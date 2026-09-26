@@ -38,6 +38,18 @@ workspace.
 - `ironwood_enhance_metadata_queue` records a compact binding with a single
   `compact_bound` flag instead of unused `ephemeral_key` and
   `compact_ciphertext` copies.
+- Add an opt-in experimental swap receiving-key registry with atomic per-purpose
+  reservations, recovered-index tracking, and persistent incoming lookahead keys.
+  The schema preserves these records across builds with the feature disabled.
+  Compact scanning retains the derived key on each note, promotes paid lookahead
+  indices, and reconstructs inputs with that key after reopening. Builds without
+  the feature exclude these notes from reconstruction. Full-transaction and
+  Enhance PIR retrieval authenticate memos using the note's registered key.
+  Unsupported builds preserve PIR work and report missing swap support.
+  Per-key scan coverage persists with blocks and queues missing history when keys
+  are recovered. Rewinds trim coverage even without the feature. Key retirement
+  remains pending. Shared recovery helpers register authenticated funding memos
+  and extend incoming lookahead with historical replay.
 
 ## [0.1.0-rc6] - 2026-09-24
 

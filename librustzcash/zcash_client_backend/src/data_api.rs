@@ -62,6 +62,11 @@
 //! [`propose_shielding`]: crate::data_api::wallet::propose_shielding
 //! [`pczt`]: https://docs.rs/pczt
 
+#[cfg(feature = "experimental-swap-receiving")]
+use crate::scanning::swap_receiving::SwapScanningKey;
+#[cfg(feature = "experimental-swap-receiving")]
+use zakura_swap_receiving::KeyId;
+
 use nonempty::NonEmpty;
 use secrecy::SecretVec;
 use std::{
@@ -2444,6 +2449,13 @@ pub trait WalletRead {
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error>;
 
+    /// Returns registered derived Ironwood keys to include in the next scan.
+    /// Registration alone does not schedule replay of already scanned history.
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn get_swap_scanning_keys(&self) -> Result<Vec<SwapScanningKey<Self::AccountId>>, Self::Error> {
+        Ok(vec![])
+    }
+
     /// Returns the memo for a note.
     ///
     /// Returns `Ok(None)` if the note is known to the wallet but memo data has not yet been
@@ -3169,6 +3181,27 @@ pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, Accou
     orchard_outputs: Vec<Tx::DecryptedOrchardOutput>,
     #[cfg(feature = "orchard")]
     ironwood_outputs: Vec<Tx::DecryptedOrchardOutput>,
+}
+
+#[cfg(feature = "experimental-swap-receiving")]
+impl<AccountId: Copy + Eq> DecryptedTransaction<'_, Transaction, AccountId> {
+    /// Adds authenticated incoming outputs from registered swap keys.
+    /// A self-payment may already have been recovered with the account OVK.
+    /// In that case, retain one incoming record carrying its receiving-key identity.
+    pub fn with_swap_receiving_keys(
+        mut self,
+        keys: impl IntoIterator<Item = SwapScanningKey<AccountId>>,
+    ) -> Self {
+        for key in keys {
+            for output in key.decrypt_outputs(self.tx) {
+                self.ironwood_outputs.retain(|existing| {
+                    existing.index() != output.index() || existing.account() != output.account()
+                });
+                self.ironwood_outputs.push(output);
+            }
+        }
+        self
+    }
 }
 
 impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<'a, Tx, AccountId> {
@@ -4035,6 +4068,22 @@ pub trait WalletWrite:
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
     ) -> Result<(), <Self as WalletRead>::Error>;
+
+    /// Persists scanned blocks and records which swap keys actually scanned them.
+    ///
+    /// `keys` must be the snapshot used for trial decryption, not a fresh registry
+    /// lookup. Implementations tracking coverage must commit it with the blocks.
+    /// The default stores blocks without tracking per-key coverage.
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn put_blocks_with_swap_keys(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
+        keys: &[(<Self as WalletRead>::AccountId, KeyId)],
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        let _ = keys;
+        self.put_blocks(from_state, blocks)
+    }
 
     /// Adds a transparent UTXO received by the wallet to the data store.
     fn put_received_transparent_utxo(

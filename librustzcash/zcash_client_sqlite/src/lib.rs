@@ -1085,7 +1085,9 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
                     ConfirmationsPolicy::MIN,
                     exclude,
                     ShieldedPool::Orchard,
-                    wallet::orchard::to_received_note,
+                    |params, pool, row| {
+                        wallet::orchard::to_received_note(self.conn.borrow(), params, pool, row)
+                    },
                     wallet::common::NoteRequest::Unspent,
                     lock_filter,
                 )?
@@ -1102,7 +1104,9 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
                     ConfirmationsPolicy::MIN,
                     exclude,
                     ShieldedPool::Ironwood,
-                    wallet::orchard::to_received_note,
+                    |params, pool, row| {
+                        wallet::orchard::to_received_note(self.conn.borrow(), params, pool, row)
+                    },
                     wallet::common::NoteRequest::Unspent,
                     lock_filter,
                 )?
@@ -1457,6 +1461,37 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error> {
         wallet::get_unified_full_viewing_keys(self.conn.borrow(), &self.params)
+    }
+
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn get_swap_scanning_keys(
+        &self,
+    ) -> Result<
+        Vec<zcash_client_backend::scanning::swap_receiving::SwapScanningKey<AccountUuid>>,
+        Self::Error,
+    > {
+        self.get_unified_full_viewing_keys()?.into_iter().try_fold(
+            Vec::new(),
+            |mut keys, (account, ufvk)| {
+                let Some(parent) = ufvk.orchard() else {
+                    return Ok(keys);
+                };
+                for key in self
+                    .get_swap_receiving_keys(account)
+                    .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?
+                {
+                    keys.push(
+                        zcash_client_backend::scanning::swap_receiving::SwapScanningKey::derive(
+                            account,
+                            key.key_id(),
+                            parent,
+                        )
+                        .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
+                    );
+                }
+                Ok(keys)
+            },
+        )
     }
 
     fn get_memo(&self, note_id: NoteId) -> Result<Option<Memo>, Self::Error> {
@@ -2075,6 +2110,16 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         self.transactionally(|wdb| wdb.put_blocks(from_state, blocks))
     }
 
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn put_blocks_with_swap_keys(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<AccountUuid>>,
+        keys: &[(AccountUuid, zakura_swap_receiving::KeyId)],
+    ) -> Result<(), SqliteClientError> {
+        self.transactionally(|wdb| wdb.put_blocks_with_swap_keys(from_state, blocks, keys))
+    }
+
     fn put_received_transparent_utxo(
         &mut self,
         _output: &WalletTransparentOutput<<Self as WalletRead>::AccountId>,
@@ -2261,6 +2306,65 @@ where
 
     fn get_locked_outputs(&self, account: Self::AccountId) -> Result<Vec<OutputRef>, Self::Error> {
         wallet::locking::get_locked_outputs(self.conn.0, account)
+    }
+}
+
+impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P, CL, R> {
+    fn store_scanned_blocks(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<AccountUuid>>,
+        #[cfg(feature = "experimental-swap-receiving")] keys: &[(
+            AccountUuid,
+            zakura_swap_receiving::KeyId,
+        )],
+    ) -> Result<(), SqliteClientError> {
+        // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
+        // retention grids are retained as durable anchors. The activation height is `None` (and so
+        // anchor retention is inactive) on networks that do not yet have an assigned NU6.3
+        // activation height.
+        //
+        // Upstream also unions in the grid every in-flight pool migration was committed under,
+        // read from the database. This fork does not carry the pool-migration engine, so no such
+        // row can exist and the union is exactly this wallet's configured interval. Restoring that
+        // behaviour means restoring the engine, not just this call.
+        let anchor_retention = self
+            .params
+            .activation_height(consensus::NetworkUpgrade::Nu6_3)
+            .map(|from_height| {
+                Ok::<_, SqliteClientError>(AnchorRetention::union(
+                    from_height,
+                    core::iter::once(self.anchor_retention_interval),
+                ))
+            })
+            .transpose()?
+            .flatten();
+
+        #[cfg(feature = "experimental-swap-receiving")]
+        let scanned_range = blocks
+            .first()
+            .zip(blocks.last())
+            .map(|(first, last)| first.height()..last.height() + 1);
+
+        ll::wallet::put_blocks::<_, SqliteClientError, commitment_tree::Error>(
+            self,
+            #[cfg(feature = "transparent-inputs")]
+            self.gap_limits,
+            from_state,
+            blocks,
+            anchor_retention.as_ref(),
+        )
+        .map_err(SqliteClientError::from)?;
+        #[cfg(feature = "experimental-swap-receiving")]
+        {
+            if let Some(range) = scanned_range {
+                wallet::swap_receiving::coverage::record(self.conn.0, keys, range)?;
+            }
+            // A registration may have arrived after the scanner captured its keys.
+            // Restore its gaps after ordinary scan completion updates the shared queue.
+            wallet::swap_receiving::coverage::queue_missing(self.conn.0)?;
+        }
+        Ok(())
     }
 }
 
@@ -2471,6 +2575,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         tip_height: BlockHeight,
     ) -> Result<(), <Self as WalletRead>::Error> {
         wallet::scanning::update_chain_tip(self.conn.0, &self.params, tip_height)?;
+        #[cfg(feature = "experimental-swap-receiving")]
+        wallet::swap_receiving::coverage::queue_missing(self.conn.0)?;
         Ok(())
     }
 
@@ -2488,36 +2594,22 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
-        // retention grids are retained as durable anchors. The activation height is `None` (and so
-        // anchor retention is inactive) on networks that do not yet have an assigned NU6.3
-        // activation height.
-        //
-        // Upstream also unions in the grid every in-flight pool migration was committed under,
-        // read from the database. This fork does not carry the pool-migration engine, so no such
-        // row can exist and the union is exactly this wallet's configured interval. Restoring that
-        // behaviour means restoring the engine, not just this call.
-        let anchor_retention = self
-            .params
-            .activation_height(consensus::NetworkUpgrade::Nu6_3)
-            .map(|from_height| {
-                Ok::<_, SqliteClientError>(AnchorRetention::union(
-                    from_height,
-                    core::iter::once(self.anchor_retention_interval),
-                ))
-            })
-            .transpose()?
-            .flatten();
-
-        ll::wallet::put_blocks::<_, SqliteClientError, commitment_tree::Error>(
-            self,
-            #[cfg(feature = "transparent-inputs")]
-            self.gap_limits,
+        self.store_scanned_blocks(
             from_state,
             blocks,
-            anchor_retention.as_ref(),
+            #[cfg(feature = "experimental-swap-receiving")]
+            &[],
         )
-        .map_err(SqliteClientError::from)
+    }
+
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn put_blocks_with_swap_keys(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<AccountUuid>>,
+        keys: &[(AccountUuid, zakura_swap_receiving::KeyId)],
+    ) -> Result<(), SqliteClientError> {
+        self.store_scanned_blocks(from_state, blocks, keys)
     }
 
     fn put_received_transparent_utxo(

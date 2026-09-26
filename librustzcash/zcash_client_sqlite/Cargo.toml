@@ -94,6 +94,7 @@ pczt.workspace = true
 rand_core.workspace = true
 rand_distr.workspace = true
 rand.workspace = true
+zakura-swap-receiving = { version = "0.0.0", path = "../../zakura/swap-receiving", optional = true }
 
 ambassador = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
@@ -156,6 +157,10 @@ orchard = [
     "pczt/spend-finalizer",
     "pczt/tx-extractor",
 ]
+
+## Enables the unpublished swap receiving-key registry for local POC work.
+## Registration alone does not enable scanning or spending these notes.
+experimental-swap-receiving = ["orchard", "dep:zakura-swap-receiving", "zcash_client_backend/experimental-swap-receiving"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [

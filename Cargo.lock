@@ -7214,6 +7214,7 @@ dependencies = [
  "zakura-primitives",
  "zakura-proofs",
  "zakura-sapling-crypto",
+ "zakura-swap-receiving",
  "zcash_address",
  "zcash_encoding",
  "zcash_note_encryption",
@@ -7273,6 +7274,7 @@ dependencies = [
  "zakura-primitives",
  "zakura-proofs",
  "zakura-sapling-crypto",
+ "zakura-swap-receiving",
  "zcash_address",
  "zcash_encoding",
  "zcash_note_encryption",
@@ -7652,6 +7654,25 @@ dependencies = [
  "once_cell",
  "subtle",
  "zakura-pasta-curves",
+]
+
+[[package]]
+name = "zakura-swap-receiving"
+version = "0.0.0"
+dependencies = [
+ "ff 0.14.0",
+ "hex",
+ "hmac 0.12.1",
+ "incrementalmerkletree",
+ "rand 0.10.2",
+ "sha2 0.10.9",
+ "shardtree",
+ "zakura-keys",
+ "zakura-orchard",
+ "zakura-pasta-curves",
+ "zcash_address",
+ "zcash_protocol",
+ "zeroize",
 ]
 
 [[package]]

@@ -172,7 +172,7 @@ impl std::error::Error for WalletMigrationError {
 fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> WalletMigrationError {
     match e {
         #[cfg(feature = "orchard")]
-        SqliteClientError::EnhancementModeNotConfigured => {
+        SqliteClientError::EnhancementModeNotConfigured | SqliteClientError::SwapReceivingNotEnabled => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
         SqliteClientError::CorruptedData(e) => WalletMigrationError::CorruptedData(e),
@@ -830,6 +830,8 @@ mod tests {
             db::TABLE_IRONWOOD_MEMO_RETRIEVAL_QUEUE,
             db::TABLE_IRONWOOD_RECEIVED_NOTE_SPENDS,
             db::TABLE_IRONWOOD_RECEIVED_NOTES,
+            db::TABLE_IRONWOOD_RECEIVING_KEY_SCAN_RANGES,
+            db::TABLE_IRONWOOD_RECEIVING_KEYS,
             db::TABLE_IRONWOOD_TREE_CAP,
             db::TABLE_IRONWOOD_TREE_CHECKPOINT_MARKS_REMOVED,
             db::TABLE_IRONWOOD_TREE_CHECKPOINTS,

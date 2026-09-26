@@ -528,6 +528,21 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
     transaction_id ASC
 )"#;
 
+/// Registered swap keys. Empty lookahead entries do not advance allocation.
+pub(super) const TABLE_IRONWOOD_RECEIVING_KEYS: &str = "
+CREATE TABLE ironwood_receiving_keys (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    purpose INTEGER NOT NULL CHECK (purpose IN (0, 1)),
+    derivation_version INTEGER NOT NULL CHECK (derivation_version = 1),
+    key_index BLOB NOT NULL CHECK (typeof(key_index) = 'blob' AND length(key_index) = 8),
+    receiver BLOB NOT NULL CHECK (typeof(receiver) = 'blob' AND length(receiver) = 43),
+    scan_from INTEGER NOT NULL CHECK (scan_from >= 0 AND scan_from <= 4294967295),
+    advances_allocation INTEGER NOT NULL CHECK (advances_allocation IN (0, 1)),
+    UNIQUE (account_id, purpose, derivation_version, key_index)
+)
+";
+
 /// Stores the Ironwood notes received by the wallet.
 ///
 /// Ironwood notes ([ZIP 2005], NU6.3) are Orchard-protocol notes obtained from version 3 note
@@ -568,7 +583,8 @@ CREATE TABLE ironwood_received_notes (
     compact_ciphertext BLOB
     CHECK ((ephemeral_key IS NULL AND compact_ciphertext IS NULL) OR
            (ephemeral_key IS NOT NULL AND compact_ciphertext IS NOT NULL AND
-            length(ephemeral_key) = 32 AND length(compact_ciphertext) = 52)),
+            length(ephemeral_key) = 32 AND length(compact_ciphertext) = 52)), receiving_key_id INTEGER
+                REFERENCES ironwood_receiving_keys(id),
     UNIQUE (transaction_id, action_index)
 )";
 pub(super) const INDEX_IRONWOOD_RECEIVED_NOTES_ACCOUNT: &str = "
@@ -2063,3 +2079,13 @@ CREATE TABLE ironwood_enhance_metadata_queue (
     CHECK ((commitment_tree_position IS NULL) = (output_index IS NULL)),
     CHECK (compact_bound = 0 OR commitment_tree_position IS NOT NULL)
 )";
+
+/// Disjoint half-open ranges scanned with each registered swap key.
+pub(super) const TABLE_IRONWOOD_RECEIVING_KEY_SCAN_RANGES: &str = "
+CREATE TABLE ironwood_receiving_key_scan_ranges (
+    receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+    range_start INTEGER NOT NULL CHECK (range_start >= 0),
+    range_end INTEGER NOT NULL CHECK (range_end > range_start AND range_end <= 4294967295),
+    PRIMARY KEY (receiving_key_id, range_start)
+)
+";

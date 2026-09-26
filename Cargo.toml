@@ -18,6 +18,7 @@ members = [
     "zakura/pir-enhance-types",
     "zakura/pir-status",
     "zakura/transaction-status",
+    "zakura/swap-receiving",
 ]
 
 resolver = "2"

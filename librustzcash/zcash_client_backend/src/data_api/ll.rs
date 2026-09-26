@@ -762,6 +762,12 @@ pub trait ReceivedShieldedOutput {
     fn note_commitment_tree_position(&self) -> Option<Position>;
     /// Returns the HD derivation scope of the viewing key that decrypted the note, if known.
     fn recipient_key_scope(&self) -> Option<Scope>;
+
+    /// Derived Ironwood receiving key relative to the owning account.
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn swap_key_id(&self) -> Option<zakura_swap_receiving::KeyId> {
+        None
+    }
 }
 
 /// This trait provides a generalization over shielded Sapling output representations.
@@ -870,6 +876,11 @@ impl<T: ReceivedShieldedOutput<Note = ::orchard::Note, Nullifier = ::orchard::no
 
 #[cfg(feature = "orchard")]
 impl<AccountId: Copy> ReceivedShieldedOutput for WalletOrchardOutput<AccountId> {
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn swap_key_id(&self) -> Option<zakura_swap_receiving::KeyId> {
+        self.swap_key_id()
+    }
+
     fn compact_encryption_fields(&self) -> Option<crate::wallet::CompactEncryptionFields> {
         self.compact_ciphertext()
             .map(|ciphertext| crate::wallet::CompactEncryptionFields {
@@ -926,6 +937,11 @@ impl<AccountId: Copy> ReceivedShieldedOutput for WalletOrchardOutput<AccountId> 
 impl<AccountId: Copy> ReceivedShieldedOutput
     for DecryptedOutput<(::orchard::Note, ::orchard::ValuePool), AccountId>
 {
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn swap_key_id(&self) -> Option<zakura_swap_receiving::KeyId> {
+        self.swap_key_id()
+    }
+
     type AccountId = AccountId;
     type Note = ::orchard::Note;
     type Nullifier = ::orchard::note::Nullifier;
