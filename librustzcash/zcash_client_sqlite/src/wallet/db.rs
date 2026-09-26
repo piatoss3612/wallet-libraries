@@ -2089,3 +2089,19 @@ CREATE TABLE ironwood_receiving_key_scan_ranges (
     PRIMARY KEY (receiving_key_id, range_start)
 )
 ";
+
+pub(super) const TABLE_IRONWOOD_NULLIFIER_SCAN_BLOCKS: &str = "CREATE TABLE ironwood_nullifier_scan_blocks (
+            height INTEGER PRIMARY KEY CHECK (height >= 0 AND height <= 4294967295)
+        )";
+
+pub(super) const TABLE_IRONWOOD_SWAP_PAYMENT_RECOVERY: &str = "CREATE TABLE ironwood_swap_payment_recovery (
+            receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+            txid BLOB NOT NULL CHECK (length(txid) = 32),
+            action_index INTEGER NOT NULL CHECK (action_index BETWEEN 0 AND 4294967295),
+            height INTEGER NOT NULL CHECK (height BETWEEN 0 AND 4294967295),
+            block_hash BLOB NOT NULL CHECK (length(block_hash) = 32),
+            tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
+            position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 4294967295),
+            encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 676),
+            PRIMARY KEY (txid, action_index)
+        )";

@@ -25,10 +25,30 @@ advance allocation. Reservation and application operation state can share a
 commit, and reuse its key ID when retrying that operation.
 
 The feature is disabled by default. The migration creates its table in every
-build so feature changes preserve existing reservations. Registration does not
-yet enable scanning or spending these notes. See the
-[shared POC contract](../../zakura/swap-receiving/README.md) for the APIs and
-remaining integration work.
+build so feature changes preserve existing reservations. Compact scanning and
+software spending retain each note's derived key. Change uses ordinary account
+keys. See the [shared POC contract](../../zakura/swap-receiving/README.md).
+
+`queue_swap_payment` authenticates privately retrieved ciphertext under a
+registered key and persists a `PendingPayment`. `pending_swap_payments` reloads
+these candidates after reopening. Queuing does not credit balance, advance a
+lookahead sequence, or complete recovery. Conflicting output identities are
+rejected. Rewinds discard candidates above the retained height while keeping
+their receiving keys for another lookup.
+
+`swap_payment_spend_status` checks locally derived nullifiers against both known
+wallet spends and retained unlinked spends. Absence means `Unspent` only when
+every block from receipt through the accepted scan anchor retains its unlinked
+nullifiers. Pruning and rewinds trim that coverage. Account deletion clears it
+because it removes known-spend evidence. Existing scans get no inferred
+coverage during migration. Otherwise absence is `Unknown`, not evidence of an
+unspent note. The method also works inside the transaction helper so eventual
+note insertion can share its database snapshot.
+
+The caller must still verify commitment inclusion and position against an
+independently accepted tree root before inserting a note. These APIs do not yet
+apply candidates, integrate a witness service, or retire scanning keys. No
+public retrieval fallback is triggered by incomplete recovery.
 
 ## License
 

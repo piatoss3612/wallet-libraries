@@ -49,7 +49,11 @@ workspace.
   Per-key scan coverage persists with blocks and queues missing history when keys
   are recovered. Rewinds trim coverage even without the feature. Key retirement
   remains pending. Shared recovery helpers register authenticated funding memos
-  and extend incoming lookahead with historical replay.
+  and extend incoming lookahead with historical replay. Privately retrieved
+  payments can be authenticated and persisted as pending candidates without
+  crediting balance. Local spentness checks require retained scan coverage and
+  consult both known wallet spends and unlinked nullifiers. Rewinds invalidate
+  affected candidates, and pruning trims nullifier coverage.
 
 ## [0.1.0-rc6] - 2026-09-24
 

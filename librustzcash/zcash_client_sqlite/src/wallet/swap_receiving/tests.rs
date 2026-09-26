@@ -312,3 +312,5 @@ fn maintained_lookahead_advances_only_after_reservation_or_payment() {
     assert_eq!(keys.len(), 40);
     assert_eq!(keys.last().unwrap().key_id().index(), 39);
 }
+
+mod payments;

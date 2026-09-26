@@ -56,8 +56,8 @@ jobs:
 
       - name: Experimental swap receiving
         run: |
-          cargo test -p zakura-client-sqlite --features experimental-swap-receiving --locked swap_receiving
-          cargo test -p zakura-client-sqlite --features orchard --locked swap_receiving
+          cargo test -p zakura-client-sqlite --features experimental-swap-receiving --locked swap
+          cargo test -p zakura-client-sqlite --features orchard --locked swap
 
       # `native-reinspiring` replaces the v7 protocol at compile time, so it is
       # tested on its own rather than through `--all-features`.

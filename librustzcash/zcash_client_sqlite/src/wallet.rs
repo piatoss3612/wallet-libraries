@@ -816,6 +816,10 @@ pub(crate) fn delete_account(
         detach.execute(named_params![":tx": id, ":account_uuid": account_uuid.0])?;
         delete_intent.execute(named_params![":txid": txid])?;
     }
+    // Known wallet spends are omitted from the unlinked nullifier map. Deleting
+    // their account removes that evidence, so absence needs fresh scan coverage.
+    conn.execute("DELETE FROM ironwood_nullifier_scan_blocks", [])?;
+
     let mut delete_tx = conn.prepare_cached("DELETE FROM transactions WHERE id_tx = :tx")?;
     for (id, _) in exclusive_transactions {
         delete_tx.execute(named_params![":tx": id])?;
@@ -4262,6 +4266,15 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         [u32::from(truncation_height)],
     )?;
 
+    conn.execute(
+        "DELETE FROM ironwood_nullifier_scan_blocks WHERE height > ?1",
+        [u32::from(truncation_height)],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_swap_payment_recovery WHERE height > ?1",
+        [u32::from(truncation_height)],
+    )?;
+
     // Mark transparent utxos as un-mined. Since the TXO is now not mined, it would ideally be
     // considered to have been returned to the mempool; it _might_ be spendable in this state, but
     // we must also set its max_observed_unspent_height field to NULL because the transaction may
@@ -5718,6 +5731,14 @@ pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
         }
     }
 
+    if spend_pool == ShieldedPool::Ironwood {
+        // Record even empty blocks, but only when their nullifiers were actually retained.
+        conn.execute(
+            "INSERT OR IGNORE INTO ironwood_nullifier_scan_blocks (height) VALUES (?1)",
+            [u32::from(block_height)],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -5793,6 +5814,10 @@ pub(crate) fn prune_nullifier_map(
     )?;
 
     stmt_delete_locators.execute(named_params![":block_height": u32::from(block_height)])?;
+    conn.execute(
+        "DELETE FROM ironwood_nullifier_scan_blocks WHERE height < ?1",
+        [u32::from(block_height)],
+    )?;
 
     Ok(())
 }

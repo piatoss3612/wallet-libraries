@@ -48,6 +48,7 @@ mod spend_key_available;
 mod standalone_p2sh;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
+mod swap_payment_recovery;
 mod swap_receiving_coverage;
 mod swap_receiving_keys;
 mod swap_receiving_notes;
@@ -154,6 +155,7 @@ pub mod ids {
         standalone_p2sh::MIGRATION_ID as STANDALONE_P2SH,
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
+        swap_payment_recovery::MIGRATION_ID as SWAP_PAYMENT_RECOVERY,
         swap_receiving_coverage::MIGRATION_ID as SWAP_RECEIVING_COVERAGE,
         swap_receiving_keys::MIGRATION_ID as SWAP_RECEIVING_KEYS,
         swap_receiving_notes::MIGRATION_ID as SWAP_RECEIVING_NOTES,
@@ -372,6 +374,7 @@ pub(super) fn all_migrations<
         Box::new(swap_receiving_keys::Migration),
         Box::new(swap_receiving_notes::Migration),
         Box::new(swap_receiving_coverage::Migration),
+        Box::new(swap_payment_recovery::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -595,7 +598,7 @@ pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
-    swap_receiving_coverage::MIGRATION_ID,
+    swap_payment_recovery::MIGRATION_ID,
     fix_bad_ironwood_change_flagging::MIGRATION_ID,
     v_address_uses_ironwood::MIGRATION_ID,
     orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,
@@ -736,6 +739,7 @@ pub(crate) mod tests {
             ids::STANDALONE_P2SH,
             ids::SUPPORT_LEGACY_SQLITE,
             ids::SUPPORT_ZCASHD_WALLET_IMPORT,
+            ids::SWAP_PAYMENT_RECOVERY,
             ids::SWAP_RECEIVING_COVERAGE,
             ids::SWAP_RECEIVING_KEYS,
             ids::SWAP_RECEIVING_NOTES,
