@@ -10,6 +10,7 @@
 #![deny(missing_docs)]
 
 pub mod lifecycle;
+pub mod recovery;
 
 mod keys;
 mod memo;

@@ -8,3 +8,5 @@
 - Add shared completion policy with durable grace and reconciliation deadlines,
   receipt and coverage checks, shared-key decisions, and reorg invalidation.
   SQLite operation persistence and active-key filtering remain pending.
+- Add transport-independent incoming-note authentication and commitment-path
+  validation for privately discovered swap payments.

@@ -170,3 +170,22 @@ Zcash Protocol Specification **v2026.7.0-202-gafa086, NU6.3 proposal**, commit
 
 The swap KDF and memo format are proposed wallet conventions, separate from
 these protocol requirements. Passing the POC is not a cryptographic review.
+
+## Private recovery authentication
+
+`recovery::EncryptedNote` joins compact Action fields with the ciphertext suffix
+returned by enhancement. `decrypt` derives the requested purpose/index key from
+the account, authenticates the complete Ironwood plaintext, and requires the
+expected diversifier-zero receiver. It returns the actual note, memo, and locally
+computed spend nullifier. Public zero-OVK recovery is not used as ownership proof.
+
+`RecoveredNote::verify_position` checks the exact position and commitment path
+against an independently accepted Ironwood root. It rejects positions above the
+32-bit tree capacity rather than truncating them. Wallet storage must recheck the
+anchor after asynchronous work and separately establish spend-history coverage.
+Neither helper authenticates service transaction metadata or makes a note spendable.
+
+`cargo test -p zakura-swap-receiving --test recovery` covers both derivation
+purposes, wrong account/index, altered compact and memo ciphertext, wrong roots,
+and substituted or overflowing positions. Decryption and Merkle hashing delegate
+to `zakura-orchard`, following the pinned NU6.3 proposal at `afa086bd976e316612a5c06fb139429958d07d84`.
