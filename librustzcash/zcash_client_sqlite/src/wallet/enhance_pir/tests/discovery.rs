@@ -98,16 +98,23 @@ impl Send {
     }
 
     fn with_second_funder(change: bool, second_funder: bool) -> Self {
-        Self::build(change, second_funder, 0)
+        Self::build(change, second_funder, 0, false)
     }
 
     /// A change-and-recipient send padded with `dummies` zero-value actions whose outgoing
     /// ciphertexts use a foreign OVK, as a builder's padding would.
     fn with_dummies(dummies: u8) -> Self {
-        Self::build(true, false, dummies)
+        Self::build(true, false, dummies, false)
     }
 
-    fn build(change: bool, second_funder: bool, dummies: u8) -> Self {
+    /// Like [`Self::with_dummies`], but every note is zero-valued, so with a zero fee the
+    /// linked spends sum to zero.
+    fn with_zero_value_dummies(dummies: u8) -> Self {
+        Self::build(true, false, dummies, true)
+    }
+
+    fn build(change: bool, second_funder: bool, dummies: u8, zero_value: bool) -> Self {
+        let value = |zatoshis: u64| if zero_value { 0 } else { zatoshis };
         let mut st = state_with_factory(TestDbFactory::file_backed());
         st.wallet_mut()
             .db_mut()
@@ -123,7 +130,7 @@ impl Send {
         let (funding_height, _, nf) = st.generate_next_block(
             &fvk,
             AddressType::DefaultExternal,
-            Zatoshis::const_from_u64(50_000),
+            Zatoshis::const_from_u64(value(50_000)),
         );
         let second_funding = second.as_ref().map(|(account, key)| {
             let (height, _, nf) = st.generate_next_block(
@@ -145,7 +152,7 @@ impl Send {
                 nf.to_bytes(),
                 fvk.0.address_at(0u32, Scope::Internal),
                 fvk.0.to_ovk(Scope::Internal),
-                30_000,
+                value(30_000),
             );
             actions.push(action);
             change_record = Some(record);
@@ -160,13 +167,13 @@ impl Send {
                 .map_or(&fvk, |(_, key)| key)
                 .0
                 .to_ovk(Scope::External),
-            if second_funder {
+            value(if second_funder {
                 30_000
             } else if change {
                 20_000
             } else {
                 50_000
-            },
+            }),
         );
         actions.push(action);
         let mut dummy_records = vec![];
@@ -633,6 +640,33 @@ fn value_balanced_dummy_outputs_retire_in_either_record_order() {
             .unwrap();
         assert_eq!(value, 20_000);
     }
+}
+
+#[test]
+fn zero_valued_spends_still_retire_dummies() {
+    let mut send = Send::with_zero_value_dummies(1);
+    send.scan_funding();
+    send.scan_send();
+    let (change, recipient, dummy) = (send.request_at(0), send.request_at(1), send.request_at(2));
+    let (change_record, record) = (send.change_record.clone().unwrap(), send.record.clone());
+    let dummy_record = send.dummy_records[0].clone();
+
+    assert_eq!(
+        send.apply(change, &change_record),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(
+        send.apply(recipient, &record),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(
+        send.apply(dummy, &dummy_record),
+        EnhancePirStoreResult::NotRecoverable
+    );
+
+    // 0 spent = 0 recovered + 0 fee: a linked spend, not a positive sum, marks it wallet-funded.
+    assert_eq!(send.suspended_outgoing(), 0);
+    assert!(!send.queued());
 }
 
 #[test]

@@ -18,10 +18,10 @@ workspace.
   sends these are dummy padding outputs; otherwise they were funded by another
   party or by an account since deleted, whose sent history is deleted with it.
   They no longer remain as permanent `OutgoingNotRecoverable` suspensions that
-  also keep the transaction's retrieval request open. A data-only migration
-  applies the rule to rows suspended before this change. Undecryptable real
-  zero-value outputs are indistinguishable from dummies and are retired with
-  them.
+  also keep the transaction's retrieval request open. Rows suspended before
+  this change are not migrated; a rescan requeues and retires them.
+  Undecryptable real zero-value outputs are indistinguishable from dummies and
+  are retired with them.
 - Make finite-expiry status obligations dormant after contiguous local scanning
   reaches expiry plus the reorg safety depth, retaining queue rows for rewind
   reactivation without treating incomplete private coverage as proof of absence.
