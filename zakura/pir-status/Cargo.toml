@@ -6,6 +6,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+categories.workspace = true
 keywords = ["zcash", "privacy", "pir"]
 
 [dependencies]

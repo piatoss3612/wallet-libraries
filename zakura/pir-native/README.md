@@ -13,3 +13,5 @@ The `test-server` feature exposes the matching server-side operations
 (publishing masks, parsing requests, packing responses) so protocol crates can
 round-trip their clients without depending on a server implementation. It is
 not a server.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.

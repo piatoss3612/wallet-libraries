@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc7] - 2026-09-27
+
+Breaking storage release for independently routed transaction status and
+payload enhancement work.
+
 ### Fixed
 - Retire undecryptable Ironwood outgoing candidates once the wallet's value
   accounting proves no account it holds funded them: the wallet has a linked
@@ -38,7 +43,6 @@ workspace.
   No new columns are added.
   Sent-transaction storage requires a known chain tip to clamp creation evidence.
   See `docs/transaction_status_work.md` for consumer migration instructions.
-
 
 ### Added
 - Implement `EnhancePirRead::transaction_enhancement_work` with one SQL statement

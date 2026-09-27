@@ -57,3 +57,5 @@ responses are bounded to their exact protocol lengths. No status error authorize
 This crate alone does not enable private status in a wallet or qualify a live
 Status PIR service. The server and client must use the same frozen release
 protocol and pass live-source qualification before activation.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.

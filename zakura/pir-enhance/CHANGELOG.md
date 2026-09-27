@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc1] - 2026-09-27
+
 ### Added
 
 - Native two-mask protocol `ironwood-enhance-pir-v9-native-two-mask-m29`
@@ -17,7 +19,7 @@
   `zakura-pir-native` crate and are re-exported from `native` unchanged.
 - The client now speaks v9 exclusively. The `native-reinspiring` feature and
   the legacy v7 implementation and fixtures have been removed.
-- `ipir-sp` now comes from the `valargroup/ipir-sp` git tag `v0.1.0-rc.6`
+- `ipir-sp =0.1.0-rc.6` and `reinspiring =0.1.2` now come from crates.io
   instead of the `=0.1.0-rc.3` crates.io release.
 
 ### Fixed
