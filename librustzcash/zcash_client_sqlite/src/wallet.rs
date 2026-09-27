@@ -5349,12 +5349,21 @@ pub(crate) fn transaction_status_work(
     conn: &rusqlite::Connection,
     mode: TransactionStatusMode,
 ) -> Result<Vec<TransactionStatusWork>, SqliteClientError> {
+    // Expiry dormancy is scheduling only, not evidence of absence. Use contiguous local
+    // scanning so an advertised tip or an isolated scanned range cannot suppress work.
+    let scanned_height = fully_scanned_height(conn)?.map(u32::from);
     let mut tx_retrieval_stmt = conn.prepare_cached(
         "SELECT q.txid, CASE WHEN t.target_height IS NOT NULL THEN MIN(t.target_height, t.min_observed_height) END
          FROM tx_retrieval_queue q
          LEFT JOIN transactions t ON t.txid = q.txid
          WHERE q.query_type = :status_type
          AND t.mined_height IS NULL
+         AND (
+            t.expiry_height IS NULL
+            OR t.expiry_height = 0
+            OR :scanned_height IS NULL
+            OR :scanned_height < t.expiry_height + :reorg_depth
+         )
          AND (
             t.confirmed_unmined_at_height IS NULL
             OR t.expiry_height = 0
@@ -5374,7 +5383,9 @@ pub(crate) fn transaction_status_work(
         .query_and_then(
             named_params![
                 ":status_type": TxQueryType::Status.code(),
-                ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA
+                ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
+                ":scanned_height": scanned_height,
+                ":reorg_depth": PRUNING_DEPTH
             ],
             |row| {
                 Ok::<_, rusqlite::Error>(route_status_work(

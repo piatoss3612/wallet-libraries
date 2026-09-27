@@ -83,6 +83,8 @@ impl PrivateTransactionStatusRequest {
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait TransactionStatusRead: WalletRead {
     /// Returns each currently actionable status obligation once, with its selected route.
+    /// Stores may retain expired obligations as dormant work that becomes eligible after
+    /// a rewind. Omission from this batch is not conclusive evidence of transaction absence.
     fn transaction_status_work(&self) -> Result<Vec<TransactionStatusWork>, Self::Error>;
 
     /// Routes an individual lookup without enqueueing it or requiring an actionable queue entry.

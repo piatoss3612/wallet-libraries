@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+### Fixed
+- Make finite-expiry status obligations dormant after contiguous local scanning
+  reaches expiry plus the reorg safety depth, retaining queue rows for rewind
+  reactivation without treating incomplete private coverage as proof of absence.
+  Zero-expiry transactions remain eligible.
+
 ### Breaking changes
 - Replace legacy transaction status requests with explicitly routed public/private
   `TransactionStatusWork` and a dedicated `TransactionStatusRead` interface.
