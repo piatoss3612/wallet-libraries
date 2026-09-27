@@ -7503,6 +7503,7 @@ dependencies = [
  "zakura-client-backend",
  "zakura-client-sqlite",
  "zakura-pir-enhance-types",
+ "zakura-pir-native",
  "zakura-primitives",
  "zcash_protocol",
 ]
@@ -7512,17 +7513,27 @@ name = "zakura-pir-enhance-types"
 version = "0.0.1-rc0"
 
 [[package]]
+name = "zakura-pir-native"
+version = "0.0.1-rc0"
+dependencies = [
+ "ipir-sp",
+ "rand 0.8.7",
+ "rand_chacha 0.3.1",
+ "reinspiring",
+]
+
+[[package]]
 name = "zakura-pir-status"
 version = "0.0.1-rc0"
 dependencies = [
  "hex",
- "ipir-sp",
  "rand 0.8.7",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
+ "zakura-pir-native",
 ]
 
 [[package]]

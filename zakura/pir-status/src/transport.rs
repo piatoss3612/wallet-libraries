@@ -328,4 +328,171 @@ mod tests {
             ]
         );
     }
+
+    /// A q48-free server over the native library operations: publishes the
+    /// two-mask session material and answers `SPN1` queries for real rows.
+    mod native {
+        use super::super::*;
+        use crate::{
+            AcceptedAnchor, COLS, HEADER_BYTES, PROTOCOL, QUERY_MAGIC, ROW_BYTES, ROWS, Record,
+            bucket, native_packing_seed, native_setup_seed,
+        };
+        use sha2::{Digest, Sha256};
+        use std::sync::Mutex;
+        use zakura_pir_native::test_server::Database;
+
+        const NETWORK: [u8; 32] = [1; 32];
+        const SALT: [u8; 32] = [2; 32];
+
+        struct Server {
+            db: Database,
+            manifest: Manifest,
+            tamper_header: Mutex<bool>,
+        }
+
+        impl Transport for Server {
+            async fn get(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, Error> {
+                let bytes = if url.ends_with("/v1/status/init") {
+                    serde_json::to_vec(&self.manifest).unwrap()
+                } else if url.ends_with(&format!(
+                    "/v1/status/session/{}",
+                    hex::encode(self.manifest.id())
+                )) {
+                    self.db.public().to_vec()
+                } else {
+                    return Err(Error::Unavailable);
+                };
+                assert!(bytes.len() <= max_bytes);
+                Ok(bytes)
+            }
+
+            async fn post(
+                &self,
+                url: &str,
+                body: Vec<u8>,
+                max_bytes: usize,
+            ) -> Result<Vec<u8>, Error> {
+                assert!(url.ends_with("/v1/status/query"));
+                assert_eq!(&body[..4], QUERY_MAGIC);
+                assert_eq!(body[4..36], self.manifest.id());
+                assert_eq!(
+                    body.len(),
+                    HEADER_BYTES + zakura_pir_native::request_len(ROWS)
+                );
+                let mut response = body[..HEADER_BYTES].to_vec();
+                if *self.tamper_header.lock().unwrap() {
+                    response[40] ^= 1;
+                }
+                response.extend(self.db.answer(&body[HEADER_BYTES..]));
+                assert_eq!(response.len(), max_bytes);
+                Ok(response)
+            }
+        }
+
+        /// `records[i]` is placed alone in its bucket row.
+        fn server(records: &[Record]) -> Server {
+            let mut rows = vec![vec![0u8; ROW_BYTES]; ROWS];
+            for r in records {
+                let row = bucket(&NETWORK, &SALT, &r.txid);
+                rows[row][..crate::SLOT_BYTES].copy_from_slice(&r.encode().unwrap());
+            }
+            let db: Vec<Vec<u16>> = (0..COLS)
+                .map(|col| {
+                    rows.iter()
+                        .map(|row| u16::from_le_bytes([row[2 * col], row[2 * col + 1]]))
+                        .collect()
+                })
+                .collect();
+            let masks = zakura_pir_native::public_query_masks(
+                native_setup_seed(&NETWORK, &SALT),
+                ROWS,
+                COLS,
+            );
+            let db = Database::new(db, &masks, native_packing_seed(&NETWORK, &SALT));
+            let manifest = Manifest {
+                protocol: PROTOCOL.into(),
+                network: NETWORK,
+                salt: SALT,
+                generation: 1,
+                recovery_epoch: 0,
+                coverage_start: 10,
+                anchor_height: 20,
+                anchor_hash: [3; 32],
+                observed_ms: 1000,
+                entries: records.len(),
+                rows_digest: [4; 32],
+                public_digest: Sha256::digest(db.public()).into(),
+            };
+            Server {
+                db,
+                manifest,
+                tamper_header: Mutex::new(false),
+            }
+        }
+
+        #[tokio::test]
+        async fn native_session_observes_rows_through_the_transport() {
+            let mined = Record {
+                txid: [9; 32],
+                tag: 2,
+                height: 15,
+            };
+            let mempool = Record {
+                txid: [7; 32],
+                tag: 1,
+                height: 0,
+            };
+            assert_ne!(
+                bucket(&NETWORK, &SALT, &mined.txid),
+                bucket(&NETWORK, &SALT, &mempool.txid)
+            );
+            let absent = (0u8..=255)
+                .map(|b| [b; 32])
+                .find(|t| {
+                    ![mined.txid, mempool.txid]
+                        .iter()
+                        .any(|r| bucket(&NETWORK, &SALT, r) == bucket(&NETWORK, &SALT, t))
+                })
+                .unwrap();
+            let transport = server(&[mined.clone(), mempool.clone()]);
+            let anchor = AcceptedAnchor {
+                network: NETWORK,
+                height: 20,
+                hash: [3; 32],
+            };
+            let client = PendingClient::fetch(&transport, "https://status.example", || 1000)
+                .await
+                .unwrap()
+                .accept(&transport, &anchor)
+                .await
+                .unwrap();
+            let covered = LocalCoverageContext {
+                earliest_possible_inclusion: Some(10),
+                required_through: Some(20),
+            };
+            assert_eq!(
+                client.observe(&transport, &mined.txid, covered).await,
+                Ok(Observation::Mined(15))
+            );
+            assert_eq!(
+                client.observe(&transport, &mempool.txid, covered).await,
+                Ok(Observation::Mempool)
+            );
+            assert_eq!(
+                client.observe(&transport, &absent, covered).await,
+                Ok(Observation::NotFound)
+            );
+            assert_eq!(
+                client
+                    .observe(&transport, &absent, LocalCoverageContext::default())
+                    .await,
+                Err(Error::CoverageIncomplete)
+            );
+            *transport.tamper_header.lock().unwrap() = true;
+            assert_eq!(
+                client.observe(&transport, &mined.txid, covered).await,
+                Err(Error::Malformed)
+            );
+        }
+    }
 }

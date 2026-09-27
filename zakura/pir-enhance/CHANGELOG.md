@@ -12,6 +12,9 @@
 
 ### Changed
 
+- The protocol-neutral native primitives (`params`, `public_query_masks`,
+  `prepare_with`, `decode_cols` and the length helpers) moved to the new
+  `zakura-pir-native` crate and are re-exported from `native` unchanged.
 - The client now speaks v9 exclusively. The `native-reinspiring` feature and
   the legacy v7 implementation and fixtures have been removed.
 - `ipir-sp` now comes from the `valargroup/ipir-sp` git tag `v0.1.0-rc.6`
