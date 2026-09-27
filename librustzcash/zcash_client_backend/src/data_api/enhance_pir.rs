@@ -270,8 +270,9 @@ pub trait EnhancePirRead: WalletRead {
     ///   transactions or those with a sticky LWD decision. Private errors and suspensions never
     ///   produce public work.
     /// - This is the only source of payload work in every mode. Status observation and
-    ///   transparent-address history are not enhancement and are not returned; obtain them from
-    ///   [`WalletRead::transaction_data_requests`], which never returns payload work.
+    ///   transparent-address history are not enhancement and are not returned; obtain status from
+    ///   [`super::status::TransactionStatusRead`] and transparent history from
+    ///   [`WalletRead::transaction_data_requests`]. Neither returns payload work.
     ///
     /// Rediscovery is grouped by block and ordered by height, followed by private queries by
     /// position, public requests, discovery suspensions by transaction location/identity, and

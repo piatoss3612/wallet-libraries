@@ -41,7 +41,9 @@
 //! The relevant traits are [`InputSource`], [`WalletRead`], [`WalletWrite`], and
 //! [`WalletCommitmentTrees`]. A complete implementation of the data storage layer for a wallet
 //! will include an implementation of all four of these traits. See the [`zcash_client_sqlite`]
-//! crate for a complete example of the implementation of these traits.
+//! crate for a complete example of the implementation of these traits. Routed status work
+//! is exposed separately by [`status::TransactionStatusRead`], and payload work by
+//! [`enhance_pir::EnhancePirRead`].
 //!
 //! ## Accounts
 //!
@@ -105,6 +107,7 @@ use crate::{
 };
 
 pub mod enhance_pir;
+pub mod status;
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -1384,7 +1387,7 @@ pub struct TransactionsInvolvingAddress {
     output_status_filter: OutputStatusFilter,
 }
 
-/// A request for a transaction status observation, spentness check, or discovery
+/// A request for a spentness check or discovery
 /// of spends from a given transparent address within a specific block range.
 ///
 /// Payload retrieval (download of complete raw transaction data) is not a
@@ -1394,19 +1397,6 @@ pub struct TransactionsInvolvingAddress {
 /// [`EnhancePirRead::transaction_enhancement_work`]: enhance_pir::EnhancePirRead::transaction_enhancement_work
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TransactionDataRequest {
-    /// Information about the chain's view of a transaction is requested.
-    ///
-    /// The caller evaluating this request on behalf of the wallet backend should respond to this
-    /// request by determining the status of the specified transaction with respect to the main
-    /// chain; if using `lightwalletd` for access to chain data, this may be obtained by
-    /// using a status-only RPC, or interpreting a payload response when no status-only API
-    /// is available. It should then call
-    /// [`WalletWrite::set_transaction_status`] to provide the resulting transaction status
-    /// information to the wallet backend. This obligation is independent of payload retrieval
-    /// ([`PublicTransactionEnhancementRequest`]): observing status does not satisfy payload
-    /// retrieval, and retrieving a payload does not discard durable status-observation intent.
-    /// A mined observation may make status work dormant; a rewind can reactivate it.
-    GetStatus(TxId),
     /// Information about transactions that receive or spend funds belonging to the specified
     /// transparent address is requested.
     ///
@@ -1454,20 +1444,6 @@ pub enum TransactionDataRequest {
     GetSpendingTx(OutPoint),
 }
 
-/// Pending observation of a transaction's status on the main chain.
-///
-/// This describes wallet work, not permission to disclose the transaction ID. The caller must
-/// select a status transport whose disclosure policy is appropriate for this transaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TransactionStatusRequest(TxId);
-
-impl TransactionStatusRequest {
-    /// Returns the transaction whose status the wallet needs to observe.
-    pub fn txid(self) -> TxId {
-        self.0
-    }
-}
-
 /// Pending ordinary payload enhancement (download of complete raw transaction data), routed to
 /// public transport by [`EnhancePirRead::transaction_enhancement_work`].
 ///
@@ -1479,7 +1455,7 @@ impl TransactionStatusRequest {
 /// [`WalletWrite::notify_transaction_enhancement_not_found`]. Transport failures,
 /// cancellation, invalid responses, and missing PIR coverage leave this obligation pending.
 ///
-/// Payload retrieval and [`TransactionDataRequest::GetStatus`] are independent obligations.
+/// Payload retrieval and [`status::TransactionStatusRead::transaction_status_work`] are independent obligations.
 /// Successful payload ingestion completes enhancement, including when the transaction is
 /// found to be irrelevant to the wallet. A mined height supplied with the payload may also
 /// update status, but payload completion must not discard durable status-observation intent.
@@ -1504,15 +1480,6 @@ impl PublicTransactionEnhancementRequest {
 }
 
 impl TransactionDataRequest {
-    /// Converts a status request from a transaction-data request snapshot.
-    pub fn into_status_request(self) -> Option<TransactionStatusRequest> {
-        #[allow(unreachable_patterns)]
-        match self {
-            Self::GetStatus(txid) => Some(TransactionStatusRequest(txid)),
-            _ => None,
-        }
-    }
-
     /// Constructs a request for Information about transactions that receive or spend funds
     /// belonging to the specified transparent address.
     ///
@@ -2614,8 +2581,8 @@ pub trait WalletRead {
         )
     }
 
-    /// Returns a vector of [`TransactionDataRequest`] values that describe status observations
-    /// and transparent history needed by the wallet to complete its view of transaction history.
+    /// Returns transparent history and spentness requests needed by the wallet.
+    /// Status work is returned only by [`status::TransactionStatusRead`].
     ///
     /// Payload retrieval is not included; it is returned only by
     /// [`EnhancePirRead::transaction_enhancement_work`]. A transaction may have pending status
@@ -2634,21 +2601,6 @@ pub trait WalletRead {
     /// transaction data requests, such as when it is necessary to fill in purely-transparent
     /// transaction history by walking the chain backwards via transparent inputs.
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error>;
-
-    /// Returns pending transaction-status observations from the current transaction-data request
-    /// snapshot. This is a convenience view of [`WalletRead::transaction_data_requests`], so it
-    /// retains that method's scheduling and retry rules.
-    ///
-    /// A status request is not permission to reveal its transaction ID. The caller must choose a
-    /// status transport appropriate for its privacy policy independently of enhancement routing.
-    /// In particular, private enhancement routing does not make status observation private.
-    fn transaction_status_requests(&self) -> Result<Vec<TransactionStatusRequest>, Self::Error> {
-        Ok(self
-            .transaction_data_requests()?
-            .into_iter()
-            .filter_map(TransactionDataRequest::into_status_request)
-            .collect())
-    }
 
     /// Returns a vector of [`ReceivedTransactionOutput`] values describing the outputs of the
     /// specified transaction that were received by the wallet. The number of confirmations until

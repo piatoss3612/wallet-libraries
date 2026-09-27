@@ -1,8 +1,9 @@
 //! Regression tests for independent status and payload obligations. Exercise
 //! public writes, not just queue SQL helpers.
 use rusqlite::params;
+use zcash_client_backend::data_api::status::TransactionStatusRead;
 use zcash_client_backend::data_api::{
-    TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite,
+    TransactionStatus, WalletRead, WalletWrite,
     enhance_pir::EnhancePirRead,
     testing::{TestBuilder, TestState},
     wallet::decrypt_and_store_transaction,
@@ -28,7 +29,7 @@ type State = TestState<BlockCache, TestDb, LocalNetwork>;
 
 fn fixture() -> (State, BlockHeight) {
     let mut st = TestBuilder::new()
-        .with_data_store_factory(TestDbFactory::default())
+        .with_data_store_factory(TestDbFactory::file_backed())
         .with_block_cache(BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
         .build();
@@ -84,14 +85,15 @@ fn typed_requests_follow_independent_status_and_payload_lifecycles() {
 
     assert!(
         st.wallet()
-            .transaction_data_requests()
+            .transaction_status_work()
             .unwrap()
-            .contains(&TransactionDataRequest::GetStatus(txid))
+            .iter()
+            .any(|work| work.txid() == txid)
     );
     assert!(payload_pending(&st, txid));
     assert!(
         st.wallet()
-            .transaction_status_requests()
+            .transaction_status_work()
             .unwrap()
             .iter()
             .any(|request| request.txid() == txid)
@@ -103,7 +105,7 @@ fn typed_requests_follow_independent_status_and_payload_lifecycles() {
         .unwrap();
     assert!(
         !st.wallet()
-            .transaction_status_requests()
+            .transaction_status_work()
             .unwrap()
             .iter()
             .any(|request| request.txid() == txid)
@@ -311,9 +313,10 @@ fn rewind_reactivates_mined_status_without_completing_enhancement() {
     assert!(queued(&st, txid, 0));
     assert!(
         !st.wallet()
-            .transaction_data_requests()
+            .transaction_status_work()
             .unwrap()
-            .contains(&TransactionDataRequest::GetStatus(txid))
+            .iter()
+            .any(|work| work.txid() == txid)
     );
     st.wallet_mut()
         .db_mut()
@@ -321,9 +324,10 @@ fn rewind_reactivates_mined_status_without_completing_enhancement() {
         .unwrap();
     assert!(
         st.wallet()
-            .transaction_data_requests()
+            .transaction_status_work()
             .unwrap()
-            .contains(&TransactionDataRequest::GetStatus(txid))
+            .iter()
+            .any(|work| work.txid() == txid)
     );
     assert!(payload_pending(&st, txid));
 }
@@ -375,7 +379,7 @@ fn routed_enhancement_work_is_independent_of_status_lifecycle() {
     };
     let statuses = |st: &State| {
         st.wallet()
-            .transaction_status_requests()
+            .transaction_status_work()
             .unwrap()
             .into_iter()
             .map(|request| request.txid())
@@ -409,4 +413,291 @@ fn routed_enhancement_work_is_independent_of_status_lifecycle() {
         .unwrap();
     assert!(public(&st).is_empty());
     assert_eq!(statuses(&st), 2);
+}
+
+fn private_bound(st: &State, txid: TxId) -> Option<BlockHeight> {
+    use zcash_client_backend::data_api::status::TransactionStatusWork;
+    match st.wallet().transaction_status_work_for(txid).unwrap() {
+        TransactionStatusWork::Private(request) => request.earliest_possible_inclusion(),
+        _ => panic!("expected private work"),
+    }
+}
+
+#[test]
+fn status_policy_is_explicit_and_unknown_evidence_stays_private() {
+    use zcash_client_backend::data_api::status::{TransactionStatusMode, TransactionStatusWork};
+    let (mut st, height) = fixture();
+    let discovery = st.wallet().transaction_data_requests().unwrap();
+    let imported = TxId::from_bytes([81; 32]);
+    let queue_only = TxId::from_bytes([82; 32]);
+    queue_both(&st, imported, height, None);
+    st.wallet()
+        .conn()
+        .execute(
+            "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 0)",
+            [queue_only.as_ref()],
+        )
+        .unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .set_status_mode(TransactionStatusMode::Private);
+    assert_eq!(private_bound(&st, imported), None);
+    assert_eq!(private_bound(&st, queue_only), None);
+    let work = st.wallet().transaction_status_work().unwrap();
+    assert_eq!(work.len(), 2);
+    for item in work {
+        assert!(matches!(item, TransactionStatusWork::Private(_)));
+        assert_eq!(
+            item,
+            st.wallet()
+                .transaction_status_work_for(item.txid())
+                .unwrap()
+        );
+    }
+    assert_eq!(st.wallet().transaction_data_requests().unwrap(), discovery);
+    st.wallet_mut()
+        .db_mut()
+        .transactionally(|db| {
+            assert!(matches!(
+                db.transaction_status_work_for(imported)?,
+                TransactionStatusWork::Private(_)
+            ));
+            Ok::<_, SqliteClientError>(())
+        })
+        .unwrap();
+    let db = crate::WalletDb::from_connection(st.wallet().conn(), *st.network(), (), ());
+    assert!(matches!(
+        db.transaction_status_work(),
+        Err(SqliteClientError::StatusModeNotConfigured)
+    ));
+    assert!(matches!(
+        db.transaction_status_work_for(imported),
+        Err(SqliteClientError::StatusModeNotConfigured)
+    ));
+    let db = db.with_status_mode(TransactionStatusMode::Private);
+    assert_eq!(
+        db.transaction_status_work().unwrap(),
+        st.wallet().transaction_status_work().unwrap()
+    );
+}
+
+#[test]
+fn local_creation_evidence_survives_existing_rows_ingestion_reopen_and_rewind() {
+    use zcash_client_backend::data_api::{Account, SentTransaction, status::TransactionStatusMode};
+    use zcash_protocol::value::Zatoshis;
+    let (mut st, prior) = fixture();
+    let (height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(height, 1);
+    st.wallet_mut()
+        .db_mut()
+        .set_status_mode(TransactionStatusMode::Private);
+    let transaction = TransactionData::<Authorized>::from_parts(
+        TxVersion::V5,
+        BranchId::Nu5,
+        0,
+        height + 100,
+        None,
+        None,
+        None,
+        None,
+    )
+    .freeze()
+    .unwrap();
+    let txid = transaction.txid();
+    queue_both(&st, txid, height, None);
+    assert_eq!(private_bound(&st, txid), None);
+    let account = st.test_account().unwrap().id();
+    let sent = SentTransaction::new(
+        &transaction,
+        time::OffsetDateTime::UNIX_EPOCH,
+        (height + 1).into(),
+        account,
+        &[],
+        Zatoshis::ZERO,
+        #[cfg(feature = "transparent-inputs")]
+        &[],
+    );
+    let result = st.wallet_mut().db_mut().transactionally(|db| {
+        db.store_transactions_to_be_sent(&[sent])?;
+        Err::<(), _>(SqliteClientError::CorruptedData("rollback".into()))
+    });
+    assert!(result.is_err());
+    assert_eq!(private_bound(&st, txid), None);
+    let store = |st: &mut State| {
+        st.wallet_mut()
+            .store_transactions_to_be_sent(&[SentTransaction::new(
+                &transaction,
+                time::OffsetDateTime::UNIX_EPOCH,
+                (height + 1).into(),
+                account,
+                &[],
+                Zatoshis::ZERO,
+                #[cfg(feature = "transparent-inputs")]
+                &[],
+            )])
+            .unwrap();
+    };
+    store(&mut st);
+    assert_eq!(private_bound(&st, txid), Some(height));
+    let params = *st.network();
+    decrypt_and_store_transaction(&params, st.wallet_mut(), &transaction, None).unwrap();
+    assert_eq!(private_bound(&st, txid), Some(height));
+    st.wallet_mut()
+        .set_transaction_status(txid, TransactionStatus::Mined(height))
+        .unwrap();
+    st.wallet_mut().db_mut().truncate_to_height(prior).unwrap();
+    assert_eq!(private_bound(&st, txid), Some(prior));
+    store(&mut st);
+    assert_eq!(private_bound(&st, txid), Some(prior));
+    let reopened = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();
+    let db = crate::WalletDb::from_connection(reopened, params, (), ())
+        .with_status_mode(TransactionStatusMode::Private);
+    assert_eq!(
+        db.transaction_status_work_for(txid).unwrap(),
+        st.wallet().transaction_status_work_for(txid).unwrap()
+    );
+}
+
+#[test]
+fn outbox_evidence_is_atomic_and_does_not_enqueue_or_raise_bounds() {
+    use zcash_client_backend::data_api::status::{TransactionStatusMode, TransactionStatusWrite};
+    let (mut st, height) = fixture();
+    st.wallet_mut()
+        .db_mut()
+        .set_status_mode(TransactionStatusMode::Private);
+    let txid = TxId::from_bytes([93; 32]);
+    let result = st.wallet_mut().db_mut().transactionally(|db| {
+        db.record_transaction_created(txid, height)?;
+        Err::<(), _>(SqliteClientError::CorruptedData("rollback outbox".into()))
+    });
+    assert!(result.is_err());
+    assert_eq!(private_bound(&st, txid), None);
+    st.wallet_mut()
+        .db_mut()
+        .record_transaction_created(txid, height)
+        .unwrap();
+    assert_eq!(private_bound(&st, txid), Some(height));
+    assert!(!queued(&st, txid, 0));
+    assert!(!queued(&st, txid, 1));
+    st.wallet_mut()
+        .db_mut()
+        .record_transaction_created(txid, height - 1)
+        .unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .record_transaction_created(txid, height + 50)
+        .unwrap();
+    assert_eq!(private_bound(&st, txid), Some(height - 1));
+}
+
+#[test]
+fn sent_creation_without_chain_tip_rolls_back() {
+    use zcash_client_backend::data_api::{Account, SentTransaction};
+    use zcash_protocol::value::Zatoshis;
+    let (mut st, height) = fixture();
+    st.wallet()
+        .conn()
+        .execute("DELETE FROM scan_queue", [])
+        .unwrap();
+    let transaction = TransactionData::<Authorized>::from_parts(
+        TxVersion::V5,
+        BranchId::Nu5,
+        0,
+        height + 100,
+        None,
+        None,
+        None,
+        None,
+    )
+    .freeze()
+    .unwrap();
+    let account = st.test_account().unwrap().id();
+    let result = st
+        .wallet_mut()
+        .store_transactions_to_be_sent(&[SentTransaction::new(
+            &transaction,
+            time::OffsetDateTime::UNIX_EPOCH,
+            (height + 50).into(),
+            account,
+            &[],
+            Zatoshis::ZERO,
+            #[cfg(feature = "transparent-inputs")]
+            &[],
+        )]);
+    assert!(matches!(result, Err(SqliteClientError::ChainHeightUnknown)));
+    assert_eq!(
+        st.wallet()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM transactions WHERE txid = ?1",
+                [transaction.txid().as_ref()],
+                |row| row.get::<_, u32>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn status_evidence_rewind_uses_rescan_floor_even_without_scanned_suffix() {
+    use std::collections::HashSet;
+    use zcash_client_backend::data_api::{
+        chain::ChainState,
+        status::{TransactionStatusMode, TransactionStatusWrite},
+    };
+    let (mut st, floor) = fixture();
+    let tip = floor + 100;
+    st.wallet_mut().update_chain_tip(tip).unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .set_status_mode(TransactionStatusMode::Private);
+    let local = TxId::from_bytes([94; 32]);
+    let imported = TxId::from_bytes([95; 32]);
+    st.wallet_mut()
+        .db_mut()
+        .record_transaction_created(local, tip)
+        .unwrap();
+    queue_both(&st, imported, tip, None);
+    st.wallet_mut()
+        .rewind_to_chain_state(ChainState::empty(floor, BlockHash([0; 32])), HashSet::new())
+        .unwrap();
+    assert_eq!(private_bound(&st, local), Some(floor));
+    assert_eq!(private_bound(&st, imported), None);
+    st.wallet_mut()
+        .rewind_to_chain_state(
+            ChainState::empty(floor + 1, BlockHash([0; 32])),
+            HashSet::new(),
+        )
+        .unwrap();
+    assert_eq!(private_bound(&st, local), Some(floor));
+}
+
+#[test]
+fn status_evidence_truncation_uses_rescan_floor_below_retained_checkpoint() {
+    use zcash_client_backend::data_api::status::{TransactionStatusMode, TransactionStatusWrite};
+    let (mut st, floor) = fixture();
+    let (checkpoint, _) = st.generate_empty_block();
+    st.scan_cached_blocks(checkpoint, 1);
+    st.wallet_mut()
+        .db_mut()
+        .set_status_mode(TransactionStatusMode::Private);
+    let txid = TxId::from_bytes([96; 32]);
+    st.wallet_mut()
+        .db_mut()
+        .record_transaction_created(txid, checkpoint)
+        .unwrap();
+    let params = *st.network();
+    let mut conn = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();
+    let tx = conn.transaction().unwrap();
+    super::truncate_to_height_internal(
+        &tx,
+        &params,
+        #[cfg(feature = "transparent-inputs")]
+        &crate::GapLimits::default(),
+        checkpoint,
+        floor,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(private_bound(&st, txid), Some(floor));
 }

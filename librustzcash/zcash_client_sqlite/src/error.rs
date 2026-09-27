@@ -42,6 +42,8 @@ use {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SqliteClientError {
+    /// Status work requires an explicit disclosure policy.
+    StatusModeNotConfigured,
     /// Payload-work enumeration requires an explicit enhancement mode on this handle.
     #[cfg(feature = "orchard")]
     EnhancementModeNotConfigured,
@@ -322,6 +324,11 @@ impl From<GapAddressesError<SqliteClientError>> for SqliteClientError {
 impl fmt::Display for SqliteClientError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self {
+            SqliteClientError::StatusModeNotConfigured => write!(
+                f,
+                "Status mode is not configured; call set_status_mode before obtaining status work"
+            ),
+
             #[cfg(feature = "orchard")]
             SqliteClientError::EnhancementModeNotConfigured => write!(
                 f,

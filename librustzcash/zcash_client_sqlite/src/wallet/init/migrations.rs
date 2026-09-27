@@ -46,6 +46,7 @@ mod sent_notes_to_internal;
 mod shardtree_support;
 mod spend_key_available;
 mod standalone_p2sh;
+mod status_inclusion_evidence;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transparent_gap_limit_handling;
@@ -149,6 +150,7 @@ pub mod ids {
         shardtree_support::MIGRATION_ID as SHARDTREE_SUPPORT,
         spend_key_available::MIGRATION_ID as SPEND_KEY_AVAILABLE,
         standalone_p2sh::MIGRATION_ID as STANDALONE_P2SH,
+        status_inclusion_evidence::MIGRATION_ID as STATUS_INCLUSION_EVIDENCE,
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
@@ -373,6 +375,7 @@ pub(super) fn all_migrations<
         Box::new(tree_retained_checkpoints::Migration),
         Box::new(note_locking::Migration),
         Box::new(tx_status_observation_intent::Migration),
+        Box::new(status_inclusion_evidence::Migration),
         Box::new(orchard_ironwood_migration_anchor_interval::Migration),
         Box::new(v_tx_outputs_transparent_addresses::Migration),
         Box::new(orchard_ironwood_migration_unsatisfiability::Migration),
@@ -582,15 +585,11 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
 
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
+    status_inclusion_evidence::MIGRATION_ID,
     v_tx_outputs_transparent_addresses::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
-    ironwood_enhance::MIGRATION_ID,
-    fix_bad_ironwood_change_flagging::MIGRATION_ID,
-    v_address_uses_ironwood::MIGRATION_ID,
-    orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,
-    tree_retained_checkpoints::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
@@ -733,6 +732,7 @@ pub(crate) mod tests {
             ids::TX_RETRIEVAL_QUEUE,
             ids::TX_RETRIEVAL_QUEUE_EXPIRY,
             ids::TX_STATUS_OBSERVATION_INTENT,
+            ids::STATUS_INCLUSION_EVIDENCE,
             ids::UFVK_SUPPORT,
             ids::UTXOS_TABLE,
             ids::UTXOS_TO_TXOS,

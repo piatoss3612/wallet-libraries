@@ -38,6 +38,10 @@ use nonempty::NonEmpty;
 use rand_core::Rng;
 use secrecy::{ExposeSecret, SecretVec};
 use shardtree::{ShardTree, error::ShardTreeError, store::ShardStore};
+use zcash_client_backend::data_api::status::{
+    TransactionStatusMode, TransactionStatusRead, TransactionStatusWork, TransactionStatusWrite,
+};
+
 use std::{
     borrow::{Borrow, BorrowMut},
     cmp::{max, min},
@@ -299,6 +303,7 @@ pub struct WalletDb<C, P, CL, R> {
     anchor_retention_interval: AnchorRetentionInterval,
     #[cfg(feature = "orchard")]
     enhancement_mode: Option<EnhancementMode>,
+    status_mode: Option<TransactionStatusMode>,
     #[cfg(feature = "transparent-inputs")]
     gap_limits: GapLimits,
 }
@@ -471,7 +476,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// `WalletRead::transaction_data_requests` (status and transparent history) does not
+    /// `WalletRead::transaction_data_requests` (transparent history) does not
     /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
@@ -487,6 +492,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 clock,
                 rng,
                 anchor_retention_interval: AnchorRetentionInterval::default(),
+                status_mode: None,
                 #[cfg(feature = "orchard")]
                 enhancement_mode: None,
                 #[cfg(feature = "transparent-inputs")]
@@ -497,6 +503,18 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
 }
 
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Selects status disclosure policy. Discard outstanding work snapshots when changing it.
+    /// This is not persisted; each reopened handle must select a mode explicitly.
+    pub fn set_status_mode(&mut self, mode: TransactionStatusMode) {
+        self.status_mode = Some(mode);
+    }
+
+    /// Configures status policy before obtaining routed work.
+    pub fn with_status_mode(mut self, mode: TransactionStatusMode) -> Self {
+        self.set_status_mode(mode);
+        self
+    }
+
     /// Sets the interval on which this wallet retains note commitment tree checkpoints as durable
     /// anchors, exempt from ordinary checkpoint pruning.
     ///
@@ -579,7 +597,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// `WalletRead::transaction_data_requests` (status and transparent history) does not
+    /// `WalletRead::transaction_data_requests` (transparent history) does not
     /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
@@ -588,6 +606,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock,
             rng,
             anchor_retention_interval: AnchorRetentionInterval::default(),
+            status_mode: None,
             #[cfg(feature = "orchard")]
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
@@ -618,6 +637,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
+            status_mode: self.status_mode,
             #[cfg(feature = "orchard")]
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
@@ -678,6 +698,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
+            status_mode: self.status_mode,
             #[cfg(feature = "orchard")]
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
@@ -1584,7 +1605,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
-            let iter = wallet::transaction_data_requests(self.conn.borrow())?.into_iter();
+            let iter = std::iter::empty();
 
             #[cfg(feature = "transparent-inputs")]
             let iter = iter.chain(wallet::transparent::transaction_data_requests(
@@ -1613,6 +1634,41 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
             target_height,
             confirmations_policy,
         )
+    }
+}
+
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransactionStatusRead
+    for WalletDb<C, P, CL, R>
+{
+    fn transaction_status_work(&self) -> Result<Vec<TransactionStatusWork>, Self::Error> {
+        let mode = self
+            .status_mode
+            .ok_or(SqliteClientError::StatusModeNotConfigured)?;
+        if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
+            return Ok(vec![]);
+        }
+        wallet::transaction_status_work(self.conn.borrow(), mode)
+    }
+    fn transaction_status_work_for(
+        &self,
+        txid: TxId,
+    ) -> Result<TransactionStatusWork, Self::Error> {
+        let mode = self
+            .status_mode
+            .ok_or(SqliteClientError::StatusModeNotConfigured)?;
+        wallet::transaction_status_work_for(self.conn.borrow(), mode, txid)
+    }
+}
+
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransactionStatusWrite
+    for WalletDb<C, P, CL, R>
+{
+    fn record_transaction_created(
+        &mut self,
+        txid: TxId,
+        earliest: BlockHeight,
+    ) -> Result<(), Self::Error> {
+        wallet::record_transaction_created(self.conn.borrow(), txid, earliest)
     }
 }
 
@@ -5092,7 +5148,8 @@ mod tests {
                         false
                     }
                 }
-                _ => false,
+                #[cfg(feature = "spend-index")]
+                TransactionDataRequest::GetSpendingTx(_) => false,
             });
 
             assert!(has_valid_request);

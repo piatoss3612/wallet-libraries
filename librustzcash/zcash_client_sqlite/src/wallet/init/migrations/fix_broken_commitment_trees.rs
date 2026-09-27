@@ -216,6 +216,7 @@ fn truncate_to_height<P: consensus::Parameters>(
             anchor_retention_interval: AnchorRetentionInterval::default(),
             #[cfg(feature = "orchard")]
             enhancement_mode: None,
+            status_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
         };

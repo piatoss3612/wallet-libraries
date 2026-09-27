@@ -91,6 +91,7 @@ use super::{
     enhance_pir::EnhancePirRead,
     error::Error,
     scanning::{ScanPriority, ScanRange},
+    status::TransactionStatusRead,
     wallet::{
         ConfirmationsPolicy, SpendingKeys, create_proposed_transactions,
         input_selection::{
@@ -1875,7 +1876,8 @@ pub trait DataStoreFactory {
         + WalletTest
         + WalletWrite
         + WalletCommitmentTrees
-        + EnhancePirRead;
+        + EnhancePirRead
+        + TransactionStatusRead;
 
     /// Constructs a new data store.
     fn new_data_store(
