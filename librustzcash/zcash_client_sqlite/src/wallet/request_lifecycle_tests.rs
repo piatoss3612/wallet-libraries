@@ -701,3 +701,165 @@ fn status_evidence_truncation_uses_rescan_floor_below_retained_checkpoint() {
     tx.commit().unwrap();
     assert_eq!(private_bound(&st, txid), Some(floor));
 }
+
+#[test]
+fn expiry_dormancy_preserves_obligations_and_reactivates_after_rewind() {
+    use zcash_client_backend::data_api::status::TransactionStatusMode;
+
+    for mode in [
+        TransactionStatusMode::Public,
+        TransactionStatusMode::Private,
+    ] {
+        let (mut st, height) = fixture();
+        st.wallet_mut().db_mut().set_status_mode(mode);
+        let unknown = TxId::from_bytes([201; 32]);
+        let legacy = TxId::from_bytes([202; 32]);
+        let never = TxId::from_bytes([203; 32]);
+        let unknown_expiry = TxId::from_bytes([204; 32]);
+        let large_expiry = TxId::from_bytes([205; 32]);
+        let missing = TxId::from_bytes([206; 32]);
+        for txid in [unknown, legacy, never, unknown_expiry, large_expiry] {
+            queue_both(&st, txid, height, None);
+        }
+        // Place the boundary one block above the current contiguous scan height.
+        let expiry = u32::from(height) + 1 - crate::PRUNING_DEPTH;
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE transactions SET expiry_height = ?1 WHERE txid IN (?2, ?3)",
+                params![expiry, unknown.as_ref(), legacy.as_ref()],
+            )
+            .unwrap();
+        st.wallet().conn().execute(
+            "UPDATE transactions SET target_height = ?1, min_observed_height = 0 WHERE txid = ?2",
+            params![u32::from(height), legacy.as_ref()],
+        ).unwrap();
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE transactions SET expiry_height = NULL WHERE txid = ?1",
+                [unknown_expiry.as_ref()],
+            )
+            .unwrap();
+        st.wallet()
+            .conn()
+            .execute(
+                "UPDATE transactions SET expiry_height = ?1 WHERE txid = ?2",
+                params![u32::MAX, large_expiry.as_ref()],
+            )
+            .unwrap();
+        st.wallet()
+            .conn()
+            .execute(
+                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 0)",
+                [missing.as_ref()],
+            )
+            .unwrap();
+        let active = |st: &State, txid| {
+            st.wallet()
+                .transaction_status_work()
+                .unwrap()
+                .iter()
+                .any(|work| work.txid() == txid)
+        };
+        let evidence = [unknown, legacy, never]
+            .map(|txid| st.wallet().transaction_status_work_for(txid).unwrap());
+        assert!(active(&st, unknown));
+        assert!(active(&st, legacy));
+        for _ in 0..2 {
+            let (next, _) = st.generate_empty_block();
+            st.scan_cached_blocks(next, 1);
+            for txid in [unknown, legacy] {
+                assert!(!active(&st, txid));
+                assert!(queued(&st, txid, 0));
+                assert!(payload_pending(&st, txid));
+                let confirmed: Option<u32> = st
+                    .wallet()
+                    .conn()
+                    .query_row(
+                        "SELECT confirmed_unmined_at_height FROM transactions WHERE txid = ?1",
+                        [txid.as_ref()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(confirmed, None);
+            }
+            for txid in [never, unknown_expiry, large_expiry, missing] {
+                assert!(active(&st, txid));
+            }
+        }
+        for (txid, expected) in [unknown, legacy, never].into_iter().zip(evidence) {
+            assert_eq!(
+                st.wallet().transaction_status_work_for(txid).unwrap(),
+                expected
+            );
+        }
+        let reopened = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();
+        let db = crate::WalletDb::from_connection(reopened, *st.network(), (), ())
+            .with_status_mode(mode);
+        assert_eq!(
+            db.transaction_status_work().unwrap(),
+            st.wallet().transaction_status_work().unwrap()
+        );
+        st.wallet_mut().db_mut().truncate_to_height(height).unwrap();
+        assert!(active(&st, unknown));
+        assert!(active(&st, legacy));
+        assert!(queued(&st, unknown, 0));
+        assert!(payload_pending(&st, unknown));
+    }
+}
+
+#[test]
+fn expiry_dormancy_requires_contiguous_scanning() {
+    let (mut st, height) = fixture();
+    let txid = TxId::from_bytes([207; 32]);
+    queue_both(&st, txid, height, None);
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET expiry_height = ?1 WHERE txid = ?2",
+            params![u32::from(height) + 1 - crate::PRUNING_DEPTH, txid.as_ref()],
+        )
+        .unwrap();
+    let (gap, _) = st.generate_empty_block();
+    let (later, _) = st.generate_empty_block();
+    st.scan_cached_blocks(later, 1);
+    assert_eq!(
+        super::fully_scanned_height(st.wallet().conn()).unwrap(),
+        Some(height)
+    );
+    assert!(
+        st.wallet()
+            .transaction_status_work()
+            .unwrap()
+            .iter()
+            .any(|w| w.txid() == txid)
+    );
+    st.scan_cached_blocks(gap, 1);
+    assert!(
+        !st.wallet()
+            .transaction_status_work()
+            .unwrap()
+            .iter()
+            .any(|w| w.txid() == txid)
+    );
+    // With no established scan progress, even an old expiry must stay actionable.
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE scan_queue SET priority = ?1",
+            [super::priority_code(&super::ScanPriority::Historic)],
+        )
+        .unwrap();
+    assert_eq!(
+        super::fully_scanned_height(st.wallet().conn()).unwrap(),
+        None
+    );
+    assert!(
+        st.wallet()
+            .transaction_status_work()
+            .unwrap()
+            .iter()
+            .any(|w| w.txid() == txid)
+    );
+}

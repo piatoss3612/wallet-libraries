@@ -17,6 +17,22 @@ without requiring a queued obligation, enqueueing one, or changing wallet state.
 It supports migration recovery and native status observers. An unknown txid can
 still be queried privately, but has unknown inclusion evidence.
 
+## Expiry dormancy
+
+SQLite omits finite-expiry obligations from batch status work once the contiguous
+fully scanned height reaches `expiry_height + PRUNING_DEPTH` (100 blocks of reorg
+safety). The queue row remains intact. Rewinding below that boundary makes the
+obligation eligible again, subject to the existing mined and conclusive-status
+rules. A reported chain tip or a scanned range beyond a gap does not establish
+this boundary. With a known chain tip, unknown scan progress does not trigger
+expiry dormancy; the existing empty-batch behavior for an unknown tip is unchanged.
+
+Zero expiry means no expiry and never triggers this filter. Unknown expiry also
+retains its existing scheduling rules. Dormancy changes neither inclusion evidence
+nor transaction status, and does not complete payload retrieval or prove absence
+for migration retirement. Explicit `transaction_status_work_for(txid)` lookups
+remain available for dormant obligations.
+
 ## Inclusion evidence
 
 A private work item carries `earliest_possible_inclusion: Option<BlockHeight>`.
