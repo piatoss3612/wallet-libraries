@@ -1541,6 +1541,7 @@ fn pre_nu6_3_test_network() -> zcash_protocol::local_consensus::LocalNetwork {
         nu6_1: Some(BlockHeight::from_u32(8)),
         nu6_2: Some(BlockHeight::from_u32(9)),
         nu6_3: None,
+        #[cfg(zcash_unstable = "nu7")]
         nu7: None,
     }
 }
@@ -1558,6 +1559,7 @@ fn nu6_3_test_network() -> zcash_protocol::local_consensus::LocalNetwork {
         nu6_1: Some(BlockHeight::from_u32(8)),
         nu6_2: Some(BlockHeight::from_u32(9)),
         nu6_3: Some(BlockHeight::from_u32(10)),
+        #[cfg(zcash_unstable = "nu7")]
         nu7: None,
     }
 }

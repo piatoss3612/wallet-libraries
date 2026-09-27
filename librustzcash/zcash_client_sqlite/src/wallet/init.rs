@@ -785,6 +785,8 @@ mod tests {
     };
 
     use regex::Regex;
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    use zcash_protocol::value::Zatoshis;
 
     pub(crate) fn describe_tables(conn: &Connection) -> Result<Vec<String>, rusqlite::Error> {
         let result = conn
@@ -1324,6 +1326,8 @@ mod tests {
                 BranchId::Canopy,
                 0,
                 BlockHeight::from(0),
+                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+                Zatoshis::ZERO,
                 None,
                 None,
                 None,
