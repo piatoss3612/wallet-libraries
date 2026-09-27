@@ -109,6 +109,109 @@ fn retire_enhancement_if_complete(
     Ok(())
 }
 
+/// Selects the undecryptable outgoing candidates of `:tx` that the wallet's own value
+/// accounting proves carry no value.
+///
+/// An Ironwood bundle has one action per spend or output, whichever is more numerous, so a
+/// transaction spending many notes to few recipients is padded with dummy outputs. Compact
+/// data cannot tell a dummy from a payment, so each is queued as an outgoing candidate, and
+/// OVK decryption of its record then fails with `NotRecoverable`. That result alone does not
+/// prove a dummy: it could also be an OVK-discarded payment or corrupt service data.
+///
+/// Every other output of the transaction being recovered is what proves it. A privately
+/// routed transaction is Ironwood-only with no transparent data, so its fee equals the value
+/// of its spends minus its outputs. When every spend is linked (no discovery work), every
+/// decryptable output is recovered (no memo, metadata or recoverable outgoing work), the fee
+/// is known, and
+///
+/// `sum(spent notes) = sum(recovered outputs) + fee`,
+///
+/// the remaining outputs sum to zero. Rows orphaned by account deletion are excluded, and
+/// they also block the transaction, because their funding may be missing from the sum.
+///
+/// Exclusions, by design:
+/// - An undecryptable output that really is a zero-value payment (for example a memo-only
+///   output built with its OVK discarded) is indistinguishable from a dummy and is retired
+///   with them. Decryptable zero-value outputs are unaffected: they are recovered normally
+///   before this rule can apply.
+/// - The fee is PIR metadata. A service that inflates it by the value of a withheld output
+///   could make that output look like a dummy; this is an accepted risk.
+const VALUE_BALANCED_DUMMIES: &str = concat!(
+    "ironwood_enhance_outgoing_queue
+     WHERE transaction_id = :tx AND not_recoverable = 1
+       AND EXISTS (SELECT 1 FROM transactions t ",
+    active_private_tx!(),
+    " AND t.id_tx = :tx AND t.fee IS NOT NULL)
+       AND NOT EXISTS (
+           SELECT 1 FROM ironwood_enhance_outgoing_queue o
+           WHERE o.transaction_id = :tx
+             AND (o.not_recoverable = 0 OR NOT EXISTS (
+                 SELECT 1 FROM ironwood_enhance_outgoing_accounts a
+                 WHERE a.commitment_tree_position = o.commitment_tree_position)))
+       AND NOT EXISTS (
+           SELECT 1 FROM ironwood_memo_retrieval_queue q
+           JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
+           WHERE rn.transaction_id = :tx)
+       AND NOT EXISTS (SELECT 1 FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx)
+       AND NOT EXISTS (SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)
+       AND (SELECT COALESCE(SUM(rn.value), 0)
+            FROM ironwood_received_note_spends s
+            JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id
+            WHERE s.transaction_id = :tx) > 0
+       AND (SELECT COALESCE(SUM(rn.value), 0)
+            FROM ironwood_received_note_spends s
+            JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id
+            WHERE s.transaction_id = :tx)
+         = (SELECT fee FROM transactions WHERE id_tx = :tx)
+         + (SELECT COALESCE(SUM(value), 0) FROM (
+                SELECT value FROM sent_notes
+                WHERE transaction_id = :tx AND output_pool = :ironwood_pool
+                UNION ALL
+                SELECT rn.value FROM ironwood_received_notes rn
+                WHERE rn.transaction_id = :tx
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sent_notes sn
+                      WHERE sn.transaction_id = :tx AND sn.output_pool = :ironwood_pool
+                        AND sn.output_index = rn.action_index)))"
+);
+
+/// Deletes the outgoing candidates selected by [`VALUE_BALANCED_DUMMIES`], so they stop being
+/// reported as suspended work and no longer hold the transaction's retrieval request open.
+///
+/// A later compact rescan rebuilds the outgoing queue from the scanned candidates, so retired
+/// dummies are queried once more and retired again. Nothing is lost by that; recovered
+/// outputs are never requeued.
+fn retire_value_balanced_dummies(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+) -> Result<(), SqliteClientError> {
+    // Select once: deleting account rows would make the remaining queue rows look orphaned.
+    let positions = conn
+        .prepare(&format!(
+            "SELECT commitment_tree_position FROM {VALUE_BALANCED_DUMMIES}"
+        ))?
+        .query_map(
+            named_params![
+                ":tx": tx_ref.0,
+                ":ironwood_pool": super::pool_code(PoolType::Shielded(ShieldedPool::Ironwood)),
+            ],
+            |row| row.get::<_, i64>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    for position in positions {
+        // Explicit rather than relying on ON DELETE CASCADE.
+        conn.execute(
+            "DELETE FROM ironwood_enhance_outgoing_accounts WHERE commitment_tree_position = ?",
+            [position],
+        )?;
+        conn.execute(
+            "DELETE FROM ironwood_enhance_outgoing_queue WHERE commitment_tree_position = ?",
+            [position],
+        )?;
+    }
+    Ok(())
+}
+
 /// Clears private work without removing recovered data or an ordinary request.
 pub(crate) fn clear_work(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClientError> {
     super::ironwood_hooks::clear_ironwood_enhancement_work(conn, tx_ref)
@@ -968,6 +1071,9 @@ pub(crate) fn apply<P: Parameters>(
             EnhancePirStoreResult::Stored
         }
     };
+    // Records arrive in any order: the last real output, or the last dummy, can close the
+    // value balance.
+    retire_value_balanced_dummies(tx, tx_ref)?;
     retire_enhancement_if_complete(tx, tx_ref)?;
     Ok(result)
 }

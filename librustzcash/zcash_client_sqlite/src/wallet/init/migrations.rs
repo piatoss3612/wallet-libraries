@@ -41,6 +41,7 @@ mod orchard_received_notes;
 mod orchard_shardtree;
 mod received_notes_nullable_nf;
 mod receiving_key_scopes;
+mod retire_ironwood_dummy_outgoing;
 mod sapling_memo_consistency;
 mod sent_notes_to_internal;
 mod shardtree_support;
@@ -145,6 +146,7 @@ pub mod ids {
         orchard_shardtree::MIGRATION_ID as ORCHARD_SHARDTREE,
         received_notes_nullable_nf::MIGRATION_ID as RECEIVED_NOTES_NULLABLE_NF,
         receiving_key_scopes::MIGRATION_ID as RECEIVING_KEY_SCOPES,
+        retire_ironwood_dummy_outgoing::MIGRATION_ID as RETIRE_IRONWOOD_DUMMY_OUTGOING,
         sapling_memo_consistency::MIGRATION_ID as SAPLING_MEMO_CONSISTENCY,
         sent_notes_to_internal::MIGRATION_ID as SENT_NOTES_TO_INTERNAL,
         shardtree_support::MIGRATION_ID as SHARDTREE_SUPPORT,
@@ -376,6 +378,7 @@ pub(super) fn all_migrations<
         Box::new(note_locking::Migration),
         Box::new(tx_status_observation_intent::Migration),
         Box::new(status_inclusion_evidence::Migration),
+        Box::new(retire_ironwood_dummy_outgoing::Migration),
         Box::new(orchard_ironwood_migration_anchor_interval::Migration),
         Box::new(v_tx_outputs_transparent_addresses::Migration),
         Box::new(orchard_ironwood_migration_unsatisfiability::Migration),
@@ -585,7 +588,7 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
 
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    status_inclusion_evidence::MIGRATION_ID,
+    retire_ironwood_dummy_outgoing::MIGRATION_ID,
     v_tx_outputs_transparent_addresses::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
@@ -719,6 +722,7 @@ pub(crate) mod tests {
             ids::ORCHARD_SHARDTREE,
             ids::RECEIVED_NOTES_NULLABLE_NF,
             ids::RECEIVING_KEY_SCOPES,
+            ids::RETIRE_IRONWOOD_DUMMY_OUTGOING,
             ids::SAPLING_MEMO_CONSISTENCY,
             ids::SENT_NOTES_TO_INTERNAL,
             ids::SHARDTREE_SUPPORT,

@@ -11,6 +11,14 @@ workspace.
 ## [Unreleased]
 
 ### Fixed
+- Retire undecryptable Ironwood outgoing candidates once the wallet's value
+  accounting proves them to be zero-value dummies: every spend is linked, every
+  other output is recovered, the fee is known, and spends equal recovered outputs
+  plus fee. They no longer remain as permanent `OutgoingNotRecoverable`
+  suspensions that also keep the transaction's retrieval request open. A
+  data-only migration applies the rule to rows suspended before this change.
+  Undecryptable real zero-value outputs are indistinguishable from dummies and
+  are retired with them.
 - Make finite-expiry status obligations dormant after contiguous local scanning
   reaches expiry plus the reorg safety depth, retaining queue rows for rewind
   reactivation without treating incomplete private coverage as proof of absence.
