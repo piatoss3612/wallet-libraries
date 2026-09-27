@@ -110,7 +110,7 @@ fn retire_enhancement_if_complete(
 }
 
 /// Selects the undecryptable outgoing candidates of `:tx` that the wallet's own value
-/// accounting proves carry no value.
+/// accounting proves were funded by no account it holds: dummies, in the wallet's own sends.
 ///
 /// An Ironwood bundle has one action per spend or output, whichever is more numerous, so a
 /// transaction spending many notes to few recipients is padded with dummy outputs. Compact
@@ -120,14 +120,21 @@ fn retire_enhancement_if_complete(
 ///
 /// Every other output of the transaction being recovered is what proves it. A privately
 /// routed transaction is Ironwood-only with no transparent data, so its fee equals the value
-/// of its spends minus its outputs. When every spend is linked (no discovery work), every
-/// decryptable output is recovered (no memo, metadata or recoverable outgoing work), the fee
-/// is known, and
+/// of its spends minus its outputs. The rule applies when the wallet has at least one linked
+/// spend, no discovery work remains, every decryptable output is recovered (no memo, metadata
+/// or recoverable outgoing work), the fee is known, and
 ///
-/// `sum(spent notes) = sum(recovered outputs) + fee`,
+/// `sum(linked spent notes) = sum(recovered outputs) + fee`.
 ///
-/// the remaining outputs sum to zero. Rows orphaned by account deletion are excluded, and
-/// they also block the transaction, because their funding may be missing from the sum.
+/// This proves the remaining outputs were funded by nothing the wallet currently holds: their
+/// value equals the inputs of which the wallet has no linked spend. Those are either another
+/// party's inputs or the notes of an account deleted since the transaction was scanned (the
+/// deletion cascades away its notes and spend links, while the remaining accounts keep the
+/// candidates alive). Neither is this wallet's sent history to recover: another party's
+/// outputs cannot be decrypted with this wallet's OVKs, and a deleted account's sent notes
+/// are deleted with it. Re-importing that account links its spends again, which reopens the
+/// transaction and rebuilds its candidates. Rows orphaned by account deletion (no funding
+/// account left) are never retired, and they block the transaction.
 ///
 /// Exclusions, by design:
 /// - An undecryptable output that really is a zero-value payment (for example a memo-only
@@ -154,10 +161,7 @@ const VALUE_BALANCED_DUMMIES: &str = concat!(
            WHERE rn.transaction_id = :tx)
        AND NOT EXISTS (SELECT 1 FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx)
        AND NOT EXISTS (SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)
-       AND (SELECT COALESCE(SUM(rn.value), 0)
-            FROM ironwood_received_note_spends s
-            JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id
-            WHERE s.transaction_id = :tx) > 0
+       AND EXISTS (SELECT 1 FROM ironwood_received_note_spends WHERE transaction_id = :tx)
        AND (SELECT COALESCE(SUM(rn.value), 0)
             FROM ironwood_received_note_spends s
             JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id

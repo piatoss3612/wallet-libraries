@@ -21,7 +21,7 @@ use uuid::Uuid;
 use super::{ironwood_enhance, status_inclusion_evidence};
 use crate::wallet::init::WalletMigrationError;
 
-/// Retires suspended Ironwood outgoing candidates proven to be zero-value dummies.
+/// Retires suspended Ironwood outgoing candidates that no held account funded.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x8b32fc31_ac5d_4008_9954_791c7c2c5d71);
 
 const DEPENDENCIES: &[Uuid] = &[
@@ -65,10 +65,7 @@ const VALUE_BALANCED_DUMMIES: &str = "
           WHERE rn.transaction_id = :tx)
       AND NOT EXISTS (SELECT 1 FROM ironwood_enhance_metadata_queue WHERE transaction_id = :tx)
       AND NOT EXISTS (SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)
-      AND (SELECT COALESCE(SUM(rn.value), 0)
-           FROM ironwood_received_note_spends s
-           JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id
-           WHERE s.transaction_id = :tx) > 0
+      AND EXISTS (SELECT 1 FROM ironwood_received_note_spends WHERE transaction_id = :tx)
       AND (SELECT COALESCE(SUM(rn.value), 0)
            FROM ironwood_received_note_spends s
            JOIN ironwood_received_notes rn ON rn.id = s.ironwood_received_note_id
@@ -213,6 +210,18 @@ mod tests {
         send(&conn, 1, 10, 100, true); // 100 = 60 + 30 + 10: dummies
         send(&conn, 2, 5, 200, true); // 5 unaccounted: a real output may be hidden
         send(&conn, 3, 10, 300, false); // orphaned by account deletion
+        // A mined zero-fee transaction spending a zero-valued note: linked, but summing to 0.
+        conn.execute_batch(
+            "INSERT INTO transactions VALUES (40, X'00', NULL, 1, 0);
+             INSERT INTO ironwood_received_notes VALUES (40, 40, 0, 0);
+             INSERT INTO transactions VALUES (4, X'04', NULL, 2, 0);
+             INSERT INTO ironwood_enhance_routing VALUES (4, 0);
+             INSERT INTO ironwood_received_note_spends VALUES (40, 4);
+             INSERT INTO ironwood_enhance_outgoing_queue VALUES (400, 4, 1);
+             INSERT INTO ironwood_enhance_outgoing_accounts VALUES (400, 1);
+             INSERT INTO tx_retrieval_queue VALUES (X'04', 1);",
+        )
+        .unwrap();
 
         let tx = conn.transaction().unwrap();
         super::Migration.up(&tx).unwrap();
@@ -243,5 +252,6 @@ mod tests {
         );
         assert_eq!((outgoing(2), queued(2)), (2, 1));
         assert_eq!((outgoing(3), queued(3)), (2, 1));
+        assert_eq!((outgoing(4), queued(4)), (0, 0));
     }
 }
