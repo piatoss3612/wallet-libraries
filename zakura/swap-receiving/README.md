@@ -84,7 +84,7 @@ Recompute scan decisions even for retired keys. Never credit a note to multiple
 operations sharing a receiver.
 
 This helper is unit tested. SQLite operation persistence and active-key filtering
-are the next integration step. SQLite currently scans every registered key.
+are the next integration step. SQLite private recovery uses the bounded policy described below.
 
 ## Derivation
 
@@ -146,7 +146,7 @@ cargo test -p zakura-client-sqlite --features experimental-swap-receiving --lock
 The SQLite integration tests also scan both purposes alongside ordinary keys,
 reopen the database, and construct a mixed-input transaction whose change returns
 to the ordinary internal key. They check replay, late payments, and invalid note
-metadata. Registered keys currently remain in every subsequent compact scan.
+metadata. Outside private recovery mode, registered keys remain in subsequent compact scans.
 Full-transaction retrieval authenticates swap memos before or after compact
 scanning, including self-payments also recoverable through the ordinary OVK.
 Enhance PIR resolves the registered key after restart and rejects altered
@@ -206,3 +206,28 @@ for locally verifiable spend history. It cannot repair evidence pruned by earlie
 builds. `mark_swap_directory_checked` requires a local block anchor and no pending
 candidates. Rewinds remove checks above the retained height. This does not retire
 keys or claim that a provider's terminal status rules out future payments.
+
+### Bounded private recovery policy
+
+The SQLite private recovery opt-in separates temporary trial decryption from PIR
+closeout. Persist each local operation with `observe_swap_operation` before showing
+its deposit instruction. Supported terminal observations save an inclusive deadline
+of the first observed chain height plus ten blocks; duplicates do not extend it.
+Unknown statuses and transport failures must not update the watch. Shared addresses
+scan while any linked operation is pending or within its grace window.
+
+`WalletRead::get_swap_scan_window` filters before deriving inactive keys and returns
+an exclusive boundary so even large catch-up batches stop at the deadline. Unlike
+the conservative receipt-based `Lifecycle::scan_decision` helper, this policy stops
+trial decryption when the height budget is exhausted even if PIR is unavailable.
+It does not delete registry entries, received notes, witnesses, or spend metadata.
+
+`prepare_swap_recovery_target` selects a durable canonical target after grace. With
+no local operation, restored and lookahead keys are PIR-only and use the first
+accepted restore tip. Wait until a publication covers the saved target before doing
+receiver queries, resolve all returned payments, then mark directory completion.
+New tips do not extend completed targets. Rewinds invalidate affected target and
+publication anchors. Scan deadlines are height budgets rather than block identity
+claims, so replay below the deadline uses the original bounded watch again.
+Payments sent after this one-time closeout require a later explicit recovery; these
+addresses are intended for individual swaps, not indefinite address reuse.

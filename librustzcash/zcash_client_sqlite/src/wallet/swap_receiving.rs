@@ -5,9 +5,10 @@
 //! are loaded by compact scanning, with missing history queued for replay. Key
 //! retirement is managed separately by the caller.
 
-pub(crate) mod coverage;
 mod apply;
+pub(crate) mod coverage;
 pub use apply::PaymentApplication;
+pub(crate) mod lifecycle;
 mod payments;
 mod private;
 mod recovery;
@@ -135,16 +136,35 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         &self,
         account: AccountUuid,
     ) -> Result<Vec<RegisteredKey>, Error> {
+        self.swap_receiving_keys_for_scan(account, None)
+            .map(|(keys, _)| keys)
+    }
+
+    pub(crate) fn swap_receiving_keys_for_scan(
+        &self,
+        account: AccountUuid,
+        height: Option<BlockHeight>,
+    ) -> Result<(Vec<RegisteredKey>, Option<BlockHeight>), Error> {
         let conn = self.conn.borrow();
         let (account_ref, parent) = account_key(conn, &self.params, account)?;
         let mut stmt = conn.prepare_cached(
-            "SELECT purpose, derivation_version, key_index, receiver, scan_from, advances_allocation
+            "SELECT purpose, derivation_version, key_index, receiver, scan_from, advances_allocation, id
              FROM ironwood_receiving_keys WHERE account_id = :account
              ORDER BY purpose, key_index"
         )?;
         let mut rows = stmt.query(named_params![":account": account_ref.0])?;
         let mut keys = Vec::new();
+        let mut boundary = None;
         while let Some(row) = rows.next()? {
+            if let Some(height) = height {
+                let (active, next) = lifecycle::scan_window(conn, row.get(6)?, height)?;
+                if let Some(next) = next {
+                    boundary = Some(boundary.map_or(next, |end: BlockHeight| end.min(next)));
+                }
+                if !active {
+                    continue;
+                }
+            }
             let version: u8 = row.get(1)?;
             if version != 1 {
                 return Err(corrupt("unsupported swap key derivation version"));
@@ -170,7 +190,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             }
             keys.push(key);
         }
-        Ok(keys)
+        Ok((keys, boundary))
     }
 }
 

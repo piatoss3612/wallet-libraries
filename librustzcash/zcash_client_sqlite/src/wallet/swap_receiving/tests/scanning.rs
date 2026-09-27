@@ -2,6 +2,15 @@ use super::*;
 
 #[test]
 fn swap_receiving_scan_reopen_and_spend_into_ordinary_change() {
+    scan_reopen_and_spend(false);
+}
+
+#[test]
+fn retired_swap_keys_still_spend_into_ordinary_change() {
+    scan_reopen_and_spend(true);
+}
+
+fn scan_reopen_and_spend(private: bool) {
     use std::convert::Infallible;
     use zcash_client_backend::{
         data_api::{
@@ -42,6 +51,21 @@ fn swap_receiving_scan_reopen_and_spend_into_ordinary_change() {
         .db_mut()
         .watch_swap_receive_key(account.id(), 9, activation)
         .unwrap();
+
+    if private {
+        let db = st.wallet_mut().db_mut();
+        db.enable_private_swap_recovery(account.id()).unwrap();
+        db.observe_swap_operation(account.id(), refund.key_id(), "outgoing", false, activation)
+            .unwrap();
+        db.observe_swap_operation(
+            account.id(),
+            incoming.key_id(),
+            "incoming",
+            false,
+            activation,
+        )
+        .unwrap();
+    }
 
     // Both purposes and the ordinary key coexist in one account's batch runner.
     let (first, _, refund_nf) = st.generate_next_block(
@@ -107,6 +131,30 @@ fn swap_receiving_scan_reopen_and_spend_into_ordinary_change() {
         10
     );
 
+    if private {
+        for (key, operation) in [
+            (refund.key_id(), "outgoing"),
+            (incoming.key_id(), "incoming"),
+        ] {
+            st.wallet_mut()
+                .db_mut()
+                .observe_swap_operation(account.id(), key, operation, true, height)
+                .unwrap();
+        }
+        for _ in 0..11 {
+            let (h, _) = st.generate_empty_block();
+            st.scan_cached_blocks(h, 1);
+        }
+        assert!(
+            st.wallet()
+                .db()
+                .get_swap_scan_window(height + 11)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+    }
+
     let receiver = orchard::keys::FullViewingKey::from(
         &orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap(),
     )
@@ -169,13 +217,13 @@ fn swap_receiving_scan_reopen_and_spend_into_ordinary_change() {
         .db()
         .get_unspent_ironwood_notes_at_historical_height(account.id(), late_height)
         .unwrap();
-    assert_eq!(notes.len(), 2);
+    assert_eq!(notes.len(), if private { 1 } else { 2 });
     assert_eq!(
         notes
             .iter()
             .filter(|n| n.swap_key_id() == Some(refund.key_id()))
             .count(),
-        1
+        usize::from(!private)
     );
     // Spending does not retire a receiver or forget the next allocation.
     assert_eq!(

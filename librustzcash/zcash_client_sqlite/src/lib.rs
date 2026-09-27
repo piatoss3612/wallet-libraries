@@ -1498,6 +1498,43 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         )
     }
 
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn get_swap_scan_window(
+        &self,
+        from_height: BlockHeight,
+    ) -> Result<
+        (
+            Vec<zcash_client_backend::scanning::swap_receiving::SwapScanningKey<AccountUuid>>,
+            Option<BlockHeight>,
+        ),
+        Self::Error,
+    > {
+        let mut active = Vec::new();
+        let mut boundary = None;
+        for (account, ufvk) in self.get_unified_full_viewing_keys()? {
+            let Some(parent) = ufvk.orchard() else {
+                continue;
+            };
+            let (keys, next) = self
+                .swap_receiving_keys_for_scan(account, Some(from_height))
+                .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?;
+            if let Some(next) = next {
+                boundary = Some(boundary.map_or(next, |end: BlockHeight| end.min(next)));
+            }
+            for key in keys {
+                active.push(
+                    zcash_client_backend::scanning::swap_receiving::SwapScanningKey::derive(
+                        account,
+                        key.key_id(),
+                        parent,
+                    )
+                    .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
+                );
+            }
+        }
+        Ok((active, boundary))
+    }
+
     fn get_memo(&self, note_id: NoteId) -> Result<Option<Memo>, Self::Error> {
         let sent_memo = wallet::get_sent_memo(self.conn.borrow(), note_id)?;
         if sent_memo.is_some() {

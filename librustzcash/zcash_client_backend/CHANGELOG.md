@@ -11,6 +11,10 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- Add `WalletRead::get_swap_scan_window` for experimental swap receiving. Compact
+  scanning splits batches at changes to the active key set without changing full
+  transaction enhancement or note spending. Custom stores retain existing defaults.
+
 - Add a typed `WalletRead::transaction_status_requests` view of
   `transaction_data_requests`. The method has a default for custom stores and does
   not grant disclosure consent.

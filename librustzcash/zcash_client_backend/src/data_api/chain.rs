@@ -640,13 +640,16 @@ where
         .map_err(Error::Wallet)?;
     let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
     #[cfg(feature = "experimental-swap-receiving")]
-    let (scanning_keys, swap_key_ids) = {
-        let keys = data_db.get_swap_scanning_keys().map_err(Error::Wallet)?;
+    let (scanning_keys, swap_key_ids, limit) = {
+        let (keys, boundary) = data_db
+            .get_swap_scan_window(from_height)
+            .map_err(Error::Wallet)?;
+        let limit = boundary.map_or(limit, |end| limit.min((end - from_height) as usize));
         let ids = keys
             .iter()
             .map(|key| (*key.account_id(), key.key_id()))
             .collect::<Vec<_>>();
-        (scanning_keys.with_swap_receiving_keys(keys), ids)
+        (scanning_keys.with_swap_receiving_keys(keys), ids, limit)
     };
     let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
 

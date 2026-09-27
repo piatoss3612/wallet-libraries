@@ -7,6 +7,7 @@
   receive/reconstruct/spend proof test.
 - Add shared completion policy with durable grace and reconciliation deadlines,
   receipt and coverage checks, shared-key decisions, and reorg invalidation.
-  SQLite operation persistence and active-key filtering remain pending.
+  Expose a separate hard scan deadline for wallets that hand off to PIR regardless
+  of receipt resolution. SQLite now persists bounded watches and recovery targets.
 - Add transport-independent incoming-note authentication and commitment-path
   validation for privately discovered swap payments.

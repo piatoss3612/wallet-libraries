@@ -23,6 +23,17 @@ pub struct CompletionPolicy {
     pub reconciliation_delay_secs: u64,
 }
 
+impl CompletionPolicy {
+    /// Inclusive end of temporary trial decryption. This deadline does not depend
+    /// on receipt accounting or directory availability; reconciliation can outlive it.
+    pub fn scan_through(self, observed_height: BlockHeight) -> Result<BlockHeight, LifecycleError> {
+        u32::from(observed_height)
+            .checked_add(self.grace_blocks)
+            .map(BlockHeight::from)
+            .ok_or(LifecycleError::DeadlineOverflow)
+    }
+}
+
 impl Default for CompletionPolicy {
     fn default() -> Self {
         Self {
@@ -71,13 +82,11 @@ pub struct TerminalObservation {
 
 impl TerminalObservation {
     fn new(tip: ChainAnchor, now: u64, policy: CompletionPolicy) -> Result<Self, LifecycleError> {
-        let height = u32::from(tip.height)
-            .checked_add(policy.grace_blocks)
-            .ok_or(LifecycleError::DeadlineOverflow)?;
+        let height = policy.scan_through(tip.height)?;
         let due = now
             .checked_add(policy.reconciliation_delay_secs)
             .ok_or(LifecycleError::DeadlineOverflow)?;
-        Self::from_parts(tip, now, height.into(), due)
+        Self::from_parts(tip, now, height, due)
     }
 
     /// Reconstructs persisted deadlines without applying today's defaults.

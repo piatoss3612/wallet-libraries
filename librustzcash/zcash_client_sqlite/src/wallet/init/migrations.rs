@@ -53,6 +53,7 @@ mod swap_private_recovery;
 mod swap_receiving_coverage;
 mod swap_receiving_keys;
 mod swap_receiving_notes;
+mod swap_scan_lifecycle;
 mod transparent_gap_limit_handling;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
@@ -378,6 +379,7 @@ pub(super) fn all_migrations<
         Box::new(swap_receiving_coverage::Migration),
         Box::new(swap_payment_recovery::Migration),
         Box::new(swap_private_recovery::Migration),
+        Box::new(swap_scan_lifecycle::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -601,7 +603,7 @@ pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
-    swap_private_recovery::MIGRATION_ID,
+    swap_scan_lifecycle::MIGRATION_ID,
     fix_bad_ironwood_change_flagging::MIGRATION_ID,
     v_address_uses_ironwood::MIGRATION_ID,
     orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,

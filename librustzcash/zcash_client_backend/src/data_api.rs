@@ -2456,6 +2456,18 @@ pub trait WalletRead {
         Ok(vec![])
     }
 
+    /// Keys active at `from_height` and an optional exclusive batch boundary.
+    /// A caller must stop before that boundary and reload the set for the next batch.
+    /// Full-transaction enhancement continues to use `get_swap_scanning_keys` so
+    /// retiring trial decryption never removes note ownership or spending metadata.
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn get_swap_scan_window(
+        &self,
+        _from_height: BlockHeight,
+    ) -> Result<(Vec<SwapScanningKey<Self::AccountId>>, Option<BlockHeight>), Self::Error> {
+        self.get_swap_scanning_keys().map(|keys| (keys, None))
+    }
+
     /// Returns the memo for a note.
     ///
     /// Returns `Ok(None)` if the note is known to the wallet but memo data has not yet been

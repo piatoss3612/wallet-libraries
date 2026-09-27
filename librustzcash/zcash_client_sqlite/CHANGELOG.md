@@ -43,6 +43,12 @@ workspace.
   `compact_ciphertext` copies.
 - Add an opt-in experimental swap receiving-key registry with atomic per-purpose
   reservations, recovered-index tracking, and persistent incoming lookahead keys.
+  Combine canonical directory checkpoints with actual per-key scan coverage so
+  completed private recovery does not repeat lookups when publications advance.
+  Private recovery persists per-operation scan deadlines and fixed PIR targets.
+  Only pending local operations and their ten-block terminal grace windows enable
+  compact trial decryption; retirement preserves note ownership and spendability.
+  Rewinds invalidate recovery anchors and trim scan coverage atomically.
   The schema preserves these records across builds with the feature disabled.
   Compact scanning retains the derived key on each note, promotes paid lookahead
   indices, and reconstructs inputs with that key after reopening. Builds without
