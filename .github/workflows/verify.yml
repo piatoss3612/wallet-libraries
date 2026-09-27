@@ -58,6 +58,9 @@ jobs:
         run: |
           cargo test -p zakura-client-sqlite --features experimental-swap-receiving --locked swap
           cargo test -p zakura-client-sqlite --features orchard --locked swap
+      # Without Orchard, the SQLite store routes every payload request to public work.
+      - name: SQLite wallet without Orchard
+        run: cargo test -p zakura-client-sqlite --features test-dependencies --locked
 
       # `native-reinspiring` replaces the v7 protocol at compile time, so it is
       # tested on its own rather than through `--all-features`.

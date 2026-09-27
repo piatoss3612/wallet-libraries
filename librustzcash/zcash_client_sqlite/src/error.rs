@@ -42,7 +42,7 @@ use {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SqliteClientError {
-    /// Request enumeration requires an explicit enhancement mode on this handle.
+    /// Payload-work enumeration requires an explicit enhancement mode on this handle.
     #[cfg(feature = "orchard")]
     EnhancementModeNotConfigured,
 
@@ -329,7 +329,7 @@ impl fmt::Display for SqliteClientError {
             #[cfg(feature = "orchard")]
             SqliteClientError::EnhancementModeNotConfigured => write!(
                 f,
-                "Enhancement mode is not configured; call set_enhancement_mode before enumerating requests"
+                "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
             ),
             #[cfg(feature = "orchard")]
             SqliteClientError::SwapReceivingNotEnabled => {
