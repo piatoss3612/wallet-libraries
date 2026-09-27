@@ -59,6 +59,9 @@ workspace.
   affected candidates, and pruning trims nullifier coverage. Verified candidates
   can be applied atomically with their memo, receiving key, inclusion path, and
   any known spend. Incomplete chain, witness, or spend coverage stays pending.
+  An explicit private recovery policy suppresses historical key replay and retains
+  the shared nullifier map for delayed discovery. Directory checks persist by key
+  and accepted block. Rewinds invalidate affected checks.
 
 ## [0.1.0-rc6] - 2026-09-24
 

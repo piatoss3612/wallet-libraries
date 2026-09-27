@@ -96,6 +96,7 @@ pub(crate) fn queue_missing(conn: &Transaction<'_>) -> Result<(), SqliteClientEr
         "SELECT k.id, k.scan_from, r.range_start, r.range_end
          FROM ironwood_receiving_keys k
          LEFT JOIN ironwood_receiving_key_scan_ranges r ON r.receiving_key_id = k.id
+         WHERE NOT EXISTS (SELECT 1 FROM ironwood_swap_private_recovery p WHERE p.account_id=k.account_id)
          ORDER BY k.id, r.range_start",
     )?;
     let mut rows = stmt.query([])?;

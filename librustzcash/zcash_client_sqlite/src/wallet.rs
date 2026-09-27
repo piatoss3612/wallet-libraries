@@ -4271,6 +4271,10 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     )?;
 
     conn.execute(
+        "DELETE FROM ironwood_swap_directory_checks WHERE height > ?1",
+        [u32::from(truncation_height)],
+    )?;
+    conn.execute(
         "DELETE FROM ironwood_nullifier_scan_blocks WHERE height > ?1",
         [u32::from(truncation_height)],
     )?;
@@ -5801,6 +5805,15 @@ pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
+    // The experimental private restore learns old notes after scanning. Keep the
+    // shared locator map until an external complete spend-history source replaces it.
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_swap_private_recovery)",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
     let mut stmt_delete_locators = conn.prepare_cached(
         "DELETE FROM tx_locator_map
         WHERE block_height < :block_height",

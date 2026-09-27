@@ -2105,3 +2105,14 @@ pub(super) const TABLE_IRONWOOD_SWAP_PAYMENT_RECOVERY: &str = "CREATE TABLE iron
             encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 676),
             PRIMARY KEY (txid, action_index)
         )";
+
+#[cfg(test)]
+pub(super) const TABLE_IRONWOOD_SWAP_PRIVATE_RECOVERY: &str = "CREATE TABLE ironwood_swap_private_recovery (
+            account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
+        )";
+#[cfg(test)]
+pub(super) const TABLE_IRONWOOD_SWAP_DIRECTORY_CHECKS: &str = "CREATE TABLE ironwood_swap_directory_checks (
+            receiving_key_id INTEGER PRIMARY KEY REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+            height INTEGER NOT NULL CHECK (height BETWEEN 0 AND 4294967295),
+            block_hash BLOB NOT NULL CHECK (length(block_hash) = 32)
+        )";

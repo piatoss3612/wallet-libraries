@@ -9,6 +9,7 @@ pub(crate) mod coverage;
 mod apply;
 pub use apply::PaymentApplication;
 mod payments;
+mod private;
 mod recovery;
 pub use payments::{PendingPayment, SpendStatus};
 pub use recovery::RecoveredRefund;
