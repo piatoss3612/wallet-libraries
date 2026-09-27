@@ -840,6 +840,8 @@ pub(crate) fn delete_account(
     )?;
 
     ironwood_hooks::suspend_orphaned_ironwood_enhancement(conn)?;
+    #[cfg(feature = "orchard")]
+    enhance_pir::retire_after_account_deletion(conn)?;
 
     Ok(())
 }

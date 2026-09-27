@@ -88,6 +88,7 @@ struct Send {
     block: CompactBlock,
     record: EnhanceRecord,
     change_record: Option<EnhanceRecord>,
+    dummy_records: Vec<EnhanceRecord>,
     recipient: orchard::Address,
 }
 
@@ -97,6 +98,41 @@ impl Send {
     }
 
     fn with_second_funder(change: bool, second_funder: bool) -> Self {
+        Self::build(change, second_funder, 0, false, false)
+    }
+
+    /// A change-and-recipient send padded with `dummies` zero-value actions whose outgoing
+    /// ciphertexts use a foreign OVK, as a builder's padding would.
+    fn with_dummies(dummies: u8) -> Self {
+        Self::build(true, false, dummies, false, false)
+    }
+
+    /// Like [`Self::with_dummies`], but every note is zero-valued, so with a zero fee the
+    /// linked spends sum to zero.
+    fn with_zero_value_dummies(dummies: u8) -> Self {
+        Self::build(true, false, dummies, true, false)
+    }
+
+    /// A two-funder send that stays unbalanced until the first funder is deleted: the first
+    /// account's 50_000 note pays 30_000 of change plus a 20_000 output encrypted to a foreign
+    /// OVK, and the second account's 30_000 note pays the 30_000 recipient.
+    fn with_undecryptable_first_funder_output() -> Self {
+        Self::build(true, true, 1, false, true)
+    }
+
+    fn build(
+        change: bool,
+        second_funder: bool,
+        dummies: u8,
+        zero_value: bool,
+        hidden_split: bool,
+    ) -> Self {
+        let (second_funding_value, dummy_value) = if hidden_split {
+            (30_000, 20_000)
+        } else {
+            (10_000, 0)
+        };
+        let value = |zatoshis: u64| if zero_value { 0 } else { zatoshis };
         let mut st = state_with_factory(TestDbFactory::file_backed());
         st.wallet_mut()
             .db_mut()
@@ -112,13 +148,13 @@ impl Send {
         let (funding_height, _, nf) = st.generate_next_block(
             &fvk,
             AddressType::DefaultExternal,
-            Zatoshis::const_from_u64(50_000),
+            Zatoshis::const_from_u64(value(50_000)),
         );
         let second_funding = second.as_ref().map(|(account, key)| {
             let (height, _, nf) = st.generate_next_block(
                 key,
                 AddressType::DefaultExternal,
-                Zatoshis::const_from_u64(10_000),
+                Zatoshis::const_from_u64(second_funding_value),
             );
             (height, *account, nf)
         });
@@ -134,7 +170,7 @@ impl Send {
                 nf.to_bytes(),
                 fvk.0.address_at(0u32, Scope::Internal),
                 fvk.0.to_ovk(Scope::Internal),
-                30_000,
+                value(30_000),
             );
             actions.push(action);
             change_record = Some(record);
@@ -149,15 +185,26 @@ impl Send {
                 .map_or(&fvk, |(_, key)| key)
                 .0
                 .to_ovk(Scope::External),
-            if second_funder {
+            value(if second_funder {
                 30_000
             } else if change {
                 20_000
             } else {
                 50_000
-            },
+            }),
         );
         actions.push(action);
+        let mut dummy_records = vec![];
+        for i in 0..dummies {
+            let (action, record) = encrypted_action(
+                [0x20 + i; 32],
+                recipient,
+                other_fvk.to_ovk(Scope::External),
+                dummy_value,
+            );
+            actions.push(action);
+            dummy_records.push(record);
+        }
         block
             .chain_metadata
             .as_mut()
@@ -184,6 +231,7 @@ impl Send {
             block,
             record,
             change_record,
+            dummy_records,
             recipient,
         }
     }
@@ -500,6 +548,235 @@ fn rescanning_a_send_preserves_pending_and_suspended_outgoing_recovery() {
             .unwrap();
         assert_eq!((value, memo), (20_000, vec![4; 512]));
     }
+}
+
+impl Send {
+    fn request_at(&self, output_index: u32) -> EnhancePirRequest {
+        *self
+            .requests()
+            .iter()
+            .find(|r| r.request_id().output_index() == output_index)
+            .unwrap()
+    }
+
+    fn apply(
+        &mut self,
+        request: EnhancePirRequest,
+        record: &EnhanceRecord,
+    ) -> EnhancePirStoreResult {
+        apply_record(self.st.wallet_mut().db_mut(), request, record).unwrap()
+    }
+
+    fn suspended_outgoing(&self) -> usize {
+        self.st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM ironwood_enhance_outgoing_queue
+                 WHERE transaction_id = ?1 AND not_recoverable = 1",
+                [self.tx_ref().0],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn reported_suspensions(&self) -> usize {
+        self.st
+            .wallet()
+            .db()
+            .transaction_enhancement_work()
+            .unwrap()
+            .into_iter()
+            .filter(|work| {
+                matches!(
+                    work,
+                    TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
+                        EnhancePirSuspension::OutgoingNotRecoverable(_)
+                    ))
+                )
+            })
+            .count()
+    }
+}
+
+#[test]
+fn value_balanced_dummy_outputs_retire_in_either_record_order() {
+    for dummies_first in [false, true] {
+        let mut send = Send::with_dummies(2);
+        send.scan_funding();
+        send.scan_send();
+        let (change, recipient) = (send.request_at(0), send.request_at(1));
+        let dummies = [send.request_at(2), send.request_at(3)];
+        let (change_record, record) = (send.change_record.clone().unwrap(), send.record.clone());
+        let dummy_records = send.dummy_records.clone();
+
+        let apply_dummies = |send: &mut Send| {
+            for (request, record) in dummies.iter().zip(&dummy_records) {
+                assert_eq!(
+                    send.apply(*request, record),
+                    EnhancePirStoreResult::NotRecoverable
+                );
+            }
+        };
+        if dummies_first {
+            apply_dummies(&mut send);
+            assert_eq!(
+                send.suspended_outgoing(),
+                2,
+                "an open real output means the balance cannot yet prove the dummies"
+            );
+            assert!(send.queued());
+        }
+        assert_eq!(
+            send.apply(change, &change_record),
+            EnhancePirStoreResult::Stored
+        );
+        assert_eq!(
+            send.apply(recipient, &record),
+            EnhancePirStoreResult::Stored
+        );
+        if !dummies_first {
+            apply_dummies(&mut send);
+        }
+
+        assert_eq!(send.suspended_outgoing(), 0);
+        assert_eq!(send.reported_suspensions(), 0);
+        assert!(send.requests().is_empty());
+        assert!(
+            !send.queued(),
+            "the completed transaction releases its txid request"
+        );
+        let value: u64 = send
+            .st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT value FROM sent_notes WHERE transaction_id = ?1 AND output_index = 1",
+                [send.tx_ref().0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, 20_000);
+    }
+}
+
+#[test]
+fn zero_valued_spends_still_retire_dummies() {
+    let mut send = Send::with_zero_value_dummies(1);
+    send.scan_funding();
+    send.scan_send();
+    let (change, recipient, dummy) = (send.request_at(0), send.request_at(1), send.request_at(2));
+    let (change_record, record) = (send.change_record.clone().unwrap(), send.record.clone());
+    let dummy_record = send.dummy_records[0].clone();
+
+    assert_eq!(
+        send.apply(change, &change_record),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(
+        send.apply(recipient, &record),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(
+        send.apply(dummy, &dummy_record),
+        EnhancePirStoreResult::NotRecoverable
+    );
+
+    // 0 spent = 0 recovered + 0 fee: a linked spend, not a positive sum, marks it wallet-funded.
+    assert_eq!(send.suspended_outgoing(), 0);
+    assert!(!send.queued());
+}
+
+#[test]
+fn deleting_a_funder_reevaluates_a_now_balanced_suspension() {
+    let mut send = Send::with_undecryptable_first_funder_output();
+    send.scan_funding();
+    let (height, _) = send.second_funding.unwrap();
+    send.st.scan_cached_blocks(height, 1);
+    send.scan_send();
+    let (change, recipient, hidden) = (send.request_at(0), send.request_at(1), send.request_at(2));
+    let (change_record, record) = (send.change_record.clone().unwrap(), send.record.clone());
+    let hidden_record = send.dummy_records[0].clone();
+
+    assert_eq!(
+        send.apply(change, &change_record),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(
+        send.apply(recipient, &record),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(
+        send.apply(hidden, &hidden_record),
+        EnhancePirStoreResult::NotRecoverable
+    );
+    // 80_000 spent, 60_000 recovered: the 20_000 output may be real, so it stays suspended.
+    assert_eq!(send.suspended_outgoing(), 1);
+    assert!(send.queued());
+
+    // Deleting the first funder removes its spend link and sent notes. The second funder's
+    // 30_000 now equals its recovered 30_000 plus the zero fee, and no record will arrive
+    // to re-run the rule, so deletion itself must.
+    let account_a = send.st.test_account().unwrap().id();
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .delete_account(account_a)
+        .unwrap();
+    assert!(
+        send.st
+            .wallet()
+            .db()
+            .discovery_requests()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(send.suspended_outgoing(), 0);
+    assert_eq!(send.reported_suspensions(), 0);
+    assert!(!send.queued());
+}
+
+#[test]
+fn an_undecryptable_real_output_keeps_every_suspension() {
+    let mut send = Send::with_dummies(1);
+    send.scan_funding();
+    send.scan_send();
+    let (change, recipient, dummy) = (send.request_at(0), send.request_at(1), send.request_at(2));
+    let change_record = send.change_record.clone().unwrap();
+    let dummy_record = send.dummy_records[0].clone();
+    // The recipient's outgoing ciphertext fails OVK decryption, like an OVK-discarded payment.
+    let mut ciphertext = *send.record.enc_ciphertext_suffix();
+    ciphertext[527] ^= 1;
+    let corrupt = EnhanceRecord::from_parts(EnhanceRecordParts {
+        enc_ciphertext_suffix: ciphertext,
+        cv_net: *send.record.cv_net(),
+        out_ciphertext: *send.record.out_ciphertext(),
+        has_transparent_inputs: false,
+        has_transparent_outputs: false,
+        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+            0,
+            Some(0),
+        )
+        .unwrap(),
+    });
+
+    assert_eq!(
+        send.apply(change, &change_record),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(
+        send.apply(recipient, &corrupt),
+        EnhancePirStoreResult::NotRecoverable
+    );
+    assert_eq!(
+        send.apply(dummy, &dummy_record),
+        EnhancePirStoreResult::NotRecoverable
+    );
+
+    // 50_000 spent, 30_000 recovered, fee 0: 20_000 is unaccounted for, so nothing is proven.
+    assert_eq!(send.suspended_outgoing(), 2);
+    assert_eq!(send.reported_suspensions(), 2);
+    assert!(send.queued());
 }
 
 #[test]

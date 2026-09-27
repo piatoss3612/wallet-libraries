@@ -11,6 +11,19 @@ workspace.
 ## [Unreleased]
 
 ### Fixed
+- Retire undecryptable Ironwood outgoing candidates once the wallet's value
+  accounting proves no account it holds funded them: the wallet has a linked
+  spend, no discovery work remains, every other output is recovered, the fee is
+  known, and linked spends equal recovered outputs plus fee. In the wallet's own
+  sends these are dummy padding outputs; otherwise they were funded by another
+  party or by an account since deleted, whose sent history is deleted with it.
+  They no longer remain as permanent `OutgoingNotRecoverable` suspensions that
+  also keep the transaction's retrieval request open. Account deletion
+  re-evaluates suspended transactions, since removing a funder can balance
+  them. Rows suspended before this change are not migrated; a rescan requeues
+  and retires them.
+  Undecryptable real zero-value outputs are indistinguishable from dummies and
+  are retired with them.
 - Make finite-expiry status obligations dormant after contiguous local scanning
   reaches expiry plus the reorg safety depth, retaining queue rows for rewind
   reactivation without treating incomplete private coverage as proof of absence.
