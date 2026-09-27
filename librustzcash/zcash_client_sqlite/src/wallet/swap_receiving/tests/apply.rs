@@ -350,28 +350,129 @@ fn swap_payment_imports_an_already_spent_note_without_crediting_it() {
     );
 }
 
-
 #[test]
 fn privately_imported_note_spends_into_ordinary_internal_change() {
     use std::convert::Infallible;
-    use zcash_client_backend::{data_api::wallet::{ConfirmationsPolicy,input_selection::GreedyInputSelector},fees::{DustOutputPolicy,StandardFeeRule,standard},wallet::OvkPolicy};
-    use zcash_keys::address::{Address,UnifiedAddress};
+    use zcash_client_backend::{
+        data_api::wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
+        fees::{DustOutputPolicy, StandardFeeRule, standard},
+        wallet::OvkPolicy,
+    };
+    use zcash_keys::address::{Address, UnifiedAddress};
     use zcash_protocol::ShieldedPool;
-    use zip321::{Payment,TransactionRequest};
-    let (mut st,key,candidate,through,path)=fixture();
-    let account=st.test_account().cloned().unwrap();
-    st.wallet_mut().db_mut().apply_pending_swap_payment(account.id(),key.key_id(),&candidate,through,Some((through,&path))).unwrap();
-    for _ in 0..5 {let(h,_)=st.generate_empty_block();st.scan_cached_blocks(h,1);}
-    let recipient=FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([0xf5;32]).unwrap()).address_at(0u32,Scope::External);
-    let address=Address::Unified(UnifiedAddress::from_receivers(Some(recipient),None,None).unwrap());
-    let request=TransactionRequest::new(vec![Payment::without_memo(address.to_zcash_address(st.network()),Zatoshis::const_from_u64(50_000))]).unwrap();
-    let strategy=standard::SingleOutputChangeStrategy::<TestDb>::new(StandardFeeRule::Zip317,None,ShieldedPool::Orchard,DustOutputPolicy::default());
-    let proposal=st.propose_transfer(account.id(),&GreedyInputSelector::new(),&strategy,request,ConfirmationsPolicy::MIN).unwrap();
-    assert_eq!(proposal.input_count_in_pool(zcash_protocol::PoolType::IRONWOOD),1);
-    let created=st.create_proposed_transactions::<Infallible,_,Infallible,_>(account.usk(),OvkPolicy::Sender,&proposal).unwrap();
-    let(h,_)=st.generate_next_block_including(created[0]);st.scan_cached_blocks(h,1);
-    let notes=st.wallet().db().get_unspent_ironwood_notes_at_historical_height(account.id(),h).unwrap();
-    assert_eq!(notes.len(),1);
+    use zip321::{Payment, TransactionRequest};
+    let (mut st, key, candidate, through, path) = fixture();
+    let account = st.test_account().cloned().unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .apply_pending_swap_payment(
+            account.id(),
+            key.key_id(),
+            &candidate,
+            through,
+            Some((through, &path)),
+        )
+        .unwrap();
+    for _ in 0..5 {
+        let (h, _) = st.generate_empty_block();
+        st.scan_cached_blocks(h, 1);
+    }
+    let recipient =
+        FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap())
+            .address_at(0u32, Scope::External);
+    let address =
+        Address::Unified(UnifiedAddress::from_receivers(Some(recipient), None, None).unwrap());
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        address.to_zcash_address(st.network()),
+        Zatoshis::const_from_u64(50_000),
+    )])
+    .unwrap();
+    let strategy = standard::SingleOutputChangeStrategy::<TestDb>::new(
+        StandardFeeRule::Zip317,
+        None,
+        ShieldedPool::Orchard,
+        DustOutputPolicy::default(),
+    );
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &GreedyInputSelector::new(),
+            &strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    assert_eq!(
+        proposal.input_count_in_pool(zcash_protocol::PoolType::IRONWOOD),
+        1
+    );
+    let created = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap();
+    let (h, _) = st.generate_next_block_including(created[0]);
+    st.scan_cached_blocks(h, 1);
+    let notes = st
+        .wallet()
+        .db()
+        .get_unspent_ironwood_notes_at_historical_height(account.id(), h)
+        .unwrap();
+    assert_eq!(notes.len(), 1);
     assert!(notes[0].swap_key_id().is_none());
-    assert_eq!(notes[0].note().recipient(),FullViewingKey::from(account.usk().orchard()).address_at(0u32,Scope::Internal));
+    assert_eq!(
+        notes[0].note().recipient(),
+        FullViewingKey::from(account.usk().orchard()).address_at(0u32, Scope::Internal)
+    );
+}
+
+#[test]
+fn private_payment_uses_its_witness_anchor_and_rewind_invalidates_directory_progress() {
+    let (mut st, key, candidate, proof_anchor, path) = fixture();
+    let account = st.test_account().unwrap().id();
+    let (height, _, _) = st.generate_next_block(
+        &IronwoodFvk(key.full_viewing_key().clone()),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(10_000),
+    );
+    st.scan_cached_blocks(height, 1);
+    let through = ChainAnchor {
+        height,
+        hash: st.wallet().db().get_block_hash(height).unwrap().unwrap().0,
+    };
+    // The newer block changed the root. The supplied path belongs to the older accepted checkpoint.
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .apply_pending_swap_payment(
+                account,
+                key.key_id(),
+                &candidate,
+                through,
+                Some((proof_anchor, &path))
+            )
+            .unwrap(),
+        PaymentApplication::Applied
+    );
+    st.wallet_mut()
+        .db_mut()
+        .mark_swap_directory_checked(account, key.key_id(), through)
+        .unwrap();
+    st.truncate_to_height_retaining_cache(proof_anchor.height);
+    assert_eq!(
+        st.wallet()
+            .db()
+            .swap_directory_check(account, key.key_id())
+            .unwrap(),
+        None
+    );
+    let notes = st
+        .wallet()
+        .db()
+        .get_unspent_ironwood_notes_at_historical_height(account, proof_anchor.height)
+        .unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].note().value().inner(), 100_000);
 }
