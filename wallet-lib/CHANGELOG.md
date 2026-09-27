@@ -7,9 +7,10 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc6] - 2026-09-27
+
 ### Changed
-- Update local backend and SQLite dependencies to `0.1.0-rc6` for the
-  `zakura-pir-enhance 0.0.1-rc0` release. The facade is not part of this release.
+- Updated the Zakura backend and SQLite dependencies to `0.1.0-rc7`.
 
 ### Removed
 - The facade's unused `zakura-pir-enhance` feature. Enhance PIR APIs are now

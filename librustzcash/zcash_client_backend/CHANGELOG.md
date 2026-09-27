@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc7] - 2026-09-27
+
+Breaking release that separates transaction status observation from payload
+enhancement and makes Enhance PIR part of Orchard support.
+
 ### Breaking changes
 - Replace legacy transaction status requests with explicitly routed public/private
   `TransactionStatusWork` and a dedicated `TransactionStatusRead` interface.
@@ -30,19 +35,6 @@ workspace.
   never produce public work.
 - Add `PublicTransactionEnhancementRequest::new`.
 
-### Removed
-- The `zakura-pir-enhance` feature. Enhance PIR APIs and their wire-record types
-  are now always available; scan integration is included whenever Orchard
-  support is enabled.
-- `EnhancePirRead::enhance_pir_work`. PIR schedulers consume
-  `transaction_enhancement_work`, which returns the same private work already
-  routed together with public requests.
-- `TransactionDataRequest::Enhancement` and
-  `TransactionDataRequest::into_public_enhancement_request`.
-  `WalletRead::transaction_data_requests` now returns only status observations and
-  transparent-history requests; obtain payload work from
-  `EnhancePirRead::transaction_enhancement_work`.
-
 ### Changed
 - `WalletWrite::set_transaction_status` and the low-level equivalent now update
   status only; they must not retire enhancement or private recovery work.
@@ -58,6 +50,17 @@ workspace.
   the placeholder compact action fields.
 
 ### Removed
+- The `zakura-pir-enhance` feature. Enhance PIR APIs and their wire-record types
+  are now always available; scan integration is included whenever Orchard
+  support is enabled.
+- `EnhancePirRead::enhance_pir_work`. PIR schedulers consume
+  `transaction_enhancement_work`, which returns the same private work already
+  routed together with public requests.
+- `TransactionDataRequest::Enhancement` and
+  `TransactionDataRequest::into_public_enhancement_request`.
+  `WalletRead::transaction_data_requests` now returns only status observations and
+  transparent-history requests; obtain payload work from
+  `EnhancePirRead::transaction_enhancement_work`.
 - `data_api::enhance_pir::storage::validate_and_apply_record`. Apply a single
   record as a batch of one with `validate_and_apply_records`, as
   `zakura-client-sqlite` already does.

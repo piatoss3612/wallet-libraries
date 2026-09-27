@@ -1,8 +1,8 @@
 # zakura-pir-enhance
 
-Release candidate `0.0.1-rc0` requires Rust 1.91. The crate has no default
+Release candidate `0.0.1-rc1` requires Rust 1.91. The crate has no default
 features and bundles no HTTP client: applications implement `transport::Transport`.
-The optional `wallet` feature integrates with `zakura-client-backend 0.1.0-rc6`.
+The optional `wallet` feature integrates with `zakura-client-backend 0.1.0-rc7`.
 The crate speaks the experimental native two-mask protocol (v9). Shared records come from
 `zakura-pir-enhance-types =0.0.1-rc0`. See [CHANGELOG.md](CHANGELOG.md) for
 release notes.
@@ -39,7 +39,8 @@ Cover is off by default;
 timing, round count, the birthday window and cross-interval intersection remain
 observable. Ordinary streaming batches retain their existing partial-result semantics.
 
-The q48 profile uses `ipir-sp` from the `valargroup/ipir-sp` git tag `v0.1.0-rc.6`.
+The q48 profile uses the published `ipir-sp =0.1.0-rc.6` and
+`reinspiring =0.1.2` crates.
 Earlier protocol revisions are rejected. Schema-11 records and the deterministic
 public setup domain are unchanged. The `EPQ7` header is 116 bytes and binds routing,
 domain, packing material, recovery epoch, session ID, request ID and accepted anchor. Noise

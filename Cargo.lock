@@ -2545,20 +2545,9 @@ dependencies = [
 
 [[package]]
 name = "inspiring"
-version = "0.1.0-rc.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "591187fbe9b9560c7b0b7ddc423fe9d65e9c368d707f9b019d61d6c7f728bb03"
-dependencies = [
- "rand_chacha 0.3.1",
- "rayon",
- "thiserror 1.0.69",
- "valar-spiral-rs",
-]
-
-[[package]]
-name = "inspiring"
 version = "0.1.0-rc.2"
-source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9b0e8f5cffb5d695280a49775f1a635d67a50cc86ae3862193f6739176afba7"
 dependencies = [
  "bytemuck",
  "memmap2",
@@ -2580,12 +2569,13 @@ dependencies = [
 [[package]]
 name = "ipir-sp"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4128030557482a837a65cb531b0c2651c4c66f4e3be49900ad3ff41ab7199bfe"
 dependencies = [
  "clap",
  "env_logger",
  "fastrand",
- "inspiring 0.1.0-rc.2",
+ "inspiring",
  "log",
  "rand 0.9.5",
  "rand_chacha 0.3.1",
@@ -4041,10 +4031,11 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "reinspiring"
 version = "0.1.2"
-source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2637107860b7b9083f89143736c5a750c8fdeea1f3376f3f2b0eba9269b97da8"
 dependencies = [
  "bytemuck",
- "inspiring 0.1.0-rc.2",
+ "inspiring",
  "memmap2",
  "rand 0.8.7",
  "rand_chacha 0.3.1",
@@ -4639,9 +4630,10 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 [[package]]
 name = "simplepir-kernel"
 version = "0.1.0-rc.3"
-source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30dd16e9b8bd35b6598faad9b793f53333e652140b46bd0f1769365f12ad9cc6"
 dependencies = [
- "inspiring 0.1.0-rc.2",
+ "inspiring",
  "rayon",
  "valar-spiral-rs",
 ]
@@ -7149,7 +7141,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-backend"
-version = "0.1.0-rc6"
+version = "0.1.0-rc7"
 dependencies = [
  "ambassador",
  "arti-client",
@@ -7226,7 +7218,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-client-sqlite"
-version = "0.1.0-rc6"
+version = "0.1.0-rc7"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -7482,14 +7474,14 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-enhance"
-version = "0.0.1-rc0"
+version = "0.0.1-rc1"
 dependencies = [
  "base64",
  "futures",
  "futures-util",
  "hex",
  "incrementalmerkletree",
- "inspiring 0.1.0-rc.1",
+ "inspiring",
  "ipir-sp",
  "rand 0.8.7",
  "rand_chacha 0.3.1",
@@ -7679,7 +7671,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-wallet-lib"
-version = "0.1.0-rc5"
+version = "0.1.0-rc6"
 dependencies = [
  "orchard",
  "pczt",
