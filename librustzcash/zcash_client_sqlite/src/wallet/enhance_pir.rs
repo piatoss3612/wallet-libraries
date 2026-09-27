@@ -216,6 +216,27 @@ fn retire_value_balanced_dummies(
     Ok(())
 }
 
+/// Re-evaluates every suspended transaction after an account is deleted.
+///
+/// Suspended candidates are never queried again, so `apply` never revisits them. Deleting a
+/// funding account removes its spend links and sent notes, which can leave the remaining
+/// accounts' side exactly balanced; without this pass such a transaction would keep its
+/// suspension and retrieval request until a rescan.
+pub(crate) fn retire_after_account_deletion(conn: &Connection) -> Result<(), SqliteClientError> {
+    let transactions = conn
+        .prepare(
+            "SELECT DISTINCT transaction_id FROM ironwood_enhance_outgoing_queue
+             WHERE not_recoverable = 1",
+        )?
+        .query_map([], |row| row.get(0).map(crate::TxRef))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for tx_ref in transactions {
+        retire_value_balanced_dummies(conn, tx_ref)?;
+        retire_enhancement_if_complete(conn, tx_ref)?;
+    }
+    Ok(())
+}
+
 /// Clears private work without removing recovered data or an ordinary request.
 pub(crate) fn clear_work(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClientError> {
     super::ironwood_hooks::clear_ironwood_enhancement_work(conn, tx_ref)

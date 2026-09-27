@@ -98,22 +98,40 @@ impl Send {
     }
 
     fn with_second_funder(change: bool, second_funder: bool) -> Self {
-        Self::build(change, second_funder, 0, false)
+        Self::build(change, second_funder, 0, false, false)
     }
 
     /// A change-and-recipient send padded with `dummies` zero-value actions whose outgoing
     /// ciphertexts use a foreign OVK, as a builder's padding would.
     fn with_dummies(dummies: u8) -> Self {
-        Self::build(true, false, dummies, false)
+        Self::build(true, false, dummies, false, false)
     }
 
     /// Like [`Self::with_dummies`], but every note is zero-valued, so with a zero fee the
     /// linked spends sum to zero.
     fn with_zero_value_dummies(dummies: u8) -> Self {
-        Self::build(true, false, dummies, true)
+        Self::build(true, false, dummies, true, false)
     }
 
-    fn build(change: bool, second_funder: bool, dummies: u8, zero_value: bool) -> Self {
+    /// A two-funder send that stays unbalanced until the first funder is deleted: the first
+    /// account's 50_000 note pays 30_000 of change plus a 20_000 output encrypted to a foreign
+    /// OVK, and the second account's 30_000 note pays the 30_000 recipient.
+    fn with_undecryptable_first_funder_output() -> Self {
+        Self::build(true, true, 1, false, true)
+    }
+
+    fn build(
+        change: bool,
+        second_funder: bool,
+        dummies: u8,
+        zero_value: bool,
+        hidden_split: bool,
+    ) -> Self {
+        let (second_funding_value, dummy_value) = if hidden_split {
+            (30_000, 20_000)
+        } else {
+            (10_000, 0)
+        };
         let value = |zatoshis: u64| if zero_value { 0 } else { zatoshis };
         let mut st = state_with_factory(TestDbFactory::file_backed());
         st.wallet_mut()
@@ -136,7 +154,7 @@ impl Send {
             let (height, _, nf) = st.generate_next_block(
                 key,
                 AddressType::DefaultExternal,
-                Zatoshis::const_from_u64(10_000),
+                Zatoshis::const_from_u64(second_funding_value),
             );
             (height, *account, nf)
         });
@@ -182,7 +200,7 @@ impl Send {
                 [0x20 + i; 32],
                 recipient,
                 other_fvk.to_ovk(Scope::External),
-                0,
+                dummy_value,
             );
             actions.push(action);
             dummy_records.push(record);
@@ -666,6 +684,55 @@ fn zero_valued_spends_still_retire_dummies() {
 
     // 0 spent = 0 recovered + 0 fee: a linked spend, not a positive sum, marks it wallet-funded.
     assert_eq!(send.suspended_outgoing(), 0);
+    assert!(!send.queued());
+}
+
+#[test]
+fn deleting_a_funder_reevaluates_a_now_balanced_suspension() {
+    let mut send = Send::with_undecryptable_first_funder_output();
+    send.scan_funding();
+    let (height, _) = send.second_funding.unwrap();
+    send.st.scan_cached_blocks(height, 1);
+    send.scan_send();
+    let (change, recipient, hidden) = (send.request_at(0), send.request_at(1), send.request_at(2));
+    let (change_record, record) = (send.change_record.clone().unwrap(), send.record.clone());
+    let hidden_record = send.dummy_records[0].clone();
+
+    assert_eq!(
+        send.apply(change, &change_record),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(
+        send.apply(recipient, &record),
+        EnhancePirStoreResult::Stored
+    );
+    assert_eq!(
+        send.apply(hidden, &hidden_record),
+        EnhancePirStoreResult::NotRecoverable
+    );
+    // 80_000 spent, 60_000 recovered: the 20_000 output may be real, so it stays suspended.
+    assert_eq!(send.suspended_outgoing(), 1);
+    assert!(send.queued());
+
+    // Deleting the first funder removes its spend link and sent notes. The second funder's
+    // 30_000 now equals its recovered 30_000 plus the zero fee, and no record will arrive
+    // to re-run the rule, so deletion itself must.
+    let account_a = send.st.test_account().unwrap().id();
+    send.st
+        .wallet_mut()
+        .db_mut()
+        .delete_account(account_a)
+        .unwrap();
+    assert!(
+        send.st
+            .wallet()
+            .db()
+            .discovery_requests()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(send.suspended_outgoing(), 0);
+    assert_eq!(send.reported_suspensions(), 0);
     assert!(!send.queued());
 }
 
