@@ -106,19 +106,3 @@ fn multi_boundary_blocks_and_partial_threshold_use_canonical_coordinates() {
             .is_err()
     );
 }
-
-/// The frozen fixture carries v7 identifiers; the native build's session
-/// identity is pinned by its own unit tests.
-#[cfg(not(feature = "native-reinspiring"))]
-#[test]
-fn identity_vector_matches_frozen_bytes() {
-    let m = manifest(67);
-    // An independent Python encoder checks the serialized fixture as well.
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/v7-session.json")).unwrap();
-    assert_eq!(serde_json::to_value(&m).unwrap(), fixture["manifest"]);
-    assert_eq!(
-        hex::encode(m.session_id(0).unwrap()),
-        fixture["session_id"].as_str().unwrap()
-    );
-}

@@ -4,20 +4,18 @@
 
 ### Added
 
-- Optional `native-reinspiring` feature selecting the experimental native
-  two-mask protocol `ironwood-enhance-pir-v9-native-two-mask-m29` at compile
-  time (49-bit queries, 22-bit responses, 29-bit published masks, one uploaded
-  `K_g` key per request). The default build still speaks v7 only; unit tests
-  pin the v7 `parameter_id` and request length so the switch cannot move the
-  supported wire contract.
-- `types::session_public_len`, `types::response_len` and (under the feature)
+- Native two-mask protocol `ironwood-enhance-pir-v9-native-two-mask-m29`
+  support (49-bit queries, 22-bit responses, 29-bit published masks, one
+  uploaded `K_g` key per request).
+- `types::session_public_len`, `types::response_len` and
   `types::request_len` give exact protocol lengths for a shard.
 
 ### Changed
 
+- The client now speaks v9 exclusively. The `native-reinspiring` feature and
+  the legacy v7 implementation and fixtures have been removed.
 - `ipir-sp` now comes from the `valargroup/ipir-sp` git tag `v0.1.0-rc.6`
-  instead of the `=0.1.0-rc.3` crates.io release. The v7 wire contract is
-  unchanged.
+  instead of the `=0.1.0-rc.3` crates.io release.
 
 ### Fixed
 
