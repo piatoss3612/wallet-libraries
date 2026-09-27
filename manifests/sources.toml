@@ -77,24 +77,24 @@ path = "zcash_client_sqlite"
 package = "zakura-client-sqlite"
 version = "0.1.0-rc6"
 
-# Workspace dependencies redirected onto one immutable Common revision.
+# Workspace dependencies redirected onto the Common v2.0.0 release.
 # The upstream dependency key is kept, so crate sources continue to say
 # `orchard::` and `zcash_primitives::` while resolving to the forks.
 [rewire]
-bellman = { package = "zakura-bellman", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-bls12_381 = { package = "zakura-bls12-381", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-jubjub = { package = "zakura-jubjub", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-zcash_address = { package = "zakura-address", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-zcash_protocol = { package = "zakura-protocol", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-transparent = { package = "zakura-transparent", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-zip321 = { package = "zakura-zip321", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-zcash_primitives = { package = "zakura-primitives", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-zcash_keys = { package = "zakura-keys", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-zcash_proofs = { package = "zakura-proofs", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-orchard = { package = "zakura-orchard", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-sapling = { package = "zakura-sapling-crypto", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-redjubjub = { package = "zakura-redjubjub", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
-pasta_curves = { package = "zakura-pasta-curves", version = "1.3.0-alpha.1", git = "https://github.com/zakura-core/common.git", rev = "c4c255c4be5cacaad77b918a481cbf6d35b1f8fd" }
+bellman = { package = "zakura-bellman", version = "2.0.0" }
+bls12_381 = { package = "zakura-bls12-381", version = "2.0.0" }
+jubjub = { package = "zakura-jubjub", version = "2.0.0" }
+zcash_address = { package = "zakura-address", version = "2.0.0" }
+zcash_protocol = { package = "zakura-protocol", version = "2.0.0" }
+transparent = { package = "zakura-transparent", version = "2.0.0" }
+zip321 = { package = "zakura-zip321", version = "2.0.0" }
+zcash_primitives = { package = "zakura-primitives", version = "2.0.0" }
+zcash_keys = { package = "zakura-keys", version = "2.0.0" }
+zcash_proofs = { package = "zakura-proofs", version = "2.0.0" }
+orchard = { package = "zakura-orchard", version = "2.0.0" }
+sapling = { package = "zakura-sapling-crypto", version = "2.0.0" }
+redjubjub = { package = "zakura-redjubjub", version = "2.0.0" }
+pasta_curves = { package = "zakura-pasta-curves", version = "2.0.0" }
 
 # Non-renamed ecosystem crates whose public traits changed with the 1.0 crypto
 # family. The generated workspace keeps upstream's other dependency metadata
