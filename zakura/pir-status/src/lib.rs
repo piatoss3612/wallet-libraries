@@ -1,5 +1,11 @@
 //! Status-PIR wire contract and private client. No transaction payload API.
 //!
+//! The client speaks the native two-mask protocol
+//! `status-pir-v3-native-two-mask-m29`: one uploaded `K_g` packing key and a
+//! 49-bit selection query per request, answered under two published 29-bit
+//! masks. The q48 profile (`status-pir-v2-q48`) is no longer supported; the
+//! row format, bucket hash and manifest identity are unchanged from v2.
+//!
 //! Observations are available only through [`transport::StatusPirClient`], so
 //! every query runs under a manifest bound to the wallet's accepted anchor. The
 //! low-level client is not public:
@@ -8,9 +14,6 @@
 //! use zakura_pir_status::Client;
 //! ```
 pub mod transport;
-use ipir_sp::{
-    IPIRClient, IPIRSeed, ProductionSimplePirParams, PublicQuerySetup, SimplePirProfile,
-};
 use rand::{Rng, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,7 +24,11 @@ pub const SLOT_BYTES: usize = 40;
 pub const ROW_BYTES: usize = 12288;
 pub const ITEM_BITS: u64 = (ROW_BYTES * 8) as u64;
 pub const MAX_ENTRIES: usize = ROWS * SLOTS * 3 / 4;
-pub const PROTOCOL: &str = "status-pir-v2-q48";
+pub const PROTOCOL: &str = "status-pir-v3-native-two-mask-m29";
+/// First four bytes of every query body and echoed response header.
+pub const QUERY_MAGIC: &[u8; 4] = b"SPN1";
+/// Plaintext u16 coefficients per row.
+pub const COLS: usize = ROW_BYTES / 2;
 pub const HEADER_BYTES: usize = 52;
 pub const MAX_AGE_MS: u64 = 20_000;
 /// A manifest observed this far ahead of the wallet clock is treated as
@@ -126,9 +133,20 @@ pub fn bucket(network: &Hash, salt: &Hash, txid: &Hash) -> usize {
     usize::from(u16::from_le_bytes([d[0], d[1]])) & (ROWS - 1)
 }
 
-pub fn setup_seed(network: &Hash, salt: &Hash) -> Hash {
+/// First-dimension query-mask domain, distinct from the retired q48 setup
+/// (`status-pir/v2/setup`) and from every Enhance setup.
+pub fn native_setup_seed(network: &Hash, salt: &Hash) -> Hash {
     let mut h = Sha256::new();
-    h.update(b"status-pir/v2/setup\0");
+    h.update(b"status-pir/v3/native-setup\0");
+    h.update(network);
+    h.update(salt);
+    h.finalize().into()
+}
+
+/// Packing key-switching setup domain for the native profile.
+pub fn native_packing_seed(network: &Hash, salt: &Hash) -> Hash {
+    let mut h = Sha256::new();
+    h.update(b"status-pir/v3/native-packing\0");
     h.update(network);
     h.update(salt);
     h.finalize().into()
@@ -338,42 +356,68 @@ pub(crate) fn decode_row(
     }
 }
 
-fn profile() -> Result<ProductionSimplePirParams, Error> {
-    ProductionSimplePirParams::new(ROWS as u64, ITEM_BITS, SimplePirProfile::P16Q48)
-        .map_err(|_| Error::Pir)
-}
-
-/// Exact length of the public session material.
+/// Exact length of the public session material: both 29-bit masks per column.
 pub(crate) fn session_len() -> Result<usize, Error> {
-    let p = profile()?;
-    let (d, q) = (p.rlwe().d, p.rlwe().q);
-    Ok(p.ypir().db_cols / d * ipir_sp::modulus_switch::published_c1_len(d, q))
+    Ok(zakura_pir_native::public_len(COLS))
 }
-
 /// Exact length of a query response, including the echoed header.
 pub(crate) fn response_len() -> Result<usize, Error> {
-    let p = profile()?;
-    let d = p.rlwe().d;
-    Ok(HEADER_BYTES
-        + p.ypir().db_cols / d * ipir_sp::modulus_switch::response_body_len(d, p.ypir().q_prime_1))
+    Ok(HEADER_BYTES + zakura_pir_native::response_len(COLS))
 }
-
 /// `body` may be moved into the transport; decoding uses the retained header.
 pub(crate) struct Query {
     pub(crate) body: Vec<u8>,
     header: [u8; HEADER_BYTES],
-    seed: IPIRSeed,
+    secret: zakura_pir_native::NativeSecret,
     txid: Hash,
     earliest: Option<u32>,
 }
-
 pub(crate) struct Client {
     manifest: Manifest,
-    client: IPIRClient,
-    setup: PublicQuerySetup,
-    public: Vec<Vec<u64>>,
+    packing: zakura_pir_native::NativeSetup,
+    masks: Vec<Vec<u64>>,
+    public: Vec<u8>,
 }
-
+impl Client {
+    /// The manifest accepted by [`Client::new`]; it cannot be replaced without
+    /// repeating anchor acceptance and setup.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+    /// Checks shared by every profile before the row selector is encrypted.
+    fn envelope(
+        &self,
+        txid: &[u8],
+        coverage: LocalCoverageContext,
+        now_ms: u64,
+    ) -> Result<(Hash, Vec<u8>), Error> {
+        let txid: Hash = txid.try_into().map_err(|_| Error::Malformed)?;
+        self.manifest.fresh(now_ms)?;
+        coverage.validate(&self.manifest)?;
+        let mut body = QUERY_MAGIC.to_vec();
+        body.extend(self.manifest.id());
+        body.extend(OsRng.r#gen::<[u8; 16]>());
+        Ok((txid, body))
+    }
+    /// Checks shared by every profile before the response body is decrypted.
+    /// A query prepared under another manifest is `Stale`, even when that
+    /// manifest shares this client's public setup.
+    fn check_response(
+        &self,
+        header: &[u8; HEADER_BYTES],
+        response: &[u8],
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.manifest.fresh(now_ms)?;
+        if header[4..36] != self.manifest.id() {
+            return Err(Error::Stale);
+        }
+        if response.len() != response_len()? || response[..HEADER_BYTES] != header[..] {
+            return Err(Error::Malformed);
+        }
+        Ok(())
+    }
+}
 impl Client {
     pub fn new(
         manifest: Manifest,
@@ -384,32 +428,24 @@ impl Client {
         if !anchor_accepted(&manifest, accepted) {
             return Err(Error::Malformed);
         }
-        let client = IPIRClient::from_profile(ROWS as u64, ITEM_BITS, SimplePirProfile::P16Q48)
-            .map_err(|_| Error::Pir)?;
-        let p = profile()?;
-        let (d, q) = (p.rlwe().d, p.rlwe().q);
-        let blocks = p.ypir().db_cols / d;
         if public.len() != session_len()?
             || Hash::from(Sha256::digest(public)) != manifest.public_digest
         {
             return Err(Error::Malformed);
         }
-        let setup = client.generate_public_query_setup_simplepir_from_seed(setup_seed(
-            &manifest.network,
-            &manifest.salt,
-        ));
-        let public = ipir_sp::modulus_switch::recover_published_c1(public, d, blocks, q);
         Ok(Self {
+            packing: zakura_pir_native::packing_setup(native_packing_seed(
+                &manifest.network,
+                &manifest.salt,
+            )),
+            masks: zakura_pir_native::public_query_masks(
+                native_setup_seed(&manifest.network, &manifest.salt),
+                ROWS,
+                COLS,
+            ),
+            public: public.to_vec(),
             manifest,
-            client,
-            setup,
-            public,
         })
-    }
-    /// The manifest accepted by [`Client::new`]; it cannot be replaced without
-    /// repeating anchor acceptance and setup.
-    pub fn manifest(&self) -> &Manifest {
-        &self.manifest
     }
     pub fn prepare(
         &self,
@@ -417,46 +453,32 @@ impl Client {
         coverage: LocalCoverageContext,
         now_ms: u64,
     ) -> Result<Query, Error> {
-        let txid: Hash = txid.try_into().map_err(|_| Error::Malformed)?;
-        self.manifest.fresh(now_ms)?;
-        coverage.validate(&self.manifest)?;
+        let (txid, mut body) = self.envelope(txid, coverage, now_ms)?;
         let row = bucket(&self.manifest.network, &self.manifest.salt, &txid);
-        let (query, keys, seed) = self.client.generate_fresh_query_simplepir(&self.setup, row);
-        let mut body = b"SPQ2".to_vec();
-        body.extend(self.manifest.id());
-        body.extend(OsRng.r#gen::<[u8; 16]>());
-        body.extend(
-            ipir_sp::serialize::serialize_packing_keys(self.client.rlwe_params(), &keys)
-                .map_err(|_| Error::Pir)?,
-        );
-        body.extend(query.to_switched_bytes(self.client.rlwe_params().q, 48));
+        let (secret, payload) =
+            zakura_pir_native::prepare_with(&self.packing, &self.masks, ROWS, row)
+                .map_err(|_| Error::Pir)?;
+        body.extend(payload);
         Ok(Query {
             header: body[..HEADER_BYTES].try_into().unwrap(),
             body,
-            seed,
+            secret,
             txid,
             earliest: coverage.earliest_possible_inclusion,
         })
     }
-    /// A query prepared under another manifest is `Stale`, even when that
-    /// manifest shares this client's public setup.
     pub fn decode(&self, query: Query, response: &[u8], now_ms: u64) -> Result<Observation, Error> {
-        self.manifest.fresh(now_ms)?;
-        if query.header[4..36] != self.manifest.id() {
-            return Err(Error::Stale);
-        }
-        if response.len() != response_len()? || response[..HEADER_BYTES] != query.header {
-            return Err(Error::Malformed);
-        }
-        let row = self.client.decode_response_simplepir(
-            query.seed,
+        self.check_response(&query.header, response, now_ms)?;
+        let row = zakura_pir_native::decode_cols(
+            &query.secret,
             &self.public,
             &response[HEADER_BYTES..],
-        );
+            COLS,
+        )
+        .map_err(|_| Error::Pir)?;
         decode_row(&self.manifest, &query.txid, query.earliest, &row)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,22 +499,48 @@ mod tests {
         }
     }
     #[test]
-    fn v2_geometry_and_v1_rejection() {
+    fn row_geometry_and_retired_protocol_rejection() {
         assert_eq!((ROWS, SLOTS, SLOT_BYTES, ROW_BYTES), (8192, 256, 40, 12288));
         assert_eq!(ROWS * ROW_BYTES, 96 * 1024 * 1024);
         let mut m = manifest();
-        m.protocol = "status-pir-v1-q48".into();
-        assert_eq!(m.validate(), Err(Error::Unsupported));
+        for retired in ["status-pir-v1-q48", "status-pir-v2-q48"] {
+            m.protocol = retired.into();
+            assert_eq!(m.validate(), Err(Error::Unsupported));
+        }
         assert_eq!(Record::decode(&[0; 80]), Err(Error::Malformed));
+    }
+    #[test]
+    fn native_setup_domains_match_independent_python_vectors() {
+        assert_eq!(
+            hex::encode(native_setup_seed(&[1; 32], &[2; 32])),
+            "c8cb85010ef6544f65566f275551a3c62616692e6f0a88429176fb83a16aeccf"
+        );
+        assert_eq!(
+            hex::encode(native_packing_seed(&[1; 32], &[2; 32])),
+            "7f99c2ef04dab7c859432bb188475a9e2680b06f8cd7eae099ed24f9a0698af5"
+        );
+        assert_ne!(
+            native_setup_seed(&[1; 32], &[2; 32]),
+            native_packing_seed(&[1; 32], &[2; 32])
+        );
+    }
+    #[test]
+    fn native_wire_identity_and_exact_lengths() {
+        assert_eq!(PROTOCOL, "status-pir-v3-native-two-mask-m29");
+        assert_eq!(QUERY_MAGIC, b"SPN1");
+        assert_eq!(COLS, 6144);
+        // Two 29-bit masks per column.
+        assert_eq!(session_len(), Ok(44_544));
+        // Echoed header plus 6144 22-bit coefficients.
+        assert_eq!(response_len(), Ok(HEADER_BYTES + 16_896));
+        // One uploaded key plus a 49-bit selection over 8192 rows.
+        assert_eq!(zakura_pir_native::KEY_BYTES, 27_648);
+        assert_eq!(zakura_pir_native::request_len(ROWS), 27_648 + 50_176);
     }
     #[test]
     fn independent_python_hash_vector() {
         let txid = std::array::from_fn(|i| i as u8);
         assert_eq!(bucket(&[1; 32], &[2; 32], &txid), 6818);
-        assert_eq!(
-            hex::encode(setup_seed(&[1; 32], &[2; 32])),
-            "44ada24f0ddb452f8d8a6902d2c32d02fe64fde4088e71e60a81c453d81e9ea8"
-        );
     }
     #[test]
     fn slot_codec_rejects_reserved_bytes_empty_garbage_and_invalid_states() {
