@@ -112,7 +112,8 @@ pub(crate) fn table_constants<E: ErrUnsupportedPool>(
 ///
 /// If the wallet doesn't know an actual mined height or expiry height for a transaction, it will
 /// be treated as unexpired _only_ if we just observed it in the last DEFAULT_TX_EXPIRY_DELTA
-/// blocks, guessing that the wallet creating the transaction used the same expiry delta as our
+/// blocks (or use the original local construction target), guessing that the wallet creating
+/// the transaction used the same expiry delta as our
 /// default. If our guess is wrong (and the wallet used a larger expiry delta or disabled expiry),
 /// then the transaction will be treated as unexpired when it shouldn't be for as long as it takes
 /// this wallet to either observe the transaction being mined, or enhance it to learn its expiry
@@ -125,7 +126,7 @@ pub(crate) fn tx_unexpired_condition(tx: &str) -> String {
         OR {tx}.expiry_height >= :target_height  -- the tx is unexpired
         OR (
             {tx}.expiry_height IS NULL -- the expiry height is unknown
-            AND {tx}.min_observed_height + {DEFAULT_TX_EXPIRY_DELTA} >= :target_height
+            AND COALESCE({tx}.target_height, {tx}.min_observed_height) + {DEFAULT_TX_EXPIRY_DELTA} >= :target_height
         )
         "#
     )

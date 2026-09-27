@@ -562,10 +562,22 @@ mod tests {
                 Err(Error::CoverageIncomplete)
             );
         }
-        assert_eq!(
-            decode_row(&m, &[9; 32], Some(10), &row),
-            Ok(Observation::NotFound)
-        );
+        for earliest in [10, 20] {
+            assert_eq!(
+                decode_row(&m, &[9; 32], Some(earliest), &row),
+                Ok(Observation::NotFound)
+            );
+        }
+        for through in [19, 20] {
+            assert_eq!(
+                LocalCoverageContext {
+                    earliest_possible_inclusion: Some(10),
+                    required_through: Some(through)
+                }
+                .validate(&m),
+                Ok(())
+            );
+        }
         let id = m.id();
         let mut changed = m.clone();
         changed.observed_ms += 1;

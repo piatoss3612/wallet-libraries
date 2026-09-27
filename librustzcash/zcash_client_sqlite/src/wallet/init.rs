@@ -171,6 +171,9 @@ impl std::error::Error for WalletMigrationError {
 /// variants.
 fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> WalletMigrationError {
     match e {
+        SqliteClientError::StatusModeNotConfigured => {
+            unreachable!("migrations do not request status work")
+        }
         #[cfg(feature = "orchard")]
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")

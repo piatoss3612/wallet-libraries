@@ -10,6 +10,15 @@ workspace.
 
 ## [Unreleased]
 
+### Breaking changes
+- Replace legacy transaction status requests with explicitly routed public/private
+  `TransactionStatusWork` and a dedicated `TransactionStatusRead` interface.
+  SQLite requires an explicit status mode and derives inclusion evidence from
+  existing local-creation fields, with rewind handling, a data-only legacy migration,
+  and a transactional outbox evidence writer. No new columns are added.
+  See `docs/transaction_status_work.md` for consumer migration instructions.
+
+
 ### Added
 - Add a typed `WalletRead::transaction_status_requests` view of
   `transaction_data_requests`. The method has a default for custom stores and does

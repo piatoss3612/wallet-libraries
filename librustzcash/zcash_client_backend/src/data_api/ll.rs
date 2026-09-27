@@ -657,13 +657,12 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
         dependent_tx_ref: Option<Self::TxRef>,
     ) -> Result<(), Self::Error>;
 
-    /// Adds a [`TransactionDataRequest::GetStatus`] request for a transaction whose mined status
+    /// Adds a status observation request for a transaction whose mined status
     /// cannot be learned through ordinary compact-block scanning.
     ///
     /// The request intent must remain durable while the transaction is mined, so that it becomes
     /// active again if a chain rewind un-mines the transaction.
     ///
-    /// [`TransactionDataRequest::GetStatus`]: super::TransactionDataRequest
     fn queue_tx_status(&mut self, txid: TxId) -> Result<(), Self::Error>;
 
     /// Adds a [`TransactionDataRequest::TransactionsInvolvingAddress`] request to the transaction

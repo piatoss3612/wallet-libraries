@@ -1,3 +1,5 @@
+#[cfg(feature = "transparent-inputs")]
+use crate::data_api::status::TransactionStatusRead;
 use std::{
     cmp::Eq,
     collections::HashSet,
@@ -125,7 +127,7 @@ use crate::proposal::ProposalError;
 #[cfg(feature = "transparent-inputs")]
 use {
     crate::{
-        data_api::{CoinbaseFilter, OutputOfSentTx, TransactionDataRequest, TransactionStatus},
+        data_api::{CoinbaseFilter, OutputOfSentTx, TransactionStatus},
         fees::ChangeValue,
         proposal::{Proposal, ProposalError, StepOutput, StepOutputIndex},
         wallet::{Exposure, TransparentAddressSource, WalletTransparentOutput},
@@ -1750,8 +1752,12 @@ pub fn spend_everything_multi_step_single_note_proposed_transfer<T: ShieldedPool
 
     // Verify that a status request has been generated for the second transaction of
     // the ZIP 320 pair.
-    let tx_data_requests = st.wallet().transaction_data_requests().unwrap();
-    assert!(tx_data_requests.contains(&TransactionDataRequest::GetStatus(*txids.last())));
+    let tx_data_requests = st.wallet().transaction_status_work().unwrap();
+    assert!(
+        tx_data_requests
+            .iter()
+            .any(|work| work.txid() == *txids.last())
+    );
 
     assert!(expected_step0_change > expected_ephemeral_spend);
     assert_eq!(confirmed_sent.len(), 2);
@@ -1892,8 +1898,12 @@ pub fn spend_everything_multi_step_many_notes_proposed_transfer<T: ShieldedPoolT
 
     // Verify that a status request has been generated for the second transaction of
     // the ZIP 320 pair.
-    let tx_data_requests = st.wallet().transaction_data_requests().unwrap();
-    assert!(tx_data_requests.contains(&TransactionDataRequest::GetStatus(*txids.last())));
+    let tx_data_requests = st.wallet().transaction_status_work().unwrap();
+    assert!(
+        tx_data_requests
+            .iter()
+            .any(|work| work.txid() == *txids.last())
+    );
 
     assert!(expected_step0_change > expected_ephemeral_spend);
     assert_eq!(confirmed_sent.len(), 2);
@@ -2044,8 +2054,12 @@ pub fn spend_everything_multi_step_with_marginal_notes_proposed_transfer<
 
     // Verify that a status request has been generated for the second transaction of
     // the ZIP 320 pair.
-    let tx_data_requests = st.wallet().transaction_data_requests().unwrap();
-    assert!(tx_data_requests.contains(&TransactionDataRequest::GetStatus(*txids.last())));
+    let tx_data_requests = st.wallet().transaction_status_work().unwrap();
+    assert!(
+        tx_data_requests
+            .iter()
+            .any(|work| work.txid() == *txids.last())
+    );
 
     assert!(expected_step0_change > expected_ephemeral_spend);
     assert_eq!(confirmed_sent.len(), 2);
@@ -2393,8 +2407,12 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
 
         // Verify that a status request has been generated for the second transaction of
         // the ZIP 320 pair.
-        let tx_data_requests = st.wallet().transaction_data_requests().unwrap();
-        assert!(tx_data_requests.contains(&TransactionDataRequest::GetStatus(*txids.last())));
+        let tx_data_requests = st.wallet().transaction_status_work().unwrap();
+        assert!(
+            tx_data_requests
+                .iter()
+                .any(|work| work.txid() == *txids.last())
+        );
 
         assert!(expected_step0_change < expected_ephemeral);
         assert_eq!(confirmed_sent.len(), 2);
@@ -2817,8 +2835,12 @@ pub fn spend_all_funds_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
 
     // Verify that a status request has been generated for the second transaction of
     // the ZIP 320 pair.
-    let tx_data_requests = st.wallet().transaction_data_requests().unwrap();
-    assert!(tx_data_requests.contains(&TransactionDataRequest::GetStatus(*txids.last())));
+    let tx_data_requests = st.wallet().transaction_status_work().unwrap();
+    assert!(
+        tx_data_requests
+            .iter()
+            .any(|work| work.txid() == *txids.last())
+    );
 
     assert!(expected_step0_change < expected_ephemeral);
     assert_eq!(confirmed_sent.len(), 2);
@@ -3838,9 +3860,10 @@ where
 
     assert!(
         !st.wallet()
-            .transaction_data_requests()
+            .transaction_status_work()
             .unwrap()
-            .contains(&TransactionDataRequest::GetStatus(shielding_txid)),
+            .iter()
+            .any(|work| work.txid() == shielding_txid),
         "a wallet-owned shielded output makes the transaction observable by scanning",
     );
 
@@ -8286,9 +8309,10 @@ pub fn shielding_coinbase_to_orchard_receiver_delivers_via_ironwood<Dsf>(
     // request to learn its outcome.
     assert!(
         st.wallet()
-            .transaction_data_requests()
+            .transaction_status_work()
             .unwrap()
-            .contains(&TransactionDataRequest::GetStatus(sent_txid))
+            .iter()
+            .any(|work| work.txid() == sent_txid)
     );
 
     let (mined_height, _) = st.generate_next_block_including(sent_txid);
@@ -8314,9 +8338,10 @@ pub fn shielding_coinbase_to_orchard_receiver_delivers_via_ironwood<Dsf>(
     );
     assert!(
         !st.wallet()
-            .transaction_data_requests()
+            .transaction_status_work()
             .unwrap()
-            .contains(&TransactionDataRequest::GetStatus(sent_txid)),
+            .iter()
+            .any(|work| work.txid() == sent_txid),
         "status intent is dormant while the transaction is mined",
     );
 
@@ -8330,9 +8355,10 @@ pub fn shielding_coinbase_to_orchard_receiver_delivers_via_ironwood<Dsf>(
     );
     assert!(
         st.wallet()
-            .transaction_data_requests()
+            .transaction_status_work()
             .unwrap()
-            .contains(&TransactionDataRequest::GetStatus(sent_txid)),
+            .iter()
+            .any(|work| work.txid() == sent_txid),
         "rewinding the mined block reactivates the durable status intent",
     );
 }

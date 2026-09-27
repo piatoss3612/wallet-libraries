@@ -10,6 +10,17 @@ workspace.
 
 ## [Unreleased]
 
+### Breaking changes
+- Replace legacy transaction status requests with explicitly routed public/private
+  `TransactionStatusWork` and a dedicated `TransactionStatusRead` interface.
+  SQLite requires an explicit status mode and derives inclusion evidence from
+  existing local-creation fields, with rewind handling at the actual rescan floor,
+  a data-only legacy migration, and a transactional outbox evidence writer.
+  No new columns are added.
+  Sent-transaction storage requires a known chain tip to clamp creation evidence.
+  See `docs/transaction_status_work.md` for consumer migration instructions.
+
+
 ### Added
 - Implement `EnhancePirRead::transaction_enhancement_work` with one SQL statement
   over the ordinary and private queues, partitioned by transaction-wide route.

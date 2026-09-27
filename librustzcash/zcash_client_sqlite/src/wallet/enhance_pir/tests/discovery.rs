@@ -9,6 +9,7 @@ use orchard::{
 use pasta_curves::pallas;
 use prost::Message;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
+use zcash_client_backend::data_api::status::TransactionStatusRead;
 use zcash_client_backend::{
     data_api::{
         chain::BlockSource,
@@ -1271,7 +1272,8 @@ fn deleting_an_exclusively_owned_transaction_cascades_its_discovery_job() {
             test_rng(),
         )
         .unwrap()
-        .with_enhancement_mode(mode);
+        .with_enhancement_mode(mode)
+        .with_status_mode(zcash_client_backend::data_api::status::TransactionStatusMode::Public);
         assert!(
             !reopened
                 .transaction_enhancement_work()
@@ -1280,9 +1282,10 @@ fn deleting_an_exclusively_owned_transaction_cascades_its_discovery_job() {
         );
         assert!(
             !reopened
-                .transaction_data_requests()
+                .transaction_status_work()
                 .unwrap()
-                .contains(&TransactionDataRequest::GetStatus(txid))
+                .iter()
+                .any(|work| work.txid() == txid)
         );
     }
 }
