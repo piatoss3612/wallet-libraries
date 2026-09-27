@@ -33,8 +33,10 @@ consumer. `zcash_address`, `zip321`, `zcash_protocol`, `zcash_transparent`,
 
 `zcash_client_sqlite` upstream also depends on `zcash_pool_migration`. Vizor
 does not use the pool-migration engine, so this fork cuts that dependency
-instead of carrying the crate: the module and its tests are gone, the schema
-and its migrations are not, and an existing database still opens.
+instead of carrying the crate. The ZIP 318 classification and send policy built
+around the engine are removed too. A forward migration drops the schema they
+left behind, so an existing database still opens. Anchor retention stays,
+because Vizor's own migration depends on it. See `docs/zip318_removal.md`.
 
 ## Layout
 

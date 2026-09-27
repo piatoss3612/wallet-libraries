@@ -212,31 +212,6 @@ pub(crate) fn select_spendable_sapling_notes_for_consolidation<P: consensus::Par
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn select_single_spendable_sapling_note<P: consensus::Parameters>(
-    conn: &Connection,
-    params: &P,
-    account: AccountUuid,
-    value: Zatoshis,
-    target_height: TargetHeight,
-    confirmations_policy: ConfirmationsPolicy,
-    exclude: &[ReceivedNoteId],
-    lock_filter: LockFilter<'_>,
-) -> Result<Option<ReceivedNote<ReceivedNoteId, sapling::Note>>, SqliteClientError> {
-    super::common::select_single_spendable_note(
-        conn,
-        params,
-        account,
-        value,
-        target_height,
-        confirmations_policy,
-        exclude,
-        ShieldedPool::Sapling,
-        to_received_note,
-        lock_filter,
-    )
-}
-
 pub(crate) fn select_unspent_note_meta(
     conn: &Connection,
     wallet_birthday: BlockHeight,

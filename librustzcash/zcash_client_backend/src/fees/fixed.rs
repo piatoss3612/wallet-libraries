@@ -4,13 +4,11 @@ use core::marker::PhantomData;
 
 use zcash_primitives::transaction::fees::{fixed::FeeRule as FixedFeeRule, transparent};
 use zcash_protocol::{
-    ShieldedPool,
-    consensus::{self, BlockHeight},
+    ShieldedPool, consensus,
     memo::MemoBytes,
     value::{BalanceError, Zatoshis},
 };
 
-use crate::data_api::anchor_retention::PoolMigrationParams;
 use crate::data_api::{InputSource, wallet::TargetHeight};
 
 use super::{
@@ -104,8 +102,6 @@ impl<I: InputSource> ChangeStrategy for SingleOutputChangeStrategy<I> {
         &self,
         params: &P,
         target_height: TargetHeight,
-        anchor_height: BlockHeight,
-        zip318: &PoolMigrationParams,
         transparent_inputs: &[impl transparent::InputView],
         transparent_outputs: &[impl transparent::OutputView],
         sapling: &impl sapling_fees::BundleView<NoteRefT>,
@@ -142,8 +138,6 @@ impl<I: InputSource> ChangeStrategy for SingleOutputChangeStrategy<I> {
             // The fixed-fee strategy has no unpadded opt-in; keep the padded default.
             #[cfg(feature = "orchard")]
             BundlePadding::DEFAULT,
-            anchor_height,
-            zip318,
             self.change_memo.as_ref(),
             ephemeral_balance,
         )
@@ -152,12 +146,10 @@ impl<I: InputSource> ChangeStrategy for SingleOutputChangeStrategy<I> {
 
 #[cfg(test)]
 mod tests {
-    use crate::data_api::anchor_retention::{AnchorRetentionInterval, PoolMigrationParams};
     use ::transparent::bundle::TxOut;
     use zcash_primitives::transaction::fees::{
         fixed::FeeRule as FixedFeeRule, zip317::MINIMUM_FEE,
     };
-    use zcash_protocol::consensus::BlockHeight;
     use zcash_protocol::{
         ShieldedPool,
         consensus::{Network, NetworkUpgrade, Parameters},
@@ -193,8 +185,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[] as &[TestTransparentInput],
             &[] as &[TxOut],
             &(
@@ -238,8 +228,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[] as &[TestTransparentInput],
             &[] as &[TxOut],
             &(

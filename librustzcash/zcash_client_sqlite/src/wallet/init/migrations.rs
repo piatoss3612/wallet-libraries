@@ -16,6 +16,7 @@ mod add_transparent_receiver_address_index;
 mod add_transparent_value_index;
 mod add_utxo_account;
 mod addresses_table;
+mod drop_zip318_pool_migration;
 mod ensure_default_transparent_address;
 mod ensure_orchard_ua_receiver;
 mod ephemeral_addresses;
@@ -121,6 +122,7 @@ pub mod ids {
         add_transparent_value_index::MIGRATION_ID as ADD_TRANSPARENT_VALUE_INDEX,
         add_utxo_account::MIGRATION_ID as ADD_UTXO_ACCOUNT,
         addresses_table::MIGRATION_ID as ADDRESSES_TABLE,
+        drop_zip318_pool_migration::MIGRATION_ID as DROP_ZIP318_POOL_MIGRATION,
         ensure_default_transparent_address::MIGRATION_ID as ENSURE_DEFAULT_TRANSPARENT_ADDRESS,
         ensure_orchard_ua_receiver::MIGRATION_ID as ENSURE_ORCHARD_UA_RECEIVER,
         ephemeral_addresses::MIGRATION_ID as EPHEMERAL_ADDRESSES,
@@ -263,6 +265,13 @@ pub(super) fn all_migrations<
     //                             |              v_transactions_pool_crossing \
     //                             `------------------------------------------- v_tx_outputs_transparent_addresses
     //
+    // Not drawn above: the ZIP 318 and status tail of the graph. It runs
+    // v_transactions_pool_crossing -> zip318_classification -> v_transactions_zip318_kind ->
+    // ironwood_enhance, and ironwood_received_notes -> orchard_ironwood_migration_tables ->
+    // orchard_ironwood_migration_anchor_interval -> orchard_ironwood_migration_unsatisfiability.
+    // Both chains meet at status_inclusion_evidence, which is followed by
+    // drop_zip318_pool_migration, which drops the schema the ZIP 318 migrations created.
+    //
     let rng = Rc::new(Mutex::new(rng));
     vec![
         Box::new(initial_setup::Migration {}),
@@ -379,6 +388,7 @@ pub(super) fn all_migrations<
         Box::new(orchard_ironwood_migration_anchor_interval::Migration),
         Box::new(v_tx_outputs_transparent_addresses::Migration),
         Box::new(orchard_ironwood_migration_unsatisfiability::Migration),
+        Box::new(drop_zip318_pool_migration::Migration),
     ]
 }
 
@@ -585,7 +595,7 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
 
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    status_inclusion_evidence::MIGRATION_ID,
+    drop_zip318_pool_migration::MIGRATION_ID,
     v_tx_outputs_transparent_addresses::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
@@ -694,6 +704,7 @@ pub(crate) mod tests {
             ids::ADD_TRANSPARENT_VALUE_INDEX,
             ids::ADD_UTXO_ACCOUNT,
             ids::ADDRESSES_TABLE,
+            ids::DROP_ZIP318_POOL_MIGRATION,
             ids::ENSURE_DEFAULT_TRANSPARENT_ADDRESS,
             ids::ENSURE_ORCHARD_UA_RECEIVER,
             ids::EPHEMERAL_ADDRESSES,

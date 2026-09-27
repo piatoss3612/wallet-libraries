@@ -9,13 +9,11 @@
 //! exempts the boundary checkpoints from that pruning.
 //!
 //! [`AnchorRetentionInterval`] defines the grid, and owns the arithmetic that decides whether a
-//! height is a boundary. The migration scheduler MUST draw its anchors from the same grid the
-//! wallet retains: a transfer anchored to a height the wallet did not retain cannot be proved. See
-//! [`WalletRead::anchor_retention_interval`], the accessor through which a migration reads the grid
-//! back off the wallet that maintains it.
+//! height is a boundary. This crate does not schedule pool migrations; a wallet that does MUST draw
+//! its anchors from the same grid it retains: a transfer anchored to a height the wallet did not
+//! retain cannot be proved.
 //!
 //! [ZIP 318]: https://zips.z.cash/zip-0318
-//! [`WalletRead::anchor_retention_interval`]: super::WalletRead::anchor_retention_interval
 
 use std::collections::BTreeSet;
 
@@ -24,7 +22,7 @@ use zcash_protocol::consensus::BlockHeight;
 /// The interval, in blocks, between the durable anchor checkpoints a wallet retains.
 ///
 /// This is a re-export of [`zcash_protocol::zip318::AnchorBucketInterval`], the single definition
-/// shared with `zcash_pool_migration`. The grid a wallet retains its checkpoints on and the grid a
+/// shared with the wallet that schedules pool migrations. The grid a wallet retains its checkpoints on and the grid a
 /// pool-crossing transfer anchors to must be the same, so they are one type rather than two kept
 /// aligned by a conversion.
 ///
@@ -309,44 +307,5 @@ mod tests {
                 }
             }
         }
-    }
-}
-
-/// The [ZIP 318] pool-migration parameters in force for a particular wallet: the specified values,
-/// with the anchor bucket grid taken from the grid that wallet actually retains.
-///
-/// The wallet is the authority on the grid, because it is the side that keeps the checkpoints
-/// alive. A crossing anchored to a boundary the wallet did not retain cannot be proved, so every
-/// decision that depends on the grid — whether to bucket an anchor, and whether the resulting
-/// transaction is a canonical crossing — must consult the same source. Reading the grid from the
-/// network defaults instead would agree with the wallet only by coincidence, and silently disagree
-/// for any wallet configured with a different interval.
-///
-/// Obtained from [`WalletRead::pool_migration_params`].
-///
-/// [ZIP 318]: https://zips.z.cash/zip-0318
-/// [`WalletRead::pool_migration_params`]: super::WalletRead::pool_migration_params
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PoolMigrationParams {
-    interval: AnchorRetentionInterval,
-}
-
-impl PoolMigrationParams {
-    /// Constructs the parameters for a wallet retaining anchors on `interval`. Every other ZIP 318
-    /// value takes its specified default.
-    pub fn new(interval: AnchorRetentionInterval) -> Self {
-        Self { interval }
-    }
-}
-
-impl From<AnchorRetentionInterval> for PoolMigrationParams {
-    fn from(interval: AnchorRetentionInterval) -> Self {
-        Self::new(interval)
-    }
-}
-
-impl zcash_protocol::zip318::PoolMigrationConstants for PoolMigrationParams {
-    fn anchor_bucket_interval(&self) -> AnchorRetentionInterval {
-        self.interval
     }
 }

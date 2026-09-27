@@ -3225,29 +3225,6 @@ pub(crate) fn get_account_ref(
     .ok_or(SqliteClientError::AccountUnknown)
 }
 
-/// Returns whether an anchor is computable at `height` for spends from the given pool.
-///
-/// An anchor is computable exactly at the heights whose note commitment tree checkpoints the
-/// wallet retains, so this is answered from the pool's checkpoints table.
-pub(crate) fn anchor_computable(
-    conn: &rusqlite::Connection,
-    protocol: ShieldedPool,
-    height: BlockHeight,
-) -> Result<bool, SqliteClientError> {
-    let TableConstants { table_prefix, .. } =
-        common::table_constants::<SqliteClientError>(protocol)?;
-    conn.query_row(
-        &format!(
-            "SELECT EXISTS (
-                 SELECT 1 FROM {table_prefix}_tree_checkpoints WHERE checkpoint_id = :height
-             )"
-        ),
-        named_params![":height": u32::from(height)],
-        |row| row.get(0),
-    )
-    .map_err(SqliteClientError::from)
-}
-
 /// Returns the maximum height of blocks in the chain which may be scanned.
 pub(crate) fn chain_tip_height(
     conn: &rusqlite::Connection,
@@ -5230,28 +5207,6 @@ pub(crate) fn put_tx_data(
         .and_then(|tx_ref| {
             ironwood_hooks::clear_ironwood_enhancement_work(conn, tx_ref).map(|()| tx_ref)
         })
-}
-
-/// Records how a transaction classifies against ZIP 318.
-///
-/// The column defaults to the code for "not classified", so a row this was never called for
-/// reports as unclassified rather than as a decision that the transaction is not a migration
-/// transaction. Rows written before this column existed keep that default, and need the
-/// transaction rescanned before they can be labelled.
-pub(crate) fn put_zip318_classification(
-    conn: &rusqlite::Connection,
-    tx_ref: TxRef,
-    classification: zcash_protocol::zip318::Zip318Classification,
-) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "UPDATE transactions SET zip318_kind = :zip318_kind WHERE id_tx = :id_tx",
-        named_params![
-            ":zip318_kind": classification.to_code(),
-            ":id_tx": tx_ref.0,
-        ],
-    )?;
-
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
