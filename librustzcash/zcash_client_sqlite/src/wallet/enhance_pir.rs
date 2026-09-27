@@ -141,6 +141,14 @@ fn require_lwd(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClie
     Ok(())
 }
 
+/// A privately imported receipt keeps private routing. Preserve explicit public choices.
+#[cfg(feature = "experimental-swap-receiving")]
+pub(crate) fn protect_recovered_incoming(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClientError> {
+    conn.execute("INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1,?2)
+        ON CONFLICT(transaction_id) DO NOTHING", rusqlite::params![tx_ref.0, PRIVATE_PROTECTED])?;
+    retire_enhancement_if_complete(conn,tx_ref)
+}
+
 pub(crate) fn is_protected(conn: &Connection, txid: TxId) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
         concat!(

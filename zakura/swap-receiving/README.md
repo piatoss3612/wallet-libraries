@@ -155,8 +155,7 @@ an error for that retrieval instead of trying the ordinary account key.
 
 Per-key historical coverage, retirement,
 automatic seed restore and gap extension, PCZT/firmware qualification, Vizor,
-and receiver PIR remain required before live use. Registration after an earlier
-scan does not yet schedule the missing history automatically.
+and receiver PIR remain required before live use. Registered keys queue missing historical scans by default.
 
 ## Protocol baseline
 
@@ -189,3 +188,13 @@ Neither helper authenticates service transaction metadata or makes a note spenda
 purposes, wrong account/index, altered compact and memo ciphertext, wrong roots,
 and substituted or overflowing positions. Decryption and Merkle hashing delegate
 to `zakura-orchard`, following the pinned NU6.3 proposal at `afa086bd976e316612a5c06fb139429958d07d84`.
+
+The SQLite `apply_pending_swap_payment` helper commits a queued candidate only
+at the wallet's fully scanned tip. It authenticates ciphertext again, checks
+receipt bounds and retained spend evidence, and verifies a supplied witness at
+its explicit local block anchor (or uses an available local witness). It marks
+the leaf for future witness updates and writes the note, memo, key and known
+spend atomically. Incomplete inputs preserve the queue without adding balance.
+A synthetic test spends a privately imported note into ordinary internal change.
+Transaction IDs and Action indices remain directory assertions, checked for
+conflicts with local data. The inclusion proof binds the commitment and position.

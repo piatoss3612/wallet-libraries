@@ -87,6 +87,7 @@ uuid = { workspace = true, features = ["v4"] }
 regex = { workspace = true }
 
 # Dependencies used internally:
+zcash_note_encryption = { workspace = true, optional = true }
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
 document-features.workspace = true
 maybe-rayon.workspace = true
@@ -160,7 +161,7 @@ orchard = [
 
 ## Enables the unpublished swap receiving-key registry for local POC work.
 ## Registration alone does not enable scanning or spending these notes.
-experimental-swap-receiving = ["orchard", "dep:zakura-swap-receiving", "zcash_client_backend/experimental-swap-receiving"]
+experimental-swap-receiving = ["orchard", "dep:zcash_note_encryption", "dep:zakura-swap-receiving", "zcash_client_backend/experimental-swap-receiving"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.
 test-dependencies = [

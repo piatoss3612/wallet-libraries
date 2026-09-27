@@ -56,7 +56,9 @@ workspace.
   payments can be authenticated and persisted as pending candidates without
   crediting balance. Local spentness checks require retained scan coverage and
   consult both known wallet spends and unlinked nullifiers. Rewinds invalidate
-  affected candidates, and pruning trims nullifier coverage.
+  affected candidates, and pruning trims nullifier coverage. Verified candidates
+  can be applied atomically with their memo, receiving key, inclusion path, and
+  any known spend. Incomplete chain, witness, or spend coverage stays pending.
 
 ## [0.1.0-rc6] - 2026-09-24
 

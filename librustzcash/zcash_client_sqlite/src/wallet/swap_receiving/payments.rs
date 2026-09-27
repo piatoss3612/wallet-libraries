@@ -46,7 +46,7 @@ pub enum SpendStatus {
     },
 }
 
-fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Result<i64, Error> {
+pub(super) fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Result<i64, Error> {
     conn.query_row(
         "SELECT k.id FROM ironwood_receiving_keys k JOIN accounts a ON a.id=k.account_id
         WHERE a.uuid=?1 AND k.purpose=?2 AND k.derivation_version=1 AND k.key_index=?3",
@@ -60,7 +60,7 @@ fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Result<i64, E
     .optional()?
     .ok_or_else(|| corrupt("unregistered swap recovery key"))
 }
-fn authenticate<P: Parameters>(
+pub(super) fn authenticate<P: Parameters>(
     conn: &Connection,
     parameters: &P,
     account: AccountUuid,
