@@ -78,11 +78,19 @@ impl RusqliteMigration for Migration {
                 source_id BLOB PRIMARY KEY,
                 accepted_lineage INTEGER NOT NULL,
                 accepted_revision_id BLOB NOT NULL,
+                accepted_sealed INTEGER NOT NULL CHECK (accepted_sealed IN (0, 1)),
+                accepted_anchor_height INTEGER NOT NULL,
+                accepted_anchor_hash BLOB NOT NULL,
                 quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
-                qualified_revision_id BLOB,
-                qualified_lineage INTEGER,
-                trust_epoch INTEGER NOT NULL DEFAULT 0,
-                CHECK ((qualified_revision_id IS NULL) = (qualified_lineage IS NULL))
+                trust_epoch INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE tpir_qualified_revisions (
+                source_id BLOB NOT NULL
+                    REFERENCES tpir_sources(source_id) ON DELETE CASCADE,
+                revision_id BLOB NOT NULL,
+                lineage INTEGER NOT NULL,
+                UNIQUE (source_id, revision_id)
             );
 
             CREATE TABLE tpir_scripts (
@@ -192,6 +200,7 @@ impl RusqliteMigration for Migration {
                 sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
                 anchor_height INTEGER NOT NULL,
                 anchor_hash BLOB NOT NULL,
+                source_trust_epoch INTEGER NOT NULL,
                 page_id BLOB NOT NULL,
                 from_height INTEGER NOT NULL,
                 to_height INTEGER NOT NULL,
@@ -490,6 +499,7 @@ mod tests {
             "tpir_pending_page_scripts",
             "tpir_sources",
             "tpir_unsupported_coverage",
+            "tpir_qualified_revisions",
         ] {
             assert_eq!(count(&db.conn, table), 0, "{table} must start empty");
         }

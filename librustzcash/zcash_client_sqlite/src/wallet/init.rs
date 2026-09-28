@@ -863,6 +863,7 @@ mod tests {
             db::TABLE_TPIR_OUTPUT_ORIGINS,
             db::TABLE_TPIR_PENDING_PAGE_SCRIPTS,
             db::TABLE_TPIR_PENDING_PAGES,
+            db::TABLE_TPIR_QUALIFIED_REVISIONS,
             db::TABLE_TPIR_RECEIVE_EVENTS,
             db::TABLE_TPIR_SCRIPTS,
             db::TABLE_TPIR_SOURCES,

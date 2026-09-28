@@ -821,13 +821,11 @@ CREATE TABLE tpir_account_state (
 /// Recovery sources known to the ledger.
 ///
 /// ### Columns
-/// - `accepted_lineage`, `accepted_revision_id`: the newest publication revision accepted from
-///   the source. Commits from an older lineage are rejected as superseded, and a commit at the
-///   same lineage must cite the same revision to be accepted as a retry.
+/// - `accepted_lineage`, `accepted_revision_id`, `accepted_sealed`, `accepted_anchor_*`: the
+///   complete newest revision accepted from the source. Commits from an older lineage are
+///   rejected as superseded, and a commit at the same lineage must cite the identical revision,
+///   status, and anchor to be accepted as a retry.
 /// - `quarantined`: set when the source's commit contradicted accepted state.
-/// - `qualified_revision_id`, `qualified_lineage`: the one revision that passed production
-///   qualification, set only by source verification and never by a commit. Coverage from any
-///   other revision cannot qualify an account for promotion.
 /// - `trust_epoch`: advanced whenever the source is quarantined or re-verified; commits citing
 ///   an older epoch are rejected as stale.
 pub(super) const TABLE_TPIR_SOURCES: &str = r#"
@@ -835,11 +833,11 @@ CREATE TABLE tpir_sources (
     source_id BLOB PRIMARY KEY,
     accepted_lineage INTEGER NOT NULL,
     accepted_revision_id BLOB NOT NULL,
+    accepted_sealed INTEGER NOT NULL CHECK (accepted_sealed IN (0, 1)),
+    accepted_anchor_height INTEGER NOT NULL,
+    accepted_anchor_hash BLOB NOT NULL,
     quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
-    qualified_revision_id BLOB,
-    qualified_lineage INTEGER,
-    trust_epoch INTEGER NOT NULL DEFAULT 0,
-    CHECK ((qualified_revision_id IS NULL) = (qualified_lineage IS NULL))
+    trust_epoch INTEGER NOT NULL DEFAULT 0
 )"#;
 /// Scripts watched by transparent ledger recovery.
 ///
@@ -955,6 +953,10 @@ CREATE TABLE tpir_coverage (
 pub(super) const INDEX_TPIR_COVERAGE_SCRIPT: &str = r#"
 CREATE INDEX idx_tpir_coverage_script ON tpir_coverage (script_id, from_height)"#;
 /// Bounded, resumable retrieval work and the operation context it was opened under.
+///
+/// `source_trust_epoch` records the source's trust epoch when the page was opened. An
+/// integrity quarantine deletes the pending pages of the quarantined source and affected
+/// accounts, so no page survives into a later trust epoch.
 pub(super) const TABLE_TPIR_PENDING_PAGES: &str = r#"
 CREATE TABLE tpir_pending_pages (
     id INTEGER PRIMARY KEY,
@@ -964,6 +966,7 @@ CREATE TABLE tpir_pending_pages (
     sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
     anchor_height INTEGER NOT NULL,
     anchor_hash BLOB NOT NULL,
+    source_trust_epoch INTEGER NOT NULL,
     page_id BLOB NOT NULL,
     from_height INTEGER NOT NULL,
     to_height INTEGER NOT NULL,
@@ -1014,6 +1017,17 @@ CREATE TABLE tpir_unsupported_coverage (
 pub(super) const INDEX_TPIR_UNSUPPORTED_COVERAGE_SCRIPT: &str = r#"
 CREATE INDEX idx_tpir_unsupported_coverage_script
     ON tpir_unsupported_coverage (script_id)"#;
+/// Source revisions that passed production qualification, set only by source verification and
+/// never by a commit. Each revision is qualified separately; coverage from an unlisted revision
+/// cannot qualify an account for promotion.
+pub(super) const TABLE_TPIR_QUALIFIED_REVISIONS: &str = r#"
+CREATE TABLE tpir_qualified_revisions (
+    source_id BLOB NOT NULL
+        REFERENCES tpir_sources(source_id) ON DELETE CASCADE,
+    revision_id BLOB NOT NULL,
+    lineage INTEGER NOT NULL,
+    UNIQUE (source_id, revision_id)
+)"#;
 /// The provenance of each [`TABLE_TRANSPARENT_RECEIVED_OUTPUTS`] row.
 ///
 /// Every transparent output has at least one origin; origins are removed with their output.
