@@ -10,6 +10,19 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `data_api::transparent_ledger`: the storage-neutral contract for privately
+  recovered transparent ledger state. It adds `ChainPoint`,
+  `TransparentLedgerMode`, `TransparentLedgerSnapshot`, the normalized commit
+  and context types, commit and promotion outcomes, and the
+  `TransparentLedgerRead` and `TransparentLedgerWrite` traits. Stores must reject
+  unconfigured handles and must not fabricate coverage or a spendable private
+  balance.
+- `data_api::history`: vocabulary for partial transaction history, covering
+  owned effects, classification basis, recipients, per-detail state, fee
+  provenance, and mining evidence. It is a contract only; no read method uses
+  it yet.
+
 ### Removed
 - ZIP 318 transaction classification and the canonical-crossing send policy.
   Vizor schedules its own Orchard -> Ironwood migration transfers, so the
