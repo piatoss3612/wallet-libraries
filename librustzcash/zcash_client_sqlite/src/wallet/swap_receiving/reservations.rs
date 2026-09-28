@@ -256,7 +256,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 
     /// Atomically resumes the single draft or locks the lowest never-paid free index.
-    /// Does not expose the address. The caller must complete a current PIR check before quoting.
+    /// Does not expose the address. Complete canonical history and per-key tail verification
+    /// before quoting.
     /// Only canonical received notes advance the recovery bound; local issuance never does.
     pub fn prepare_swap_receive_reservation(
         &mut self,
@@ -299,6 +300,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 
     /// Saves an unknown quote outcome before a network request. A lost response cannot free it.
+    /// Rechecks complete address verification through the current scan frontier atomically.
     pub fn begin_swap_receive_quote(
         &mut self,
         account: AccountUuid,
@@ -410,7 +412,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 
     /// Releases only after successful provider reconciliation and a fresh, complete empty PIR lookup.
-    /// The caller supplies the accepted publication, not a cached empty-result boolean.
+    /// The caller performs a fresh empty PIR lookup and any bounded local tail check,
+    /// then supplies their verified through-anchor, not an unchecked freshness boolean.
     pub fn reclaim_swap_receive_reservation(
         &mut self,
         account: AccountUuid,
