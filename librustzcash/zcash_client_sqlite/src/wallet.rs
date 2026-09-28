@@ -204,6 +204,7 @@ pub(crate) mod sapling;
 pub(crate) mod scanning;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) mod transparent;
+pub(crate) mod transparent_ledger;
 
 pub(crate) const BLOCK_SAPLING_FRONTIER_ABSENT: &[u8] = &[0x0];
 
@@ -3601,7 +3602,12 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
 
     #[cfg(feature = "transparent-inputs")]
     for utxo_outpoint in sent_tx.utxos_spent() {
-        transparent::mark_transparent_utxo_spent(conn, tx_ref, utxo_outpoint)?;
+        transparent::mark_transparent_utxo_spent(
+            conn,
+            tx_ref,
+            utxo_outpoint,
+            Some(transparent_ledger::ProjectionOrigin::LocalConstruction),
+        )?;
     }
 
     // Unlock any notes that were locked for this transaction, since the spend records
@@ -3653,6 +3659,7 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                             ),
                             sent_tx.target_height().into(),
                             true,
+                            transparent_ledger::ProjectionOrigin::LocalConstruction,
                         )?;
                     }
                 }
@@ -3749,6 +3756,7 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                     .expect("can extract a recipient address from an ephemeral address script"),
                     sent_tx.target_height().into(),
                     true,
+                    transparent_ledger::ProjectionOrigin::LocalConstruction,
                 )?;
             }
             #[cfg(feature = "transparent-inputs")]
@@ -3775,6 +3783,7 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                     .expect("can extract a recipient address from a transparent recipient_address"),
                     sent_tx.target_height().into(),
                     true,
+                    transparent_ledger::ProjectionOrigin::LocalConstruction,
                 )?;
             }
         }

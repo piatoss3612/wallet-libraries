@@ -3139,6 +3139,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             output,
             observation_height,
             known_unspent,
+            wallet::transparent_ledger::ProjectionOrigin::LegacyPublic,
         )?;
 
         Ok((account_uuid, key_scope.as_transparent()))
@@ -3150,7 +3151,12 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         outpoint: &OutPoint,
         spent_in_tx: Self::TxRef,
     ) -> Result<bool, Self::Error> {
-        wallet::transparent::mark_transparent_utxo_spent(self.conn.borrow(), spent_in_tx, outpoint)
+        wallet::transparent::mark_transparent_utxo_spent(
+            self.conn.borrow(),
+            spent_in_tx,
+            outpoint,
+            Some(wallet::transparent_ledger::ProjectionOrigin::LegacyPublic),
+        )
     }
 
     #[cfg(feature = "transparent-inputs")]

@@ -770,6 +770,204 @@ CREATE INDEX idx_transparent_spend_map_transaction_id ON transparent_spend_map (
     spending_transaction_id ASC
 )"#;
 
+// Transparent ledger (`tpir_*`) tables. See `docs/transparent-pir-ledger-architecture.md`.
+
+/// The durable transparent ledger policy, as a single row.
+///
+/// ### Columns
+/// - `applied_mode`: the transparent ledger mode durably applied to this wallet: 0 public,
+///   1 private shadow, 2 private required. A handle configured with a weaker mode than a
+///   durably applied private-required policy is rejected; the stored policy is never weakened
+///   by a handle's configuration.
+/// - `policy_generation`: incremented by each policy transition, so that operations captured
+///   under an earlier policy can be rejected.
+/// - `min_reader_version`: the lowest ledger reader version permitted to operate on this
+///   wallet's ledger state.
+pub(super) const TABLE_TPIR_META: &str = r#"
+CREATE TABLE tpir_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 0),
+    applied_mode INTEGER NOT NULL CHECK (applied_mode IN (0, 1, 2)),
+    policy_generation INTEGER NOT NULL CHECK (policy_generation >= 0),
+    min_reader_version INTEGER NOT NULL CHECK (min_reader_version >= 1)
+)"#;
+/// Per-account transparent ledger lifecycle.
+///
+/// An account without a row has legacy public lifecycle: its transparent records came from
+/// public discovery and it has no private ledger state.
+///
+/// ### Columns
+/// - `lifecycle`: 0 candidate (isolated recovery), 1 active (promoted private authority).
+/// - `lifecycle_generation`: incremented on each lifecycle change.
+/// - `watch_generation`: incremented when the account's watched scripts or bounds change.
+/// - `activated_height`, `activated_hash`: the accepted point of promotion, when active.
+pub(super) const TABLE_TPIR_ACCOUNT_STATE: &str = r#"
+CREATE TABLE tpir_account_state (
+    account_id INTEGER PRIMARY KEY
+        REFERENCES accounts(id) ON DELETE CASCADE,
+    lifecycle INTEGER NOT NULL CHECK (lifecycle IN (0, 1)),
+    lifecycle_generation INTEGER NOT NULL,
+    watch_generation INTEGER NOT NULL,
+    activated_height INTEGER,
+    activated_hash BLOB,
+    CHECK ((activated_height IS NULL) = (activated_hash IS NULL)),
+    CHECK (lifecycle = 0 OR activated_height IS NOT NULL)
+)"#;
+/// Scripts watched by transparent ledger recovery.
+///
+/// ### Columns
+/// - `key_scope`, `child_index`: derivation information; `child_index` is null for imported
+///   scripts. Scripts derived only for candidate recovery need not have an `addresses` row.
+/// - `required_from`: the conservative lower bound of the script's history; null means the
+///   start is unknown and recovery must begin at genesis.
+/// - `watch_generation`: the account watch-set generation that introduced the script.
+pub(super) const TABLE_TPIR_SCRIPTS: &str = r#"
+CREATE TABLE tpir_scripts (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL
+        REFERENCES accounts(id) ON DELETE CASCADE,
+    script BLOB NOT NULL UNIQUE,
+    key_scope INTEGER NOT NULL,
+    child_index INTEGER,
+    address_id INTEGER
+        REFERENCES addresses(id) ON DELETE SET NULL,
+    required_from INTEGER,
+    watch_generation INTEGER NOT NULL
+)"#;
+pub(super) const INDEX_TPIR_SCRIPTS_ACCOUNT: &str = r#"
+CREATE INDEX idx_tpir_scripts_account ON tpir_scripts (account_id)"#;
+/// Immutable content of recovered receives, identified by `(txid, output_index)`.
+///
+/// Coinbase classification is explicit and never inferred from a missing transaction index.
+pub(super) const TABLE_TPIR_RECEIVE_EVENTS: &str = r#"
+CREATE TABLE tpir_receive_events (
+    id INTEGER PRIMARY KEY,
+    txid BLOB NOT NULL,
+    output_index INTEGER NOT NULL,
+    script BLOB NOT NULL,
+    value_zat INTEGER NOT NULL CHECK (value_zat >= 0),
+    is_coinbase INTEGER NOT NULL CHECK (is_coinbase IN (0, 1)),
+    UNIQUE (txid, output_index)
+)"#;
+pub(super) const INDEX_TPIR_RECEIVE_EVENTS_SCRIPT: &str = r#"
+CREATE INDEX idx_tpir_receive_events_script ON tpir_receive_events (script)"#;
+/// Immutable content of recovered spends, identified by `(spending_txid, input_index)`.
+///
+/// The spent outpoint is checked content. A spend may be recorded before its output.
+pub(super) const TABLE_TPIR_SPEND_EVENTS: &str = r#"
+CREATE TABLE tpir_spend_events (
+    id INTEGER PRIMARY KEY,
+    spending_txid BLOB NOT NULL,
+    input_index INTEGER NOT NULL,
+    prevout_txid BLOB NOT NULL,
+    prevout_output_index INTEGER NOT NULL,
+    UNIQUE (spending_txid, input_index)
+)"#;
+pub(super) const INDEX_TPIR_SPEND_EVENTS_PREVOUT: &str = r#"
+CREATE INDEX idx_tpir_spend_events_prevout ON tpir_spend_events (
+    prevout_txid, prevout_output_index
+)"#;
+/// Canonical mined placement of recovered transactions on the locally accepted chain.
+///
+/// Placement is separate from event identity: re-mining changes placement only.
+pub(super) const TABLE_TPIR_EVENT_PLACEMENTS: &str = r#"
+CREATE TABLE tpir_event_placements (
+    txid BLOB PRIMARY KEY,
+    mined_height INTEGER NOT NULL,
+    block_hash BLOB NOT NULL
+)"#;
+/// The publication revisions that supplied each recovered event.
+///
+/// Seeing identical content in another revision is not a contradiction.
+pub(super) const TABLE_TPIR_EVENT_OBSERVATIONS: &str = r#"
+CREATE TABLE tpir_event_observations (
+    id INTEGER PRIMARY KEY,
+    receive_event_id INTEGER
+        REFERENCES tpir_receive_events(id) ON DELETE CASCADE,
+    spend_event_id INTEGER
+        REFERENCES tpir_spend_events(id) ON DELETE CASCADE,
+    source_id BLOB NOT NULL,
+    revision_id BLOB NOT NULL,
+    anchor_height INTEGER NOT NULL,
+    anchor_hash BLOB NOT NULL,
+    record_digest BLOB,
+    CHECK ((receive_event_id IS NULL) != (spend_event_id IS NULL))
+)"#;
+pub(super) const INDEX_TPIR_EVENT_OBSERVATIONS_RECEIVE: &str = r#"
+CREATE UNIQUE INDEX idx_tpir_event_observations_receive
+    ON tpir_event_observations (receive_event_id, source_id, revision_id)
+    WHERE receive_event_id IS NOT NULL"#;
+pub(super) const INDEX_TPIR_EVENT_OBSERVATIONS_SPEND: &str = r#"
+CREATE UNIQUE INDEX idx_tpir_event_observations_spend
+    ON tpir_event_observations (spend_event_id, source_id, revision_id)
+    WHERE spend_event_id IS NOT NULL"#;
+/// Checked, continuous per-script height intervals.
+///
+/// Each interval binds its accepted endpoint and the publication anchor of the revision that
+/// supplied it. Empty checked ranges are coverage; the absence of rows is not.
+pub(super) const TABLE_TPIR_COVERAGE: &str = r#"
+CREATE TABLE tpir_coverage (
+    id INTEGER PRIMARY KEY,
+    script_id INTEGER NOT NULL
+        REFERENCES tpir_scripts(id) ON DELETE CASCADE,
+    from_height INTEGER NOT NULL,
+    through_height INTEGER NOT NULL,
+    through_hash BLOB NOT NULL,
+    source_id BLOB NOT NULL,
+    revision_id BLOB NOT NULL,
+    sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
+    anchor_height INTEGER NOT NULL,
+    anchor_hash BLOB NOT NULL,
+    CHECK (from_height <= through_height)
+)"#;
+pub(super) const INDEX_TPIR_COVERAGE_SCRIPT: &str = r#"
+CREATE INDEX idx_tpir_coverage_script ON tpir_coverage (script_id, from_height)"#;
+/// Bounded, resumable retrieval work and the operation context it was opened under.
+pub(super) const TABLE_TPIR_PENDING_PAGES: &str = r#"
+CREATE TABLE tpir_pending_pages (
+    id INTEGER PRIMARY KEY,
+    source_id BLOB NOT NULL,
+    revision_id BLOB NOT NULL,
+    page_id BLOB NOT NULL,
+    from_height INTEGER NOT NULL,
+    to_height INTEGER NOT NULL,
+    lifecycle INTEGER NOT NULL CHECK (lifecycle IN (0, 1)),
+    policy_generation INTEGER NOT NULL,
+    target_height INTEGER NOT NULL,
+    target_hash BLOB NOT NULL,
+    UNIQUE (source_id, revision_id, page_id),
+    CHECK (from_height <= to_height)
+)"#;
+/// The provenance of each [`TABLE_TRANSPARENT_RECEIVED_OUTPUTS`] row.
+///
+/// Every transparent output has at least one origin; origins are removed with their output.
+///
+/// ### Columns
+/// - `origin`: 0 legacy public (public discovery, or a record that existed before this table),
+///   1 local construction, 2 ledger event, 3 independently authorized payload. Legacy and local
+///   origins never constitute ledger coverage.
+pub(super) const TABLE_TPIR_OUTPUT_ORIGINS: &str = r#"
+CREATE TABLE tpir_output_origins (
+    output_id INTEGER NOT NULL
+        REFERENCES transparent_received_outputs(id) ON DELETE CASCADE,
+    origin INTEGER NOT NULL CHECK (origin IN (0, 1, 2, 3)),
+    UNIQUE (output_id, origin)
+)"#;
+/// The provenance of each transparent spend, keyed by its natural identity.
+///
+/// A spend is recorded either in [`TABLE_TRANSPARENT_RECEIVED_OUTPUT_SPENDS`] or, before its
+/// output is known, in [`TABLE_TRANSPARENT_SPEND_MAP`]. Every such spend has at least one origin
+/// row with the same spending transaction and prevout; origins are removed with the spending
+/// transaction. `origin` codes match [`TABLE_TPIR_OUTPUT_ORIGINS`].
+pub(super) const TABLE_TPIR_SPEND_ORIGINS: &str = r#"
+CREATE TABLE tpir_spend_origins (
+    spending_transaction_id INTEGER NOT NULL
+        REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    prevout_txid BLOB NOT NULL,
+    prevout_output_index INTEGER NOT NULL,
+    origin INTEGER NOT NULL CHECK (origin IN (0, 1, 2, 3)),
+    UNIQUE (spending_transaction_id, prevout_txid, prevout_output_index, origin)
+)"#;
+
 /// Stores the outputs of transactions created by the wallet.
 ///
 /// Unlike with outputs received by the wallet, we store sent outputs for all pools in
