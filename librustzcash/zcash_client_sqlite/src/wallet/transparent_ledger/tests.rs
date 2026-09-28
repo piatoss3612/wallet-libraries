@@ -391,12 +391,12 @@ mod handles {
             WalletWrite as _,
             testing::{AddressType, single_output_change_strategy},
             transparent_ledger::{
-                ChainPoint, CommitOutcome, CommitRejection, LastKnownSource, LedgerLifecycle,
-                Placed, PromotionContext, PromotionOutcome, PromotionRejection, PublicationAnchor,
-                PublicationStatus, ReceiveEvent, RecoveryBlocker, RecoveryCompletion, RevisionId,
-                SourceId, SourceRevision, TransparentAuthority, TransparentLedgerCommit,
-                TransparentLedgerContext, TransparentLedgerMode, TransparentLedgerRead as _,
-                TransparentLedgerWrite as _,
+                AccountLifecycle, ChainPoint, CommitOutcome, CommitRejection, LastKnownSource,
+                LedgerLifecycle, Placed, PromotionContext, PromotionOutcome, PromotionRejection,
+                PublicationAnchor, PublicationStatus, ReceiveEvent, RecoveryBlocker,
+                RecoveryCompletion, RevisionId, SourceId, SourceRevision, TransparentAuthority,
+                TransparentLedgerCommit, TransparentLedgerContext, TransparentLedgerMode,
+                TransparentLedgerRead as _, TransparentLedgerWrite as _,
             },
             wallet::{
                 ConfirmationsPolicy, TargetHeight,
@@ -906,6 +906,15 @@ mod handles {
         assert_eq!(snapshot.accounts.len(), 1);
         assert_eq!(snapshot.accounts[0].account, account);
         assert_eq!(snapshot.accounts[0].watch_generation, 0);
+        assert_eq!(
+            snapshot.accounts[0].lifecycle,
+            AccountLifecycle::LegacyPublic
+        );
+        assert_eq!(
+            snapshot.accounts[0].lifecycle.commit_destination(),
+            LedgerLifecycle::Candidate
+        );
+        assert!(!snapshot.accounts[0].quarantined);
         assert!(snapshot.scripts.is_empty());
     }
 
@@ -976,5 +985,79 @@ mod handles {
         for error in selector_errors(&st, &funded) {
             assert!(matches!(error, Some(SqliteClientError::CorruptedData(_))));
         }
+    }
+
+    #[test]
+    fn pending_pages_are_enumerable_after_restart() {
+        let (mut st, _, _) = funded_wallet();
+        conn(&st)
+            .execute_batch(
+                "INSERT INTO tpir_scripts (id, account_id, script, key_scope, required_from,
+                     watch_generation)
+                 VALUES (1, 1, X'76A9', 0, NULL, 1);
+                 INSERT INTO tpir_pending_pages (id, source_id, revision_id, lineage, sealed,
+                     anchor_height, anchor_hash, page_id, from_height, to_height, lifecycle,
+                     policy_generation, target_height, target_hash)
+                 VALUES (1, X'01', X'02', 3, 1, 20, zeroblob(32), X'03', 5, 9, 0, 0, 18,
+                     zeroblob(32));
+                 INSERT INTO tpir_pending_page_scripts (pending_page_id, script_id) VALUES (1, 1);",
+            )
+            .unwrap();
+        // Reopening the handle loses nothing: pages are read from durable state.
+        set_mode(&mut st, PrivateShadow);
+        let pages = st.wallet().db().transparent_ledger_pending_pages().unwrap();
+        assert_eq!(pages.len(), 1);
+        let page = &pages[0];
+        assert_eq!(page.source.source.as_bytes(), &[1]);
+        assert_eq!(page.source.revision.as_bytes(), &[2]);
+        assert_eq!(page.source.lineage, 3);
+        assert_eq!(page.source.status, PublicationStatus::Sealed);
+        assert_eq!(page.source.anchor.height, BlockHeight::from(20));
+        assert_eq!(page.page.page.as_bytes(), &[3]);
+        assert_eq!(
+            (page.page.from, page.page.to),
+            (BlockHeight::from(5), BlockHeight::from(9))
+        );
+        assert_eq!(page.page.scripts.len(), 1);
+        assert_eq!(page.lifecycle, LedgerLifecycle::Candidate);
+        assert_eq!(page.target.height, BlockHeight::from(18));
+    }
+
+    #[test]
+    fn dropped_policy_table_after_migration_is_corruption() {
+        let (st, _, funded) = funded_wallet();
+        conn(&st).execute_batch("DROP TABLE tpir_meta").unwrap();
+        assert!(matches!(
+            st.wallet().db().transparent_ledger_mode(),
+            Err(SqliteClientError::CorruptedData(_))
+        ));
+        for error in selector_errors(&st, &funded) {
+            assert!(matches!(error, Some(SqliteClientError::CorruptedData(_))));
+        }
+    }
+
+    #[test]
+    fn unknown_chain_has_no_public_authority() {
+        let st = zcash_client_backend::data_api::testing::TestBuilder::new()
+            .with_data_store_factory(crate::testing::db::TestDbFactory::default())
+            .with_block_cache(crate::testing::BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        if st.wallet().chain_height().unwrap().is_some() {
+            conn(&st)
+                .execute_batch("DELETE FROM blocks; DELETE FROM scan_queue;")
+                .unwrap();
+        }
+        assert_eq!(st.wallet().chain_height().unwrap(), None);
+        let account = st.test_account().unwrap().id();
+        let snapshot = st
+            .wallet()
+            .db()
+            .transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN)
+            .unwrap();
+        assert_eq!(snapshot.authority, TransparentAuthority::Unavailable);
+        assert_eq!(snapshot.authorized, None);
+        assert_eq!(snapshot.completion, RecoveryCompletion::Blocked);
+        assert_eq!(snapshot.blockers, vec![RecoveryBlocker::ChainUnknown]);
     }
 }

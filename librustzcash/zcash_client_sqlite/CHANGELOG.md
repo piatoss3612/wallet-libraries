@@ -50,8 +50,14 @@ workspace.
   `SqliteClientError::PublicTransparentDiscoveryForbidden`. `get_wallet_summary`
   omits transparent funds when private authority is required by the handle or
   by the durable policy.
-- A `tpir_meta` table without its policy row is reported as corrupted data,
-  never as a wallet without a policy.
+- A `tpir_meta` table without its policy row, or a missing `tpir_meta` after
+  the ledger migration has been recorded, is reported as corrupted data, never
+  as a wallet without a policy.
+- The ledger snapshot reports `Unavailable` authority, never public authority,
+  while the chain tip is unknown or transparent state cannot be read.
+- `transparent_ledger_pending_pages` enumerates durable pending pages with their
+  source revision, captured context, and affected scripts. The watched-script
+  snapshot reports each account's lifecycle and quarantine.
 - Projection origins for new transparent records: public discovery writes
   record a legacy-public origin, and local construction records a local
   origin, in the same transaction as the record.

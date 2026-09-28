@@ -11,11 +11,13 @@
 use rusqlite::OptionalExtension as _;
 use zcash_client_backend::data_api::{
     transparent_ledger::{
-        AccountWatchGeneration, CommitOutcome, CommitRejection, LastKnownBalance, LastKnownSource,
-        PromotionContext, PromotionOutcome, PromotionRejection, RecoveryBlocker,
-        RecoveryCompletion, RecoveryDiagnostics, RecoveryStart, TransparentAuthority,
-        TransparentLedgerBalance, TransparentLedgerCommit, TransparentLedgerMode,
-        TransparentLedgerSnapshot, WatchedScript, WatchedScriptSnapshot,
+        AccountLifecycle, ChainPoint, CommitOutcome, CommitRejection, LastKnownBalance,
+        LastKnownSource, LedgerLifecycle, OutstandingPage, PageId, PendingPage, PromotionContext,
+        PromotionOutcome, PromotionRejection, PublicationAnchor, PublicationStatus,
+        RecoveryBlocker, RecoveryCompletion, RecoveryDiagnostics, RecoveryStart, RevisionId,
+        SourceId, SourceRevision, TransparentAuthority, TransparentLedgerBalance,
+        TransparentLedgerCommit, TransparentLedgerMode, TransparentLedgerSnapshot, WatchedAccount,
+        WatchedScript, WatchedScriptSnapshot,
     },
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
@@ -72,7 +74,22 @@ pub(crate) fn durable_policy(
         |row| row.get(0),
     )?;
     if !has_meta {
-        return Ok(None);
+        // Only a wallet that never ran the ledger migration may lack the policy table. Once
+        // the migration is recorded, a missing table is damage and must not read as public.
+        let migrated: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM schemer_migrations WHERE id = ?1)",
+            [super::init::migrations::TRANSPARENT_LEDGER_SCHEMA_ID
+                .as_bytes()
+                .to_vec()],
+            |row| row.get(0),
+        )?;
+        return if migrated {
+            Err(SqliteClientError::CorruptedData(
+                "tpir_meta is missing after the transparent ledger migration".into(),
+            ))
+        } else {
+            Ok(None)
+        };
     }
     conn.query_row(
         "SELECT applied_mode, policy_generation, min_reader_version FROM tpir_meta WHERE id = 0",
@@ -251,6 +268,7 @@ pub(crate) fn snapshot(
 
     // No account can hold private ledger state yet, so authority follows the mode alone.
     let mut blockers = vec![];
+    let chain_known = chain_tip_height(conn)?.is_some();
     let balance = match chain_tip_height(conn)? {
         None => {
             blockers.push(RecoveryBlocker::ChainUnknown);
@@ -265,26 +283,36 @@ pub(crate) fn snapshot(
             balance
         }
     };
-    let (authority, authorized, last_known, completion) = if mode.retains_public_authority() {
-        (
-            TransparentAuthority::Public,
-            balance,
-            None,
-            RecoveryCompletion::NotApplicable,
-        )
-    } else {
-        blockers.push(RecoveryBlocker::PrivateRecoveryUnavailable);
-        (
-            TransparentAuthority::Unavailable,
-            None,
-            balance.map(|balance| LastKnownBalance {
+    let (authority, authorized, last_known, completion) =
+        if !chain_known || (mode.retains_public_authority() && balance.is_none()) {
+            // Authority cannot be established before the chain is known, or when this build cannot
+            // read transparent state. Unavailable is never reported as public authority.
+            (
+                TransparentAuthority::Unavailable,
+                None,
+                None,
+                RecoveryCompletion::Blocked,
+            )
+        } else if mode.retains_public_authority() {
+            (
+                TransparentAuthority::Public,
                 balance,
-                source: LastKnownSource::LegacyPublic,
-                at: None,
-            }),
-            RecoveryCompletion::Blocked,
-        )
-    };
+                None,
+                RecoveryCompletion::NotApplicable,
+            )
+        } else {
+            blockers.push(RecoveryBlocker::PrivateRecoveryUnavailable);
+            (
+                TransparentAuthority::Unavailable,
+                None,
+                balance.map(|balance| LastKnownBalance {
+                    balance,
+                    source: LastKnownSource::LegacyPublic,
+                    at: None,
+                }),
+                RecoveryCompletion::Blocked,
+            )
+        };
 
     Ok(TransparentLedgerSnapshot {
         account,
@@ -310,20 +338,31 @@ pub(crate) fn watched_scripts(
     conn: &rusqlite::Connection,
     durable: Option<DurablePolicy>,
 ) -> Result<WatchedScriptSnapshot<AccountUuid>, SqliteClientError> {
-    let accounts = conn
-        .prepare(
-            "SELECT a.uuid, IFNULL(s.watch_generation, 0)
-             FROM accounts a
-             LEFT JOIN tpir_account_state s ON s.account_id = a.id
-             ORDER BY a.id",
-        )?
-        .query_map([], |row| {
-            Ok(AccountWatchGeneration {
-                account: AccountUuid(row.get(0)?),
-                watch_generation: row.get::<_, i64>(1)?.try_into().unwrap_or(u64::MAX),
-            })
-        })?
-        .collect::<Result<_, _>>()?;
+    let mut accounts = vec![];
+    let mut stmt = conn.prepare(
+        "SELECT a.uuid, IFNULL(s.watch_generation, 0), s.lifecycle, IFNULL(s.quarantined, 0)
+         FROM accounts a
+         LEFT JOIN tpir_account_state s ON s.account_id = a.id
+         ORDER BY a.id",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        accounts.push(WatchedAccount {
+            account: AccountUuid(row.get(0)?),
+            watch_generation: to_u64(row.get(1)?)?,
+            lifecycle: match row.get::<_, Option<i64>>(2)? {
+                None => AccountLifecycle::LegacyPublic,
+                Some(0) => AccountLifecycle::Candidate,
+                Some(1) => AccountLifecycle::Active,
+                Some(other) => {
+                    return Err(SqliteClientError::CorruptedData(format!(
+                        "unknown transparent ledger lifecycle {other}"
+                    )));
+                }
+            },
+            quarantined: row.get(3)?,
+        });
+    }
     let scripts = conn
         .prepare(
             "SELECT a.uuid, s.script, s.required_from
@@ -347,6 +386,97 @@ pub(crate) fn watched_scripts(
         accounts,
         scripts,
     })
+}
+
+fn to_u64(value: i64) -> Result<u64, SqliteClientError> {
+    u64::try_from(value)
+        .map_err(|_| SqliteClientError::CorruptedData(format!("negative ledger counter {value}")))
+}
+
+fn to_height(value: i64) -> Result<zcash_protocol::consensus::BlockHeight, SqliteClientError> {
+    u32::try_from(value)
+        .map(Into::into)
+        .map_err(|_| SqliteClientError::CorruptedData(format!("invalid ledger height {value}")))
+}
+
+fn to_hash(bytes: Vec<u8>) -> Result<zcash_primitives::block::BlockHash, SqliteClientError> {
+    zcash_primitives::block::BlockHash::try_from_slice(&bytes)
+        .ok_or_else(|| SqliteClientError::CorruptedData("invalid ledger block hash".into()))
+}
+
+fn opaque<T>(
+    bytes: Vec<u8>,
+    new: impl FnOnce(
+        Vec<u8>,
+    )
+        -> Result<T, zcash_client_backend::data_api::transparent_ledger::OpaqueIdError>,
+) -> Result<T, SqliteClientError> {
+    new(bytes).map_err(|e| SqliteClientError::CorruptedData(format!("invalid ledger id: {e:?}")))
+}
+
+/// Reads every durable pending page with its source revision, captured context, and affected
+/// watched scripts.
+pub(crate) fn pending_pages(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<OutstandingPage>, SqliteClientError> {
+    let mut scripts_stmt = conn.prepare(
+        "SELECT s.script FROM tpir_pending_page_scripts ps
+         JOIN tpir_scripts s ON s.id = ps.script_id
+         WHERE ps.pending_page_id = ?1
+         ORDER BY s.id",
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT id, source_id, revision_id, lineage, sealed, anchor_height, anchor_hash,
+                page_id, from_height, to_height, lifecycle, policy_generation,
+                target_height, target_hash
+         FROM tpir_pending_pages
+         ORDER BY id",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut pages = vec![];
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let scripts = scripts_stmt
+            .query_map([id], |r| {
+                Ok(transparent::address::Script(zcash_script::script::Code(
+                    r.get(0)?,
+                )))
+            })?
+            .collect::<Result<_, _>>()?;
+        pages.push(OutstandingPage {
+            source: SourceRevision {
+                source: opaque(row.get(1)?, SourceId::new)?,
+                revision: opaque(row.get(2)?, RevisionId::new)?,
+                lineage: to_u64(row.get(3)?)?,
+                status: if row.get(4)? {
+                    PublicationStatus::Sealed
+                } else {
+                    PublicationStatus::Provisional
+                },
+                anchor: PublicationAnchor {
+                    height: to_height(row.get(5)?)?,
+                    hash: to_hash(row.get(6)?)?,
+                },
+            },
+            page: PendingPage {
+                page: opaque(row.get(7)?, PageId::new)?,
+                from: to_height(row.get(8)?)?,
+                to: to_height(row.get(9)?)?,
+                scripts,
+            },
+            lifecycle: if row.get::<_, i64>(10)? == 1 {
+                LedgerLifecycle::Active
+            } else {
+                LedgerLifecycle::Candidate
+            },
+            policy_generation: to_u64(row.get(11)?)?,
+            target: ChainPoint {
+                height: to_height(row.get(12)?)?,
+                hash: to_hash(row.get(13)?)?,
+            },
+        });
+    }
+    Ok(pages)
 }
 
 /// Validates a commit's context and rejects it: no ledger state is writable yet. Nothing is

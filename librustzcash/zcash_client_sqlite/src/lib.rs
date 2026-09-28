@@ -42,7 +42,7 @@ use zcash_client_backend::data_api::status::{
     TransactionStatusMode, TransactionStatusRead, TransactionStatusWork, TransactionStatusWrite,
 };
 use zcash_client_backend::data_api::transparent_ledger::{
-    CommitOutcome, PromotionContext, PromotionOutcome, TransparentLedgerCommit,
+    CommitOutcome, OutstandingPage, PromotionContext, PromotionOutcome, TransparentLedgerCommit,
     TransparentLedgerMode, TransparentLedgerRead, TransparentLedgerSnapshot,
     TransparentLedgerWrite, WatchedScriptSnapshot,
 };
@@ -1671,6 +1671,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         } else {
             read(conn)
         }
+    }
+
+    fn transparent_ledger_pending_pages(&self) -> Result<Vec<OutstandingPage>, Self::Error> {
+        let conn = self.conn.borrow();
+        wallet::transparent_ledger::resolve_mode(conn, self.transparent_ledger_mode)?;
+        wallet::transparent_ledger::pending_pages(conn)
     }
 
     fn transparent_ledger_watched_scripts(
