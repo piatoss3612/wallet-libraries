@@ -181,7 +181,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::TransparentLedgerModeNotConfigured
         | SqliteClientError::TransparentLedgerPolicyConflict { .. }
         | SqliteClientError::TransparentAuthorityUnavailable
-        | SqliteClientError::TransparentLedgerIncompatible { .. } => {
+        | SqliteClientError::TransparentLedgerIncompatible { .. }
+        | SqliteClientError::PublicTransparentDiscoveryForbidden => {
             unreachable!("migrations neither use ledger APIs nor select transparent inputs")
         }
         SqliteClientError::CorruptedData(e) => WalletMigrationError::CorruptedData(e),

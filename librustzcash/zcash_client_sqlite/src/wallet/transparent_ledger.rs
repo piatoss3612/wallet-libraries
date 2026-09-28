@@ -86,6 +86,9 @@ pub(crate) fn durable_policy(
         },
     )
     .optional()?
+    // Once the table exists, a missing singleton is damage, not the absence of a policy.
+    .ok_or_else(|| SqliteClientError::CorruptedData("tpir_meta policy row is missing".into()))
+    .map(Some)?
     .map(|(mode, generation, min_reader_version)| {
         if min_reader_version > TPIR_READER_VERSION {
             return Err(SqliteClientError::TransparentLedgerIncompatible {
@@ -136,21 +139,63 @@ pub(crate) fn resolve_mode(
 
 /// Checks that the handle may authorize consuming transparent inputs.
 ///
-/// Public authority is retained by `Public` and `PrivateShadow` handles, and by unconfigured
-/// handles unless the wallet durably requires private authority. Private authority is not yet
+/// Public authority is retained only by explicitly configured `Public` and `PrivateShadow`
+/// handles; financial authorization never defaults to public. Private authority is not yet
 /// available, so `PrivateRequired` handles are rejected.
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn check_transparent_authority(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<(), SqliteClientError> {
-    check_not_weaker(configured, durable_policy(conn)?)?;
-    match configured {
-        Some(TransparentLedgerMode::PrivateRequired) => {
+    match resolve_mode(conn, configured)?.0 {
+        TransparentLedgerMode::PrivateRequired => {
             Err(SqliteClientError::TransparentAuthorityUnavailable)
         }
-        _ => Ok(()),
+        TransparentLedgerMode::Public | TransparentLedgerMode::PrivateShadow => Ok(()),
     }
+}
+
+#[cfg(feature = "transparent-inputs")]
+/// Returns whether public transparent discovery is permitted for this handle. It requires an
+/// explicitly configured mode that retains public authority.
+pub(crate) fn public_discovery_permitted(
+    conn: &rusqlite::Connection,
+    configured: Option<TransparentLedgerMode>,
+) -> Result<bool, SqliteClientError> {
+    Ok(resolve_mode(conn, configured)?.0.retains_public_authority())
+}
+
+/// Rejects recording publicly discovered transparent data unless public discovery is permitted.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn check_public_discovery(
+    conn: &rusqlite::Connection,
+    configured: Option<TransparentLedgerMode>,
+) -> Result<(), SqliteClientError> {
+    if public_discovery_permitted(conn, configured)? {
+        Ok(())
+    } else {
+        Err(SqliteClientError::PublicTransparentDiscoveryForbidden)
+    }
+}
+
+/// Returns whether the whole-wallet summary may report transparent funds as current.
+///
+/// Under a required-private policy, whether configured on the handle or durably applied, no
+/// current transparent authority exists, so the summary omits those funds; the ledger snapshot
+/// reports them as last-known instead. The summary is display-only, so an unconfigured handle
+/// on a wallet without a private policy keeps reporting them.
+pub(crate) fn summary_includes_transparent(
+    conn: &rusqlite::Connection,
+    configured: Option<TransparentLedgerMode>,
+) -> Result<bool, SqliteClientError> {
+    let durable_private = matches!(
+        durable_policy(conn)?,
+        Some(DurablePolicy {
+            mode: TransparentLedgerMode::PrivateRequired,
+            ..
+        })
+    );
+    Ok(!durable_private && configured != Some(TransparentLedgerMode::PrivateRequired))
 }
 
 /// Reads the account's transparent balance. Without transparent support this build cannot

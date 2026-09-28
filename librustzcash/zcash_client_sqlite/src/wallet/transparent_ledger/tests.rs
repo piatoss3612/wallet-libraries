@@ -388,6 +388,7 @@ mod handles {
     use zcash_client_backend::{
         data_api::{
             Account as _, CoinbaseFilter, InputSource as _, TargetValue, WalletRead as _,
+            WalletWrite as _,
             testing::{AddressType, single_output_change_strategy},
             transparent_ledger::{
                 ChainPoint, CommitOutcome, CommitRejection, LastKnownSource, LedgerLifecycle,
@@ -424,7 +425,9 @@ mod handles {
         testing::db::{test_clock, test_rng},
         wallet::{
             init::WalletMigrator,
-            transparent_ledger::{check_transparent_authority, set_durable_policy_for_testing},
+            transparent_ledger::{
+                check_public_discovery, check_transparent_authority, set_durable_policy_for_testing,
+            },
         },
     };
 
@@ -452,6 +455,7 @@ mod handles {
             source: SourceRevision {
                 source: SourceId::new(b"source".to_vec()).unwrap(),
                 revision: RevisionId::new(b"revision".to_vec()).unwrap(),
+                lineage: 0,
                 status: PublicationStatus::Provisional,
                 anchor: PublicationAnchor {
                     height: BlockHeight::from(2),
@@ -851,10 +855,7 @@ mod handles {
         // An unconfigured handle is blocked too.
         assert!(matches!(
             check_transparent_authority(conn(&st), None),
-            Err(SqliteClientError::TransparentLedgerPolicyConflict {
-                configured: None,
-                applied: PrivateRequired,
-            })
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
         ));
 
         // A matching handle operates, with transparent inputs still unavailable.
@@ -906,5 +907,74 @@ mod handles {
         assert_eq!(snapshot.accounts[0].account, account);
         assert_eq!(snapshot.accounts[0].watch_generation, 0);
         assert!(snapshot.scripts.is_empty());
+    }
+
+    #[test]
+    fn unconfigured_handles_cannot_authorize_or_discover_transparent_funds() {
+        assert!(matches!(
+            check_transparent_authority(conn(&funded_wallet().0), None),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        assert!(matches!(
+            check_public_discovery(conn(&funded_wallet().0), None),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+    }
+
+    #[test]
+    fn private_required_stops_public_discovery_and_current_balances() {
+        let (mut st, taddr, _) = funded_wallet();
+        let (account, _) = account_taddr(&st);
+        let transparent_total = |st: &State| {
+            st.wallet()
+                .get_wallet_summary(ConfirmationsPolicy::MIN)
+                .unwrap()
+                .unwrap()
+                .account_balances()[&account]
+                .unshielded_balance()
+                .total()
+        };
+        assert_eq!(transparent_total(&st), Zatoshis::const_from_u64(100_000));
+        assert!(!st.wallet().transaction_data_requests().unwrap().is_empty());
+
+        set_mode(&mut st, PrivateRequired);
+        // Public history requests are withheld, and publicly discovered outputs are refused.
+        assert!(st.wallet().transaction_data_requests().unwrap().is_empty());
+        let height = st.wallet().chain_height().unwrap().unwrap();
+        let utxo = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+            OutPoint::new([0x43; 32], 0),
+            transparent::bundle::TxOut::new(Zatoshis::const_from_u64(5_000), taddr.script().into()),
+            Some(height),
+            Some(account),
+            Some(transparent::keys::TransparentKeyScope::EXTERNAL),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            st.wallet_mut()
+                .db_mut()
+                .put_received_transparent_utxo(&utxo),
+            Err(SqliteClientError::PublicTransparentDiscoveryForbidden)
+        ));
+        // The summary no longer reports the public amount as current funds.
+        assert_eq!(transparent_total(&st), Zatoshis::ZERO);
+
+        // A durable private policy has the same effect on a weaker handle's summary.
+        set_mode(&mut st, Public);
+        set_durable_policy_for_testing(conn(&st), PrivateRequired, 1).unwrap();
+        assert_eq!(transparent_total(&st), Zatoshis::ZERO);
+    }
+
+    #[test]
+    fn missing_policy_row_is_corruption() {
+        let (st, _, funded) = funded_wallet();
+        conn(&st).execute("DELETE FROM tpir_meta", []).unwrap();
+        assert!(matches!(
+            st.wallet().db().transparent_ledger_mode(),
+            Err(SqliteClientError::CorruptedData(_))
+        ));
+        for error in selector_errors(&st, &funded) {
+            assert!(matches!(error, Some(SqliteClientError::CorruptedData(_))));
+        }
     }
 }

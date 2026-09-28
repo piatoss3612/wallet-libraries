@@ -1111,7 +1111,15 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
         test_rng(),
     )
     .unwrap();
-    // Status and transparent-history work does not depend on payload routing.
+    // Transparent-history work depends on the transparent ledger mode, not payload routing.
+    #[cfg(feature = "transparent-inputs")]
+    assert!(matches!(
+        db.transaction_data_requests(),
+        Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+    ));
+    let db = db.with_transparent_ledger_mode(
+        zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+    );
     assert!(db.transaction_data_requests().is_ok());
     assert!(matches!(
         db.transaction_enhancement_work(),

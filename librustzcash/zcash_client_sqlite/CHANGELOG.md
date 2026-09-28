@@ -39,6 +39,19 @@ workspace.
   `TransparentSupportUnavailable`, when built without `transparent-inputs`,
   rather than a fabricated zero. `transparent_ledger_watched_scripts` lists
   each account's watch generation; script enumeration arrives with recovery.
+- Transparent input selection, storing transparent-spending transactions,
+  `put_received_transparent_utxo`, and the transparent spend-detection and
+  address-history requests of `transaction_data_requests` now require an
+  explicitly configured transparent ledger mode. Financial authorization and
+  public discovery never default to public.
+- Under `PrivateRequired`, public transparent discovery stops:
+  `transaction_data_requests` omits transparent address-history requests, and
+  `put_received_transparent_utxo` fails with
+  `SqliteClientError::PublicTransparentDiscoveryForbidden`. `get_wallet_summary`
+  omits transparent funds when private authority is required by the handle or
+  by the durable policy.
+- A `tpir_meta` table without its policy row is reported as corrupted data,
+  never as a wallet without a policy.
 - Projection origins for new transparent records: public discovery writes
   record a legacy-public origin, and local construction records a local
   origin, in the same transaction as the record.

@@ -61,6 +61,8 @@ pub enum SqliteClientError {
     /// Consuming transparent inputs requires private transparent authority, which is not
     /// available.
     TransparentAuthorityUnavailable,
+    /// Public transparent discovery is forbidden by the handle's transparent ledger mode.
+    PublicTransparentDiscoveryForbidden,
     /// The wallet's transparent ledger state requires a newer reader than this build.
     TransparentLedgerIncompatible {
         /// The minimum reader version the wallet requires.
@@ -363,6 +365,10 @@ impl fmt::Display for SqliteClientError {
             } => write!(
                 f,
                 "Transparent ledger mode {configured:?} is weaker than the wallet's applied policy {applied:?}; this build cannot operate on this wallet's transparent funds"
+            ),
+            SqliteClientError::PublicTransparentDiscoveryForbidden => write!(
+                f,
+                "Public transparent discovery is forbidden by the configured transparent ledger mode"
             ),
             SqliteClientError::TransparentLedgerIncompatible { required } => write!(
                 f,

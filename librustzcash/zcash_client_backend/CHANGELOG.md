@@ -18,6 +18,12 @@ workspace.
   not fabricate a spendable private balance. Recovery commits and promotion are
   added with the work that implements them.
 
+### Changed
+- `sync::run` requires `TransparentLedgerRead` and refreshes UTXOs only when the
+  configured transparent ledger mode retains public authority. The mode is
+  resolved before any request, so an unconfigured store fails instead of
+  disclosing its transparent receivers.
+
 ### Removed
 - ZIP 318 transaction classification and the canonical-crossing send policy.
   Vizor schedules its own Orchard -> Ironwood migration transfers, so the

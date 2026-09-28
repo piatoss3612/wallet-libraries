@@ -2572,6 +2572,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
     params: &P,
     confirmations_policy: ConfirmationsPolicy,
     progress: &impl ProgressEstimator,
+    include_transparent: bool,
 ) -> Result<Option<WalletSummary<AccountUuid>>, SqliteClientError> {
     let chain_tip_height = match chain_tip_height(tx)? {
         Some(h) => h,
@@ -2931,12 +2932,16 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
     drop(sapling_trace);
 
     #[cfg(feature = "transparent-inputs")]
-    transparent::add_transparent_account_balances(
-        tx,
-        target_height,
-        confirmations_policy,
-        &mut account_balances,
-    )?;
+    if include_transparent {
+        transparent::add_transparent_account_balances(
+            tx,
+            target_height,
+            confirmations_policy,
+            &mut account_balances,
+        )?;
+    }
+    #[cfg(not(feature = "transparent-inputs"))]
+    let _ = include_transparent;
 
     // The approach used here for shielded subtree indexing was a quick hack
     // that has not yet been replaced. TODO: Make less hacky.

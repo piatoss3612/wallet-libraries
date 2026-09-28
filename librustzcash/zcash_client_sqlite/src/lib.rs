@@ -482,8 +482,9 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// `WalletRead::transaction_data_requests` (transparent history) does not
-    /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
+    /// Transparent discovery and transparent input selection likewise require
+    /// `set_transparent_ledger_mode`; see that method. Modes are not persisted; reopened handles
+    /// must be configured again.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
         params: P,
@@ -610,8 +611,9 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// `WalletRead::transaction_data_requests` (transparent history) does not
-    /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
+    /// Transparent discovery and transparent input selection likewise require
+    /// `set_transparent_ledger_mode`; see that method. Modes are not persisted; reopened handles
+    /// must be configured again.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
             conn,
@@ -1380,11 +1382,17 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     ) -> Result<Option<WalletSummary<Self::AccountId>>, Self::Error> {
         // This will return a runtime error if we call `get_wallet_summary` from two
         // threads at the same time, as transactions cannot nest.
+        let tx = self.conn.borrow().unchecked_transaction()?;
+        let include_transparent = wallet::transparent_ledger::summary_includes_transparent(
+            &tx,
+            self.transparent_ledger_mode,
+        )?;
         wallet::get_wallet_summary(
-            &self.conn.borrow().unchecked_transaction()?,
+            &tx,
             &self.params,
             confirmations_policy,
             &SubtreeProgressEstimator,
+            include_transparent,
         )
     }
 
@@ -1556,12 +1564,26 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
             let iter = std::iter::empty();
 
+            // Transparent spend-detection and address-history requests are public discovery.
             #[cfg(feature = "transparent-inputs")]
-            let iter = iter.chain(wallet::transparent::transaction_data_requests(
+            let public_discovery = wallet::transparent_ledger::public_discovery_permitted(
                 self.conn.borrow(),
-                &self.params,
-                _chain_tip_height,
-            )?);
+                self.transparent_ledger_mode,
+            )?;
+            #[cfg(feature = "transparent-inputs")]
+            let iter = iter.chain(
+                public_discovery
+                    .then(|| {
+                        wallet::transparent::transaction_data_requests(
+                            self.conn.borrow(),
+                            &self.params,
+                            _chain_tip_height,
+                        )
+                    })
+                    .transpose()?
+                    .into_iter()
+                    .flatten(),
+            );
 
             Ok(iter.collect())
         } else {
@@ -2620,6 +2642,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
     ) -> Result<Self::UtxoRef, <Self as WalletRead>::Error> {
         #[cfg(feature = "transparent-inputs")]
         return {
+            wallet::transparent_ledger::check_public_discovery(
+                self.conn.0,
+                self.transparent_ledger_mode,
+            )?;
             let (account_id, _, key_scope, utxo_id) =
                 wallet::transparent::put_received_transparent_utxo(
                     self.conn.0,
