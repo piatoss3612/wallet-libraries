@@ -2908,6 +2908,10 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         )
     }
 
+    fn requires_full_nullifier_history(&self) -> Result<bool, Self::Error> {
+        wallet::requires_full_nullifier_history(self.conn.borrow())
+    }
+
     fn select_receiving_address(
         &self,
         account: Self::AccountId,

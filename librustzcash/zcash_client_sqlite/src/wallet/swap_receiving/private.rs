@@ -62,7 +62,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Opt in before the first scan. Historical key gaps then use the directory,
     /// while ordinary scanning retains spend evidence for late note insertion.
     /// Enabling later cannot recreate already pruned evidence or remove queued scans.
-    /// This POC policy deliberately retains the shared nullifier map without pruning.
+    /// This POC policy retains every block's nullifiers, bypassing both the large-batch
+    /// insertion shortcut and pruning of the shared nullifier map.
     pub fn enable_private_swap_recovery(&mut self, account: AccountUuid) -> Result<(), Error> {
         self.transactionally(|db| {
             let (id, _) = account_key(db.conn.0, &db.params, account)?;

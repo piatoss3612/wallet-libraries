@@ -306,6 +306,7 @@ pub struct PutBlocksRows {
 /// either received in an already-scanned block (so its spend is detected directly against
 /// the wallet's own nullifiers rather than the map) or is received later in this same
 /// ascending batch (so the spend is linked when the receiving transaction is processed).
+/// Stores requiring full nullifier history bypass this optimization.
 /// For every out-of-order range — scanning after a gap, recent-first, or chain-tip
 /// pre-scans — the nullifiers of every block are tracked.
 pub fn put_blocks_rows<DbT, SE, TE>(
@@ -345,13 +346,21 @@ where
         });
     }
 
-    let nullifier_tracking_floor = nullifier_tracking_floor(
-        wallet_db
-            .block_fully_scanned_height()
-            .map_err(PutBlocksError::Storage)?,
-        from_state.block_height(),
-        blocks.last().map(|block| block.height()),
-    );
+    // A contiguous scan can still miss notes learned later through private discovery.
+    let nullifier_tracking_floor = if wallet_db
+        .requires_full_nullifier_history()
+        .map_err(PutBlocksError::Storage)?
+    {
+        None
+    } else {
+        nullifier_tracking_floor(
+            wallet_db
+                .block_fully_scanned_height()
+                .map_err(PutBlocksError::Storage)?,
+            from_state.block_height(),
+            blocks.last().map(|block| block.height()),
+        )
+    };
 
     let mut sapling_commitments = vec![];
     #[cfg(feature = "orchard")]

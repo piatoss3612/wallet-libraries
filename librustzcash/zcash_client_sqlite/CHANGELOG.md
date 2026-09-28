@@ -17,6 +17,8 @@ workspace.
   Orchard support; without it, every payload request is public work.
 
 ### Changed
+- Preserve all spend evidence during large scan batches when private swap recovery
+  is enabled, allowing old discovered notes to establish their spent state.
 - Enhance PIR storage and routing are now part of Orchard support; the separate
   `zakura-pir-enhance` feature has been removed.
 - `WalletRead::transaction_data_requests` no longer returns payload work and no

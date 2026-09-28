@@ -5807,6 +5807,18 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     .map(Some)
 }
 
+/// Late note discovery needs every scanned spend, including ones not yet linked to a note.
+pub(crate) fn requires_full_nullifier_history(
+    conn: &Connection,
+) -> Result<bool, SqliteClientError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_swap_private_recovery)",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(SqliteClientError::from)
+}
+
 /// Deletes from the nullifier map any entries with a locator referencing a block height
 /// lower than the pruning height.
 pub(crate) fn prune_nullifier_map(
@@ -5815,11 +5827,7 @@ pub(crate) fn prune_nullifier_map(
 ) -> Result<(), SqliteClientError> {
     // The experimental private restore learns old notes after scanning. Keep the
     // shared locator map until an external complete spend-history source replaces it.
-    if conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_swap_private_recovery)",
-        [],
-        |r| r.get::<_, bool>(0),
-    )? {
+    if requires_full_nullifier_history(conn)? {
         return Ok(());
     }
     let mut stmt_delete_locators = conn.prepare_cached(

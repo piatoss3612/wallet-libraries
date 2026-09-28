@@ -339,3 +339,82 @@ fn private_scan_deadline_survives_restart_and_delayed_directory_then_reorgs() {
         None
     );
 }
+
+#[test]
+fn private_recovery_keeps_early_spends_and_empty_coverage_in_large_batches() {
+    use orchard::keys::SpendingKey;
+    use zakura_swap_receiving::lifecycle::ChainAnchor;
+    use zcash_client_backend::data_api::testing::IronwoodFvk;
+    use zcash_keys::address::{Address, UnifiedAddress};
+    use zcash_protocol::value::Zatoshis;
+
+    for enabled in [false, true] {
+        for spend in [false, true] {
+            let (mut st, key, candidate, original, _) = fixture();
+            let account = st.test_account().unwrap().id();
+            if enabled {
+                st.wallet_mut()
+                    .db_mut()
+                    .enable_private_swap_recovery(account)
+                    .unwrap();
+            }
+            let first = original.height + 1;
+            if spend {
+                let note = candidate
+                    .encrypted_note
+                    .decrypt(
+                        &FullViewingKey::from(st.test_account().unwrap().usk().orchard()),
+                        key.key_id(),
+                    )
+                    .unwrap();
+                let noise = FullViewingKey::from(&SpendingKey::from_bytes([7; 32]).unwrap());
+                st.generate_next_block_spending(
+                    &IronwoodFvk(key.full_viewing_key().clone()),
+                    (
+                        note.note().nullifier(key.full_viewing_key()),
+                        Zatoshis::const_from_u64(100_000),
+                    ),
+                    Address::Unified(
+                        UnifiedAddress::from_receivers(
+                            Some(noise.address_at(0u32, Scope::External)),
+                            None,
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                    Zatoshis::const_from_u64(100_000),
+                );
+            } else {
+                st.generate_empty_block();
+            }
+            for _ in 0..200 {
+                st.generate_empty_block();
+            }
+            st.scan_cached_blocks(first, 201);
+            let last = first + 200;
+            let through = ChainAnchor {
+                height: last,
+                hash: st.wallet().db().get_block_hash(last).unwrap().unwrap().0,
+            };
+            let status = st
+                .wallet_mut()
+                .db_mut()
+                .swap_payment_spend_status(account, key.key_id(), &candidate, through)
+                .unwrap();
+            if enabled {
+                assert!(matches!(status, SpendStatus::Spent { .. }) == spend);
+                if !spend {
+                    assert_eq!(status, SpendStatus::Unspent);
+                }
+                let covered: u32 = st.wallet().conn().query_row(
+                    "SELECT COUNT(*) FROM ironwood_nullifier_scan_blocks WHERE height BETWEEN ?1 AND ?2",
+                    rusqlite::params![u32::from(first), u32::from(last)], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(covered, 201);
+            } else {
+                // The ordinary optimization remains enabled when late discovery is off.
+                assert_eq!(status, SpendStatus::Unknown);
+            }
+        }
+    }
+}

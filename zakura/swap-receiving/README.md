@@ -202,8 +202,10 @@ conflicts with local data. The inclusion proof binds the commitment and position
 `enable_private_swap_recovery` opts an account out of automatic key-history
 replay. Enable it before the first scan. This prototype retains the shared
 nullifier map without pruning while any account uses the policy, trading storage
-for locally verifiable spend history. It cannot repair evidence pruned by earlier
-builds. `mark_swap_directory_checked` requires a local block anchor and no pending
+for locally verifiable spend history. Large scan batches also retain every block
+instead of skipping old entries at a contiguous scan frontier. Both decisions use
+the same store policy. Enabling it cannot repair evidence pruned or skipped by
+earlier scans. Those gaps require rescanning. `mark_swap_directory_checked` requires a local block anchor and no pending
 candidates. Rewinds remove checks above the retained height. This does not retire
 keys or claim that a provider's terminal status rules out future payments.
 

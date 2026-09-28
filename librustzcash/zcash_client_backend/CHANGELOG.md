@@ -11,6 +11,8 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- Add `LowLevelWalletRead::requires_full_nullifier_history` so stores supporting late
+  note discovery can retain spend evidence throughout large scan batches.
 - Add `WalletRead::get_swap_scan_window` for experimental swap receiving. Compact
   scanning splits batches at changes to the active key set without changing full
   transaction enhancement or note spending. Custom stores retain existing defaults.

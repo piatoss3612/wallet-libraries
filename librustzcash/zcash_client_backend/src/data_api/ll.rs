@@ -160,6 +160,15 @@ pub trait LowLevelWalletRead {
         &self,
     ) -> Result<Option<zcash_protocol::consensus::BlockHeight>, Self::Error>;
 
+    /// Whether notes may be discovered after their blocks have been fully scanned.
+    ///
+    /// Returning `true` preserves spend evidence from every block in a scan batch.
+    /// Such stores must also prevent pruning that evidence until late discovery no
+    /// longer needs it. The default permits the normal contiguous-scan optimization.
+    fn requires_full_nullifier_history(&self) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
     /// Returns the set of account identifiers for accounts that spent notes and/or UTXOs in the
     /// construction of the given transaction.
     fn get_funding_accounts<T: TxMeta>(
