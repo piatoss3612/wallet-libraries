@@ -825,8 +825,9 @@ CREATE TABLE tpir_account_state (
 ///   the source. Commits from an older lineage are rejected as superseded, and a commit at the
 ///   same lineage must cite the same revision to be accepted as a retry.
 /// - `quarantined`: set when the source's commit contradicted accepted state.
-/// - `qualification`: 0 unqualified, 1 production-qualified. Set only by source verification,
-///   never by a commit; promotion requires every contributing source to be qualified.
+/// - `qualified_revision_id`, `qualified_lineage`: the one revision that passed production
+///   qualification, set only by source verification and never by a commit. Coverage from any
+///   other revision cannot qualify an account for promotion.
 /// - `trust_epoch`: advanced whenever the source is quarantined or re-verified; commits citing
 ///   an older epoch are rejected as stale.
 pub(super) const TABLE_TPIR_SOURCES: &str = r#"
@@ -835,8 +836,10 @@ CREATE TABLE tpir_sources (
     accepted_lineage INTEGER NOT NULL,
     accepted_revision_id BLOB NOT NULL,
     quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
-    qualification INTEGER NOT NULL DEFAULT 0 CHECK (qualification IN (0, 1)),
-    trust_epoch INTEGER NOT NULL DEFAULT 0
+    qualified_revision_id BLOB,
+    qualified_lineage INTEGER,
+    trust_epoch INTEGER NOT NULL DEFAULT 0,
+    CHECK ((qualified_revision_id IS NULL) = (qualified_lineage IS NULL))
 )"#;
 /// Scripts watched by transparent ledger recovery.
 ///

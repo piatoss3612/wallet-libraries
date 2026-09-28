@@ -79,8 +79,10 @@ impl RusqliteMigration for Migration {
                 accepted_lineage INTEGER NOT NULL,
                 accepted_revision_id BLOB NOT NULL,
                 quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
-                qualification INTEGER NOT NULL DEFAULT 0 CHECK (qualification IN (0, 1)),
-                trust_epoch INTEGER NOT NULL DEFAULT 0
+                qualified_revision_id BLOB,
+                qualified_lineage INTEGER,
+                trust_epoch INTEGER NOT NULL DEFAULT 0,
+                CHECK ((qualified_revision_id IS NULL) = (qualified_lineage IS NULL))
             );
 
             CREATE TABLE tpir_scripts (
