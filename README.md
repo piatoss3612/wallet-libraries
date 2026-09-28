@@ -124,7 +124,7 @@ The dependency keys keep their upstream names, so wallet source needs no changes
 ```toml
 zcash_client_backend = { version = "0.1.0-rc7", package = "zakura-client-backend" }
 zcash_client_sqlite = { version = "0.1.0-rc7", package = "zakura-client-sqlite" }
-pczt = { version = "0.1.0-rc3", package = "zakura-pczt" }
+pczt = { version = "0.1.0-rc4", package = "zakura-pczt" }
 ```
 
 The crypto stack comes from crates.io as `zakura-*`; do not also declare the

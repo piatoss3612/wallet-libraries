@@ -56,7 +56,7 @@ zcash_note_encryption = "0.4.1"
 zcash_primitives = { version = "2.0.0", default-features = false, package = "zakura-primitives" }
 zcash_proofs = { version = "2.0.0", default-features = false, package = "zakura-proofs" }
 
-pczt = { version = "0.1.0-rc3", path = "librustzcash/pczt", package = "zakura-pczt" }
+pczt = { version = "0.1.0-rc4", path = "librustzcash/pczt", package = "zakura-pczt" }
 
 # Shielded protocols
 bellman = { version = "2.0.0", default-features = false, features = ["groth16"], package = "zakura-bellman" }
