@@ -305,6 +305,7 @@ pub fn publish_layout(
             end_height: end,
             parent_block_hash: hash(start - 1).to_display_hex(),
             terminal_block_hash: hash(end).to_display_hex(),
+            tag_salt_counter: built.tag_salt_counter,
             parent_manifest_digest: parent_digest.clone(),
             sealed: !is_tail,
             revision: if is_tail { tail_revision } else { 0 },
@@ -355,6 +356,7 @@ pub fn publish_layout(
                 txids: 0,
                 excluded_scripts: built.excluded_scripts,
             },
+            directory_choice: None,
         };
 
         let digest = manifest.digest();

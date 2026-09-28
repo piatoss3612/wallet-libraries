@@ -305,9 +305,9 @@ fn a_real_private_query_returns_a_row_this_build_can_decode() {
 
     let mut client = TableClient::new(
         Table::Directory,
+        &params.name,
         params.directory_rows,
         params.directory_row_bytes,
-        params.directory_setup_seed,
         &params.directory_scheme,
     )
     .expect("the served geometry reproduces");

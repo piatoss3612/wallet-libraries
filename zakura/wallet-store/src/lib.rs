@@ -201,6 +201,7 @@ impl WalletDb {
         let mut db = Self { conn };
         db.create_schema()?;
         db.check_versions()?;
+        transparent::upgrade_transparent_format(&mut db)?;
         Ok(db)
     }
 

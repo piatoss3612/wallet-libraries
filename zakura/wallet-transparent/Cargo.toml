@@ -22,10 +22,10 @@ https-client = ["transparent-wallet/reqwest"]
 # also serves it. Pinned to a revision rather than tracked: the record layouts
 # and the table geometry are protocol, and a wallet that silently followed a
 # change to either would decode a newer layout as the one it knows.
-transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
-transparent-filter = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
-transparent-shard = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
-transparent-events = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir.git", rev = "0be15b3eb48be2ad458d45a3f4c6ef3920fff55f" }
+transparent-filter = { git = "https://github.com/valargroup/wallet-pir.git", rev = "0be15b3eb48be2ad458d45a3f4c6ef3920fff55f" }
+transparent-shard = { git = "https://github.com/valargroup/wallet-pir.git", rev = "0be15b3eb48be2ad458d45a3f4c6ef3920fff55f" }
+transparent-events = { git = "https://github.com/valargroup/wallet-pir.git", rev = "0be15b3eb48be2ad458d45a3f4c6ef3920fff55f" }
 
 hex.workspace = true
 rusqlite.workspace = true
@@ -39,11 +39,11 @@ zakura-wallet-sync = { path = "../wallet-sync" }
 
 [dev-dependencies]
 zakura-wallet-store = { path = "../wallet-store", features = ["test-dependencies"] }
-transparent-wallet = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec", features = ["reqwest", "testing"] }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir.git", rev = "0be15b3eb48be2ad458d45a3f4c6ef3920fff55f", features = ["reqwest", "testing"] }
 # The real shard service, run in-process by the tests so private retrieval,
 # budgets, tail replacement and reorgs are exercised against what will serve
 # them rather than against a stand-in.
-transparent-shard-server = { git = "https://github.com/valargroup/enhance-pir.git", rev = "22e6bec" }
+transparent-shard-server = { git = "https://github.com/valargroup/wallet-pir.git", rev = "0be15b3eb48be2ad458d45a3f4c6ef3920fff55f" }
 axum = "0.7"
 bip0039.workspace = true
 tempfile.workspace = true

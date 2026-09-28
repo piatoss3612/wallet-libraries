@@ -71,12 +71,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
 name = "ambassador"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -221,15 +215,6 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
-name = "arc-swap"
-version = "1.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
-dependencies = [
- "rustversion",
-]
 
 [[package]]
 name = "arrayref"
@@ -722,16 +707,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "bitflags-serde-legacy"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b64e60c28b6d25ad92e8b367801ff9aa12b41d05fc8798055d296bace4a60cc"
-dependencies = [
- "bitflags 2.13.1",
- "serde",
-]
-
-[[package]]
 name = "bitvec"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -813,7 +788,6 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09dc0086e469182132244e9b8d313a0742e1132da43a08c24b9dd3c18e0faf3a"
 dependencies = [
- "serde",
  "thiserror 2.0.20",
 ]
 
@@ -855,12 +829,6 @@ name = "by_address"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64fa3c856b712db6612c019f14756e64e4bcea13337a6b33b696333a9eaa2d06"
-
-[[package]]
-name = "byte-slice-cast"
-version = "1.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7575182f7272186991736b70173b0ea045398f984bf5ebbb3804736ce1330c9d"
 
 [[package]]
 name = "bytemuck"
@@ -1118,27 +1086,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
-name = "const_format"
-version = "0.2.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4481a617ad9a412be3b97c5d403fef8ed023103368908b9c50af598ff467cc1e"
-dependencies = [
- "const_format_proc_macros",
- "konst",
-]
-
-[[package]]
-name = "const_format_proc_macros"
-version = "0.2.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d57c2eccfb16dbac1f4e61e206105db5820c9d26c3c472bc17c774259ef7744"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-xid",
-]
-
-[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1352,7 +1299,6 @@ dependencies = [
  "digest 0.10.7",
  "fiat-crypto",
  "rustc_version",
- "serde",
  "subtle",
  "zeroize",
 ]
@@ -1769,7 +1715,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
  "pkcs8",
- "serde",
  "signature",
 ]
 
@@ -1782,23 +1727,6 @@ dependencies = [
  "curve25519-dalek",
  "ed25519",
  "merlin",
- "rand_core 0.6.4",
- "serde",
- "sha2 0.10.9",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "ed25519-zebra"
-version = "4.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "775765289f7c6336c18d3d66127527820dd45ffd9eb3b6b8ee4708590e6c20f5"
-dependencies = [
- "curve25519-dalek",
- "ed25519",
- "hashbrown 0.16.1",
- "pkcs8",
  "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
@@ -1854,51 +1782,6 @@ name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
-
-[[package]]
-name = "enhance-pir"
-version = "0.1.0"
-source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
-dependencies = [
- "base64",
- "hex",
- "ipir-sp 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
- "rand 0.8.7",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "enhance-pir-server"
-version = "0.1.0"
-source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
-dependencies = [
- "arc-swap",
- "axum 0.7.9",
- "base64",
- "clap",
- "enhance-pir",
- "hex",
- "inspiring 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
- "ipir-sp 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
- "prometheus",
- "rand 0.8.7",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sysinfo",
- "thiserror 2.0.20",
- "tokio",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
- "transparent-spend-pir",
- "zakura-chain",
-]
 
 [[package]]
 name = "enum-ordinalize"
@@ -1966,7 +1849,6 @@ checksum = "306286e8dcc39ab3dfceb74c792ce8baffdab90591321d3ffaae64829734c37f"
 dependencies = [
  "blake2b_simd",
  "corez",
- "document-features",
 ]
 
 [[package]]
@@ -2096,18 +1978,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
-name = "fixed-hash"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "835c052cb0c08c1acf6ffd71c022172e18723949c8282f2b9f27efbc51e64534"
-dependencies = [
- "byteorder",
- "rand 0.8.7",
- "rustc-hex",
- "static_assertions",
-]
-
-[[package]]
 name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2194,12 +2064,6 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "foldhash"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
@@ -2555,7 +2419,7 @@ dependencies = [
  "rand 0.8.7",
  "sinsemilla",
  "subtle",
- "uint 0.9.5",
+ "uint",
 ]
 
 [[package]]
@@ -2620,18 +2484,7 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
- "foldhash 0.1.5",
-]
-
-[[package]]
-name = "hashbrown"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.2.0",
+ "foldhash",
 ]
 
 [[package]]
@@ -2680,9 +2533,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "hex-conservative"
@@ -3020,26 +2870,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "impl-codec"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba6a270039626615617f3f36d15fc827041df3b78c439da2cadfa47455a77f2f"
-dependencies = [
- "parity-scale-codec",
-]
-
-[[package]]
-name = "impl-trait-for-tuples"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0eb5a3343abf848c0984fe4604b2b105da9539376e24fc0a3b0007411ae4fd9"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "incrementalmerkletree"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3115,14 +2945,15 @@ dependencies = [
 
 [[package]]
 name = "inspiring"
-version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f#223626ffdd28bd1400dd0b62027a8f366665aa4f"
+version = "0.1.0-rc.2"
+source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
 dependencies = [
- "rand 0.8.7",
+ "bytemuck",
+ "memmap2",
  "rand_chacha 0.3.1",
  "rayon",
  "thiserror 1.0.69",
- "valar-spiral-rs",
+ "valar-spiral-rs 0.5.3-rc.1",
 ]
 
 [[package]]
@@ -3134,7 +2965,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rayon",
  "thiserror 1.0.69",
- "valar-spiral-rs",
+ "valar-spiral-rs 0.5.2",
 ]
 
 [[package]]
@@ -3148,22 +2979,24 @@ dependencies = [
 
 [[package]]
 name = "ipir-sp"
-version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f#223626ffdd28bd1400dd0b62027a8f366665aa4f"
+version = "0.1.0-rc.6"
+source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
 dependencies = [
  "clap",
  "env_logger",
  "fastrand",
- "inspiring 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
+ "inspiring 0.1.0-rc.2",
  "log",
- "rand 0.8.7",
+ "rand 0.9.5",
  "rand_chacha 0.3.1",
  "rayon",
+ "reinspiring",
  "serde",
  "serde_json",
  "sha1",
- "simplepir-kernel 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
- "valar-spiral-rs",
+ "sha2 0.10.9",
+ "simplepir-kernel 0.1.0-rc.3",
+ "valar-spiral-rs 0.5.3-rc.1",
 ]
 
 [[package]]
@@ -3174,7 +3007,7 @@ dependencies = [
  "clap",
  "env_logger",
  "fastrand",
- "inspiring 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=e875404cef33661906ab60af236dfb327e6b28b1)",
+ "inspiring 0.1.0",
  "log",
  "rand 0.8.7",
  "rand_chacha 0.3.1",
@@ -3182,8 +3015,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
- "simplepir-kernel 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=e875404cef33661906ab60af236dfb327e6b28b1)",
- "valar-spiral-rs",
+ "simplepir-kernel 0.1.0",
+ "valar-spiral-rs 0.5.2",
 ]
 
 [[package]]
@@ -3338,21 +3171,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "konst"
-version = "0.2.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "128133ed7824fcd73d6e7b17957c5eb7bacb885649bd8c69708b2331a10bcefb"
-dependencies = [
- "konst_macro_rules",
-]
-
-[[package]]
-name = "konst_macro_rules"
-version = "0.2.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
-
-[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3432,12 +3250,6 @@ dependencies = [
  "pkg-config",
  "vcpkg",
 ]
-
-[[package]]
-name = "linux-raw-sys"
-version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
 name = "linux-raw-sys"
@@ -3966,34 +3778,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "parity-scale-codec"
-version = "3.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "799781ae679d79a948e13d4824a40970bfa500058d245760dd857301059810fa"
-dependencies = [
- "arrayvec",
- "bitvec",
- "byte-slice-cast",
- "const_format",
- "impl-trait-for-tuples",
- "parity-scale-codec-derive",
- "rustversion",
- "serde",
-]
-
-[[package]]
-name = "parity-scale-codec-derive"
-version = "3.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34b4653168b563151153c9e4c08ebed57fb8262bebfa79711552fa983c623e7a"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4351,17 +4135,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "primitive-types"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b34d9fd68ae0b74a41b21c03c2f62847aa0ffea044eee893b4c140b37e244e2"
-dependencies = [
- "fixed-hash",
- "impl-codec",
- "uint 0.9.5",
-]
-
-[[package]]
 name = "priority-queue"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4388,45 +4161,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "procfs"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "731e0d9356b0c25f16f33b5be79b1c57b562f141ebfcdb0ad8ac2c13a24293b4"
-dependencies = [
- "bitflags 2.13.1",
- "hex",
- "lazy_static",
- "procfs-core",
- "rustix 0.38.44",
-]
-
-[[package]]
-name = "procfs-core"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d3554923a69f4ce04c4a754260c338f505ce22642d3830e049a399fc2059a29"
-dependencies = [
- "bitflags 2.13.1",
- "hex",
-]
-
-[[package]]
-name = "prometheus"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d33c28a30771f7f96db69893f78b857f7450d7e0237e9c8fc6427a81bae7ed1"
-dependencies = [
- "cfg-if",
- "fnv",
- "lazy_static",
- "libc",
- "memchr",
- "parking_lot",
- "procfs",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -4866,6 +4600,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "reinspiring"
+version = "0.1.2"
+source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
+dependencies = [
+ "bytemuck",
+ "inspiring 0.1.0-rc.2",
+ "memmap2",
+ "rand 0.8.7",
+ "rand_chacha 0.3.1",
+ "rayon",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "valar-spiral-rs 0.5.3-rc.1",
+ "zeroize",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5015,12 +4766,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
-name = "rustc-hex"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e75f6a532d0fd9f7f13144f392b6ad56a32696bfcd9c78f797f16bbb6f072d6"
-
-[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5040,19 +4785,6 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
-dependencies = [
- "bitflags 2.13.1",
- "errno",
- "libc",
- "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -5060,7 +4792,7 @@ dependencies = [
  "bitflags 2.13.1",
  "errno",
  "libc",
- "linux-raw-sys 0.12.1",
+ "linux-raw-sys",
  "windows-sys 0.61.2",
 ]
 
@@ -5229,21 +4961,8 @@ checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
 dependencies = [
  "dyn-clone",
  "ref-cast",
- "schemars_derive",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "schemars_derive"
-version = "1.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d98c67716b46af2f0b8cf752abc930f6f9aecfbf671ecfb531db8a31dbe4e2ba"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_derive_internals",
- "syn 3.0.3",
 ]
 
 [[package]]
@@ -5299,7 +5018,6 @@ dependencies = [
  "bitcoin_hashes",
  "rand 0.8.7",
  "secp256k1-sys",
- "serde",
 ]
 
 [[package]]
@@ -5360,15 +5078,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde-big-array"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "serde-value"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5392,17 +5101,6 @@ name = "serde_derive"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.3",
-]
-
-[[package]]
-name = "serde_derive_internals"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5628,12 +5326,12 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "simplepir-kernel"
-version = "0.1.0"
-source = "git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f#223626ffdd28bd1400dd0b62027a8f366665aa4f"
+version = "0.1.0-rc.3"
+source = "git+https://github.com/valargroup/ipir-sp.git?tag=v0.1.0-rc.6#1f2aec654d42d8c180373036eb1f6d30ff4ad30c"
 dependencies = [
- "inspiring 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
+ "inspiring 0.1.0-rc.2",
  "rayon",
- "valar-spiral-rs",
+ "valar-spiral-rs 0.5.3-rc.1",
 ]
 
 [[package]]
@@ -5641,9 +5339,9 @@ name = "simplepir-kernel"
 version = "0.1.0"
 source = "git+https://github.com/valargroup/ipir-sp.git?rev=e875404cef33661906ab60af236dfb327e6b28b1#e875404cef33661906ab60af236dfb327e6b28b1"
 dependencies = [
- "inspiring 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=e875404cef33661906ab60af236dfb327e6b28b1)",
+ "inspiring 0.1.0",
  "rayon",
- "valar-spiral-rs",
+ "valar-spiral-rs 0.5.2",
 ]
 
 [[package]]
@@ -5902,7 +5600,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "once_cell",
- "rustix 1.1.4",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 
@@ -7266,7 +6964,6 @@ dependencies = [
  "pin-project-lite",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -7396,7 +7093,7 @@ dependencies = [
 [[package]]
 name = "transparent-events"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
+source = "git+https://github.com/valargroup/wallet-pir.git?rev=0be15b3eb48be2ad458d45a3f4c6ef3920fff55f#0be15b3eb48be2ad458d45a3f4c6ef3920fff55f"
 dependencies = [
  "hex",
  "thiserror 2.0.20",
@@ -7405,7 +7102,7 @@ dependencies = [
 [[package]]
 name = "transparent-filter"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
+source = "git+https://github.com/valargroup/wallet-pir.git?rev=0be15b3eb48be2ad458d45a3f4c6ef3920fff55f#0be15b3eb48be2ad458d45a3f4c6ef3920fff55f"
 dependencies = [
  "bitcoin",
  "hex",
@@ -7415,10 +7112,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "transparent-native"
+version = "0.1.0"
+source = "git+https://github.com/valargroup/wallet-pir.git?rev=0be15b3eb48be2ad458d45a3f4c6ef3920fff55f#0be15b3eb48be2ad458d45a3f4c6ef3920fff55f"
+dependencies = [
+ "hex",
+ "ipir-sp 0.1.0-rc.6",
+ "rand 0.8.7",
+ "rand_chacha 0.3.1",
+ "rayon",
+ "reinspiring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "transparent-shard"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
+source = "git+https://github.com/valargroup/wallet-pir.git?rev=0be15b3eb48be2ad458d45a3f4c6ef3920fff55f#0be15b3eb48be2ad458d45a3f4c6ef3920fff55f"
 dependencies = [
+ "base64",
  "hex",
  "serde",
  "serde_json",
@@ -7431,16 +7145,17 @@ dependencies = [
 [[package]]
 name = "transparent-shard-server"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
+source = "git+https://github.com/valargroup/wallet-pir.git?rev=0be15b3eb48be2ad458d45a3f4c6ef3920fff55f#0be15b3eb48be2ad458d45a3f4c6ef3920fff55f"
 dependencies = [
  "axum 0.7.9",
  "base64",
  "clap",
- "enhance-pir-server",
  "hex",
  "http-body",
- "inspiring 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
- "ipir-sp 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
+ "ipir-sp 0.1.0-rc.6",
+ "memmap2",
+ "reinspiring",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7452,35 +7167,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "transparent-filter",
+ "transparent-native",
  "transparent-shard",
- "valar-spiral-rs",
-]
-
-[[package]]
-name = "transparent-spend-pir"
-version = "0.1.0"
-source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
-dependencies = [
- "base64",
- "hex",
- "ipir-sp 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
- "rand 0.8.7",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
 name = "transparent-wallet"
 version = "0.1.0"
-source = "git+https://github.com/valargroup/enhance-pir.git?rev=22e6bec#22e6becacdd0107683cda7280c5585fac9f4f4b2"
+source = "git+https://github.com/valargroup/wallet-pir.git?rev=0be15b3eb48be2ad458d45a3f4c6ef3920fff55f#0be15b3eb48be2ad458d45a3f4c6ef3920fff55f"
 dependencies = [
  "base64",
  "hex",
- "ipir-sp 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=223626ffdd28bd1400dd0b62027a8f366665aa4f)",
  "reqwest",
  "serde",
  "serde_json",
@@ -7488,6 +7185,7 @@ dependencies = [
  "thiserror 2.0.20",
  "transparent-events",
  "transparent-filter",
+ "transparent-native",
  "transparent-shard",
 ]
 
@@ -7518,18 +7216,6 @@ name = "uint"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76f64bba2c53b04fcab63c01a7d7427eadc821e3bc48c34dc9ba29c501164b52"
-dependencies = [
- "byteorder",
- "crunchy",
- "hex",
- "static_assertions",
-]
-
-[[package]]
-name = "uint"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f9227a75a5a540a464c832ad4a4195dbdbecd8787610a56262721fde6f04f90"
 dependencies = [
  "byteorder",
  "crunchy",
@@ -7641,6 +7327,21 @@ dependencies = [
 name = "valar-spiral-rs"
 version = "0.5.2"
 source = "git+https://github.com/valargroup/spiral-rs.git?rev=6f5b66c6a5a639827c6486c59d31c7ec2d4399a8#6f5b66c6a5a639827c6486c59d31c7ec2d4399a8"
+dependencies = [
+ "fastrand",
+ "getrandom 0.2.17",
+ "rand 0.8.7",
+ "rand_chacha 0.3.1",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+]
+
+[[package]]
+name = "valar-spiral-rs"
+version = "0.5.3-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25241fdd53c5952c5c80557c6d248a2835cf9e722de52e16bbbba794009b80b9"
 dependencies = [
  "fastrand",
  "getrandom 0.2.17",
@@ -8328,64 +8029,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zakura-chain"
-version = "6.0.0"
-source = "git+https://github.com/zakura-core/zakura.git?rev=1faf150fc3648aae22c55a6b30f8f5a9b9ce934e#1faf150fc3648aae22c55a6b30f8f5a9b9ce934e"
-dependencies = [
- "bech32",
- "bitflags 2.13.1",
- "bitflags-serde-legacy",
- "bitvec",
- "blake2b_simd",
- "blake2s_simd",
- "bounded-vec",
- "bs58",
- "byteorder",
- "chrono",
- "derive-getters",
- "dirs",
- "ed25519-zebra",
- "equihash",
- "futures",
- "group 0.14.0",
- "hex",
- "humantime",
- "incrementalmerkletree",
- "itertools 0.14.0",
- "lazy_static",
- "primitive-types",
- "rand_core 0.6.4",
- "rayon",
- "ripemd 0.1.3",
- "schemars 1.2.2",
- "secp256k1",
- "serde",
- "serde-big-array",
- "serde_with",
- "sha2 0.10.9",
- "strum",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "uint 0.10.1",
- "x25519-dalek",
- "zakura-halo2-proofs",
- "zakura-jubjub",
- "zakura-orchard",
- "zakura-primitives",
- "zakura-reddsa",
- "zakura-redjubjub",
- "zakura-sapling-crypto",
- "zakura-sinsemilla",
- "zcash_address",
- "zcash_history",
- "zcash_note_encryption",
- "zcash_protocol",
- "zcash_script",
- "zcash_transparent",
-]
-
-[[package]]
 name = "zakura-client-backend"
 version = "0.1.0-rc4"
 dependencies = [
@@ -8722,8 +8365,8 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "hex",
- "inspiring 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=e875404cef33661906ab60af236dfb327e6b28b1)",
- "ipir-sp 0.1.0 (git+https://github.com/valargroup/ipir-sp.git?rev=e875404cef33661906ab60af236dfb327e6b28b1)",
+ "inspiring 0.1.0",
+ "ipir-sp 0.1.0",
  "rand 0.8.7",
  "reqwest",
  "serde",
@@ -8810,7 +8453,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6de3e8fc50ba4a6e608c71ae636a120b9e6427e3151252ab855e526040146893"
 dependencies = [
  "rand_core 0.10.1",
- "serde",
  "thiserror 2.0.20",
  "zakura-reddsa",
  "zeroize",
@@ -9200,17 +8842,6 @@ dependencies = [
  "corez",
  "hex",
  "nonempty",
-]
-
-[[package]]
-name = "zcash_history"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69d2ed9a9fa7b466a7adedab1ad5a21f8330e4943756912fc776cf7f3beae32b"
-dependencies = [
- "blake2b_simd",
- "byteorder",
- "primitive-types",
 ]
 
 [[package]]

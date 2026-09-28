@@ -87,6 +87,8 @@ fn clipped_coverage_and_page_progress_keep_both_anchors() {
     pending.target_anchor = Some(target.clone());
     pending.validated_events = 4;
     pending.next_ordinal = 1;
+    // Unknown until the first page says how many fragments the history spans.
+    pending.page_count = 0;
     commit.pending_upsert.push(pending);
     store.commit_shard(commit).unwrap();
     let held = store.coverage(&script).unwrap();
@@ -95,13 +97,17 @@ fn clipped_coverage_and_page_progress_keep_both_anchors() {
     let mut pending = store.pending().unwrap().remove(0);
     assert_eq!(pending.validated_events, 4);
     assert_eq!(pending.target_anchor, Some(target.clone()));
+    assert_eq!(pending.page_count, 0);
     pending.validated_events = 7;
     pending.next_ordinal = 2;
+    pending.page_count = 5;
     let mut page = testing::commit(1, "revision", false, (100, 150), vec![], vec![]);
     page.source_anchor = Some(source);
     page.pending_upsert.push(pending);
     store.commit_shard(page).unwrap();
     assert_eq!(store.pending().unwrap()[0].validated_events, 7);
+    // The fragment count learned from the first page survives an update.
+    assert_eq!(store.pending().unwrap()[0].page_count, 5);
     store.commit_anchor(&target, 99, 150).unwrap();
     let ancestor = Anchor {
         height: 125,

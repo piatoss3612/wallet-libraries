@@ -513,9 +513,8 @@ fn a_rollback_removes_the_suffix_from_the_ledger_and_the_balance_alike() {
         shard_id: 1,
         revision_digest: "r1".into(),
         script: script.clone(),
-        first_page: 0,
+        first_page: 1,
         page_count: 2,
-        total_events: 9,
         inline: Vec::new(),
         next_ordinal: 0,
         attempts: 0,
@@ -1188,5 +1187,75 @@ fn a_script_too_long_to_index_is_counted_outside_coverage() {
     assert_eq!(
         db.transparent_state(id, h(100)).unwrap().outside_coverage,
         2
+    );
+}
+
+#[test]
+fn pending_pages_from_an_older_transparent_format_rewind_the_ledger_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = dir.path().join("wallet.db");
+    let cache = dir.path().join("cache.db");
+    let open = || {
+        let mut db = WalletDb::open(&wallet, &cache).unwrap();
+        db.update_chain_tip(&params(), h(1_000)).unwrap();
+        db
+    };
+    let mut db = open();
+    let id = db
+        .create_account(
+            &params(),
+            &[5u8; 32],
+            zip32::AccountId::try_from(0).unwrap(),
+            h(100),
+        )
+        .unwrap();
+    assert_eq!(
+        db.meta_u32("transparent_format").unwrap(),
+        Some(zakura_wallet_store::transparent::TRANSPARENT_FORMAT)
+    );
+    let script = scripts(&db)[0].clone();
+    registered(&mut db, id, &script, 100);
+    let mut tail = with_receive(
+        commit(1, "r1", false, (500, 599), vec![script.clone()]),
+        receive(&script, 4, 0, 5_000, 560),
+    );
+    tail.pending_upsert.push(PendingPages {
+        id: None,
+        shard_id: 1,
+        revision_digest: "r1".into(),
+        script: script.clone(),
+        first_page: 0,
+        page_count: 2,
+        // One record of the 96-byte pre-v9 event layout.
+        inline: vec![0u8; 96],
+        next_ordinal: 0,
+        attempts: 0,
+        validated_events: 0,
+        target_anchor: None,
+    });
+    db.commit_transparent_shard(&tail).unwrap();
+    drop(db);
+
+    // Reopening under the current format leaves the ledger alone.
+    let db = open();
+    assert_eq!(db.transparent_pending().unwrap().len(), 1);
+    assert_eq!(db.transparent_events().unwrap().len(), 1);
+
+    // A wallet from before the format was recorded is rewound.
+    db.connection()
+        .execute(
+            "DELETE FROM wallet_meta WHERE key = 'transparent_format'",
+            [],
+        )
+        .unwrap();
+    drop(db);
+    let db = open();
+    assert!(db.transparent_pending().unwrap().is_empty());
+    assert!(db.transparent_events().unwrap().is_empty());
+    assert!(db.transparent_coverage_of(&script).unwrap().is_empty());
+    assert_eq!(db.transparent_balance(id).unwrap().total().into_u64(), 0);
+    assert_eq!(
+        db.meta_u32("transparent_format").unwrap(),
+        Some(zakura_wallet_store::transparent::TRANSPARENT_FORMAT)
     );
 }

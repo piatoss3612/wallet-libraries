@@ -190,12 +190,11 @@ pub struct PendingPages {
     pub revision_digest: String,
     /// The script whose pages are owed.
     pub script: Vec<u8>,
-    /// The first page's ordinal.
+    /// The first page's ordinal (1-based).
     pub first_page: u32,
-    /// How many pages there are.
+    /// How many pages the script's history spans, learned from the first
+    /// fetched page; 0 while unknown. Updated in place once learned.
     pub page_count: u32,
-    /// How many events they hold in total.
-    pub total_events: u32,
     /// Events already known from the directory entry, encoded back to back.
     pub inline: Vec<u8>,
     /// The next page ordinal to fetch; pages below it are committed.
@@ -667,6 +666,53 @@ fn rollback_to(
     apply::clamp_unspent_observation(tx, height)?;
 
     record_commit(tx, "rollback", &format!("{h}: {reason}"))
+}
+
+/// The transparent PIR wire format the stored pending pages are encoded in.
+///
+/// Pending pages keep directory-inline events as raw bytes, and their page
+/// ordinals and counts follow the shard schema. `transparent-shard-v9` changed
+/// the event record (96 to 87 bytes), made `first_page` 1-based and made
+/// `page_count` a count learned from the first page. Rows written under an
+/// older format cannot be decoded or resumed.
+pub const TRANSPARENT_FORMAT: u32 = 9;
+
+const TRANSPARENT_FORMAT_KEY: &str = "transparent_format";
+
+/// Brings the transparent ledger to [`TRANSPARENT_FORMAT`] on open.
+///
+/// A wallet from before the key existed, or from another format, that still
+/// owes pending pages has its transparent ledger rewound to nothing, because
+/// those rows cannot be read and events already committed beside them belong
+/// to a revision that will not be resumed. Any republication under a new
+/// schema invalidates every stored revision anyway, so the sync that follows
+/// would rewind the same ledger. A wallet without pending pages keeps its
+/// ledger and lets the sync reconcile it.
+pub(crate) fn upgrade_transparent_format(db: &mut WalletDb) -> Result<(), Error> {
+    if db.meta_u32(TRANSPARENT_FORMAT_KEY)? == Some(TRANSPARENT_FORMAT) {
+        return Ok(());
+    }
+    db.transactionally(|tx| {
+        let pending: i64 = tx.query_row(
+            &format!("SELECT COUNT(*) FROM {CACHE_SCHEMA}.transparent_pending_pages"),
+            [],
+            |row| row.get(0),
+        )?;
+        if pending > 0 {
+            rollback_to(
+                tx,
+                BlockHeight::from_u32(0),
+                None,
+                "transparent format changed",
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO wallet_meta (key, value) VALUES (:key, :value)
+             ON CONFLICT (key) DO UPDATE SET value = :value",
+            named_params![":key": TRANSPARENT_FORMAT_KEY, ":value": TRANSPARENT_FORMAT],
+        )?;
+        Ok::<_, Error>(())
+    })
 }
 
 impl WalletDb {
@@ -1177,10 +1223,12 @@ impl WalletDb {
                         tx.execute(
                             &format!(
                                 "UPDATE {CACHE_SCHEMA}.transparent_pending_pages
-                                 SET next_ordinal = :next, attempts = :attempts, validated_events = :validated WHERE id = :id"
+                                 SET next_ordinal = :next, attempts = :attempts, validated_events = :validated,
+                                     page_count = :count WHERE id = :id"
                             ),
                             named_params![
                                 ":id": id as i64,
+                                ":count": pending.page_count,
                                 ":next": pending.next_ordinal,
                                 ":attempts": pending.attempts,
                                 ":validated": pending.validated_events,
@@ -1193,7 +1241,7 @@ impl WalletDb {
                                 "INSERT INTO {CACHE_SCHEMA}.transparent_pending_pages
                                     (shard_id, revision_digest, script, first_page, page_count,
                                      total_events, inline, next_ordinal, attempts, validated_events, target_height, target_hash)
-                                 VALUES (:shard, :revision, :script, :first, :count, :total,
+                                 VALUES (:shard, :revision, :script, :first, :count, 0,
                                          :inline, :next, :attempts, :validated, :target_height, :target_hash)"
                             ),
                             named_params![
@@ -1202,7 +1250,6 @@ impl WalletDb {
                                 ":script": &pending.script,
                                 ":first": pending.first_page,
                                 ":count": pending.page_count,
-                                ":total": pending.total_events,
                                 ":inline": &pending.inline,
                                 ":target_height": pending.target_anchor.as_ref().map(|a| u32::from(a.height)),
                                 ":target_hash": pending.target_anchor.as_ref().map(|a| a.hash.as_str()),
@@ -1339,7 +1386,7 @@ impl WalletDb {
     /// Every page retrieval still owed, oldest first.
     pub fn transparent_pending(&self) -> Result<Vec<PendingPages>, Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT id, shard_id, revision_digest, script, first_page, page_count, total_events,
+            "SELECT id, shard_id, revision_digest, script, first_page, page_count,
                     inline, next_ordinal, attempts, validated_events, target_height, target_hash
              FROM {CACHE_SCHEMA}.transparent_pending_pages ORDER BY id"
         ))?;
@@ -1351,12 +1398,11 @@ impl WalletDb {
                 script: row.get(3)?,
                 first_page: row.get(4)?,
                 page_count: row.get(5)?,
-                total_events: row.get(6)?,
-                inline: row.get(7)?,
-                next_ordinal: row.get(8)?,
-                attempts: row.get(9)?,
-                validated_events: row.get(10)?,
-                target_anchor: read_anchor(row, 11, 12)?,
+                inline: row.get(6)?,
+                next_ordinal: row.get(7)?,
+                attempts: row.get(8)?,
+                validated_events: row.get(9)?,
+                target_anchor: read_anchor(row, 10, 11)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

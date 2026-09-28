@@ -345,6 +345,8 @@ pub const DERIVED_DDL: &[&str] = &[
     // Page retrievals still owed. The directory has been read and the pages
     // located; some have not been fetched. Durable so an exhausted budget or an
     // outage leaves resumable work, never a synchronized balance.
+    // `total_events` is unused since transparent-shard-v9 and written as 0; it
+    // stays so existing wallet databases open unchanged.
     "CREATE TABLE IF NOT EXISTS transparent_pending_pages (
         id              INTEGER PRIMARY KEY,
         shard_id        INTEGER NOT NULL,
