@@ -178,6 +178,11 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
+        SqliteClientError::TransparentLedgerModeNotConfigured
+        | SqliteClientError::TransparentLedgerPolicyConflict { .. }
+        | SqliteClientError::TransparentAuthorityUnavailable => {
+            unreachable!("migrations neither use ledger APIs nor select transparent inputs")
+        }
         SqliteClientError::CorruptedData(e) => WalletMigrationError::CorruptedData(e),
         SqliteClientError::Protobuf(e) => WalletMigrationError::CorruptedData(e.to_string()),
         SqliteClientError::InvalidNote => {

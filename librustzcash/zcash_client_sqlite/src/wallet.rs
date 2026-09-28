@@ -4296,6 +4296,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
             status_mode: None,
+            transparent_ledger_mode: None,
             #[cfg(feature = "orchard")]
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]

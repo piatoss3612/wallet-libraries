@@ -11,13 +11,27 @@ workspace.
 ## [Unreleased]
 
 ### Added
-- The seedless `transparent_ledger_schema` migration, which adds `tpir_meta`
-  (the durable transparent policy, recorded as public) and the
-  `tpir_output_origins` and `tpir_spend_origins` provenance tables. It
+- The seedless `transparent_ledger_schema` migration, which adds the `tpir_*`
+  transparent ledger tables and records the durable policy as public. It
   classifies every existing transparent output and spend as legacy evidence,
   and marks records whose transaction has local creation evidence as local
-  construction too. Neither origin is coverage. Existing wallet tables are
-  unchanged.
+  construction too. Neither origin is coverage. It writes no coverage, event,
+  script, or pending-work rows. Existing wallet tables are unchanged.
+- `WalletDb::set_transparent_ledger_mode` and `with_transparent_ledger_mode`,
+  and implementations of `TransparentLedgerRead` and `TransparentLedgerWrite`.
+  The mode is not persisted; transactional handles inherit it. The ledger APIs
+  return `SqliteClientError::TransparentLedgerModeNotConfigured` on an
+  unconfigured handle, including an empty wallet. Commits and promotion are
+  validated and then rejected as unavailable; nothing is written.
+- `SqliteClientError::TransparentLedgerPolicyConflict`: a handle configured
+  with a mode weaker than a durably applied `PrivateRequired` policy cannot use
+  the ledger APIs or authorize transparent inputs. The stored policy is never
+  weakened.
+- `SqliteClientError::TransparentAuthorityUnavailable`: under
+  `PrivateRequired`, the four transparent `InputSource` selectors and storing a
+  transaction that spends transparent outputs fail, because private authority
+  is not yet available. Shielded-funded spends, including unshielding, are
+  unaffected.
 - Projection origins for new transparent records: public discovery writes
   record a legacy-public origin, and local construction records a local
   origin, in the same transaction as the record.

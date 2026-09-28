@@ -380,4 +380,491 @@ fn conflicting_output_content_is_refused() {
         )
         .unwrap();
     assert_eq!(value, 100_000);
+mod handles {
+    use std::convert::Infallible;
+
+    use tempfile::NamedTempFile;
+    use transparent::{address::TransparentAddress, bundle::OutPoint};
+    use zcash_client_backend::{
+        data_api::{
+            Account as _, CoinbaseFilter, InputSource as _, TargetValue, WalletRead as _,
+            testing::{AddressType, single_output_change_strategy},
+            transparent_ledger::{
+                ChainPoint, CommitOutcome, CommitRejection, LastKnownSource, LedgerLifecycle,
+                Placed, PromotionContext, PromotionOutcome, PromotionRejection, PublicationStatus,
+                ReceiveEvent, RecoveryBlocker, RecoveryCompletion, RevisionId, SourceId,
+                SourceRevision, TransparentAuthority, TransparentLedgerCommit,
+                TransparentLedgerContext, TransparentLedgerMode, TransparentLedgerRead as _,
+                TransparentLedgerWrite as _,
+            },
+            wallet::{
+                ConfirmationsPolicy, TargetHeight,
+                input_selection::{
+                    GreedyInputSelector, LockFilter, LockedInputPolicy, SpendPolicy,
+                    TransparentSpendPolicy,
+                },
+            },
+        },
+        fees::{StandardFeeRule, TransparentChangePolicy},
+        wallet::OvkPolicy,
+    };
+    use zcash_keys::address::Address;
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::{
+        ShieldedPool,
+        consensus::{BlockHeight, Network},
+        value::Zatoshis,
+    };
+    use zip321::{Payment, TransactionRequest};
+
+    use super::{State, conn, funded_wallet};
+    use crate::{
+        AccountUuid, WalletDb,
+        error::SqliteClientError,
+        testing::db::{test_clock, test_rng},
+        wallet::{
+            init::WalletMigrator,
+            transparent_ledger::{check_transparent_authority, set_durable_policy_for_testing},
+        },
+    };
+
+    use TransparentLedgerMode::{PrivateRequired, PrivateShadow, Public};
+
+    fn point() -> ChainPoint {
+        ChainPoint {
+            height: BlockHeight::from(1),
+            hash: BlockHash([0; 32]),
+        }
+    }
+
+    fn commit(
+        mode: TransparentLedgerMode,
+        policy_generation: u64,
+    ) -> TransparentLedgerCommit<AccountUuid> {
+        TransparentLedgerCommit {
+            context: TransparentLedgerContext {
+                mode,
+                policy_generation,
+                target: point(),
+                lifecycle: LedgerLifecycle::Candidate,
+                accounts: vec![],
+            },
+            source: SourceRevision {
+                source: SourceId::new(b"source".to_vec()).unwrap(),
+                revision: RevisionId::new(b"revision".to_vec()).unwrap(),
+                status: PublicationStatus::Provisional,
+                anchor: point(),
+            },
+            receives: vec![Placed {
+                event: ReceiveEvent {
+                    outpoint: OutPoint::new([5; 32], 0),
+                    script: Default::default(),
+                    value: Zatoshis::const_from_u64(1),
+                    is_coinbase: false,
+                },
+                mined: point(),
+            }],
+            spends: vec![],
+            coverage: vec![],
+            pages: Default::default(),
+        }
+    }
+
+    fn promotion(account: AccountUuid, policy_generation: u64) -> PromotionContext<AccountUuid> {
+        PromotionContext {
+            account,
+            policy_generation,
+            watch_generation: 0,
+            decision_point: point(),
+        }
+    }
+
+    fn ledger_rows(st: &State) -> i64 {
+        conn(st)
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM tpir_account_state)
+                      + (SELECT COUNT(*) FROM tpir_scripts)
+                      + (SELECT COUNT(*) FROM tpir_receive_events)
+                      + (SELECT COUNT(*) FROM tpir_spend_events)
+                      + (SELECT COUNT(*) FROM tpir_event_placements)
+                      + (SELECT COUNT(*) FROM tpir_event_observations)
+                      + (SELECT COUNT(*) FROM tpir_coverage)
+                      + (SELECT COUNT(*) FROM tpir_pending_pages)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn meta(st: &State) -> (i64, i64) {
+        conn(st)
+            .query_row(
+                "SELECT applied_mode, policy_generation FROM tpir_meta",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    fn set_mode(st: &mut State, mode: TransparentLedgerMode) {
+        st.wallet_mut().db_mut().set_transparent_ledger_mode(mode);
+    }
+
+    fn account_taddr(st: &State) -> (AccountUuid, TransparentAddress) {
+        let account = st.test_account().unwrap().id();
+        let taddr = *st
+            .wallet()
+            .get_last_generated_address_matching(
+                account,
+                zcash_keys::keys::UnifiedAddressRequest::AllAvailableKeys,
+            )
+            .unwrap()
+            .unwrap()
+            .transparent()
+            .unwrap();
+        (account, taddr)
+    }
+
+    /// Runs every transparent selector and returns their errors, if any.
+    fn selector_errors(st: &State, outpoint: &OutPoint) -> Vec<Option<SqliteClientError>> {
+        let (account, taddr) = account_taddr(st);
+        let db = st.wallet().db();
+        let target = TargetHeight::from(st.wallet().chain_height().unwrap().unwrap() + 1);
+        let lock = || LockFilter::Policy(&LockedInputPolicy::Exclude);
+        vec![
+            db.get_unspent_transparent_output(outpoint, target).err(),
+            db.get_spendable_transparent_outputs(
+                &taddr,
+                target,
+                ConfirmationsPolicy::MIN,
+                CoinbaseFilter::AllTransparentOutputs,
+                lock(),
+            )
+            .err(),
+            db.get_spendable_transparent_outputs_for_addresses(
+                &[taddr],
+                target,
+                ConfirmationsPolicy::MIN,
+                CoinbaseFilter::AllTransparentOutputs,
+                lock(),
+            )
+            .err(),
+            db.select_spendable_transparent_outputs(
+                account,
+                target,
+                ConfirmationsPolicy::MIN,
+                CoinbaseFilter::AllTransparentOutputs,
+                None,
+                TargetValue::AtLeast(Zatoshis::const_from_u64(1)),
+                10,
+                &StandardFeeRule::Zip317,
+                lock(),
+            )
+            .err(),
+        ]
+    }
+
+    #[test]
+    fn unconfigured_handles_are_rejected_even_when_empty() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+
+        let account = AccountUuid::from_uuid(uuid::Uuid::nil());
+        assert!(matches!(
+            db.transparent_ledger_mode(),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        assert!(matches!(
+            db.transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        assert!(matches!(
+            db.apply_transparent_ledger_commit(commit(Public, 0)),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        assert!(matches!(
+            db.promote_transparent_ledger_account(promotion(account, 0)),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+    }
+
+    #[test]
+    fn transactional_handles_inherit_and_reopened_handles_do_not() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(PrivateRequired);
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+
+        let inner = db
+            .transactionally(|wdb| wdb.transparent_ledger_mode())
+            .unwrap();
+        assert_eq!(inner, PrivateRequired);
+        let inner = db
+            .transactionally_with_extension(|wdb, _| wdb.transparent_ledger_mode())
+            .unwrap();
+        assert_eq!(inner, PrivateRequired);
+
+        let reopened =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap();
+        assert!(matches!(
+            reopened.transparent_ledger_mode(),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+    }
+
+    #[test]
+    fn snapshot_reports_authority_by_mode() {
+        let (mut st, _, _) = funded_wallet();
+        let (account, _) = account_taddr(&st);
+        let snapshot = |st: &State| {
+            st.wallet()
+                .db()
+                .transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN)
+                .unwrap()
+        };
+
+        for mode in [Public, PrivateShadow] {
+            set_mode(&mut st, mode);
+            let s = snapshot(&st);
+            assert_eq!(s.mode, mode);
+            assert_eq!(s.authority, TransparentAuthority::Public);
+            let authorized = s.authorized.unwrap();
+            assert_eq!(
+                authorized.regular.spendable_value(),
+                Zatoshis::const_from_u64(100_000)
+            );
+            assert_eq!(authorized.coinbase.total(), Zatoshis::ZERO);
+            assert_eq!(s.last_known, None);
+            assert_eq!(s.completion, RecoveryCompletion::NotApplicable);
+            assert!(s.blockers.is_empty());
+            assert_eq!(
+                (s.target, s.covered_through, s.settled_through),
+                (None, None, None)
+            );
+            assert_eq!(s.recovered_net, None);
+        }
+
+        // Private authority is unavailable: the public amount is shown as last-known legacy
+        // evidence only, with no verified anchor, never as an authorized balance.
+        set_mode(&mut st, PrivateRequired);
+        let s = snapshot(&st);
+        assert_eq!(s.authority, TransparentAuthority::Unavailable);
+        assert_eq!(s.authorized, None);
+        let last_known = s.last_known.unwrap();
+        assert_eq!(last_known.source, LastKnownSource::LegacyPublic);
+        assert_eq!(last_known.at, None);
+        assert_eq!(
+            last_known.balance.regular.spendable_value(),
+            Zatoshis::const_from_u64(100_000)
+        );
+        assert_eq!(s.completion, RecoveryCompletion::Blocked);
+        assert_eq!(
+            s.blockers,
+            vec![RecoveryBlocker::PrivateRecoveryUnavailable]
+        );
+        assert_eq!((s.covered_through, s.recovered_net), (None, None));
+    }
+
+    #[test]
+    fn private_required_blocks_transparent_inputs_but_not_shielded_spends() {
+        let (mut st, _, funded) = funded_wallet();
+        assert!(selector_errors(&st, &funded).iter().all(Option::is_none));
+
+        // A transparent payment proposed while public authority applied.
+        let account = st.test_account().cloned().unwrap();
+        let t2t = TransactionRequest::new(vec![Payment::without_memo(
+            Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]))
+                .to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(40_000),
+        )])
+        .unwrap();
+        let change_strategy =
+            single_output_change_strategy(StandardFeeRule::Zip317, None, ShieldedPool::Sapling)
+                .with_transparent_change_policy(TransparentChangePolicy::TransparentChangeAllowed);
+        let stale_proposal = st
+            .propose_transfer_with_policy(
+                account.id(),
+                &GreedyInputSelector::new(),
+                &change_strategy,
+                t2t,
+                ConfirmationsPolicy::MIN,
+                &SpendPolicy::default()
+                    .with_transparent(TransparentSpendPolicy::any_account_addr()),
+            )
+            .unwrap();
+
+        set_mode(&mut st, PrivateRequired);
+        for error in selector_errors(&st, &funded) {
+            assert!(matches!(
+                error,
+                Some(SqliteClientError::TransparentAuthorityUnavailable)
+            ));
+        }
+
+        // Consuming the stale proposal is rejected before anything is stored.
+        let transactions = |st: &State| -> i64 {
+            conn(st)
+                .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
+                .unwrap()
+        };
+        let before = transactions(&st);
+        assert!(
+            st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+                account.usk(),
+                OvkPolicy::Sender,
+                &stale_proposal,
+            )
+            .is_err()
+        );
+        assert_eq!(transactions(&st), before);
+
+        // Shielded funds remain spendable, including to the wallet's own transparent address.
+        let dfvk = account.usk().sapling().to_diversifiable_full_viewing_key();
+        let (height, _, _) = st.generate_next_block(
+            &dfvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(200_000),
+        );
+        st.scan_cached_blocks(height, 1);
+        let (_, taddr) = account_taddr(&st);
+        let unshield = TransactionRequest::new(vec![Payment::without_memo(
+            Address::Transparent(taddr).to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(50_000),
+        )])
+        .unwrap();
+        let change_strategy =
+            single_output_change_strategy(StandardFeeRule::Zip317, None, ShieldedPool::Sapling);
+        let proposal = st
+            .propose_transfer_with_policy(
+                account.id(),
+                &GreedyInputSelector::new(),
+                &change_strategy,
+                unshield,
+                ConfirmationsPolicy::MIN,
+                &SpendPolicy::default(),
+            )
+            .unwrap();
+        st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn commits_and_promotion_are_rejected_without_writes() {
+        let (mut st, _, _) = funded_wallet();
+        let (account, _) = account_taddr(&st);
+        let origins_before: i64 = conn(&st)
+            .query_row("SELECT COUNT(*) FROM tpir_output_origins", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        for mode in [Public, PrivateShadow, PrivateRequired] {
+            set_mode(&mut st, mode);
+            let db = st.wallet_mut().db_mut();
+            let other = if mode == Public {
+                PrivateShadow
+            } else {
+                Public
+            };
+            assert_eq!(
+                db.apply_transparent_ledger_commit(commit(other, 0))
+                    .unwrap(),
+                CommitOutcome::Rejected(CommitRejection::ModeMismatch)
+            );
+            assert_eq!(
+                db.apply_transparent_ledger_commit(commit(mode, 5)).unwrap(),
+                CommitOutcome::Rejected(CommitRejection::StalePolicy)
+            );
+            assert_eq!(
+                db.apply_transparent_ledger_commit(commit(mode, 0)).unwrap(),
+                CommitOutcome::Rejected(CommitRejection::Unavailable)
+            );
+            assert_eq!(
+                db.promote_transparent_ledger_account(promotion(account, 1))
+                    .unwrap(),
+                PromotionOutcome::Rejected(PromotionRejection::StalePolicy)
+            );
+            assert_eq!(
+                db.promote_transparent_ledger_account(promotion(account, 0))
+                    .unwrap(),
+                PromotionOutcome::Rejected(PromotionRejection::Unavailable)
+            );
+        }
+
+        assert_eq!(ledger_rows(&st), 0);
+        assert_eq!(meta(&st), (0, 0));
+        let origins_after: i64 = conn(&st)
+            .query_row("SELECT COUNT(*) FROM tpir_output_origins", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(origins_after, origins_before);
+    }
+
+    #[test]
+    fn durable_private_policy_is_never_weakened() {
+        let (mut st, _, funded) = funded_wallet();
+        let (account, _) = account_taddr(&st);
+        set_durable_policy_for_testing(conn(&st), PrivateRequired, 1).unwrap();
+
+        for mode in [Public, PrivateShadow] {
+            set_mode(&mut st, mode);
+            let conflict = |e: &SqliteClientError| {
+                matches!(
+                    e,
+                    SqliteClientError::TransparentLedgerPolicyConflict {
+                        configured: Some(m),
+                        applied: PrivateRequired,
+                    } if *m == mode
+                )
+            };
+            let db = st.wallet().db();
+            assert!(conflict(&db.transparent_ledger_mode().unwrap_err()));
+            assert!(conflict(
+                &db.transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN)
+                    .unwrap_err()
+            ));
+            for error in selector_errors(&st, &funded) {
+                assert!(conflict(&error.unwrap()));
+            }
+            assert!(conflict(
+                &st.wallet_mut()
+                    .db_mut()
+                    .apply_transparent_ledger_commit(commit(mode, 1))
+                    .unwrap_err()
+            ));
+        }
+        // An unconfigured handle is blocked too.
+        assert!(matches!(
+            check_transparent_authority(conn(&st), None),
+            Err(SqliteClientError::TransparentLedgerPolicyConflict {
+                configured: None,
+                applied: PrivateRequired,
+            })
+        ));
+
+        // A matching handle operates, with transparent inputs still unavailable.
+        set_mode(&mut st, PrivateRequired);
+        assert_eq!(
+            st.wallet().db().transparent_ledger_mode().unwrap(),
+            PrivateRequired
+        );
+        assert!(matches!(
+            selector_errors(&st, &funded)[0],
+            Some(SqliteClientError::TransparentAuthorityUnavailable)
+        ));
+
+        // Nothing weakened the stored policy.
+        assert_eq!(meta(&st), (2, 1));
+    }
 }

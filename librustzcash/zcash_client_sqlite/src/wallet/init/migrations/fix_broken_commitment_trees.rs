@@ -217,6 +217,7 @@ fn truncate_to_height<P: consensus::Parameters>(
             #[cfg(feature = "orchard")]
             enhancement_mode: None,
             status_mode: None,
+            transparent_ledger_mode: None,
             #[cfg(feature = "transparent-inputs")]
             gap_limits: *gap_limits,
         };
