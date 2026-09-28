@@ -391,9 +391,9 @@ mod handles {
             testing::{AddressType, single_output_change_strategy},
             transparent_ledger::{
                 ChainPoint, CommitOutcome, CommitRejection, LastKnownSource, LedgerLifecycle,
-                Placed, PromotionContext, PromotionOutcome, PromotionRejection, PublicationStatus,
-                ReceiveEvent, RecoveryBlocker, RecoveryCompletion, RevisionId, SourceId,
-                SourceRevision, TransparentAuthority, TransparentLedgerCommit,
+                Placed, PromotionContext, PromotionOutcome, PromotionRejection, PublicationAnchor,
+                PublicationStatus, ReceiveEvent, RecoveryBlocker, RecoveryCompletion, RevisionId,
+                SourceId, SourceRevision, TransparentAuthority, TransparentLedgerCommit,
                 TransparentLedgerContext, TransparentLedgerMode, TransparentLedgerRead as _,
                 TransparentLedgerWrite as _,
             },
@@ -453,7 +453,10 @@ mod handles {
                 source: SourceId::new(b"source".to_vec()).unwrap(),
                 revision: RevisionId::new(b"revision".to_vec()).unwrap(),
                 status: PublicationStatus::Provisional,
-                anchor: point(),
+                anchor: PublicationAnchor {
+                    height: BlockHeight::from(2),
+                    hash: BlockHash([1; 32]),
+                },
             },
             receives: vec![Placed {
                 event: ReceiveEvent {
@@ -466,6 +469,7 @@ mod handles {
             }],
             spends: vec![],
             coverage: vec![],
+            unsupported: vec![],
             pages: Default::default(),
         }
     }
@@ -866,5 +870,41 @@ mod handles {
 
         // Nothing weakened the stored policy.
         assert_eq!(meta(&st), (2, 1));
+    }
+
+    #[test]
+    fn newer_reader_requirement_fails_closed() {
+        let (st, _, funded) = funded_wallet();
+        conn(&st)
+            .execute("UPDATE tpir_meta SET min_reader_version = 2", [])
+            .unwrap();
+        let incompatible = |e: &SqliteClientError| {
+            matches!(
+                e,
+                SqliteClientError::TransparentLedgerIncompatible { required: 2 }
+            )
+        };
+        assert!(incompatible(
+            &st.wallet().db().transparent_ledger_mode().unwrap_err()
+        ));
+        for error in selector_errors(&st, &funded) {
+            assert!(incompatible(&error.unwrap()));
+        }
+    }
+
+    #[test]
+    fn watched_scripts_report_generations_without_fabricated_scripts() {
+        let (st, _, _) = funded_wallet();
+        let (account, _) = account_taddr(&st);
+        let snapshot = st
+            .wallet()
+            .db()
+            .transparent_ledger_watched_scripts()
+            .unwrap();
+        assert_eq!(snapshot.policy_generation, 0);
+        assert_eq!(snapshot.accounts.len(), 1);
+        assert_eq!(snapshot.accounts[0].account, account);
+        assert_eq!(snapshot.accounts[0].watch_generation, 0);
+        assert!(snapshot.scripts.is_empty());
     }
 }

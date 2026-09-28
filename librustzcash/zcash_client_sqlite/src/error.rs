@@ -61,6 +61,11 @@ pub enum SqliteClientError {
     /// Consuming transparent inputs requires private transparent authority, which is not
     /// available.
     TransparentAuthorityUnavailable,
+    /// The wallet's transparent ledger state requires a newer reader than this build.
+    TransparentLedgerIncompatible {
+        /// The minimum reader version the wallet requires.
+        required: i64,
+    },
 
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
@@ -358,6 +363,10 @@ impl fmt::Display for SqliteClientError {
             } => write!(
                 f,
                 "Transparent ledger mode {configured:?} is weaker than the wallet's applied policy {applied:?}; this build cannot operate on this wallet's transparent funds"
+            ),
+            SqliteClientError::TransparentLedgerIncompatible { required } => write!(
+                f,
+                "Transparent ledger state requires reader version {required}; this build cannot operate on this wallet's transparent funds"
             ),
             SqliteClientError::TransparentAuthorityUnavailable => write!(
                 f,

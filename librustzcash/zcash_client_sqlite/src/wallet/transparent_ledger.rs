@@ -10,12 +10,12 @@
 
 use rusqlite::OptionalExtension as _;
 use zcash_client_backend::data_api::{
-    AccountBalance,
     transparent_ledger::{
-        CommitOutcome, CommitRejection, LastKnownBalance, LastKnownSource, PromotionContext,
-        PromotionOutcome, PromotionRejection, RecoveryBlocker, RecoveryCompletion,
-        RecoveryDiagnostics, TransparentAuthority, TransparentLedgerBalance,
-        TransparentLedgerCommit, TransparentLedgerMode, TransparentLedgerSnapshot,
+        AccountWatchGeneration, CommitOutcome, CommitRejection, LastKnownBalance, LastKnownSource,
+        PromotionContext, PromotionOutcome, PromotionRejection, RecoveryBlocker,
+        RecoveryCompletion, RecoveryDiagnostics, RecoveryStart, TransparentAuthority,
+        TransparentLedgerBalance, TransparentLedgerCommit, TransparentLedgerMode,
+        TransparentLedgerSnapshot, WatchedScript, WatchedScriptSnapshot,
     },
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
@@ -27,6 +27,7 @@ use {
     crate::{TxRef, UtxoId},
     rusqlite::named_params,
     transparent::bundle::OutPoint,
+    zcash_client_backend::data_api::AccountBalance,
 };
 
 fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError> {
@@ -40,7 +41,7 @@ fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError>
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "transparent-inputs"))]
 fn mode_code(mode: TransparentLedgerMode) -> i64 {
     match mode {
         TransparentLedgerMode::Public => 0,
@@ -48,6 +49,10 @@ fn mode_code(mode: TransparentLedgerMode) -> i64 {
         TransparentLedgerMode::PrivateRequired => 2,
     }
 }
+
+/// The highest `tpir_meta.min_reader_version` this build can interpret. A wallet requiring a
+/// newer reader is refused rather than operated on with semantics this build lacks.
+pub(crate) const TPIR_READER_VERSION: i64 = 1;
 
 /// The policy durably applied to the wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,12 +75,23 @@ pub(crate) fn durable_policy(
         return Ok(None);
     }
     conn.query_row(
-        "SELECT applied_mode, policy_generation FROM tpir_meta WHERE id = 0",
+        "SELECT applied_mode, policy_generation, min_reader_version FROM tpir_meta WHERE id = 0",
         [],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
     )
     .optional()?
-    .map(|(mode, generation)| {
+    .map(|(mode, generation, min_reader_version)| {
+        if min_reader_version > TPIR_READER_VERSION {
+            return Err(SqliteClientError::TransparentLedgerIncompatible {
+                required: min_reader_version,
+            });
+        }
         Ok(DurablePolicy {
             mode: mode_from_code(mode)?,
             generation: u64::try_from(generation).map_err(|_| {
@@ -123,6 +139,7 @@ pub(crate) fn resolve_mode(
 /// Public authority is retained by `Public` and `PrivateShadow` handles, and by unconfigured
 /// handles unless the wallet durably requires private authority. Private authority is not yet
 /// available, so `PrivateRequired` handles are rejected.
+#[cfg(feature = "transparent-inputs")]
 pub(crate) fn check_transparent_authority(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
@@ -136,28 +153,38 @@ pub(crate) fn check_transparent_authority(
     }
 }
 
+/// Reads the account's transparent balance. Without transparent support this build cannot
+/// read transparent state that another build may have written, so it reports none rather
+/// than a zero balance.
+#[cfg(feature = "transparent-inputs")]
 fn transparent_balance(
     conn: &rusqlite::Connection,
     account: AccountUuid,
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
-) -> Result<TransparentLedgerBalance, SqliteClientError> {
-    #[allow(unused_mut)]
+) -> Result<Option<TransparentLedgerBalance>, SqliteClientError> {
     let mut balances = std::collections::HashMap::<AccountUuid, AccountBalance>::new();
-    #[cfg(feature = "transparent-inputs")]
     super::transparent::add_transparent_account_balances(
         conn,
         target_height,
         confirmations_policy,
         &mut balances,
     )?;
-    #[cfg(not(feature = "transparent-inputs"))]
-    let _ = (conn, target_height, confirmations_policy);
     let balance = balances.remove(&account).unwrap_or(AccountBalance::ZERO);
-    Ok(TransparentLedgerBalance {
+    Ok(Some(TransparentLedgerBalance {
         regular: *balance.unshielded_regular_balance(),
         coinbase: *balance.unshielded_coinbase_balance(),
-    })
+    }))
+}
+
+#[cfg(not(feature = "transparent-inputs"))]
+fn transparent_balance(
+    _: &rusqlite::Connection,
+    _: AccountUuid,
+    _: TargetHeight,
+    _: ConfirmationsPolicy,
+) -> Result<Option<TransparentLedgerBalance>, SqliteClientError> {
+    Ok(None)
 }
 
 /// Builds the snapshot for `account` from the connection's current state. The caller provides
@@ -178,22 +205,22 @@ pub(crate) fn snapshot(
     }
 
     // No account can hold private ledger state yet, so authority follows the mode alone.
-    let tip = chain_tip_height(conn)?;
-    let balance = tip
-        .map(|tip| {
-            transparent_balance(
-                conn,
-                account,
-                TargetHeight::from(tip + 1),
-                confirmations_policy,
-            )
-        })
-        .transpose()?;
     let mut blockers = vec![];
-    let (authority, authorized, last_known, completion) = if mode.retains_public_authority() {
-        if balance.is_none() {
+    let balance = match chain_tip_height(conn)? {
+        None => {
             blockers.push(RecoveryBlocker::ChainUnknown);
+            None
         }
+        Some(tip) => {
+            let target = TargetHeight::from(tip + 1);
+            let balance = transparent_balance(conn, account, target, confirmations_policy)?;
+            if balance.is_none() {
+                blockers.push(RecoveryBlocker::TransparentSupportUnavailable);
+            }
+            balance
+        }
+    };
+    let (authority, authorized, last_known, completion) = if mode.retains_public_authority() {
         (
             TransparentAuthority::Public,
             balance,
@@ -230,6 +257,53 @@ pub(crate) fn snapshot(
     })
 }
 
+/// Reads the watched scripts and the generations a recovery run must capture.
+///
+/// Script enumeration is not yet implemented, so accounts are listed with their current
+/// generations and no scripts; that is not evidence of empty history.
+pub(crate) fn watched_scripts(
+    conn: &rusqlite::Connection,
+    durable: Option<DurablePolicy>,
+) -> Result<WatchedScriptSnapshot<AccountUuid>, SqliteClientError> {
+    let accounts = conn
+        .prepare(
+            "SELECT a.uuid, IFNULL(s.watch_generation, 0)
+             FROM accounts a
+             LEFT JOIN tpir_account_state s ON s.account_id = a.id
+             ORDER BY a.id",
+        )?
+        .query_map([], |row| {
+            Ok(AccountWatchGeneration {
+                account: AccountUuid(row.get(0)?),
+                watch_generation: row.get::<_, i64>(1)?.try_into().unwrap_or(u64::MAX),
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let scripts = conn
+        .prepare(
+            "SELECT a.uuid, s.script, s.required_from
+             FROM tpir_scripts s
+             JOIN accounts a ON a.id = s.account_id
+             ORDER BY s.id",
+        )?
+        .query_map([], |row| {
+            Ok(WatchedScript {
+                account: AccountUuid(row.get(0)?),
+                script: transparent::address::Script(zcash_script::script::Code(row.get(1)?)),
+                required_from: match row.get::<_, Option<u32>>(2)? {
+                    Some(height) => RecoveryStart::From(height.into()),
+                    None => RecoveryStart::Unknown,
+                },
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(WatchedScriptSnapshot {
+        policy_generation: durable.map_or(0, |p| p.generation),
+        accounts,
+        scripts,
+    })
+}
+
 /// Validates a commit's context and rejects it: no ledger state is writable yet. Nothing is
 /// written.
 pub(crate) fn apply_commit(
@@ -263,7 +337,7 @@ pub(crate) fn promote(
 
 /// Durably applies `mode` for test fixtures. Production policy transitions are not yet
 /// implemented; this exists so tests can model a wallet written by a privacy-aware release.
-#[cfg(test)]
+#[cfg(all(test, feature = "transparent-inputs"))]
 pub(crate) fn set_durable_policy_for_testing(
     conn: &rusqlite::Connection,
     mode: TransparentLedgerMode,

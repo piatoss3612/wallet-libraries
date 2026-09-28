@@ -44,7 +44,7 @@ use zcash_client_backend::data_api::status::{
 use zcash_client_backend::data_api::transparent_ledger::{
     CommitOutcome, PromotionContext, PromotionOutcome, TransparentLedgerCommit,
     TransparentLedgerMode, TransparentLedgerRead, TransparentLedgerSnapshot,
-    TransparentLedgerWrite,
+    TransparentLedgerWrite, WatchedScriptSnapshot,
 };
 
 use std::{
@@ -1641,6 +1641,25 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             wallet::transparent_ledger::snapshot(conn, account, mode, confirmations_policy)
         };
         // Every field must come from one consistent read.
+        if conn.is_autocommit() {
+            let tx = conn.unchecked_transaction()?;
+            let snapshot = read(&tx)?;
+            tx.commit()?;
+            Ok(snapshot)
+        } else {
+            read(conn)
+        }
+    }
+
+    fn transparent_ledger_watched_scripts(
+        &self,
+    ) -> Result<WatchedScriptSnapshot<Self::AccountId>, Self::Error> {
+        let conn = self.conn.borrow();
+        let read = |conn: &rusqlite::Connection| {
+            let (_, durable) =
+                wallet::transparent_ledger::resolve_mode(conn, self.transparent_ledger_mode)?;
+            wallet::transparent_ledger::watched_scripts(conn, durable)
+        };
         if conn.is_autocommit() {
             let tx = conn.unchecked_transaction()?;
             let snapshot = read(&tx)?;

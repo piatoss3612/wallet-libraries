@@ -32,6 +32,13 @@ workspace.
   transaction that spends transparent outputs fail, because private authority
   is not yet available. Shielded-funded spends, including unshielding, are
   unaffected.
+- `SqliteClientError::TransparentLedgerIncompatible`: a wallet whose
+  `tpir_meta.min_reader_version` exceeds this build's reader version is
+  refused by the ledger APIs and transparent selectors.
+- The transparent ledger snapshot reports no balance, with blocker
+  `TransparentSupportUnavailable`, when built without `transparent-inputs`,
+  rather than a fabricated zero. `transparent_ledger_watched_scripts` lists
+  each account's watch generation; script enumeration arrives with recovery.
 - Projection origins for new transparent records: public discovery writes
   record a legacy-public origin, and local construction records a local
   origin, in the same transaction as the record.
