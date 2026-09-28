@@ -6,6 +6,8 @@ use std::{
 };
 
 use nonempty::NonEmpty;
+#[cfg(feature = "orchard")]
+use zcash_primitives::transaction::builder::BundlePadding;
 use zcash_primitives::transaction::{TxId, TxVersion};
 use zcash_protocol::{
     PoolType, ShieldedPool,
@@ -13,11 +15,6 @@ use zcash_protocol::{
     value::Zatoshis,
 };
 use zip321::{TransactionRequest, Zip321Error};
-#[cfg(feature = "orchard")]
-use {
-    zcash_primitives::transaction::builder::BundlePadding,
-    zcash_protocol::zip318::PoolMigrationConstants,
-};
 
 use crate::{
     data_api::wallet::{ConfirmationsPolicy, TargetHeight},
@@ -894,106 +891,11 @@ impl<NoteRef> Step<NoteRef> {
             .count()
     }
 
-    /// The value of this step's sole Ironwood PAYMENT output, or `None` when the step has any
-    /// number of Ironwood payment outputs other than exactly one, or when that output's value is
-    /// not determined (a ZIP 321 payment may carry no amount).
-    ///
-    /// Change is deliberately not considered. The fee model must reach the same verdict as
-    /// [`Step::is_canonical_crossing`] from the same data, and at the point it decides an Ironwood
-    /// change value is precisely the unknown it is solving for. That costs nothing: a step with
-    /// Ironwood change alongside an Ironwood payment has two real Ironwood outputs, so its bundle
-    /// already meets the default action floor and the padding makes no difference.
-    #[cfg(feature = "orchard")]
-    fn sole_ironwood_payment_value(&self) -> Option<Zatoshis> {
-        let mut payments = self
-            .payment_pools()
-            .iter()
-            .filter(|(_, pool)| **pool == PoolType::IRONWOOD)
-            .map(|(index, _)| {
-                self.transaction_request()
-                    .payments()
-                    .get(index)
-                    .and_then(|payment| payment.amount())
-            });
-
-        match (payments.next(), payments.next()) {
-            (Some(value), None) => value,
-            _ => None,
-        }
-    }
-
-    /// Returns whether this step is a *canonical crossing*: a step whose whole shape is
-    /// indistinguishable from a [ZIP 318] migration transfer, and which is therefore built with a
-    /// single unpadded Ironwood action so that it joins that anonymity set. See
-    /// [`Step::ironwood_bundle_padding`].
-    ///
-    /// A migration transfer spends one Orchard note, pads its Orchard bundle to the default
-    /// two-action floor (the spend plus its change, or a dummy when the note's value exactly
-    /// covers the crossing and its fee), outputs one canonical denomination into the Ironwood
-    /// pool, and is proved against a boundary of the anchor bucket grid. Every one of those is
-    /// required here:
-    ///
-    /// - exactly one Orchard input and at most one Orchard change output, so that the Orchard
-    ///   bundle is exactly two actions;
-    /// - no change in any other pool;
-    /// - no Ironwood spends, a step funded from Ironwood crossing nothing;
-    /// - no Ironwood change, leaving a single Ironwood output;
-    /// - that output's value is a canonical denomination under `params`;
-    /// - the step's anchor lies on `params`' anchor bucket grid;
-    /// - the fee equals `canonical_fee`, which the caller obtains from
-    ///   [`fees::canonical_crossing_fee`] for the consensus parameters and target height the
-    ///   transaction will actually be built against.
-    ///
-    /// [`fees::canonical_crossing_fee`]: crate::fees::canonical_crossing_fee
-    ///
-    /// Dropping the Ironwood padding without the rest would not buy anonymity but destroy it: an
-    /// unpadded Ironwood bundle beside an Orchard bundle of the wrong size, or against a
-    /// chain-tip anchor, is a shape nothing else on the network emits — a fingerprint rather than
-    /// a disguise.
-    ///
-    /// [ZIP 318]: https://zips.z.cash/zip-0318
-    #[cfg(feature = "orchard")]
-    pub fn is_canonical_crossing<P: PoolMigrationConstants>(
-        &self,
-        params: &P,
-        canonical_fee: Zatoshis,
-    ) -> bool {
-        self.input_count_in_pool(PoolType::ORCHARD) == 1
-            && self.input_count_in_pool(PoolType::IRONWOOD) == 0
-            && self.change_count_in_pool(PoolType::IRONWOOD) == 0
-            // At most ONE Orchard change output. The Orchard bundle must be exactly two actions,
-            // and from NU6.3 a spend and an output no longer share one, so its count is
-            // `spends + outputs`: a second change output makes three. A multi-output change
-            // strategy produces exactly that from a single large note.
-            && self.change_count_in_pool(PoolType::ORCHARD) <= 1
-            // Change anywhere else adds a bundle no migration transfer carries.
-            && self.change_count_in_pool(PoolType::SAPLING) == 0
-            && self.change_count_in_pool(PoolType::TRANSPARENT) == 0
-            && self
-                .sole_ironwood_payment_value()
-                .is_some_and(|value| params.is_canonical_denomination(value))
-            && self
-                .anchor_height()
-                .is_some_and(|anchor| params.anchor_bucket_interval().is_boundary(anchor))
-            // ZIP 318 forbids a non-standard fee, which would partition the anonymity set as
-            // surely as a non-standard shape. A `ChangeStrategy` may be built on any fee rule,
-            // including a fixed non-standard one, so a structurally perfect crossing can still
-            // carry a distinguishing fee.
-            //
-            // This condition is deliberately absent from `ironwood_bundle_padding`: the fee model
-            // decides that padding WHILE computing the fee, so it cannot test the result against a
-            // target. Keeping the fee here makes this predicate a gate on whether to keep a
-            // proposal at all, rather than an input the builder must reproduce.
-            && self.balance().fee_required() == canonical_fee
-    }
-
     /// The transactional bundle padding the transaction builder must use for this step's Ironwood
     /// bundle: the padding the [`ChangeStrategy`] recorded when it computed the fee.
     ///
     /// This is READ, not re-derived. The builder must produce exactly the action count the fee was
-    /// charged against, and a second derivation could disagree with the first — which is precisely
-    /// what happens for a condition only one of them can evaluate, such as whether the resulting
-    /// fee is itself canonical.
+    /// charged against, and a second derivation could disagree with the first.
     ///
     /// [`ChangeStrategy`]: crate::fees::ChangeStrategy
     #[cfg(feature = "orchard")]
@@ -1112,7 +1014,6 @@ mod tests {
 
     use incrementalmerkletree::Position;
     use nonempty::NonEmpty;
-    use zcash_address::ZcashAddress;
     use zcash_primitives::transaction::{
         TxId,
         builder::BundlePadding,
@@ -1120,21 +1021,17 @@ mod tests {
     };
 
     use crate::{
-        data_api::{
-            anchor_retention::{AnchorRetentionInterval, PoolMigrationParams},
-            wallet::{ConfirmationsPolicy, TargetHeight},
-        },
-        fees::{ChangeValue, DummyOutputCounts, TransactionBalance},
+        data_api::wallet::{ConfirmationsPolicy, TargetHeight},
+        fees::{ChangeValue, TransactionBalance},
         wallet::Note,
     };
     use zcash_protocol::{
         PoolType, ShieldedPool,
         consensus::{BlockHeight, BranchId, Network, NetworkUpgrade, Parameters},
         constants::MAX_BLOCK_BYTES,
-        value::{COIN, Zatoshis},
-        zip318::PoolMigrationConstants,
+        value::Zatoshis,
     };
-    use zip321::{Payment, TransactionRequest};
+    use zip321::TransactionRequest;
 
     use orchard::{
         ValuePool,
@@ -1226,163 +1123,8 @@ mod tests {
         )
     }
 
-    /// The canonical crossing fee under the mainnet parameters these tests use.
-    fn canonical_fee() -> Zatoshis {
-        crate::fees::canonical_crossing_fee(
-            &zcash_protocol::consensus::MAIN_NETWORK,
-            BlockHeight::from_u32(2_000_000),
-        )
-        .expect("the canonical shape is a valid input to the ZIP 317 rule")
-    }
-
-    /// The ZIP 318 parameters a wallet retaining the specified grid would report. Tests take their
-    /// parameters from a wallet-shaped value, as production code does; there is deliberately no
-    /// implementation of `PoolMigrationConstants` for a network type.
-    fn zip318() -> PoolMigrationParams {
-        PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318)
-    }
-
     fn shielded_change(pool: ShieldedPool, value: u64) -> ChangeValue {
         ChangeValue::shielded(pool, Zatoshis::const_from_u64(value), None)
-    }
-
-    // A step paying `value` into the Ironwood pool: one payment, routed to Ironwood, funded by
-    // Orchard notes, with the given change. This is the shape of an ordinary post-NU6.3 payment
-    // to an Orchard receiver, which is delivered through the Ironwood bundle.
-    fn ironwood_payment_step(value: u64, change: Vec<ChangeValue>) -> Step<u32> {
-        let recipient: ZcashAddress =
-            "u1qpatys4zruk99pg59gcscrt7y6akvl9vrhcfyhm9yxvxz7h87q6n8cgrzzpe9zru68uq39uhmlpp5uefxu0su5uqyqfe5zp3tycn0ecl"
-                .parse()
-                .expect("a valid unified address");
-        let request = TransactionRequest::new(vec![Payment::without_memo(
-            recipient,
-            Zatoshis::const_from_u64(value),
-        )])
-        .expect("a valid transaction request");
-
-        Step {
-            transaction_request: request,
-            payment_pools: BTreeMap::from([(0usize, PoolType::IRONWOOD)]),
-            transparent_inputs: vec![],
-            shielded_inputs: shielded_inputs_for(orchard_and_ironwood_notes(
-                (1, value + 100_000),
-                (0, 0),
-            )),
-            // A boundary of the ZIP 318 grid: a canonical crossing must be anchored to one.
-            anchor_height: Some(BlockHeight::from_u32(144)),
-            prior_step_inputs: vec![],
-            balance: TransactionBalance::new(change, canonical_fee())
-                .unwrap()
-                .with_dummy_outputs(DummyOutputCounts::new(0, 0, 0)),
-            is_shielding: false,
-        }
-    }
-
-    /// A crossing whose value is a canonical ZIP 318 denomination is built with a single unpadded
-    /// Ironwood action, matching the shape of a migration transfer.
-    #[test]
-    fn canonical_crossing_is_unpadded() {
-        for value in [COIN, COIN / 2, COIN / 100, 20 * COIN, 10_000 * COIN] {
-            let step = ironwood_payment_step(value, vec![]);
-            assert!(
-                step.is_canonical_crossing(&zip318(), canonical_fee()),
-                "{value} zatoshi should be a canonical crossing"
-            );
-            assert_eq!(step.ironwood_bundle_padding(), BundlePadding::UNPADDED);
-            assert_eq!(
-                step.ironwood_action_count(
-                    step.ironwood_bundle_padding(),
-                    BundleVersion::ironwood_v3()
-                ),
-                Ok(1)
-            );
-        }
-    }
-
-    /// One zatoshi off a canonical denomination, or outside the ZIP's bounds, is not a canonical
-    /// crossing: it stays padded, since it would join no migration anonymity set.
-    #[test]
-    fn near_canonical_crossing_stays_padded() {
-        for value in [COIN + 1, COIN - 1, 3 * COIN, 100_000, 20_000 * COIN] {
-            let step = ironwood_payment_step(value, vec![]);
-            assert!(
-                !step.is_canonical_crossing(&zip318(), canonical_fee()),
-                "{value} zatoshi should not be a canonical crossing"
-            );
-            assert_eq!(
-                step.ironwood_action_count(BundlePadding::DEFAULT, BundleVersion::ironwood_v3()),
-                Ok(2)
-            );
-        }
-    }
-
-    /// Ironwood change alongside a canonical payment is NOT a canonical crossing. The fee model
-    /// cannot see a change value at the point it decides padding — that value is what it is
-    /// solving for — so including change here would let the two disagree and break the builder's
-    /// exact-balance check. It costs nothing: two real outputs already meet the default floor.
-    #[test]
-    fn ironwood_change_is_not_a_canonical_crossing() {
-        let step = ironwood_payment_step(COIN, vec![shielded_change(ShieldedPool::Ironwood, 5000)]);
-        assert!(!step.is_canonical_crossing(&zip318(), canonical_fee()));
-    }
-
-    /// A payment funded from Ironwood notes crosses nothing, so it is never a canonical crossing
-    /// however canonical its value. Its bundle has two real actions regardless.
-    #[test]
-    fn ironwood_funded_payment_is_not_a_canonical_crossing() {
-        let mut step = ironwood_payment_step(COIN, vec![]);
-        step.shielded_inputs =
-            shielded_inputs_for(orchard_and_ironwood_notes((0, 0), (1, 2 * COIN)));
-        assert!(!step.is_canonical_crossing(&zip318(), canonical_fee()));
-    }
-
-    /// An anchor off the bucket grid is not a canonical crossing, however canonical the value and
-    /// however migration-shaped the bundles. Unpadding here would produce an "unpadded Ironwood
-    /// against a fresh anchor" shape that no migration transfer emits, which is a fingerprint
-    /// rather than a disguise.
-    #[test]
-    fn unbucketed_anchor_is_not_a_canonical_crossing() {
-        let mut step = ironwood_payment_step(COIN, vec![]);
-        for height in [143u32, 145, 1, 2_000_000] {
-            step.anchor_height = Some(BlockHeight::from_u32(height));
-            assert!(
-                !step.is_canonical_crossing(&zip318(), canonical_fee()),
-                "anchor {height} is not a grid boundary"
-            );
-        }
-        // The neighbouring boundaries are.
-        for height in [144u32, 288, 1_999_872] {
-            step.anchor_height = Some(BlockHeight::from_u32(height));
-            assert!(step.is_canonical_crossing(&zip318(), canonical_fee()));
-        }
-    }
-
-    /// A migration transfer spends exactly one Orchard note. A payment drawing on more leaves an
-    /// Orchard bundle of the wrong size, so unpadding its Ironwood bundle would not resemble a
-    /// migration transfer.
-    #[test]
-    fn multiple_orchard_inputs_are_not_a_canonical_crossing() {
-        let mut step = ironwood_payment_step(COIN, vec![]);
-        assert!(step.is_canonical_crossing(&zip318(), canonical_fee()));
-
-        step.shielded_inputs = shielded_inputs_for(orchard_and_ironwood_notes((3, COIN), (0, 0)));
-        assert!(!step.is_canonical_crossing(&zip318(), canonical_fee()));
-    }
-
-    /// Overridden ZIP 318 parameters narrow which crossings are canonical, and the padding follows.
-    #[test]
-    fn canonical_crossing_respects_overridden_parameters() {
-        #[derive(Clone)]
-        struct SmallCap;
-        impl PoolMigrationConstants for SmallCap {
-            fn denomination_cap(&self) -> Zatoshis {
-                Zatoshis::const_from_u64(COIN)
-            }
-        }
-
-        let step = ironwood_payment_step(2 * COIN, vec![]);
-        assert!(step.is_canonical_crossing(&zip318(), canonical_fee()));
-        assert!(!step.is_canonical_crossing(&SmallCap, canonical_fee()));
     }
 
     /// A step that produces any shielded bundle must bind a concrete anchor. Passing `None` (the

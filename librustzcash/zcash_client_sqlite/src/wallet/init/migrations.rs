@@ -16,6 +16,7 @@ mod add_transparent_receiver_address_index;
 mod add_transparent_value_index;
 mod add_utxo_account;
 mod addresses_table;
+mod drop_zip318_pool_migration;
 mod ensure_default_transparent_address;
 mod ensure_orchard_ua_receiver;
 mod ephemeral_addresses;
@@ -46,6 +47,7 @@ mod sent_notes_to_internal;
 mod shardtree_support;
 mod spend_key_available;
 mod standalone_p2sh;
+mod status_inclusion_evidence;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod swap_payment_recovery;
@@ -128,6 +130,7 @@ pub mod ids {
         add_transparent_value_index::MIGRATION_ID as ADD_TRANSPARENT_VALUE_INDEX,
         add_utxo_account::MIGRATION_ID as ADD_UTXO_ACCOUNT,
         addresses_table::MIGRATION_ID as ADDRESSES_TABLE,
+        drop_zip318_pool_migration::MIGRATION_ID as DROP_ZIP318_POOL_MIGRATION,
         ensure_default_transparent_address::MIGRATION_ID as ENSURE_DEFAULT_TRANSPARENT_ADDRESS,
         ensure_orchard_ua_receiver::MIGRATION_ID as ENSURE_ORCHARD_UA_RECEIVER,
         ephemeral_addresses::MIGRATION_ID as EPHEMERAL_ADDRESSES,
@@ -157,6 +160,7 @@ pub mod ids {
         shardtree_support::MIGRATION_ID as SHARDTREE_SUPPORT,
         spend_key_available::MIGRATION_ID as SPEND_KEY_AVAILABLE,
         standalone_p2sh::MIGRATION_ID as STANDALONE_P2SH,
+        status_inclusion_evidence::MIGRATION_ID as STATUS_INCLUSION_EVIDENCE,
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         swap_payment_recovery::MIGRATION_ID as SWAP_PAYMENT_RECOVERY,
@@ -273,6 +277,13 @@ pub(super) fn all_migrations<
     //                             |                             |            \
     //                             |              v_transactions_pool_crossing \
     //                             `------------------------------------------- v_tx_outputs_transparent_addresses
+    //
+    // Not drawn above: the ZIP 318 and status tail of the graph. It runs
+    // v_transactions_pool_crossing -> zip318_classification -> v_transactions_zip318_kind ->
+    // ironwood_enhance, and ironwood_received_notes -> orchard_ironwood_migration_tables ->
+    // orchard_ironwood_migration_anchor_interval -> orchard_ironwood_migration_unsatisfiability.
+    // Both chains meet at status_inclusion_evidence, which is followed by
+    // drop_zip318_pool_migration, which drops the schema the ZIP 318 migrations created.
     //
     let rng = Rc::new(Mutex::new(rng));
     vec![
@@ -394,9 +405,11 @@ pub(super) fn all_migrations<
         Box::new(tree_retained_checkpoints::Migration),
         Box::new(note_locking::Migration),
         Box::new(tx_status_observation_intent::Migration),
+        Box::new(status_inclusion_evidence::Migration),
         Box::new(orchard_ironwood_migration_anchor_interval::Migration),
         Box::new(v_tx_outputs_transparent_addresses::Migration),
         Box::new(orchard_ironwood_migration_unsatisfiability::Migration),
+        Box::new(drop_zip318_pool_migration::Migration),
     ]
 }
 
@@ -603,15 +616,12 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
 
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
+    drop_zip318_pool_migration::MIGRATION_ID,
     v_tx_outputs_transparent_addresses::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
     swap_receive_verification::MIGRATION_ID,
-    fix_bad_ironwood_change_flagging::MIGRATION_ID,
-    v_address_uses_ironwood::MIGRATION_ID,
-    orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,
-    tree_retained_checkpoints::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
@@ -716,6 +726,7 @@ pub(crate) mod tests {
             ids::ADD_TRANSPARENT_VALUE_INDEX,
             ids::ADD_UTXO_ACCOUNT,
             ids::ADDRESSES_TABLE,
+            ids::DROP_ZIP318_POOL_MIGRATION,
             ids::ENSURE_DEFAULT_TRANSPARENT_ADDRESS,
             ids::ENSURE_ORCHARD_UA_RECEIVER,
             ids::EPHEMERAL_ADDRESSES,
@@ -758,6 +769,7 @@ pub(crate) mod tests {
             ids::TX_RETRIEVAL_QUEUE,
             ids::TX_RETRIEVAL_QUEUE_EXPIRY,
             ids::TX_STATUS_OBSERVATION_INTENT,
+            ids::STATUS_INCLUSION_EVIDENCE,
             ids::UFVK_SUPPORT,
             ids::UTXOS_TABLE,
             ids::UTXOS_TO_TXOS,

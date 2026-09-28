@@ -171,6 +171,9 @@ impl std::error::Error for WalletMigrationError {
 /// variants.
 fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> WalletMigrationError {
     match e {
+        SqliteClientError::StatusModeNotConfigured => {
+            unreachable!("migrations do not request status work")
+        }
         #[cfg(feature = "orchard")]
         SqliteClientError::EnhancementModeNotConfigured | SqliteClientError::SwapReceivingNotEnabled => {
             unreachable!("we don't enumerate enhancement requests in migrations")
@@ -782,8 +785,6 @@ mod tests {
     };
 
     use regex::Regex;
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-    use zcash_protocol::value::Zatoshis;
 
     pub(crate) fn describe_tables(conn: &Connection) -> Result<Vec<String>, rusqlite::Error> {
         let result = conn
@@ -842,14 +843,6 @@ mod tests {
             db::TABLE_IRONWOOD_TREE_RETAINED_CHECKPOINTS,
             db::TABLE_IRONWOOD_TREE_SHARDS,
             db::TABLE_NULLIFIER_MAP,
-            db::TABLE_ORCHARD_IRONWOOD_MIGRATION_CROSSING_VALUES,
-            db::TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_DIRECT_FUNDING,
-            db::TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_INPUTS,
-            db::TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_OUTPUTS,
-            db::TABLE_ORCHARD_IRONWOOD_MIGRATION_SPEND_NULLIFIERS,
-            db::TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTION_DEPS,
-            db::TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTIONS,
-            db::TABLE_ORCHARD_IRONWOOD_MIGRATIONS,
             db::TABLE_ORCHARD_RECEIVED_NOTE_SPENDS,
             db::TABLE_ORCHARD_RECEIVED_NOTES,
             db::TABLE_ORCHARD_TREE_CAP,
@@ -904,8 +897,6 @@ mod tests {
             db::INDEX_IRONWOOD_RECEIVED_NOTES_TX,
             db::INDEX_IRONWOOD_RECEIVED_NOTES_WITNESS_STABILIZED,
             db::INDEX_NF_MAP_LOCATOR_IDX,
-            db::INDEX_ORCHARD_IRONWOOD_MIGRATION_TX_DUE,
-            db::INDEX_ORCHARD_IRONWOOD_MIGRATIONS_ACCOUNT,
             db::INDEX_ORCHARD_RNS_NOTE,
             db::INDEX_ORCHARD_RNS_TX,
             db::INDEX_ORCHARD_RECEIVED_NOTES_ACCOUNT,
@@ -978,76 +969,6 @@ mod tests {
             let actual: String = row.get(0).unwrap();
             assert_eq!(normalize(&actual), normalize(&expected_views[expected_idx]));
             expected_idx += 1;
-        }
-    }
-
-    /// The pool-migration store's canonical DDL and the schema the migrations actually leave behind
-    /// are the same schema.
-    ///
-    /// They are written twice on purpose: `orchard_ironwood_migration_tables` is published, so it
-    /// creates its tables from a frozen copy of the DDL it shipped with — down to naming the
-    /// transfer ordinal `tx_id`, which `orchard_ironwood_migration_unsatisfiability` then renames —
-    /// while the store's DDL states the shape those migrations converge on, and is what the
-    /// fixtures that build a store without running any migration create. `verify_schema` above pins
-    /// the constants compared here to the migration path, so this equates the two descriptions:
-    /// were the canonical DDL to drift, a store built by a fixture would answer questions about a
-    /// schema no wallet has.
-    #[test]
-    fn canonical_pool_migration_ddl_matches_the_migration_path() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::wallet::db::init_orchard_ironwood_migration_tables(&conn).unwrap();
-
-        let expected = [
-            (
-                "orchard_ironwood_migrations",
-                db::TABLE_ORCHARD_IRONWOOD_MIGRATIONS,
-            ),
-            (
-                "orchard_ironwood_migration_crossing_values",
-                db::TABLE_ORCHARD_IRONWOOD_MIGRATION_CROSSING_VALUES,
-            ),
-            (
-                "orchard_ironwood_migration_prep_inputs",
-                db::TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_INPUTS,
-            ),
-            (
-                "orchard_ironwood_migration_prep_outputs",
-                db::TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_OUTPUTS,
-            ),
-            (
-                "orchard_ironwood_migration_prep_direct_funding",
-                db::TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_DIRECT_FUNDING,
-            ),
-            (
-                "orchard_ironwood_migration_transactions",
-                db::TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTIONS,
-            ),
-            (
-                "orchard_ironwood_migration_transaction_deps",
-                db::TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTION_DEPS,
-            ),
-            (
-                "orchard_ironwood_migration_spend_nullifiers",
-                db::TABLE_ORCHARD_IRONWOOD_MIGRATION_SPEND_NULLIFIERS,
-            ),
-            (
-                "idx_orchard_ironwood_migration_tx_due",
-                db::INDEX_ORCHARD_IRONWOOD_MIGRATION_TX_DUE,
-            ),
-            (
-                "idx_orchard_ironwood_migrations_account",
-                db::INDEX_ORCHARD_IRONWOOD_MIGRATIONS_ACCOUNT,
-            ),
-        ];
-
-        let mut stmt = conn
-            .prepare("SELECT sql FROM sqlite_master WHERE name = ? AND sql IS NOT NULL")
-            .unwrap();
-        for (name, expected) in expected {
-            let actual: String = stmt
-                .query_row([name], |row| row.get(0))
-                .unwrap_or_else(|e| panic!("the canonical DDL creates {name}: {e}"));
-            assert_eq!(normalize_sql(&actual), normalize_sql(expected));
         }
     }
 
@@ -1329,8 +1250,6 @@ mod tests {
                 BranchId::Canopy,
                 0,
                 BlockHeight::from(0),
-                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-                Zatoshis::ZERO,
                 None,
                 None,
                 None,

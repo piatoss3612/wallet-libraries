@@ -112,7 +112,8 @@ pub(crate) fn table_constants<E: ErrUnsupportedPool>(
 ///
 /// If the wallet doesn't know an actual mined height or expiry height for a transaction, it will
 /// be treated as unexpired _only_ if we just observed it in the last DEFAULT_TX_EXPIRY_DELTA
-/// blocks, guessing that the wallet creating the transaction used the same expiry delta as our
+/// blocks (or use the original local construction target), guessing that the wallet creating
+/// the transaction used the same expiry delta as our
 /// default. If our guess is wrong (and the wallet used a larger expiry delta or disabled expiry),
 /// then the transaction will be treated as unexpired when it shouldn't be for as long as it takes
 /// this wallet to either observe the transaction being mined, or enhance it to learn its expiry
@@ -125,7 +126,7 @@ pub(crate) fn tx_unexpired_condition(tx: &str) -> String {
         OR {tx}.expiry_height >= :target_height  -- the tx is unexpired
         OR (
             {tx}.expiry_height IS NULL -- the expiry height is unknown
-            AND {tx}.min_observed_height + {DEFAULT_TX_EXPIRY_DELTA} >= :target_height
+            AND COALESCE({tx}.target_height, {tx}.min_observed_height) + {DEFAULT_TX_EXPIRY_DELTA} >= :target_height
         )
         "#
     )
@@ -394,54 +395,6 @@ where
         )
         .map(|notes| notes.into_iter().map(|candidate| candidate.note).collect()),
     }
-}
-
-/// Selects the single OLDEST spendable note of the given protocol whose value alone is at least
-/// `value`, or `None` when no single eligible note covers it. Age is the note's commitment tree
-/// position, which is assigned in strict chain order.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn select_single_spendable_note<P: consensus::Parameters, F, Note>(
-    conn: &Connection,
-    params: &P,
-    account: AccountUuid,
-    value: Zatoshis,
-    target_height: TargetHeight,
-    confirmations_policy: ConfirmationsPolicy,
-    exclude: &[ReceivedNoteId],
-    protocol: ShieldedPool,
-    to_spendable_note: F,
-    lock_filter: LockFilter<'_>,
-) -> Result<Option<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError>
-where
-    F: Fn(
-        &P,
-        ShieldedPool,
-        &Row,
-    ) -> Result<Option<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError>,
-{
-    let Some(anchor_height) =
-        get_anchor_height(conn, target_height, confirmations_policy.trusted())?
-    else {
-        return Ok(None);
-    };
-
-    Ok(select_spendable_notes_matching_value(
-        conn,
-        params,
-        account,
-        value,
-        ValueSelection::SingleCovering,
-        target_height,
-        anchor_height,
-        confirmations_policy,
-        exclude,
-        protocol,
-        &to_spendable_note,
-        lock_filter,
-    )?
-    .into_iter()
-    .next()
-    .map(|candidate| candidate.note))
 }
 
 /// Selects the fewest eligible notes needed to cover `value`, followed by small notes that the
@@ -725,9 +678,6 @@ enum ValueSelection {
     LargestFirst,
     /// Return up to `limit` notes in ascending value order from the specified lock tier.
     SmallestFirst { lock_tier: i64, limit: usize },
-    /// Select only the oldest eligible notes whose individual values cover the target alone,
-    /// oldest first.
-    SingleCovering,
 }
 
 /// Selects the set of spendable notes whose sum will be equal or greater that the
@@ -737,8 +687,6 @@ enum ValueSelection {
 /// [`ValueSelection::LargestFirst`] returns the first confirmed descending-value prefix that
 /// covers the target, or every eligible note when the target cannot be covered.
 /// [`ValueSelection::SmallestFirst`] returns a bounded ascending-value prefix from one lock tier.
-/// [`ValueSelection::SingleCovering`] returns notes whose individual value covers the target,
-/// oldest first; callers take the head.
 ///
 /// - Implementation details
 ///   - Notes with individual value *below* the ``MARGINAL_FEE`` will be ignored
@@ -812,9 +760,7 @@ where
         None => "ORDER BY rn.commitment_tree_position, rn.id ROWS UNBOUNDED PRECEDING".to_string(),
     };
     let so_far = match selection {
-        ValueSelection::Accumulate | ValueSelection::SingleCovering => {
-            format!("SUM(value) OVER ({window_frame})")
-        }
+        ValueSelection::Accumulate => format!("SUM(value) OVER ({window_frame})"),
         ValueSelection::LargestFirst | ValueSelection::SmallestFirst { .. } => "0".to_string(),
     };
     // The single-covering tail selects FROM the CTE, where `rn` is out of scope, so the tier
@@ -858,11 +804,6 @@ where
             "SELECT {result_columns}
          FROM eligible WHERE lock_tier = :selected_lock_tier
          ORDER BY value ASC, commitment_tree_position, id"
-        ),
-        ValueSelection::SingleCovering => format!(
-            "SELECT {result_columns}
-         FROM eligible WHERE value >= :target_value
-         ORDER BY lock_tier {tier_direction}, commitment_tree_position, id"
         ),
     };
     let eligible_condition = output_eligible_condition(lock_filter, "rn");
@@ -948,10 +889,7 @@ where
         (":tip_unscanned", &tip_unscanned_arg),
         (":min_value", &min_value),
     ];
-    if matches!(
-        selection,
-        ValueSelection::Accumulate | ValueSelection::SingleCovering
-    ) {
+    if selection == ValueSelection::Accumulate {
         sql_params.push((":target_value", &target_value_arg));
     }
     let selected_lock_tier = match selection {

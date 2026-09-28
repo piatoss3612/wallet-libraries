@@ -6,7 +6,7 @@ use crate::testing::{
 use zcash_client_backend::data_api::enhance_pir::EnhanceRecord;
 use zcash_client_backend::data_api::enhance_pir::EnhanceRecordParts;
 use zcash_client_backend::data_api::{
-    TransactionDataRequest, TransactionStatus, WalletRead, WalletWrite,
+    TransactionStatus, WalletRead, WalletWrite,
     enhance_pir::{EnhancePirRead, EnhancePirWrite, EnhancementMode},
     testing::{
         AddressType, IronwoodFvk, TestBuilder, TestState, orchard::OrchardPoolTester,

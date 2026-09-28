@@ -38,6 +38,10 @@ use nonempty::NonEmpty;
 use rand_core::Rng;
 use secrecy::{ExposeSecret, SecretVec};
 use shardtree::{ShardTree, error::ShardTreeError, store::ShardStore};
+use zcash_client_backend::data_api::status::{
+    TransactionStatusMode, TransactionStatusRead, TransactionStatusWork, TransactionStatusWrite,
+};
+
 use std::{
     borrow::{Borrow, BorrowMut},
     cmp::{max, min},
@@ -299,6 +303,7 @@ pub struct WalletDb<C, P, CL, R> {
     anchor_retention_interval: AnchorRetentionInterval,
     #[cfg(feature = "orchard")]
     enhancement_mode: Option<EnhancementMode>,
+    status_mode: Option<TransactionStatusMode>,
     #[cfg(feature = "transparent-inputs")]
     gap_limits: GapLimits,
 }
@@ -471,7 +476,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// `WalletRead::transaction_data_requests` (status and transparent history) does not
+    /// `WalletRead::transaction_data_requests` (transparent history) does not
     /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
@@ -487,6 +492,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 clock,
                 rng,
                 anchor_retention_interval: AnchorRetentionInterval::default(),
+                status_mode: None,
                 #[cfg(feature = "orchard")]
                 enhancement_mode: None,
                 #[cfg(feature = "transparent-inputs")]
@@ -497,19 +503,23 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
 }
 
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Selects status disclosure policy. Discard outstanding work snapshots when changing it.
+    /// This is not persisted; each reopened handle must select a mode explicitly.
+    pub fn set_status_mode(&mut self, mode: TransactionStatusMode) {
+        self.status_mode = Some(mode);
+    }
+
+    /// Configures status policy before obtaining routed work.
+    pub fn with_status_mode(mut self, mode: TransactionStatusMode) -> Self {
+        self.set_status_mode(mode);
+        self
+    }
+
     /// Sets the interval on which this wallet retains note commitment tree checkpoints as durable
     /// anchors, exempt from ordinary checkpoint pruning.
     ///
-    /// A ZIP 318 pool migration planned over this wallet reads the interval back through
-    /// [`WalletRead::anchor_retention_interval`] and draws its transfers' anchors from the same
-    /// grid, so the two cannot disagree.
-    ///
-    /// This setting is not persisted, but it does not need to be: once a migration is committed,
-    /// the grid it was committed under is recorded with it, and this wallet keeps retaining that
-    /// grid's boundaries for as long as the migration is in flight, whatever it is currently
-    /// configured with. Reopening the wallet without reapplying a non-default interval therefore
-    /// cannot strand an in-flight migration; it only affects what grid the NEXT migration is
-    /// planned against.
+    /// A ZIP 318 pool migration planned over this wallet must draw its transfers' anchors from
+    /// the same grid. This setting is not persisted.
     ///
     /// The default is [`AnchorRetentionInterval::ZIP_318`], which every wallet on the production
     /// network must use.
@@ -579,7 +589,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// `WalletRead::transaction_data_requests` (status and transparent history) does not
+    /// `WalletRead::transaction_data_requests` (transparent history) does not
     /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
@@ -588,6 +598,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock,
             rng,
             anchor_retention_interval: AnchorRetentionInterval::default(),
+            status_mode: None,
             #[cfg(feature = "orchard")]
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
@@ -618,6 +629,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
+            status_mode: self.status_mode,
             #[cfg(feature = "orchard")]
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
@@ -678,6 +690,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             clock: &self.clock,
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
+            status_mode: self.status_mode,
             #[cfg(feature = "orchard")]
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
@@ -824,14 +837,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
                 return Err(SqliteClientError::UnsupportedPoolType(PoolType::IRONWOOD));
             }
         }
-    }
-
-    fn anchor_computable(
-        &self,
-        protocol: ShieldedPool,
-        height: BlockHeight,
-    ) -> Result<bool, Self::Error> {
-        wallet::anchor_computable(self.conn.borrow(), protocol, height)
     }
 
     fn select_spendable_notes(
@@ -981,77 +986,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         };
 
         Ok(ConsolidationNotes::from_parts(funding, additional))
-    }
-
-    fn select_single_spendable_note(
-        &self,
-        account: Self::AccountId,
-        value: Zatoshis,
-        sources: &[ShieldedPool],
-        target_height: TargetHeight,
-        confirmations_policy: ConfirmationsPolicy,
-        exclude: &[Self::NoteRef],
-        lock_filter: LockFilter<'_>,
-    ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
-        // Pools are tried in the caller's preference order; the first pool holding a covering
-        // note supplies it.
-        for pool in sources {
-            match pool {
-                ShieldedPool::Sapling => {
-                    if let Some(note) = wallet::sapling::select_single_spendable_sapling_note(
-                        self.conn.borrow(),
-                        &self.params,
-                        account,
-                        value,
-                        target_height,
-                        confirmations_policy,
-                        exclude,
-                        lock_filter,
-                    )? {
-                        return Ok(ReceivedNotes::new(
-                            vec![note],
-                            #[cfg(feature = "orchard")]
-                            vec![],
-                            #[cfg(feature = "orchard")]
-                            vec![],
-                        ));
-                    }
-                }
-                #[cfg(feature = "orchard")]
-                ShieldedPool::Orchard => {
-                    if let Some(note) = wallet::orchard::select_single_spendable_orchard_note(
-                        self.conn.borrow(),
-                        &self.params,
-                        account,
-                        value,
-                        target_height,
-                        confirmations_policy,
-                        exclude,
-                        lock_filter,
-                    )? {
-                        return Ok(ReceivedNotes::new(vec![], vec![note], vec![]));
-                    }
-                }
-                #[cfg(feature = "orchard")]
-                ShieldedPool::Ironwood => {
-                    if let Some(note) = wallet::orchard::select_single_spendable_ironwood_note(
-                        self.conn.borrow(),
-                        &self.params,
-                        account,
-                        value,
-                        target_height,
-                        confirmations_policy,
-                        exclude,
-                        lock_filter,
-                    )? {
-                        return Ok(ReceivedNotes::new(vec![], vec![], vec![note]));
-                    }
-                }
-                #[cfg(not(feature = "orchard"))]
-                ShieldedPool::Orchard | ShieldedPool::Ironwood => {}
-            }
-        }
-        Ok(ReceivedNotes::empty())
     }
 
     fn select_unspent_notes(
@@ -1422,10 +1356,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         wallet::chain_tip_height(self.conn.borrow()).map_err(SqliteClientError::from)
     }
 
-    fn anchor_retention_interval(&self) -> AnchorRetentionInterval {
-        self.anchor_retention_interval
-    }
-
     fn get_block_hash(&self, block_height: BlockHeight) -> Result<Option<BlockHash>, Self::Error> {
         wallet::get_block_hash(self.conn.borrow(), block_height).map_err(SqliteClientError::from)
     }
@@ -1656,7 +1586,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
-            let iter = wallet::transaction_data_requests(self.conn.borrow())?.into_iter();
+            let iter = std::iter::empty();
 
             #[cfg(feature = "transparent-inputs")]
             let iter = iter.chain(wallet::transparent::transaction_data_requests(
@@ -1685,6 +1615,41 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
             target_height,
             confirmations_policy,
         )
+    }
+}
+
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransactionStatusRead
+    for WalletDb<C, P, CL, R>
+{
+    fn transaction_status_work(&self) -> Result<Vec<TransactionStatusWork>, Self::Error> {
+        let mode = self
+            .status_mode
+            .ok_or(SqliteClientError::StatusModeNotConfigured)?;
+        if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
+            return Ok(vec![]);
+        }
+        wallet::transaction_status_work(self.conn.borrow(), mode)
+    }
+    fn transaction_status_work_for(
+        &self,
+        txid: TxId,
+    ) -> Result<TransactionStatusWork, Self::Error> {
+        let mode = self
+            .status_mode
+            .ok_or(SqliteClientError::StatusModeNotConfigured)?;
+        wallet::transaction_status_work_for(self.conn.borrow(), mode, txid)
+    }
+}
+
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransactionStatusWrite
+    for WalletDb<C, P, CL, R>
+{
+    fn record_transaction_created(
+        &mut self,
+        txid: TxId,
+        earliest: BlockHeight,
+    ) -> Result<(), Self::Error> {
+        wallet::record_transaction_created(self.conn.borrow(), txid, earliest)
     }
 }
 
@@ -3115,14 +3080,6 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             txid,
             status,
         )
-    }
-
-    fn put_zip318_classification(
-        &mut self,
-        tx_ref: Self::TxRef,
-        classification: zcash_protocol::zip318::Zip318Classification,
-    ) -> Result<(), Self::Error> {
-        wallet::put_zip318_classification(self.conn.borrow(), tx_ref, classification)
     }
 
     fn put_received_sapling_note<T: ReceivedSaplingOutput<AccountId = Self::AccountId>>(
@@ -5225,7 +5182,8 @@ mod tests {
                         false
                     }
                 }
-                _ => false,
+                #[cfg(feature = "spend-index")]
+                TransactionDataRequest::GetSpendingTx(_) => false,
             });
 
             assert!(has_valid_request);

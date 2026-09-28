@@ -1,4 +1,4 @@
-//! Public v7 shard geometry and wire representations.
+//! Public v9 shard geometry and wire representations.
 pub use zakura_pir_enhance_types::{
     EnhanceRecord, EnhanceRecordParts, EnhanceTransactionMetadata, FLAG_HAS_TRANSPARENT_INPUTS,
     FLAG_HAS_TRANSPARENT_OUTPUTS, InvalidEnhanceRecord, KNOWN_FLAGS, RECORD_BYTES,
@@ -19,16 +19,13 @@ pub fn setup_seed_bytes() -> [u8; 32] {
     bytes[..8].copy_from_slice(&ENHANCE_SETUP_SEED.to_le_bytes());
     bytes
 }
-// Schema-11 records, v7 routing and session identities.
+// Schema-11 records, routing and session identities.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Frozen schema-11 wallet limit, independent of worker placement density.
 pub const MAX_QUERY_SHARDS: u64 = 24;
 pub const SCHEMA_VERSION: u16 = 11;
-#[cfg(not(feature = "native-reinspiring"))]
-pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v7";
-#[cfg(feature = "native-reinspiring")]
 pub const PROTOCOL_REVISION: &str = "ironwood-enhance-pir-v9-native-two-mask-m29";
 pub const HEADER_BYTES: usize = 116;
 
@@ -338,7 +335,7 @@ impl QueryBinding {
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < HEADER_BYTES || &bytes[..4] != b"EPQ7" {
-            return Err("invalid v7 query framing".into());
+            return Err("invalid query framing".into());
         }
         Ok(Self {
             generation: u64::from_le_bytes(bytes[4..12].try_into().unwrap()),
@@ -502,49 +499,25 @@ pub fn parameters(logical_rows: u64) -> Result<ipir_sp::YpirSchemeParams, String
         (RECORD_BYTES * RECORDS_PER_ROW * 8) as u64,
         ipir_sp::SimplePirProfile::P16Q48,
     )
-    .map(|(_, p)| {
-        #[cfg(feature = "native-reinspiring")]
-        {
-            let mut p = p;
-            p.query_bits = crate::native::QUERY_BITS;
-            p.q_prime_1 = 1 << crate::native::RESPONSE_BITS;
-            p
-        }
-        #[cfg(not(feature = "native-reinspiring"))]
-        {
-            p
-        }
+    .map(|(_, mut p)| {
+        p.query_bits = crate::native::QUERY_BITS;
+        p.q_prime_1 = 1 << crate::native::RESPONSE_BITS;
+        p
     })
     .map_err(|e| e.to_string())
 }
 
 /// Exact length of a shard's public session material for `logical_rows`.
-/// v7 publishes one switched `c1` block per RLWE column block; the native
-/// profile publishes two rounded masks per column.
+/// The native profile publishes two rounded masks per column.
 pub fn session_public_len(logical_rows: u64) -> Result<usize, String> {
     let params = parameters(logical_rows)?;
     if !params.db_cols.is_multiple_of(params.poly_len) {
         return Err("invalid PIR dimensions".into());
     }
-    #[cfg(feature = "native-reinspiring")]
-    {
-        if params.db_cols != crate::native::COLS {
-            return Err("unqualified native column count".into());
-        }
-        Ok(crate::native::public_len(crate::native::COLS))
+    if params.db_cols != crate::native::COLS {
+        return Err("unqualified native column count".into());
     }
-    #[cfg(not(feature = "native-reinspiring"))]
-    {
-        let (rlwe, _) = ipir_sp::params_for_simplepir_profile(
-            logical_rows,
-            ITEM_SIZE_BITS,
-            ipir_sp::SimplePirProfile::P16Q48,
-        )
-        .map_err(|e| e.to_string())?;
-        (params.db_cols / rlwe.d)
-            .checked_mul(ipir_sp::modulus_switch::published_c1_len(rlwe.d, rlwe.q))
-            .ok_or_else(|| "public material length overflow".into())
-    }
+    Ok(crate::native::public_len(crate::native::COLS))
 }
 
 /// Exact length of a query response for `logical_rows`, including the
@@ -554,28 +527,14 @@ pub fn response_len(logical_rows: u64) -> Result<usize, String> {
     if !params.db_cols.is_multiple_of(params.poly_len) {
         return Err("invalid PIR dimensions".into());
     }
-    #[cfg(feature = "native-reinspiring")]
-    {
-        if params.db_cols != crate::native::COLS {
-            return Err("unqualified native column count".into());
-        }
-        Ok(HEADER_BYTES + crate::native::response_len(crate::native::COLS))
+    if params.db_cols != crate::native::COLS {
+        return Err("unqualified native column count".into());
     }
-    #[cfg(not(feature = "native-reinspiring"))]
-    {
-        (params.db_cols / params.poly_len)
-            .checked_mul(ipir_sp::modulus_switch::response_body_len(
-                params.poly_len,
-                params.q_prime_1,
-            ))
-            .and_then(|n| n.checked_add(HEADER_BYTES))
-            .ok_or_else(|| "response length overflow".into())
-    }
+    Ok(HEADER_BYTES + crate::native::response_len(crate::native::COLS))
 }
 
-/// Exact length of a native query request for `logical_rows`, including the
+/// Exact length of a query request for `logical_rows`, including the
 /// [`HEADER_BYTES`] binding: one uploaded `K_g` key and a 49-bit selection.
-#[cfg(feature = "native-reinspiring")]
 pub fn request_len(logical_rows: u64) -> Result<usize, String> {
     let params = parameters(logical_rows)?;
     Ok(HEADER_BYTES + crate::native::request_len(params.db_rows))
@@ -584,7 +543,6 @@ pub fn request_len(logical_rows: u64) -> Result<usize, String> {
 /// Native identity binds the q48 transport profile to every native packing
 /// parameter, so a change to any of them changes the published identity.
 /// Must stay byte-identical to the server's `NativeIdentity`.
-#[cfg(feature = "native-reinspiring")]
 #[derive(Serialize)]
 struct NativeIdentity<'a> {
     q48: &'a ipir_sp::YpirSchemeParams,
@@ -595,7 +553,6 @@ struct NativeIdentity<'a> {
     cols: usize,
 }
 
-#[cfg(feature = "native-reinspiring")]
 fn native_identity(q48: &ipir_sp::YpirSchemeParams, mask_bits: usize) -> String {
     use crate::native::{COLS, QUERY_BITS, RESPONSE_BITS, params};
     digest(&NativeIdentity {
@@ -609,14 +566,7 @@ fn native_identity(q48: &ipir_sp::YpirSchemeParams, mask_bits: usize) -> String 
 }
 
 fn parameter_identity(params: &ipir_sp::YpirSchemeParams) -> String {
-    #[cfg(feature = "native-reinspiring")]
-    {
-        native_identity(params, crate::native::MASK_BITS)
-    }
-    #[cfg(not(feature = "native-reinspiring"))]
-    {
-        digest(params)
-    }
+    native_identity(params, crate::native::MASK_BITS)
 }
 
 pub fn parameter_id(logical_rows: u64) -> Result<String, String> {

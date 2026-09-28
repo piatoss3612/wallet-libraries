@@ -10,3 +10,5 @@ Construct sources lazily: a selected private mode must not connect to a public
 transaction endpoint; the unselected source is dropped unopened. An opening
 failure, or an opening cancelled by dropping `observe`, is terminal; create a
 new reader for a later retry. Status observations do not satisfy transaction enhancement work.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.

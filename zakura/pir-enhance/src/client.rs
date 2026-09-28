@@ -3,16 +3,8 @@ use crate::types::{
     HEADER_BYTES, Manifest, QueryBinding, QueryShard, RECORD_BYTES, ROW_BYTES, ShardSession,
     parameters, response_len, session_public_len,
 };
-#[cfg(not(feature = "native-reinspiring"))]
-use crate::types::{ITEM_SIZE_BITS, setup_seed};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ipir_sp::YpirSchemeParams;
-#[cfg(not(feature = "native-reinspiring"))]
-use ipir_sp::modulus_switch::recover_published_c1;
-#[cfg(not(feature = "native-reinspiring"))]
-use ipir_sp::serialize::serialize_packing_keys;
-#[cfg(not(feature = "native-reinspiring"))]
-use ipir_sp::{IPIRClient, SimplePirProfile};
 use rand::{Rng, rngs::OsRng};
 use sha2::{Digest, Sha256};
 
@@ -81,7 +73,7 @@ impl GenerationAcceptance {
         manifest.validate().map_err(ClientError::Generation)?;
         if self.network != "main" || manifest.network != self.network {
             return Err(ClientError::Generation(
-                "v7 is only defined for mainnet".into(),
+                "Enhance PIR is only defined for mainnet".into(),
             ));
         }
         if manifest.anchor_height < self.activation_height {
@@ -163,24 +155,14 @@ pub struct QuerySession {
     routes: Vec<crate::types::Route>,
     records: u64,
     params: YpirSchemeParams,
-    #[cfg(not(feature = "native-reinspiring"))]
-    client: IPIRClient,
-    #[cfg(not(feature = "native-reinspiring"))]
-    setup: ipir_sp::PublicQuerySetup,
-    #[cfg(not(feature = "native-reinspiring"))]
-    public: Vec<Vec<u64>>,
     /// Published two-mask material plus the shard's expanded query masks.
-    #[cfg(feature = "native-reinspiring")]
     native: crate::native::NativeSession,
 }
 pub struct PreparedQuery {
     binding: QueryBinding,
     row: usize,
     body: Vec<u8>,
-    #[cfg(not(feature = "native-reinspiring"))]
-    seed: ipir_sp::IPIRSeed,
     /// Fresh per query; never reused across requests.
-    #[cfg(feature = "native-reinspiring")]
     secret: reinspiring::native::NativeSecret,
 }
 impl PreparedQuery {
@@ -299,27 +281,6 @@ impl QuerySession {
                 .try_into()
                 .map_err(|_| ClientError::Generation("anchor length".into()))?,
         };
-        #[cfg(not(feature = "native-reinspiring"))]
-        let (client, setup, public) = {
-            let (rlwe, _) = ipir_sp::params_for_simplepir_profile(
-                shard.logical_rows,
-                ITEM_SIZE_BITS,
-                SimplePirProfile::P16Q48,
-            )
-            .map_err(|e| ClientError::Pir(e.to_string()))?;
-            let blocks = expected.db_cols / rlwe.d;
-            let client = IPIRClient::from_profile(
-                shard.logical_rows,
-                ITEM_SIZE_BITS,
-                SimplePirProfile::P16Q48,
-            )
-            .map_err(|e| ClientError::Pir(e.to_string()))?;
-            let setup =
-                client.generate_public_query_setup_simplepir_from_seed(setup_seed(shard.id));
-            let public = recover_published_c1(&bytes, rlwe.d, blocks, rlwe.q);
-            (client, setup, public)
-        };
-        #[cfg(feature = "native-reinspiring")]
         let native = crate::native::NativeSession::new(shard.id, expected.db_rows, bytes)
             .map_err(ClientError::Generation)?;
         Ok(Self {
@@ -334,13 +295,6 @@ impl QuerySession {
             records: manifest.coverage.records,
             shard,
             params: expected,
-            #[cfg(not(feature = "native-reinspiring"))]
-            client,
-            #[cfg(not(feature = "native-reinspiring"))]
-            setup,
-            #[cfg(not(feature = "native-reinspiring"))]
-            public,
-            #[cfg(feature = "native-reinspiring")]
             native,
         })
     }
@@ -374,34 +328,14 @@ impl QuerySession {
         let mut binding = self.binding;
         binding.request_id = OsRng.r#gen();
         let mut body = binding.encode();
-        #[cfg(feature = "native-reinspiring")]
-        {
-            let (secret, payload) = self.native.prepare(row).map_err(ClientError::Pir)?;
-            body.extend(payload);
-            Ok(PreparedQuery {
-                binding,
-                row,
-                body,
-                secret,
-            })
-        }
-        #[cfg(not(feature = "native-reinspiring"))]
-        {
-            let (query, keys, seed) = self.client.generate_fresh_query_simplepir(&self.setup, row);
-            body.extend(
-                serialize_packing_keys(self.client.rlwe_params(), &keys)
-                    .map_err(|e| ClientError::Pir(e.to_string()))?,
-            );
-            body.extend(
-                query.to_switched_bytes(self.client.rlwe_params().q, self.params.query_bits),
-            );
-            Ok(PreparedQuery {
-                binding,
-                row,
-                body,
-                seed,
-            })
-        }
+        let (secret, payload) = self.native.prepare(row).map_err(ClientError::Pir)?;
+        body.extend(payload);
+        Ok(PreparedQuery {
+            binding,
+            row,
+            body,
+            secret,
+        })
     }
     pub fn decode(&self, query: PreparedQuery, response: &[u8]) -> Result<Vec<u8>, ClientError> {
         let binding = QueryBinding::decode(response).map_err(ClientError::Response)?;
@@ -415,17 +349,10 @@ impl QuerySession {
                 "PIR response binding or length mismatch".into(),
             ));
         }
-        #[cfg(feature = "native-reinspiring")]
         let decoded = self
             .native
             .decode(&query.secret, &response[HEADER_BYTES..])
             .map_err(ClientError::Pir)?;
-        #[cfg(not(feature = "native-reinspiring"))]
-        let decoded = self.client.decode_response_simplepir(
-            query.seed,
-            &self.public,
-            &response[HEADER_BYTES..],
-        );
         decoded
             .get(..ROW_BYTES)
             .map(<[u8]>::to_vec)
@@ -487,38 +414,8 @@ mod tests {
         QuerySession::from_session(&manifest, session, &acceptance).unwrap()
     }
 
-    /// The v7 wire contract must not move when the native feature is off:
-    /// protocol identifier, parameter identity and exact request length.
-    #[cfg(not(feature = "native-reinspiring"))]
-    #[test]
-    fn v7_wire_contract_is_pinned() {
-        assert_eq!(crate::PROTOCOL_REVISION, "ironwood-enhance-pir-v7");
-        let id = parameter_id(32768).unwrap();
-        println!("v7 parameter_id(32768) = {id}");
-        let session = zero_session(32768);
-        let query = session.prepare_row(7).unwrap();
-        println!("v7 request length (32768 rows) = {}", query.body().len());
-        println!(
-            "v7 session public length (32768 rows) = {}",
-            session_public_len(32768).unwrap()
-        );
-        println!(
-            "v7 response length (32768 rows) = {}",
-            crate::types::response_len(32768).unwrap()
-        );
-        assert_eq!(
-            id,
-            "ironwood-enhance-pir-v7/b731a410f932c354abd6a01a05b32865d327b287e021a8d9769190d28c08290c"
-        );
-        assert_eq!(query.body().len(), 282_740);
-        assert_eq!(session_public_len(32768).unwrap(), 86_016);
-        assert_eq!(crate::types::response_len(32768).unwrap(), 30_836);
-        assert_eq!(session.params.query_bits, 48);
-    }
-
     /// The native profile's identifiers and exact lengths, so a server and
     /// wallet built from different trees can be compared without a network.
-    #[cfg(feature = "native-reinspiring")]
     #[test]
     fn v9_native_wire_contract_is_pinned() {
         use crate::native::{COLS, KEY_BYTES, public_len};

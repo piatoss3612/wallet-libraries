@@ -326,56 +326,6 @@ pub(crate) fn select_spendable_orchard_notes_for_consolidation<P: consensus::Par
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn select_single_spendable_orchard_note<P: consensus::Parameters>(
-    conn: &Connection,
-    params: &P,
-    account: AccountUuid,
-    value: Zatoshis,
-    target_height: TargetHeight,
-    confirmations_policy: ConfirmationsPolicy,
-    exclude: &[ReceivedNoteId],
-    lock_filter: LockFilter<'_>,
-) -> Result<Option<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError> {
-    super::common::select_single_spendable_note(
-        conn,
-        params,
-        account,
-        value,
-        target_height,
-        confirmations_policy,
-        exclude,
-        ShieldedPool::Orchard,
-        |params, pool, row| to_received_note(conn, params, pool, row),
-        lock_filter,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn select_single_spendable_ironwood_note<P: consensus::Parameters>(
-    conn: &Connection,
-    params: &P,
-    account: AccountUuid,
-    value: Zatoshis,
-    target_height: TargetHeight,
-    confirmations_policy: ConfirmationsPolicy,
-    exclude: &[ReceivedNoteId],
-    lock_filter: LockFilter<'_>,
-) -> Result<Option<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError> {
-    super::common::select_single_spendable_note(
-        conn,
-        params,
-        account,
-        value,
-        target_height,
-        confirmations_policy,
-        exclude,
-        ShieldedPool::Ironwood,
-        |params, pool, row| to_received_note(conn, params, pool, row),
-        lock_filter,
-    )
-}
-
 /// Return all Orchard notes that were received at or before `height`
 /// and unspent as of `height`, for the given account.
 ///
@@ -1109,36 +1059,6 @@ pub(crate) mod tests {
     #[test]
     fn metadata_queries_exclude_unwanted_notes() {
         testing::pool::metadata_queries_exclude_unwanted_notes::<OrchardPoolTester>()
-    }
-
-    #[test]
-    fn canonical_crossing_is_bucketed_and_unpadded() {
-        testing::pool::canonical_crossing_is_bucketed_and_unpadded()
-    }
-
-    #[test]
-    fn canonical_crossing_builds_at_empty_boundary_block() {
-        testing::pool::canonical_crossing_builds_at_empty_boundary_block()
-    }
-
-    #[test]
-    fn canonical_crossing_prefers_single_note() {
-        testing::pool::canonical_crossing_prefers_single_note()
-    }
-
-    #[test]
-    fn canonical_crossing_abandoned_without_anchor_checkpoint() {
-        testing::pool::canonical_crossing_abandoned_without_anchor_checkpoint()
-    }
-
-    #[test]
-    fn multi_note_crossing_is_not_bucketed() {
-        testing::pool::multi_note_crossing_is_not_bucketed()
-    }
-
-    #[test]
-    fn self_migration_keeps_spending_orchard() {
-        testing::pool::self_migration_keeps_spending_orchard()
     }
 
     #[test]

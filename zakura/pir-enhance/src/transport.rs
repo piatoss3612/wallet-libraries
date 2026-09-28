@@ -823,11 +823,10 @@ mod initialization_tests {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
-    #[cfg(not(feature = "native-reinspiring"))]
     use crate::{AcceptedAnchor, ClientResourceLimits};
-    #[cfg(not(feature = "native-reinspiring"))]
+    use base64::Engine as _;
     use futures::StreamExt;
-    #[cfg(not(feature = "native-reinspiring"))]
+    use sha2::{Digest, Sha256};
     use std::cell::Cell;
 
     #[test]
@@ -856,8 +855,7 @@ mod lifecycle_tests {
         assert_eq!(sessions.len(), 1);
     }
 
-    /// Serves the frozen v7 wallet fixture; a native (v9) build rejects it by design.
-    #[cfg(not(feature = "native-reinspiring"))]
+    /// Serves a synthetic v9 manifest and all-zero native session.
     struct FixtureTransport {
         manifest: Vec<u8>,
         session: Vec<u8>,
@@ -868,15 +866,26 @@ mod lifecycle_tests {
         query_requests: Cell<usize>,
     }
 
-    #[cfg(not(feature = "native-reinspiring"))]
     impl FixtureTransport {
         fn new(session_status: Option<u16>, query_status: Option<u16>) -> Self {
-            let fixture: serde_json::Value =
-                serde_json::from_str(include_str!("../tests/fixtures/wallet-schema11.json"))
-                    .unwrap();
+            let public = vec![0; crate::types::session_public_len(4096).unwrap()];
+            let mut manifest = crate::test_support::synthetic_manifest(
+                67,
+                |_| hex::encode(Sha256::digest(&public)),
+                &"00".repeat(32),
+            );
+            manifest.anchor_height = 3_428_143;
+            manifest.anchor_block_hash = "42".repeat(32);
+            let session = ShardSession {
+                session_id: hex::encode(manifest.session_id(0).unwrap()),
+                generation: manifest.generation,
+                shard_id: 0,
+                params: crate::types::parameters(4096).unwrap(),
+                public_params_base64: base64::engine::general_purpose::STANDARD.encode(public),
+            };
             Self {
-                manifest: serde_json::to_vec(&fixture["manifest"]).unwrap(),
-                session: serde_json::to_vec(&fixture["session"]).unwrap(),
+                manifest: serde_json::to_vec(&manifest).unwrap(),
+                session: serde_json::to_vec(&session).unwrap(),
                 session_status,
                 query_status,
                 init_requests: Cell::new(0),
@@ -895,7 +904,6 @@ mod lifecycle_tests {
         }
     }
 
-    #[cfg(not(feature = "native-reinspiring"))]
     impl Transport for FixtureTransport {
         async fn execute(&self, request: Request) -> Result<ResponseBody, ClientError> {
             let bytes = if request.url.ends_with("/v1/enhance/init") {
@@ -932,7 +940,6 @@ mod lifecycle_tests {
         }
     }
 
-    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn expired_shard_session_requires_new_wallet_acceptance() {
         let transport = FixtureTransport::new(Some(410), None);
@@ -980,7 +987,6 @@ mod lifecycle_tests {
         });
     }
 
-    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn retryable_session_status_stops_batch_without_more_dispatch() {
         for status in [429, 503] {
@@ -1015,7 +1021,6 @@ mod lifecycle_tests {
         }
     }
 
-    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn query_status_reuses_one_cached_shard_session() {
         let transport = FixtureTransport::new(None, Some(503));
@@ -1054,7 +1059,6 @@ mod lifecycle_tests {
     }
 
     #[cfg(feature = "wallet")]
-    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn row_requests_decode_one_row_and_preserve_order_and_duplicate_identities() {
         use zcash_client_backend::data_api::enhance_pir::{
@@ -1101,7 +1105,6 @@ mod lifecycle_tests {
     }
 
     #[cfg(feature = "wallet")]
-    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn row_requests_reject_shape_without_io_and_query_only_one_row() {
         use zcash_client_backend::data_api::enhance_pir::{
@@ -1164,7 +1167,6 @@ mod lifecycle_tests {
         });
     }
 
-    #[cfg(not(feature = "native-reinspiring"))]
     #[test]
     fn zero_cache_limit_is_rejected_before_setup() {
         let transport = FixtureTransport::new(None, None);
@@ -1182,7 +1184,7 @@ mod lifecycle_tests {
 }
 
 #[cfg(test)]
-mod v7_cover_tests {
+mod cover_tests {
     use super::*;
     use crate::types::*;
     use base64::Engine;

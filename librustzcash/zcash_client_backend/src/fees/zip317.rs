@@ -8,8 +8,7 @@ use core::marker::PhantomData;
 
 use zcash_primitives::transaction::fees::{FeeRule, transparent, zip317 as prim_zip317};
 use zcash_protocol::{
-    ShieldedPool,
-    consensus::{self, BlockHeight},
+    ShieldedPool, consensus,
     memo::MemoBytes,
     value::{BalanceError, Zatoshis},
 };
@@ -17,7 +16,6 @@ use zcash_protocol::{
 use crate::{
     data_api::{
         AccountMeta, InputSource, NoteFilter,
-        anchor_retention::PoolMigrationParams,
         wallet::{
             TargetHeight,
             input_selection::{LockFilter, LockedInputPolicy},
@@ -150,8 +148,6 @@ where
         &self,
         params: &P,
         target_height: TargetHeight,
-        anchor_height: BlockHeight,
-        zip318: &PoolMigrationParams,
         transparent_inputs: &[impl transparent::InputView],
         transparent_outputs: &[impl transparent::OutputView],
         sapling: &impl sapling_fees::BundleView<NoteRefT>,
@@ -185,13 +181,9 @@ where
             orchard,
             #[cfg(feature = "orchard")]
             ironwood,
-            // The Orchard bundle is always padded to the default floor. Only the Ironwood
-            // bundle's padding varies, and it is derived from the transaction's shape rather
-            // than chosen here.
+            // The Orchard bundle is always padded to the default floor.
             #[cfg(feature = "orchard")]
             BundlePadding::DEFAULT,
-            anchor_height,
-            zip318,
             self.change_memo.as_ref(),
             ephemeral_balance,
         )
@@ -304,8 +296,6 @@ where
         &self,
         params: &P,
         target_height: TargetHeight,
-        anchor_height: BlockHeight,
-        zip318: &PoolMigrationParams,
         transparent_inputs: &[impl transparent::InputView],
         transparent_outputs: &[impl transparent::OutputView],
         sapling: &impl sapling_fees::BundleView<NoteRefT>,
@@ -338,13 +328,9 @@ where
             orchard,
             #[cfg(feature = "orchard")]
             ironwood,
-            // The Orchard bundle is always padded to the default floor. Only the Ironwood
-            // bundle's padding varies, and it is derived from the transaction's shape rather
-            // than chosen here.
+            // The Orchard bundle is always padded to the default floor.
             #[cfg(feature = "orchard")]
             BundlePadding::DEFAULT,
-            anchor_height,
-            zip318,
             self.change_memo.as_ref(),
             ephemeral_balance,
         )
@@ -364,20 +350,14 @@ mod tests {
     };
 
     #[cfg(feature = "orchard")]
-    use {
-        crate::{
-            data_api::wallet::{TargetHeight, input_selection::OrchardPayment},
-            fees::{orchard as orchard_fees, tests::TestOrchardInput},
-        },
-        zcash_protocol::zip318::{AnchorBucketInterval, MAX_RESIDUAL_VALUE},
+    use crate::{
+        data_api::wallet::{TargetHeight, input_selection::OrchardPayment},
+        fees::{orchard as orchard_fees, tests::TestOrchardInput},
     };
 
     use crate::{
         data_api::{
-            AccountMeta, PoolMeta,
-            anchor_retention::{AnchorRetentionInterval, PoolMigrationParams},
-            testing::MockWalletDb,
-            wallet::input_selection::SaplingPayment,
+            AccountMeta, PoolMeta, testing::MockWalletDb, wallet::input_selection::SaplingPayment,
         },
         fees::{
             ChangeError, ChangeStrategy, ChangeValue, DustAction, DustOutputPolicy, SplitPolicy,
@@ -388,7 +368,7 @@ mod tests {
     use core::{convert::Infallible, num::NonZeroUsize};
     use zcash_protocol::{
         ShieldedPool,
-        consensus::{BlockHeight, Network, NetworkUpgrade, Parameters},
+        consensus::{Network, NetworkUpgrade, Parameters},
         value::Zatoshis,
     };
 
@@ -413,8 +393,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[] as &[TestTransparentInput],
             &[] as &[TxOut],
             &(
@@ -463,8 +441,6 @@ mod tests {
                         .activation_height(NetworkUpgrade::Nu5)
                         .unwrap()
                         .into(),
-                    BlockHeight::from_u32(1),
-                    &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
                     &[] as &[TestTransparentInput],
                     &[] as &[TxOut],
                     &(
@@ -518,8 +494,6 @@ mod tests {
                     .activation_height(NetworkUpgrade::Nu5)
                     .unwrap()
                     .into(),
-                BlockHeight::from_u32(1),
-                &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
                 &[] as &[TestTransparentInput],
                 &[] as &[TxOut],
                 &(
@@ -564,8 +538,6 @@ mod tests {
                     .activation_height(NetworkUpgrade::Nu5)
                     .unwrap()
                     .into(),
-                BlockHeight::from_u32(1),
-                &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
                 &[] as &[TestTransparentInput],
                 &[] as &[TxOut],
                 &(
@@ -605,8 +577,6 @@ mod tests {
                     .activation_height(NetworkUpgrade::Nu5)
                     .unwrap()
                     .into(),
-                BlockHeight::from_u32(1),
-                &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
                 &[] as &[TestTransparentInput],
                 &[] as &[TxOut],
                 &(
@@ -651,8 +621,6 @@ mod tests {
                     .activation_height(NetworkUpgrade::Nu5)
                     .unwrap()
                     .into(),
-                BlockHeight::from_u32(1),
-                &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
                 &[] as &[TestTransparentInput],
                 &[] as &[TxOut],
                 &(
@@ -705,8 +673,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[] as &[TestTransparentInput],
             &[] as &[TxOut],
             &(
@@ -755,8 +721,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu6_3)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[] as &[TestTransparentInput],
             &[] as &[TxOut],
             &sapling_fees::EmptyBundleView,
@@ -857,8 +821,6 @@ mod tests {
         let pre_nu6_3_balance = change_strategy.compute_balance::<_, Infallible>(
             &Network::TestNetwork,
             pre_nu6_3_height,
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &transparent_inputs,
             &transparent_outputs,
             &sapling_view,
@@ -884,8 +846,6 @@ mod tests {
         let post_nu6_3_balance = change_strategy.compute_balance::<_, Infallible>(
             &Network::TestNetwork,
             post_nu6_3_height,
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &transparent_inputs,
             &transparent_outputs,
             &sapling_view,
@@ -904,8 +864,8 @@ mod tests {
     }
 
     /// The change strategy records the exact dummy outputs it charged the fee against, so the
-    /// builder can reproduce that action count. A canonical crossing has no Ironwood dummy output;
-    /// a payment one zatoshi off the denomination grid has one.
+    /// builder can reproduce that action count. A lone Ironwood payment is padded to the default
+    /// two-action floor with one dummy output.
     #[test]
     #[cfg(feature = "orchard")]
     fn the_change_strategy_records_the_dummy_outputs_it_costed() {
@@ -915,12 +875,8 @@ mod tests {
             ShieldedPool::Orchard,
             DustOutputPolicy::default(),
         );
-        let zip318 = PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318);
-        let interval = AnchorBucketInterval::ZIP_318;
-
-        // An anchor ON the grid, as a canonical crossing requires.
-        let anchor = interval.boundary_at_or_below(BlockHeight::from_u32(2_000_000));
-        let height = TargetHeight::from(BlockHeight::from_u32(u32::from(anchor) + 10));
+        let height =
+            TargetHeight::from(zcash_protocol::consensus::BlockHeight::from_u32(2_000_010));
 
         // One Orchard input, large enough that its change stays in Orchard rather than being
         // promoted to Ironwood by the turnstile rule.
@@ -938,39 +894,29 @@ mod tests {
             &[] as &[Infallible],
             &[] as &[Infallible],
         );
-
-        let recorded_for = |value: Zatoshis| {
-            let ironwood_outputs = [OrchardPayment::new(value)];
-            let ironwood_view = (
-                ::orchard::bundle::BundleVersion::ironwood_v3(),
-                &[] as &[Infallible],
-                &ironwood_outputs[..],
-            );
-            change_strategy
-                .compute_balance::<_, u32>(
-                    &Network::TestNetwork,
-                    height,
-                    anchor,
-                    &zip318,
-                    &[] as &[TestTransparentInput],
-                    &[] as &[TxOut],
-                    &sapling_view,
-                    &orchard_view,
-                    &ironwood_view,
-                    None,
-                    &(),
-                )
-                .expect("the input covers the payment and its fee")
-                .dummy_outputs()
-                .expect("the change strategy records dummy outputs")
-                .ironwood()
-        };
-
-        assert_eq!(recorded_for(MAX_RESIDUAL_VALUE), 0);
-        assert_eq!(
-            recorded_for((MAX_RESIDUAL_VALUE + Zatoshis::const_from_u64(1)).unwrap()),
-            1
+        let ironwood_outputs = [OrchardPayment::new(Zatoshis::const_from_u64(100_000))];
+        let ironwood_view = (
+            ::orchard::bundle::BundleVersion::ironwood_v3(),
+            &[] as &[Infallible],
+            &ironwood_outputs[..],
         );
+
+        let dummy_outputs = change_strategy
+            .compute_balance::<_, u32>(
+                &Network::TestNetwork,
+                height,
+                &[] as &[TestTransparentInput],
+                &[] as &[TxOut],
+                &sapling_view,
+                &orchard_view,
+                &ironwood_view,
+                None,
+                &(),
+            )
+            .expect("the input covers the payment and its fee")
+            .dummy_outputs()
+            .expect("the change strategy records dummy outputs");
+        assert_eq!(dummy_outputs.ironwood(), 1);
     }
 
     #[test]
@@ -1011,8 +957,6 @@ mod tests {
             .compute_balance(
                 &Network::TestNetwork,
                 height,
-                BlockHeight::from_u32(1),
-                &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
                 &[] as &[TestTransparentInput],
                 &[] as &[TxOut],
                 &sapling_view,
@@ -1027,8 +971,6 @@ mod tests {
             .compute_balance(
                 &Network::TestNetwork,
                 height,
-                BlockHeight::from_u32(1),
-                &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
                 &[] as &[TestTransparentInput],
                 &[] as &[TxOut],
                 &sapling_view,
@@ -1085,8 +1027,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[] as &[TestTransparentInput],
             &[TxOut::new(
                 Zatoshis::const_from_u64(40000),
@@ -1133,8 +1073,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[TestTransparentInput {
                 outpoint: OutPoint::fake(),
                 coin: TxOut::new(
@@ -1180,8 +1118,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[TestTransparentInput {
                 outpoint: OutPoint::fake(),
                 coin: TxOut::new(
@@ -1233,8 +1169,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[TestTransparentInput {
                 outpoint: OutPoint::fake(),
                 coin: TxOut::new(
@@ -1284,8 +1218,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[TestTransparentInput {
                 outpoint: OutPoint::fake(),
                 coin: TxOut::new(
@@ -1333,8 +1265,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[TestTransparentInput {
                 outpoint: OutPoint::fake(),
                 coin: TxOut::new(
@@ -1382,8 +1312,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[] as &[TestTransparentInput],
             &[] as &[TxOut],
             &(
@@ -1434,8 +1362,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[TestTransparentInput {
                 outpoint: OutPoint::fake(),
                 coin: TxOut::new(
@@ -1485,8 +1411,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[TestTransparentInput {
                 outpoint: OutPoint::fake(),
                 coin: TxOut::new(
@@ -1538,8 +1462,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[TestTransparentInput {
                 outpoint: OutPoint::fake(),
                 coin: TxOut::new(
@@ -1588,8 +1510,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[TestTransparentInput {
                 outpoint: OutPoint::fake(),
                 coin: TxOut::new(
@@ -1649,8 +1569,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[] as &[TestTransparentInput],
             &[] as &[TxOut],
             &(
@@ -1700,8 +1618,6 @@ mod tests {
                 .activation_height(NetworkUpgrade::Nu5)
                 .unwrap()
                 .into(),
-            BlockHeight::from_u32(1),
-            &PoolMigrationParams::new(AnchorRetentionInterval::ZIP_318),
             &[] as &[TestTransparentInput],
             &[] as &[TxOut],
             &(

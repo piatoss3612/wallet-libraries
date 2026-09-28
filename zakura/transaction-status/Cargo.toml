@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+categories.workspace = true
+keywords = ["zcash", "wallet", "privacy"]
 
 [dependencies]
 zakura-pir-status = { version = "=0.0.1-rc0", path = "../pir-status" }

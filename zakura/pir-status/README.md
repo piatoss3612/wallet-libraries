@@ -1,7 +1,16 @@
 # Zakura Status PIR client
 
 This crate holds the release-facing status row format and transport-neutral
-client. It retrieves one encrypted row and returns only an observation. The
+client. It retrieves one encrypted row and returns only an observation.
+
+The client speaks `status-pir-v3-native-two-mask-m29` only. Each query body is
+the 52-byte header (magic `SPN1`, manifest id, 16-byte nonce) followed by one
+27,648-byte `K_g` packing key and a 49-bit selection over the 8,192 rows. The
+session material is 44,544 bytes (two 29-bit masks per coefficient column) and
+a response is the echoed header plus a 16,896-byte body. Setup derives from the
+`status-pir/v3/native-setup` and `status-pir/v3/native-packing` domains. The
+native primitives are shared with Enhance PIR through `zakura-pir-native`. The
+q48 profile `status-pir-v2-q48` is rejected as unsupported. The
 synthetic fixture protocol in `wallet-pir` uses a different protocol identifier
 and cannot be accepted by this client.
 
@@ -48,3 +57,5 @@ responses are bounded to their exact protocol lengths. No status error authorize
 This crate alone does not enable private status in a wallet or qualify a live
 Status PIR service. The server and client must use the same frozen release
 protocol and pass live-source qualification before activation.
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.

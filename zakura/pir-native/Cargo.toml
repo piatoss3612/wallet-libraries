@@ -1,0 +1,22 @@
+[package]
+name = "zakura-pir-native"
+version = "0.0.1-rc0"
+description = "Native two-mask InspiRING primitives shared by Zakura PIR clients"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+categories.workspace = true
+keywords = ["zcash", "privacy", "pir"]
+
+[features]
+default = []
+## Server-side counterparts of the client primitives, for protocol tests.
+test-server = []
+
+[dependencies]
+ipir-sp = { version = "=0.1.0-rc.6", features = ["native-reinspiring"] }
+rand = "0.8"
+rand_chacha.workspace = true
+reinspiring = "=0.1.2"

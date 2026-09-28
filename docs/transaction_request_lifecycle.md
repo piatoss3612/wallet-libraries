@@ -7,23 +7,22 @@ additional parent transactions to retrieve.
 
 ## Read entrypoints and disclosure
 
-The two obligations come from two snapshots of the same retrieval queue:
+The obligations have separate read interfaces over the durable retrieval queue:
 
-- `WalletRead::transaction_data_requests()` returns status observations
-  (`GetStatus`) and transparent address or outpoint discovery. It never returns
-  payload work. `WalletRead::transaction_status_requests()` is a typed view of
-  its status entries.
+- `TransactionStatusRead::transaction_status_work()` returns routed public/private
+  status work. See [the status work contract](transaction_status_work.md) for
+  disclosure policy, inclusion evidence, and migration from the removed status API.
+- `WalletRead::transaction_data_requests()` returns only transparent discovery
+  and spentness work.
 - `EnhancePirRead::transaction_enhancement_work()` is the only source of payload
   work. It routes each obligation to exactly one of public
   (`TransactionEnhancementWork::Public`) or private PIR transport in one
   snapshot. The SQLite store implements it with or without `orchard`; without
   `orchard` it yields only public work.
 
-A status request says that the wallet needs an observation. It does **not**
-authorize revealing the txid to a public server. The caller must choose a
-status transport independently of the enhancement mode. Likewise, public
-payload work reflects the configured wallet routing, not blanket disclosure
-consent. A caller must authorize its chosen payload transport.
+Status work carries the selected disclosure route; callers dispatch it without
+rerouting on failure. Configure status policy independently of enhancement mode.
+Public payload work likewise requires authorization of the selected transport.
 
 ## Completion contract
 
@@ -95,8 +94,9 @@ there is no default that silently drops work or reports false success.
 - Remove workarounds that defer status persistence solely because enhancement
   is pending, once the consumer actually uses a library release with this contract.
 
-No SQLite schema migration is needed. This does not add a status-only lightwalletd
-RPC, a private-status client, or new disclosure-routing APIs.
+The status work follow-up adds a data-only SQLite migration that widens legacy
+local inclusion bounds.
+It does not add a status-only lightwalletd RPC or change PIR wire encoding.
 
 ## Regression coverage
 

@@ -33,6 +33,10 @@ use zcash_client_backend::{
         },
         error::{LockError, RewindError},
         scanning::{ScanPriority, ScanRange},
+        status::{
+            TransactionStatusMode, TransactionStatusRead, TransactionStatusWork,
+            ambassador_impl_TransactionStatusRead,
+        },
         testing::{DataStoreFactory, Reset, TestRng, TestState},
         wallet::{ConfirmationsPolicy, TargetHeight, input_selection::LockFilter},
         *,
@@ -89,6 +93,7 @@ pub(crate) fn test_rng() -> TestRng {
 #[delegate(WalletWrite, target = "wallet_db")]
 #[delegate(WalletCommitmentTrees, target = "wallet_db")]
 #[delegate(EnhancePirRead, target = "wallet_db")]
+#[delegate(TransactionStatusRead, target = "wallet_db")]
 pub struct TestDb {
     wallet_db: WalletDb<Connection, LocalNetwork, FixedClock, TestRng>,
     data_file: Option<NamedTempFile>,
@@ -100,7 +105,7 @@ impl TestDb {
         data_file: Option<NamedTempFile>,
     ) -> Self {
         Self {
-            wallet_db,
+            wallet_db: wallet_db.with_status_mode(TransactionStatusMode::Public),
             data_file,
         }
     }
@@ -115,8 +120,7 @@ impl TestDb {
         &mut self.wallet_db
     }
 
-    /// The wallet database's own SQLite connection, over which a sibling store (a
-    /// `pool_migration` store, say) is opened.
+    /// The wallet database's own SQLite connection.
     pub fn conn(&self) -> &Connection {
         &self.wallet_db.conn
     }

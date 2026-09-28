@@ -10,6 +10,50 @@ workspace.
 
 ## [Unreleased]
 
+### Removed
+- The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`
+  migration drops the `orchard_ironwood_migration*` tables and their indexes,
+  which nothing read or wrote, and the `zip318_kind` column of `transactions`
+  and `v_transactions`. The migrations that created them stay registered, so
+  existing databases still migrate.
+- The implementations of the removed backend APIs
+  (`put_zip318_classification`, `select_single_spendable_note`,
+  `anchor_computable` and `anchor_retention_interval`).
+
+## [0.1.0-rc7] - 2026-09-27
+
+Breaking storage release for independently routed transaction status and
+payload enhancement work.
+
+### Fixed
+- Retire undecryptable Ironwood outgoing candidates once the wallet's value
+  accounting proves no account it holds funded them: the wallet has a linked
+  spend, no discovery work remains, every other output is recovered, the fee is
+  known, and linked spends equal recovered outputs plus fee. In the wallet's own
+  sends these are dummy padding outputs; otherwise they were funded by another
+  party or by an account since deleted, whose sent history is deleted with it.
+  They no longer remain as permanent `OutgoingNotRecoverable` suspensions that
+  also keep the transaction's retrieval request open. Account deletion
+  re-evaluates suspended transactions, since removing a funder can balance
+  them. Rows suspended before this change are not migrated; a rescan requeues
+  and retires them.
+  Undecryptable real zero-value outputs are indistinguishable from dummies and
+  are retired with them.
+- Make finite-expiry status obligations dormant after contiguous local scanning
+  reaches expiry plus the reorg safety depth, retaining queue rows for rewind
+  reactivation without treating incomplete private coverage as proof of absence.
+  Zero-expiry transactions remain eligible.
+
+### Breaking changes
+- Replace legacy transaction status requests with explicitly routed public/private
+  `TransactionStatusWork` and a dedicated `TransactionStatusRead` interface.
+  SQLite requires an explicit status mode and derives inclusion evidence from
+  existing local-creation fields, with rewind handling at the actual rescan floor,
+  a data-only legacy migration, and a transactional outbox evidence writer.
+  No new columns are added.
+  Sent-transaction storage requires a known chain tip to clamp creation evidence.
+  See `docs/transaction_status_work.md` for consumer migration instructions.
+
 ### Added
 - Implement `EnhancePirRead::transaction_enhancement_work` with one SQL statement
   over the ordinary and private queues, partitioned by transaction-wide route.

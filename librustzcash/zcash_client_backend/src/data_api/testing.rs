@@ -91,6 +91,7 @@ use super::{
     enhance_pir::EnhancePirRead,
     error::Error,
     scanning::{ScanPriority, ScanRange},
+    status::TransactionStatusRead,
     wallet::{
         ConfirmationsPolicy, SpendingKeys, create_proposed_transactions,
         input_selection::{
@@ -1875,7 +1876,8 @@ pub trait DataStoreFactory {
         + WalletTest
         + WalletWrite
         + WalletCommitmentTrees
-        + EnhancePirRead;
+        + EnhancePirRead
+        + TransactionStatusRead;
 
     /// Constructs a new data store.
     fn new_data_store(
@@ -1916,7 +1918,6 @@ impl TestBuilder<(), ()> {
         nu6_1: None,
         nu6_2: None,
         nu6_3: None,
-        #[cfg(zcash_unstable = "nu7")]
         nu7: None,
     };
 
@@ -3274,31 +3275,6 @@ impl InputSource for MockWalletDb {
     type Error = ();
     type NoteRef = u32;
     type AccountId = u32;
-
-    fn anchor_computable(
-        &self,
-        protocol: ShieldedPool,
-        height: BlockHeight,
-    ) -> Result<bool, Self::Error> {
-        match protocol {
-            ShieldedPool::Sapling => Ok(self
-                .sapling_tree
-                .store()
-                .get_checkpoint(&height)
-                .map_err(|_| ())?
-                .is_some()),
-            #[cfg(feature = "orchard")]
-            ShieldedPool::Orchard => Ok(self
-                .orchard_tree
-                .store()
-                .get_checkpoint(&height)
-                .map_err(|_| ())?
-                .is_some()),
-            // The mock maintains no Ironwood tree (and no Orchard tree without the `orchard`
-            // feature), so no anchor is computable there.
-            _ => Ok(false),
-        }
-    }
 
     fn get_spendable_note(
         &self,

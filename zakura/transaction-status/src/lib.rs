@@ -40,7 +40,15 @@ pub enum StatusError {
     Timeout,
     Malformed,
     Cancelled,
-    Transport { code: i32 },
+    Transport {
+        code: i32,
+    },
+    /// The application's own wallet state could not be read, for example a
+    /// SQLite I/O error while validating a private source's chain anchor.
+    /// This is not a source outage: callers must surface it rather than defer
+    /// it as an unavailable service. Only application-supplied sources return
+    /// it; no built-in conversion produces it.
+    LocalStorage,
 }
 
 impl fmt::Display for StatusError {
@@ -270,6 +278,59 @@ mod tests {
         let mut reader = StatusReader::new(StatusMode::PrivatePir, public, private);
         assert_eq!(reader.observe(request()).await, Err(StatusError::Stale));
         assert_eq!(public_opens.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn local_storage_failures_pass_through_unchanged() {
+        // An opening failure is terminal, so later calls keep the local error.
+        let (public, public_opens, _) = source(Ok(StatusObservation::NotFound));
+        let (mut private, private_opens, _) = source(Ok(StatusObservation::NotFound));
+        private.open_error = Some(StatusError::LocalStorage);
+        let mut reader = StatusReader::new(StatusMode::PrivatePir, public, private);
+        for _ in 0..2 {
+            assert_eq!(
+                reader.observe(request()).await,
+                Err(StatusError::LocalStorage)
+            );
+        }
+        assert_eq!(private_opens.load(Ordering::SeqCst), 1);
+        assert_eq!(public_opens.load(Ordering::SeqCst), 0);
+
+        // An observation failure keeps the selected session.
+        let (public, public_opens, _) = source(Ok(StatusObservation::NotFound));
+        let (private, private_opens, private_calls) = source(Err(StatusError::LocalStorage));
+        let mut reader = StatusReader::new(StatusMode::PrivatePir, public, private);
+        for _ in 0..2 {
+            assert_eq!(
+                reader.observe(request()).await,
+                Err(StatusError::LocalStorage)
+            );
+        }
+        assert_eq!(private_opens.load(Ordering::SeqCst), 1);
+        assert_eq!(private_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(public_opens.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn built_in_conversions_never_produce_local_storage() {
+        use zakura_pir_status::Error;
+        for error in [
+            Error::Unsupported,
+            Error::CoverageIncomplete,
+            Error::Stale,
+            Error::Capacity,
+            Error::Timeout,
+            Error::Cancelled,
+            Error::Malformed,
+            Error::Unavailable,
+            Error::Pir,
+        ] {
+            assert_ne!(StatusError::from(error), StatusError::LocalStorage);
+        }
+        for code in 0..=16 {
+            let status = tonic::Status::new(tonic::Code::from(code), "");
+            assert_ne!(StatusError::from(status), StatusError::LocalStorage);
+        }
     }
 
     #[tokio::test]

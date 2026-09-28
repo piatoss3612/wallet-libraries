@@ -41,7 +41,7 @@ use zip321::TransactionRequest;
 use crate::{
     data_api::{
         InputSource, MaxSpendMode, ReceivedNotes, SimpleNoteRetention, TargetValue,
-        anchor_retention::PoolMigrationParams, wallet::TargetHeight,
+        wallet::TargetHeight,
     },
     fees::{ChangeError, ChangeStrategy, EphemeralBalance, TransactionBalance, sapling},
     proposal::{Proposal, ProposalError, ShieldedInputs},
@@ -209,7 +209,6 @@ pub trait InputSelector {
         wallet_db: &Self::InputSource,
         target_height: TargetHeight,
         anchor_height: BlockHeight,
-        zip318: &PoolMigrationParams,
         confirmations_policy: ConfirmationsPolicy,
         account: <Self::InputSource as InputSource>::AccountId,
         transaction_request: TransactionRequest,
@@ -267,7 +266,6 @@ pub trait ShieldingSelector {
         to_account: <Self::InputSource as InputSource>::AccountId,
         target_height: TargetHeight,
         anchor_height: BlockHeight,
-        zip318: &PoolMigrationParams,
         confirmations_policy: ConfirmationsPolicy,
         output_filter: CoinbaseFilter,
     ) -> Result<
@@ -507,13 +505,6 @@ pub enum NoteSelection {
     /// Accumulate the oldest eligible notes until the target value is covered.
     #[default]
     Accumulate,
-    /// Prefer funding from a SINGLE note — the oldest eligible note whose value alone covers the
-    /// target — falling back to accumulation when no such note exists.
-    ///
-    /// A ZIP 318 migration transfer spends exactly one note, so a canonical pool crossing is
-    /// achievable only under single-note funding; multi-note funding is not an error, but the
-    /// resulting proposal does not have the canonical shape.
-    PreferSingle,
     /// Prefer a small funding set while opportunistically consolidating additional notes without
     /// changing the transaction's fee or observable shape.
     ///
@@ -882,7 +873,6 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
         wallet_db: &Self::InputSource,
         target_height: TargetHeight,
         anchor_height: BlockHeight,
-        zip318: &PoolMigrationParams,
         confirmations_policy: ConfirmationsPolicy,
         account: <DbT as InputSource>::AccountId,
         transaction_request: TransactionRequest,
@@ -1242,8 +1232,6 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                         .compute_balance::<_, DbT::NoteRef>(
                             params,
                             target_height,
-                            anchor_height,
-                            zip318,
                             &[] as &[WalletTransparentOutput<<DbT as InputSource>::AccountId>],
                             &tr1_transparent_outputs,
                             &sapling::EmptyBundleView,
@@ -1267,8 +1255,6 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                     let tr1_balance = change_strategy.compute_balance::<_, DbT::NoteRef>(
                         params,
                         target_height,
-                        anchor_height,
-                        zip318,
                         &[] as &[WalletTransparentOutput<<DbT as InputSource>::AccountId>],
                         &tr1_transparent_outputs,
                         &sapling::EmptyBundleView,
@@ -1333,8 +1319,6 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
             let tr0_balance = change_strategy.compute_balance(
                 params,
                 target_height,
-                anchor_height,
-                zip318,
                 &transparent_inputs,
                 &transparent_outputs,
                 &(
@@ -1473,8 +1457,6 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                                 let candidate_balance = change_strategy.compute_balance(
                                     params,
                                     target_height,
-                                    anchor_height,
-                                    zip318,
                                     &transparent_inputs,
                                     &transparent_outputs,
                                     &(
@@ -1643,26 +1625,11 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
             // to prevent; the `PreferUnlocked`/`PreferLocked` overrides let a caller draw through
             // a lock it recognizes (e.g. its own pool-migration PCZTs).
             //
-            // `PreferSingle` falls back to ordinary accumulation when no note covers the target.
             // `PreferConsolidation` tries minimum-cardinality funding from each pool in preference
             // order. If no single pool can cover the target, every partial result is discarded and
             // the ordinary multi-pool path is used so the preference never breaks payment liveness
             // or changes pool-affinity fallback.
             let preferred_notes = match spend_policy.note_selection() {
-                NoteSelection::PreferSingle => Some(
-                    wallet_db
-                        .select_single_spendable_note(
-                            account,
-                            amount_required,
-                            &pool_preference,
-                            target_height,
-                            confirmations_policy,
-                            &exclude,
-                            LockFilter::Policy(spend_policy.locked_input_policy()),
-                        )
-                        .map_err(InputSelectorError::DataSource)?,
-                )
-                .filter(|notes| !notes.is_empty()),
                 NoteSelection::PreferConsolidation => {
                     consolidation_source = None;
                     consolidation_additional = ReceivedNotes::empty();
@@ -2371,7 +2338,6 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
         to_account: <Self::InputSource as InputSource>::AccountId,
         target_height: TargetHeight,
         anchor_height: BlockHeight,
-        zip318: &PoolMigrationParams,
         confirmations_policy: ConfirmationsPolicy,
         output_filter: CoinbaseFilter,
     ) -> Result<
@@ -2400,8 +2366,6 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
             change_strategy,
             params,
             target_height,
-            anchor_height,
-            zip318,
             &mut transparent_inputs,
             &wallet_meta,
         )?;
@@ -2759,8 +2723,6 @@ fn compute_shielding_balance_with_dust_retry<DbT, ChangeT, ParamsT>(
     change_strategy: &ChangeT,
     params: &ParamsT,
     target_height: TargetHeight,
-    anchor_height: BlockHeight,
-    zip318: &PoolMigrationParams,
     transparent_inputs: &mut Vec<WalletTransparentOutput<()>>,
     wallet_meta: &<ChangeT as ChangeStrategy>::AccountMetaT,
 ) -> Result<
@@ -2781,8 +2743,6 @@ where
         change_strategy,
         params,
         target_height,
-        anchor_height,
-        zip318,
         transparent_inputs,
         wallet_meta,
     );
@@ -2797,8 +2757,6 @@ where
                 change_strategy,
                 params,
                 target_height,
-                anchor_height,
-                zip318,
                 transparent_inputs,
                 wallet_meta,
             )
@@ -2823,8 +2781,6 @@ fn compute_shielding_balance<DbT, ChangeT, ParamsT>(
     change_strategy: &ChangeT,
     params: &ParamsT,
     target_height: TargetHeight,
-    anchor_height: BlockHeight,
-    zip318: &PoolMigrationParams,
     transparent_inputs: &[WalletTransparentOutput<()>],
     wallet_meta: &<ChangeT as ChangeStrategy>::AccountMetaT,
 ) -> Result<TransactionBalance, ChangeError<ChangeT::Error, Infallible>>
@@ -2849,8 +2805,6 @@ where
     change_strategy.compute_balance(
         params,
         target_height,
-        anchor_height,
-        zip318,
         transparent_inputs,
         &[] as &[TxOut],
         &sapling::EmptyBundleView,

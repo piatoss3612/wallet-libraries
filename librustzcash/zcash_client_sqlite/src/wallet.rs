@@ -79,6 +79,11 @@
 //!   wallet.
 //! - `memo` the shielded memo associated with the output, if any.
 
+use zcash_client_backend::data_api::status::{
+    PrivateTransactionStatusRequest, PublicTransactionStatusRequest, TransactionStatusMode,
+    TransactionStatusWork,
+};
+
 use std::{
     collections::{HashMap, HashSet},
     convert::TryFrom,
@@ -105,8 +110,8 @@ use zcash_client_backend::{
     data_api::{
         Account as _, AccountBalance, AccountBirthday, AccountPurpose, AccountSource, AddressInfo,
         AddressSource, BlockMetadata, Progress, Ratio, ReceivedTransactionOutput,
-        SAPLING_SHARD_HEIGHT, SentTransaction, SentTransactionOutput, TransactionDataRequest,
-        TransactionStatus, WalletSummary, Zip32Derivation,
+        SAPLING_SHARD_HEIGHT, SentTransaction, SentTransactionOutput, TransactionStatus,
+        WalletSummary, Zip32Derivation,
         anchor_retention::AnchorRetentionInterval,
         chain::ChainState,
         defaults::address_receiver_matches_ua,
@@ -841,6 +846,8 @@ pub(crate) fn delete_account(
     )?;
 
     ironwood_hooks::suspend_orphaned_ironwood_enhancement(conn)?;
+    #[cfg(feature = "orchard")]
+    enhance_pir::retire_after_account_deletion(conn)?;
 
     Ok(())
 }
@@ -3039,8 +3046,6 @@ fn parse_tx<P: consensus::Parameters>(
                 BranchId::for_height(params, expiry_height),
                 tx_data.lock_time(),
                 expiry_height,
-                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-                tx_data.zip233_amount(),
                 tx_data.transparent_bundle().cloned(),
                 tx_data.sprout_bundle().cloned(),
                 tx_data.sapling_bundle().cloned(),
@@ -3222,29 +3227,6 @@ pub(crate) fn get_account_ref(
     )
     .optional()?
     .ok_or(SqliteClientError::AccountUnknown)
-}
-
-/// Returns whether an anchor is computable at `height` for spends from the given pool.
-///
-/// An anchor is computable exactly at the heights whose note commitment tree checkpoints the
-/// wallet retains, so this is answered from the pool's checkpoints table.
-pub(crate) fn anchor_computable(
-    conn: &rusqlite::Connection,
-    protocol: ShieldedPool,
-    height: BlockHeight,
-) -> Result<bool, SqliteClientError> {
-    let TableConstants { table_prefix, .. } =
-        common::table_constants::<SqliteClientError>(protocol)?;
-    conn.query_row(
-        &format!(
-            "SELECT EXISTS (
-                 SELECT 1 FROM {table_prefix}_tree_checkpoints WHERE checkpoint_id = :height
-             )"
-        ),
-        named_params![":height": u32::from(height)],
-        |row| row.get(0),
-    )
-    .map_err(SqliteClientError::from)
 }
 
 /// Returns the maximum height of blocks in the chain which may be scanned.
@@ -3578,6 +3560,10 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
         sent_tx.target_height().into(),
     )?;
 
+    // The sent-transaction contract supplies original local construction context. Payload
+    // ingestion never calls this evidence writer.
+    record_transaction_created(conn, sent_tx.tx().txid(), sent_tx.target_height().into())?;
+
     let mut detectable_via_scanning = false;
 
     // Mark notes as spent.
@@ -3851,7 +3837,7 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
                         OR (
                             t.expiry_height IS NULL
                             AND t.confirmed_unmined_at_height
-                                < t.min_observed_height + :certainty_depth
+                                < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
                         )
                     )
                  )",
@@ -4319,6 +4305,8 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
+    lower_creation_evidence(conn, rescan_floor)?;
+
     ironwood_hooks::truncate_after_unmine(conn)?;
 
     // If we're removing scanned blocks, we need to truncate the note commitment tree and remove
@@ -4334,6 +4322,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
             // Truncation removes checkpoints; it never establishes them, so no anchor retention
             // decision is made through this handle and the interval is immaterial.
             anchor_retention_interval: AnchorRetentionInterval::default(),
+            status_mode: None,
             #[cfg(feature = "orchard")]
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
@@ -4833,6 +4822,10 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
         .map_err(RewindError::DataSource)?;
     }
 
+    // Even an unscanned suffix can contain a transaction on the replacement branch.
+    // The rescan floor, not the retained tree checkpoint, bounds that possibility.
+    lower_creation_evidence(conn, target_height).map_err(RewindError::DataSource)?;
+
     // Overwrite the scan-queue range above the rewind target with a `Historic` rescan range,
     // forcing re-scan of any blocks that previously appeared above the target. This both
     // re-queues the blocks above the truncation floor (which truncate_to_height_internal
@@ -5213,6 +5206,8 @@ pub(crate) fn put_tx_data(
         SET expiry_height = :expiry_height,
             raw = :raw,
             fee = IFNULL(:fee, fee),
+            created = COALESCE(created, :created_at),
+            target_height = COALESCE(target_height, :target_height),
             tx_index = IFNULL(tx_index, :tx_index),
             min_observed_height = MIN(
                 min_observed_height,
@@ -5246,28 +5241,6 @@ pub(crate) fn put_tx_data(
         .and_then(|tx_ref| {
             ironwood_hooks::clear_ironwood_enhancement_work(conn, tx_ref).map(|()| tx_ref)
         })
-}
-
-/// Records how a transaction classifies against ZIP 318.
-///
-/// The column defaults to the code for "not classified", so a row this was never called for
-/// reports as unclassified rather than as a decision that the transaction is not a migration
-/// transaction. Rows written before this column existed keep that default, and need the
-/// transaction rescanned before they can be labelled.
-pub(crate) fn put_zip318_classification(
-    conn: &rusqlite::Connection,
-    tx_ref: TxRef,
-    classification: zcash_protocol::zip318::Zip318Classification,
-) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "UPDATE transactions SET zip318_kind = :zip318_kind WHERE id_tx = :id_tx",
-        named_params![
-            ":zip318_kind": classification.to_code(),
-            ":id_tx": tx_ref.0,
-        ],
-    )?;
-
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5358,20 +5331,30 @@ pub(crate) fn queue_tx_status(
     Ok(())
 }
 
-/// Returns the vector of [`TransactionDataRequest`]s that represents the status observations needed
+/// Returns routed status work representing the observations needed
 /// by the wallet backend in order to be able to present a complete view of wallet history.
 ///
 /// Payload retrieval is returned only by [`public_enhancement_work`] or, with Orchard support,
 /// `enhance_pir::transaction_enhancement_work`.
-pub(crate) fn transaction_data_requests(
+pub(crate) fn transaction_status_work(
     conn: &rusqlite::Connection,
-) -> Result<Vec<TransactionDataRequest>, SqliteClientError> {
+    mode: TransactionStatusMode,
+) -> Result<Vec<TransactionStatusWork>, SqliteClientError> {
+    // Expiry dormancy is scheduling only, not evidence of absence. Use contiguous local
+    // scanning so an advertised tip or an isolated scanned range cannot suppress work.
+    let scanned_height = fully_scanned_height(conn)?.map(u32::from);
     let mut tx_retrieval_stmt = conn.prepare_cached(
-        "SELECT q.txid
+        "SELECT q.txid, CASE WHEN t.target_height IS NOT NULL THEN MIN(t.target_height, t.min_observed_height) END
          FROM tx_retrieval_queue q
          LEFT JOIN transactions t ON t.txid = q.txid
          WHERE q.query_type = :status_type
          AND t.mined_height IS NULL
+         AND (
+            t.expiry_height IS NULL
+            OR t.expiry_height = 0
+            OR :scanned_height IS NULL
+            OR :scanned_height < t.expiry_height + :reorg_depth
+         )
          AND (
             t.confirmed_unmined_at_height IS NULL
             OR t.expiry_height = 0
@@ -5382,7 +5365,7 @@ pub(crate) fn transaction_data_requests(
             OR (
                 t.expiry_height IS NULL
                 AND t.confirmed_unmined_at_height
-                    < t.min_observed_height + :certainty_depth
+                    < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
             )
          )",
     )?;
@@ -5391,16 +5374,83 @@ pub(crate) fn transaction_data_requests(
         .query_and_then(
             named_params![
                 ":status_type": TxQueryType::Status.code(),
-                ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA
+                ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
+                ":scanned_height": scanned_height,
+                ":reorg_depth": PRUNING_DEPTH
             ],
             |row| {
-                row.get(0)
-                    .map(|txid| TransactionDataRequest::GetStatus(TxId::from_bytes(txid)))
+                Ok::<_, rusqlite::Error>(route_status_work(
+                    mode,
+                    TxId::from_bytes(row.get(0)?),
+                    row.get::<_, Option<u32>>(1)?.map(BlockHeight::from),
+                ))
             },
         )?
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(result)
+}
+
+// Creation context cannot exclude inclusion on a replacement branch. Widen evidence
+// in the same transaction as every rewind, including rewinds of unscanned suffixes.
+fn lower_creation_evidence(
+    conn: &rusqlite::Connection,
+    rescan_floor: BlockHeight,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE transactions SET min_observed_height = :height
+         WHERE target_height IS NOT NULL AND min_observed_height > :height",
+        named_params![":height": u32::from(rescan_floor)],
+    )?;
+    Ok(())
+}
+
+/// Atomically records creation evidence without altering either durable work queue.
+pub(crate) fn record_transaction_created(
+    conn: &rusqlite::Connection,
+    txid: TxId,
+    earliest: BlockHeight,
+) -> Result<(), SqliteClientError> {
+    // Read chain context and write evidence in one statement, so a concurrent rewind cannot
+    // interleave between reading the tip and inserting an outbox's transaction metadata.
+    let updated = conn.execute(
+        "INSERT INTO transactions (txid, target_height, min_observed_height)
+         SELECT :txid, :target, MIN(:target, MAX(tip_end - 1, 0))
+         FROM (SELECT MAX(block_range_end) AS tip_end FROM scan_queue)
+         WHERE tip_end IS NOT NULL
+         ON CONFLICT (txid) DO UPDATE SET
+             target_height = COALESCE(target_height, :target),
+             min_observed_height = MIN(min_observed_height, excluded.min_observed_height)",
+        named_params![":txid": txid.as_ref(), ":target": u32::from(earliest)],
+    )?;
+    if updated == 0 {
+        return Err(SqliteClientError::ChainHeightUnknown);
+    }
+    Ok(())
+}
+
+fn route_status_work(
+    mode: TransactionStatusMode,
+    txid: TxId,
+    earliest: Option<BlockHeight>,
+) -> TransactionStatusWork {
+    match mode {
+        TransactionStatusMode::Public => {
+            TransactionStatusWork::Public(PublicTransactionStatusRequest::new(txid))
+        }
+        TransactionStatusMode::Private => {
+            TransactionStatusWork::Private(PrivateTransactionStatusRequest::new(txid, earliest))
+        }
+    }
+}
+
+pub(crate) fn transaction_status_work_for(
+    conn: &rusqlite::Connection,
+    mode: TransactionStatusMode,
+    txid: TxId,
+) -> Result<TransactionStatusWork, SqliteClientError> {
+    let earliest = conn.query_row("SELECT CASE WHEN target_height IS NOT NULL THEN MIN(target_height, min_observed_height) END FROM transactions WHERE txid = ?1", [txid.as_ref()], |row| row.get::<_, Option<u32>>(0)).optional()?.flatten().map(BlockHeight::from);
+    Ok(route_status_work(mode, txid, earliest))
 }
 
 /// Returns every pending payload-retrieval request as public work. Without Orchard support no
@@ -6057,6 +6107,7 @@ mod tests {
         collections::HashSet,
         num::{NonZeroU8, NonZeroU32},
     };
+    use zcash_client_backend::data_api::status::TransactionStatusRead;
 
     use rusqlite::{Connection, named_params};
     use sapling::zip32::ExtendedSpendingKey;
@@ -6067,8 +6118,7 @@ mod tests {
     use zcash_client_backend::data_api::enhance_pir::EnhancementMode;
     use zcash_client_backend::data_api::enhance_pir::{EnhancePirRead, TransactionEnhancementWork};
     use zcash_client_backend::data_api::{
-        Account as _, AccountSource, TransactionDataRequest, TransactionStatus, WalletRead,
-        WalletWrite,
+        Account as _, AccountSource, TransactionStatus, WalletRead, WalletWrite,
         chain::{ChainState, CommitmentTreeRoot},
         error::RewindError,
         testing::{
@@ -6361,16 +6411,16 @@ mod tests {
                 .unwrap();
         }
 
-        let requests = st.wallet().transaction_data_requests().unwrap();
-        assert!(requests.contains(&TransactionDataRequest::GetStatus(unexpired_txid)));
-        assert!(!requests.contains(&TransactionDataRequest::GetStatus(expired_txid)));
+        let requests = st.wallet().transaction_status_work().unwrap();
+        assert!(requests.iter().any(|work| work.txid() == unexpired_txid));
+        assert!(!requests.iter().any(|work| work.txid() == expired_txid));
 
         let db_tx = st.wallet().conn().unchecked_transaction().unwrap();
         queue_tx_retrieval(&db_tx, std::iter::once(unexpired_txid), None).unwrap();
         db_tx.commit().unwrap();
 
-        let requests = st.wallet().transaction_data_requests().unwrap();
-        assert!(requests.contains(&TransactionDataRequest::GetStatus(unexpired_txid)));
+        let requests = st.wallet().transaction_status_work().unwrap();
+        assert!(requests.iter().any(|work| work.txid() == unexpired_txid));
         assert!(
             st.wallet()
                 .transaction_enhancement_work()
@@ -6544,16 +6594,12 @@ mod tests {
                 })
                 .collect()
         };
-        let status_requests = st.wallet().transaction_data_requests().unwrap();
-        assert_eq!(
-            st.wallet().transaction_status_requests().unwrap(),
+        let status_requests = st.wallet().transaction_status_work().unwrap();
+        assert!(
             status_requests
                 .iter()
-                .cloned()
-                .filter_map(TransactionDataRequest::into_status_request)
-                .collect::<Vec<_>>()
+                .any(|work| work.txid() == protected_txid)
         );
-        assert!(status_requests.contains(&TransactionDataRequest::GetStatus(protected_txid)));
         let standard_public = public(&st);
         for txid in [
             protected_txid,
@@ -6571,7 +6617,7 @@ mod tests {
                 .set_enhancement_mode(EnhancementMode::PrivateIronwood);
             assert!(
                 st.wallet()
-                    .transaction_status_requests()
+                    .transaction_status_work()
                     .unwrap()
                     .iter()
                     .any(|request| request.txid() == protected_txid),

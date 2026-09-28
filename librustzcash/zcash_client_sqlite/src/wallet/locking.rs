@@ -1176,14 +1176,6 @@ mod tests {
         }
 
         #[test]
-        fn single_note_selection_honors_lock_tier_preference() {
-            pool::single_note_selection_honors_lock_tier_preference::<SaplingPoolTester>(
-                TestDbFactory::default(),
-                BlockCache::new(),
-            )
-        }
-
-        #[test]
         fn consolidation_selection_honors_lock_tier_preference() {
             pool::consolidation_selection_honors_lock_tier_preference::<SaplingPoolTester>(
                 TestDbFactory::default(),
@@ -1280,14 +1272,6 @@ mod tests {
         #[test]
         fn unlock_proposal_inputs_releases_locks() {
             pool::unlock_proposal_inputs_releases_locks::<OrchardPoolTester>(
-                TestDbFactory::default(),
-                BlockCache::new(),
-            )
-        }
-
-        #[test]
-        fn single_note_selection_honors_lock_tier_preference() {
-            pool::single_note_selection_honors_lock_tier_preference::<OrchardPoolTester>(
                 TestDbFactory::default(),
                 BlockCache::new(),
             )
