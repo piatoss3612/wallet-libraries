@@ -139,14 +139,15 @@ impl Lineage {
     }
 }
 
-/// The one publication revision of a source that passed production qualification.
+/// A publication revision of a source that passed production qualification.
 ///
 /// Qualification is store-held metadata established by the store's source-verification path,
 /// never asserted by a commit, and it binds to this exact revision: verification checks one
-/// publication's digest and anchors. Any other revision of the source, including every later
-/// replacement, is unqualified until verified in turn, and every deterministic fixture source
-/// is unqualified. Promotion requires each revision that contributed an account's coverage to
-/// be the qualified revision of its source.
+/// publication's digest and anchors. Each revision is qualified separately, so qualifying a
+/// later sealed revision leaves earlier verified revisions qualified; an unverified revision,
+/// including every later replacement, is unqualified until verified in turn, and every
+/// deterministic fixture source is unqualified. Promotion requires each revision that
+/// contributed an account's coverage to be a qualified revision of its source.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct QualifiedRevision {
     /// The verified revision.
@@ -538,9 +539,14 @@ pub enum RecoveryBlocker {
     /// accepted-chain evidence. This is not an integrity failure: legacy records are not
     /// authoritative, but the discrepancy must be explained before promotion.
     UnexplainedLegacyDiscrepancy,
-    /// A revision contributing the account's coverage is not its source's production-qualified
-    /// revision.
+    /// A revision contributing the account's coverage is not a production-qualified revision of
+    /// its source.
     UnqualifiedSource,
+    /// Some watched script, including one added by address-window expansion, lacks continuous
+    /// coverage through the decision point.
+    IncompleteCoverage,
+    /// Address-window expansion has not yet stabilized at the decision point.
+    WatchWindowUnstable,
 }
 
 /// Counts that explain an account's recovery state.
@@ -601,9 +607,9 @@ pub enum RecoveryStart {
 pub struct SourceTrust {
     /// The source.
     pub source: SourceId,
-    /// The revision that passed production qualification, if any. Coverage from any other
-    /// revision cannot qualify an account for promotion.
-    pub qualified_revision: Option<QualifiedRevision>,
+    /// Every revision that passed production qualification. Coverage from any other revision
+    /// cannot qualify an account for promotion.
+    pub qualified_revisions: Vec<QualifiedRevision>,
     /// Whether an integrity failure has quarantined the source.
     pub quarantined: bool,
     /// Advanced by the store whenever the source is quarantined or re-verified. A run captures
@@ -684,6 +690,10 @@ pub struct WatchedScriptSnapshot<AccountId> {
 pub struct OutstandingPage {
     /// The source revision the page belongs to; completion must cite this exact revision.
     pub source: SourceRevision,
+    /// The source trust epoch when the page was opened. A page never outlives a quarantine:
+    /// an integrity failure durably removes the pending pages of the quarantined source and of
+    /// every affected account, so resumed work cannot be mistaken for post-revalidation work.
+    pub source_trust_epoch: u64,
     /// The page identity, range, and affected watched scripts.
     pub page: PendingPage,
     /// The applied policy generation when the page was opened.
