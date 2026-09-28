@@ -455,6 +455,7 @@ mod handles {
                 target: point(),
                 lifecycle: LedgerLifecycle::Candidate,
                 accounts: vec![],
+                source_trust_epoch: 0,
             },
             source: SourceRevision {
                 source: SourceId::new(b"source".to_vec()).unwrap(),
@@ -921,6 +922,44 @@ mod handles {
         );
         assert!(!snapshot.accounts[0].quarantined);
         assert!(snapshot.scripts.is_empty());
+        assert!(snapshot.sources.is_empty());
+
+        conn(&st)
+            .execute(
+                "INSERT INTO tpir_sources (source_id, accepted_lineage, quarantined, qualification,
+                     trust_epoch)
+                 VALUES (X'0A', 4, 1, 0, 2)",
+                [],
+            )
+            .unwrap();
+        let sources = st
+            .wallet()
+            .db()
+            .transparent_ledger_watched_scripts()
+            .unwrap()
+            .sources;
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source.as_bytes(), &[0x0a]);
+        assert!(sources[0].quarantined);
+        assert_eq!(sources[0].trust_epoch, 2);
+        assert_eq!(
+            sources[0].qualification,
+            zcash_client_backend::data_api::transparent_ledger::SourceQualification::Unqualified
+        );
+    }
+
+    #[test]
+    fn unconfigured_handle_fails_before_the_chain_is_known() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        assert_eq!(db.chain_height().unwrap(), None);
+        assert!(matches!(
+            db.transaction_data_requests(),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
     }
 
     #[test]

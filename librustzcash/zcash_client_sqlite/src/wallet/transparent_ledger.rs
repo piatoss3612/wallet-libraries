@@ -15,9 +15,10 @@ use zcash_client_backend::data_api::{
         LastKnownSource, LedgerLifecycle, Lineage, OutstandingPage, PageId, PendingPage,
         PromotionContext, PromotionOutcome, PromotionRejection, PublicationAnchor,
         PublicationStatus, RecoveryBlocker, RecoveryCompletion, RecoveryDiagnostics, RecoveryStart,
-        RevisionId, SourceId, SourceRevision, TransparentAuthority, TransparentLedgerBalance,
-        TransparentLedgerCommit, TransparentLedgerMode, TransparentLedgerSnapshot, WatchedAccount,
-        WatchedScript, WatchedScriptSnapshot,
+        RevisionId, SourceId, SourceQualification, SourceRevision, SourceTrust,
+        TransparentAuthority, TransparentLedgerBalance, TransparentLedgerCommit,
+        TransparentLedgerMode, TransparentLedgerSnapshot, WatchedAccount, WatchedScript,
+        WatchedScriptSnapshot,
     },
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
@@ -383,10 +384,29 @@ pub(crate) fn watched_scripts(
             })
         })?
         .collect::<Result<_, _>>()?;
+    let mut sources = vec![];
+    let mut stmt = conn.prepare(
+        "SELECT source_id, qualification, quarantined, trust_epoch
+         FROM tpir_sources
+         ORDER BY source_id",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        sources.push(SourceTrust {
+            source: opaque(row.get(0)?, SourceId::new)?,
+            qualification: match row.get::<_, i64>(1)? {
+                1 => SourceQualification::Production,
+                _ => SourceQualification::Unqualified,
+            },
+            quarantined: row.get(2)?,
+            trust_epoch: to_u64(row.get(3)?)?,
+        });
+    }
     Ok(WatchedScriptSnapshot {
         policy_generation: durable.map_or(0, |p| p.generation),
         accounts,
         scripts,
+        sources,
     })
 }
 

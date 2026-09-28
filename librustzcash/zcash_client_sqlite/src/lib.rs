@@ -1567,15 +1567,15 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
+        // Transparent spend-detection and address-history requests are public discovery. The
+        // mode is resolved first, so an unconfigured handle fails even before a chain tip exists.
+        #[cfg(feature = "transparent-inputs")]
+        let public_discovery = wallet::transparent_ledger::public_discovery_permitted(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
             let iter = std::iter::empty();
-
-            // Transparent spend-detection and address-history requests are public discovery.
-            #[cfg(feature = "transparent-inputs")]
-            let public_discovery = wallet::transparent_ledger::public_discovery_permitted(
-                self.conn.borrow(),
-                self.transparent_ledger_mode,
-            )?;
             #[cfg(feature = "transparent-inputs")]
             let iter = iter.chain(
                 public_discovery
