@@ -279,3 +279,73 @@ fn origin_write_failure_rolls_back_the_output() {
         .unwrap();
     assert_eq!(coverage, 0);
 }
+
+#[test]
+fn outbox_creation_evidence_adds_local_origins_in_either_order() {
+    use zcash_client_backend::data_api::status::TransactionStatusWrite as _;
+    let (mut st, taddr, _) = funded_wallet();
+    let height = st.wallet().chain_height().unwrap().unwrap();
+
+    // Creation evidence recorded before the output is projected publicly.
+    let before = OutPoint::new([0x51; 32], 0);
+    st.wallet_mut()
+        .db_mut()
+        .record_transaction_created(
+            zcash_primitives::transaction::TxId::from_bytes([0x51; 32]),
+            height,
+        )
+        .unwrap();
+    put_public_utxo(&mut st, &taddr, before.clone(), 6_000);
+    assert_eq!(
+        output_origins(conn(&st), &before),
+        vec![LEGACY_PUBLIC, LOCAL_CONSTRUCTION]
+    );
+
+    // Creation evidence recorded after the output is projected publicly.
+    let after = OutPoint::new([0x52; 32], 0);
+    put_public_utxo(&mut st, &taddr, after.clone(), 7_000);
+    assert_eq!(output_origins(conn(&st), &after), vec![LEGACY_PUBLIC]);
+    st.wallet_mut()
+        .db_mut()
+        .record_transaction_created(
+            zcash_primitives::transaction::TxId::from_bytes([0x52; 32]),
+            height,
+        )
+        .unwrap();
+    assert_eq!(
+        output_origins(conn(&st), &after),
+        vec![LEGACY_PUBLIC, LOCAL_CONSTRUCTION]
+    );
+    assert_eq!(records_without_origin(conn(&st)), 0);
+}
+
+#[test]
+fn conflicting_output_content_is_refused() {
+    let (mut st, taddr, funded) = funded_wallet();
+    let account = st.test_account().cloned().unwrap();
+    let height = st.wallet().chain_height().unwrap().unwrap();
+    let conflicting = WalletTransparentOutput::from_parts(
+        funded.clone(),
+        TxOut::new(Zatoshis::const_from_u64(99_999), taddr.script().into()),
+        Some(height),
+        Some(account.id()),
+        Some(TransparentKeyScope::EXTERNAL),
+        None,
+    )
+    .unwrap();
+    assert!(
+        st.wallet_mut()
+            .put_received_transparent_utxo(&conflicting)
+            .is_err()
+    );
+    let value: i64 = conn(&st)
+        .query_row(
+            "SELECT o.value_zat FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id
+             WHERE t.txid = ?1 AND o.output_index = ?2",
+            rusqlite::params![funded.hash(), funded.n()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(value, 100_000);
+}

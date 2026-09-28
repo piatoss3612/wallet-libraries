@@ -2796,6 +2796,30 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
         }
     };
 
+    // An output's script and value are immutable content of its identity. A conflicting
+    // report is rejected rather than overwriting the stored content while its existing
+    // origins, possibly local, continue to vouch for it.
+    let stored_content = conn
+        .query_row(
+            "SELECT script, value_zat FROM transparent_received_outputs
+             WHERE transaction_id = :transaction_id AND output_index = :output_index",
+            named_params![
+                ":transaction_id": id_tx,
+                ":output_index": output.outpoint().n(),
+            ],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    if let Some((script, value)) = stored_content
+        && (script != output.txout().script_pubkey().0.0
+            || value != i64::from(ZatBalance::from(output.txout().value())))
+    {
+        return Err(SqliteClientError::CorruptedData(format!(
+            "conflicting content reported for transparent output {:?}",
+            output.outpoint()
+        )));
+    }
+
     let mut stmt_upsert_transparent_output = conn.prepare_cached(
         "INSERT INTO transparent_received_outputs (
             transaction_id, output_index,

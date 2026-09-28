@@ -5399,6 +5399,8 @@ pub(crate) fn record_transaction_created(
     if updated == 0 {
         return Err(SqliteClientError::ChainHeightUnknown);
     }
+    #[cfg(feature = "transparent-inputs")]
+    transparent_ledger::record_local_origins_for_tx(conn, txid.as_ref())?;
     Ok(())
 }
 

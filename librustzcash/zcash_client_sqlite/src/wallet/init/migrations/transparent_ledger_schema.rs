@@ -69,6 +69,7 @@ impl RusqliteMigration for Migration {
                 activated_height INTEGER,
                 activated_hash BLOB,
                 quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
+                quarantine_epoch INTEGER NOT NULL DEFAULT 0,
                 CHECK ((activated_height IS NULL) = (activated_hash IS NULL)),
                 CHECK (lifecycle = 0 OR activated_height IS NOT NULL)
             );
@@ -76,7 +77,8 @@ impl RusqliteMigration for Migration {
             CREATE TABLE tpir_sources (
                 source_id BLOB PRIMARY KEY,
                 accepted_lineage INTEGER NOT NULL,
-                quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1))
+                quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
+                qualification INTEGER NOT NULL DEFAULT 0 CHECK (qualification IN (0, 1))
             );
 
             CREATE TABLE tpir_scripts (
@@ -110,6 +112,7 @@ impl RusqliteMigration for Migration {
                 input_index INTEGER NOT NULL,
                 prevout_txid BLOB NOT NULL,
                 prevout_output_index INTEGER NOT NULL,
+                spent_script BLOB NOT NULL,
                 UNIQUE (spending_txid, input_index)
             );
             CREATE INDEX idx_tpir_spend_events_prevout ON tpir_spend_events (
@@ -158,6 +161,21 @@ impl RusqliteMigration for Migration {
                 CHECK (from_height <= through_height)
             );
             CREATE INDEX idx_tpir_coverage_script ON tpir_coverage (script_id, from_height);
+
+            CREATE TABLE tpir_unsupported_coverage (
+                id INTEGER PRIMARY KEY,
+                script_id INTEGER NOT NULL
+                    REFERENCES tpir_scripts(id) ON DELETE CASCADE,
+                from_height INTEGER NOT NULL,
+                to_height INTEGER,
+                reason INTEGER NOT NULL CHECK (reason IN (0, 1)),
+                source_id BLOB NOT NULL,
+                revision_id BLOB NOT NULL,
+                lineage INTEGER NOT NULL,
+                CHECK (to_height IS NULL OR from_height <= to_height)
+            );
+            CREATE INDEX idx_tpir_unsupported_coverage_script
+                ON tpir_unsupported_coverage (script_id);
 
             CREATE TABLE tpir_pending_pages (
                 id INTEGER PRIMARY KEY,
@@ -464,6 +482,7 @@ mod tests {
             "tpir_pending_pages",
             "tpir_pending_page_scripts",
             "tpir_sources",
+            "tpir_unsupported_coverage",
         ] {
             assert_eq!(count(&db.conn, table), 0, "{table} must start empty");
         }

@@ -802,6 +802,8 @@ CREATE TABLE tpir_meta (
 /// - `activated_height`, `activated_hash`: the accepted point of promotion, when active.
 /// - `quarantined`: set when a commit touching the account's scripts contradicted accepted
 ///   state; its transparent authority stays blocked until recovery revalidates it.
+/// - `quarantine_epoch`: advanced by each quarantine, so that recovery captured before the
+///   failure cannot revalidate the account.
 pub(super) const TABLE_TPIR_ACCOUNT_STATE: &str = r#"
 CREATE TABLE tpir_account_state (
     account_id INTEGER PRIMARY KEY
@@ -812,6 +814,7 @@ CREATE TABLE tpir_account_state (
     activated_height INTEGER,
     activated_hash BLOB,
     quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
+    quarantine_epoch INTEGER NOT NULL DEFAULT 0,
     CHECK ((activated_height IS NULL) = (activated_hash IS NULL)),
     CHECK (lifecycle = 0 OR activated_height IS NOT NULL)
 )"#;
@@ -821,11 +824,14 @@ CREATE TABLE tpir_account_state (
 /// - `accepted_lineage`: the newest publication lineage accepted from the source; commits
 ///   from an older lineage are rejected as superseded.
 /// - `quarantined`: set when the source's commit contradicted accepted state.
+/// - `qualification`: 0 unqualified, 1 production-qualified. Set only by source verification,
+///   never by a commit; promotion requires every contributing source to be qualified.
 pub(super) const TABLE_TPIR_SOURCES: &str = r#"
 CREATE TABLE tpir_sources (
     source_id BLOB PRIMARY KEY,
     accepted_lineage INTEGER NOT NULL,
-    quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1))
+    quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
+    qualification INTEGER NOT NULL DEFAULT 0 CHECK (qualification IN (0, 1))
 )"#;
 /// Scripts watched by transparent ledger recovery.
 ///
@@ -867,7 +873,9 @@ pub(super) const INDEX_TPIR_RECEIVE_EVENTS_SCRIPT: &str = r#"
 CREATE INDEX idx_tpir_receive_events_script ON tpir_receive_events (script)"#;
 /// Immutable content of recovered spends, identified by `(spending_txid, input_index)`.
 ///
-/// The spent outpoint is checked content. A spend may be recorded before its output.
+/// The spent outpoint is checked content. A spend may be recorded before its output;
+/// `spent_script` then attributes it to the owning account and is checked against the output
+/// when it arrives.
 pub(super) const TABLE_TPIR_SPEND_EVENTS: &str = r#"
 CREATE TABLE tpir_spend_events (
     id INTEGER PRIMARY KEY,
@@ -875,6 +883,7 @@ CREATE TABLE tpir_spend_events (
     input_index INTEGER NOT NULL,
     prevout_txid BLOB NOT NULL,
     prevout_output_index INTEGER NOT NULL,
+    spent_script BLOB NOT NULL,
     UNIQUE (spending_txid, input_index)
 )"#;
 pub(super) const INDEX_TPIR_SPEND_EVENTS_PREVOUT: &str = r#"
@@ -970,6 +979,28 @@ CREATE TABLE tpir_pending_page_scripts (
 pub(super) const INDEX_TPIR_PENDING_PAGE_SCRIPTS_SCRIPT: &str = r#"
 CREATE INDEX idx_tpir_pending_page_scripts_script
     ON tpir_pending_page_scripts (script_id)"#;
+/// Watched script ranges a source explicitly cannot cover, bound to the source revision that
+/// reported them. They block the owning account until another source covers the range.
+///
+/// ### Columns
+/// - `to_height`: the last unsupported height; null extends through the reporting run's target.
+/// - `reason`: 0 unsupported script type, 1 history unavailable.
+pub(super) const TABLE_TPIR_UNSUPPORTED_COVERAGE: &str = r#"
+CREATE TABLE tpir_unsupported_coverage (
+    id INTEGER PRIMARY KEY,
+    script_id INTEGER NOT NULL
+        REFERENCES tpir_scripts(id) ON DELETE CASCADE,
+    from_height INTEGER NOT NULL,
+    to_height INTEGER,
+    reason INTEGER NOT NULL CHECK (reason IN (0, 1)),
+    source_id BLOB NOT NULL,
+    revision_id BLOB NOT NULL,
+    lineage INTEGER NOT NULL,
+    CHECK (to_height IS NULL OR from_height <= to_height)
+)"#;
+pub(super) const INDEX_TPIR_UNSUPPORTED_COVERAGE_SCRIPT: &str = r#"
+CREATE INDEX idx_tpir_unsupported_coverage_script
+    ON tpir_unsupported_coverage (script_id)"#;
 /// The provenance of each [`TABLE_TRANSPARENT_RECEIVED_OUTPUTS`] row.
 ///
 /// Every transparent output has at least one origin; origins are removed with their output.
