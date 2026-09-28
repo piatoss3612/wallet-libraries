@@ -9,7 +9,7 @@ use zcash_protocol::value::Zatoshis;
 type State = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
 const NOW: i64 = 1_000_000;
 
-fn fixture() -> State {
+pub(super) fn fixture() -> State {
     let activation = BlockHeight::from_u32(100_000);
     let network = LocalNetwork {
         nu6: Some(activation),
@@ -41,10 +41,19 @@ fn fixture() -> State {
 
 fn prepare(st: &mut State, now: i64) -> ReceiveReservation {
     let account = st.test_account().unwrap().id();
-    st.wallet_mut()
+    let r = st
+        .wallet_mut()
         .db_mut()
         .prepare_swap_receive_reservation(account, now, BlockHeight::from_u32(100_000))
-        .unwrap()
+        .unwrap();
+    let a = anchor(st);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .verify_swap_receive_history(account, r.id, a, &[])
+            .unwrap()
+    );
+    r
 }
 
 fn quote(st: &mut State, r: &ReceiveReservation, request: &str, start: bool) {
@@ -76,7 +85,7 @@ fn pay(st: &mut State, r: &ReceiveReservation) {
     st.scan_cached_blocks(h, 1);
 }
 
-fn anchor(st: &State) -> ChainAnchor {
+pub(super) fn anchor(st: &State) -> ChainAnchor {
     let db = st.wallet().db();
     let height = db.block_fully_scanned().unwrap().unwrap().block_height();
     ChainAnchor {
@@ -104,7 +113,7 @@ fn reclamation_waits_until_latest_quote_deadline_plus_cooldown() {
     }
     let a = anchor(&st);
     let db = st.wallet_mut().db_mut();
-    db.mark_swap_directory_checked(account, r.key.key_id(), a)
+    db.verify_swap_receive_history(account, r.id, a, &[])
         .unwrap();
     assert!(
         db.swap_receive_reclaim_candidates(account, eligible_at - 1)
@@ -134,7 +143,7 @@ fn unquoted_draft_waits_until_creation_plus_cooldown() {
     let a = anchor(&st);
     let db = st.wallet_mut().db_mut();
     let eligible_at = NOW + RECEIVE_RECLAIM_SECONDS;
-    db.mark_swap_directory_checked(account, r.key.key_id(), a)
+    db.verify_swap_receive_history(account, r.id, a, &[])
         .unwrap();
     assert!(
         db.swap_receive_reclaim_candidates(account, eligible_at - 1)
@@ -182,11 +191,17 @@ fn fills_lowest_expired_hole_and_preserves_old_quotes() {
         db.swap_receive_reclaim_candidates(account, now).unwrap(),
         vec![r.id]
     );
+    // Neither global scanning nor a recovery checkpoint is an empty-address check.
+    db.conn
+        .execute("DELETE FROM ironwood_swap_receive_checks", [])
+        .unwrap();
+    db.mark_swap_directory_checked(account, r.key.key_id(), a)
+        .unwrap();
     assert!(
         !db.reclaim_swap_receive_reservation(account, r.id, now, a)
             .unwrap()
     );
-    db.mark_swap_directory_checked(account, r.key.key_id(), a)
+    db.verify_swap_receive_history(account, r.id, a, &[])
         .unwrap();
     assert!(
         db.reclaim_swap_receive_reservation(account, r.id, now, a)
@@ -351,7 +366,7 @@ fn late_payment_between_empty_check_and_reclamation_prevents_reuse() {
     let a = anchor(&st);
     st.wallet_mut()
         .db_mut()
-        .mark_swap_directory_checked(account, r.key.key_id(), a)
+        .verify_swap_receive_history(account, r.id, a, &[])
         .unwrap();
     pay(&mut st, &r);
     assert!(
@@ -373,7 +388,7 @@ fn reclamation_rejects_changed_block_anchor_and_stale_coverage() {
     observe(&mut st, "abandoned", "PENDING_DEPOSIT", false, now);
     let a = anchor(&st);
     let db = st.wallet_mut().db_mut();
-    db.mark_swap_directory_checked(account, r.key.key_id(), a)
+    db.verify_swap_receive_history(account, r.id, a, &[])
         .unwrap();
     assert!(
         db.reclaim_swap_receive_reservation(account, r.id, now, ChainAnchor { hash: [0; 32], ..a })

@@ -4275,6 +4275,10 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         [u32::from(truncation_height)],
     )?;
     conn.execute(
+        "DELETE FROM ironwood_swap_receive_checks WHERE height > ?1",
+        [u32::from(truncation_height)],
+    )?;
+    conn.execute(
         "DELETE FROM ironwood_swap_directory_checks WHERE height > ?1",
         [u32::from(truncation_height)],
     )?;

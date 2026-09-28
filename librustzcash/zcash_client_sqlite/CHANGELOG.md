@@ -46,6 +46,9 @@ workspace.
   Persist incoming quote attempts before provider requests and reuse the lowest
   verified empty slot after 48 hours and successful provider reconciliation.
   Limit unfunded reservations to three and issuance to a 50-slot recovery gap.
+  Persist canonical empty-address verification independently of recovery closeout.
+  Reuse it with continuous per-key scanning, or verify at most five missing recent
+  blocks before address exposure. Recheck ownership and coverage atomically at quote issuance.
   Retain used markers and old quote associations across reclamation and restart.
   Combine canonical directory checkpoints with actual per-key scan coverage so
   completed private recovery does not repeat lookups when publications advance.

@@ -13,6 +13,8 @@ mod payments;
 mod private;
 mod recovery;
 mod reservations;
+mod verification;
+pub use verification::RECEIVE_VERIFICATION_MAX_LAG;
 pub use payments::{PendingPayment, SpendStatus};
 pub use recovery::RecoveredRefund;
 pub use reservations::{

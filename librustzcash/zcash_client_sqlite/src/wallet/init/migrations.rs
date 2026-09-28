@@ -51,6 +51,7 @@ mod support_zcashd_wallet_import;
 mod swap_payment_recovery;
 mod swap_private_recovery;
 mod swap_receive_reservations;
+mod swap_receive_verification;
 mod swap_receiving_coverage;
 mod swap_receiving_keys;
 mod swap_receiving_notes;
@@ -382,6 +383,7 @@ pub(super) fn all_migrations<
         Box::new(swap_private_recovery::Migration),
         Box::new(swap_scan_lifecycle::Migration),
         Box::new(swap_receive_reservations::Migration),
+        Box::new(swap_receive_verification::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -605,7 +607,7 @@ pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
-    swap_receive_reservations::MIGRATION_ID,
+    swap_receive_verification::MIGRATION_ID,
     fix_bad_ironwood_change_flagging::MIGRATION_ID,
     v_address_uses_ironwood::MIGRATION_ID,
     orchard_ironwood_migration_unsatisfiability::MIGRATION_ID,

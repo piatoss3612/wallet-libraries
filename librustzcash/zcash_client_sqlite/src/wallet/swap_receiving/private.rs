@@ -92,7 +92,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 // Use u64 for the exclusive end so the maximum block height cannot overflow.
-fn has_gap(
+pub(super) fn has_gap(
     start: u32,
     through: u32,
     checked: Option<u32>,
