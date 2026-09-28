@@ -10,9 +10,13 @@ workspace.
 
 ## [Unreleased]
 
+## [0.1.0-rc4] - 2026-09-28
+
 ### Changed
 - `Creator::new` and the updater anchor setters now accept the NU7 consensus
   branch without the `zcash_unstable="nu7"` configuration flag.
+- Updated the Zakura proving and protocol dependencies to the stable 2.0
+  release family.
 
 ## [0.1.0-rc3] - 2026-09-09
 

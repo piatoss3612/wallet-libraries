@@ -7,6 +7,9 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+- Updated the Zakura PCZT dependency to `zakura-pczt 0.1.0-rc4`.
+
 ## [0.1.0-rc6] - 2026-09-27
 
 ### Changed
