@@ -43,6 +43,10 @@ workspace.
   `compact_ciphertext` copies.
 - Add an opt-in experimental swap receiving-key registry with atomic per-purpose
   reservations, recovered-index tracking, and persistent incoming lookahead keys.
+  Persist incoming quote attempts before provider requests and reuse the lowest
+  verified empty slot after 48 hours and successful provider reconciliation.
+  Limit unfunded reservations to three and issuance to a 50-slot recovery gap.
+  Retain used markers and old quote associations across reclamation and restart.
   Combine canonical directory checkpoints with actual per-key scan coverage so
   completed private recovery does not repeat lookups when publications advance.
   Private recovery persists per-operation scan deadlines and fixed PIR targets.
@@ -56,8 +60,7 @@ workspace.
   Enhance PIR retrieval authenticate memos using the note's registered key.
   Unsupported builds preserve PIR work and report missing swap support.
   Per-key scan coverage persists with blocks and queues missing history when keys
-  are recovered. Rewinds trim coverage even without the feature. Key retirement
-  remains pending. Shared recovery helpers register authenticated funding memos
+  are recovered. Rewinds trim coverage even without the feature. Shared recovery helpers register authenticated funding memos
   and extend incoming lookahead with historical replay. Privately retrieved
   payments can be authenticated and persisted as pending candidates without
   crediting balance. Local spentness checks require retained scan coverage and

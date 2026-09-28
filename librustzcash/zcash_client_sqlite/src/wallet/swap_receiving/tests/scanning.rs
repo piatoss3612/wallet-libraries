@@ -376,20 +376,20 @@ fn incoming_seed_lookahead_replays_payments_before_the_window_edge() {
         .build();
     let account = st.test_account().cloned().unwrap();
     let parent = orchard::keys::FullViewingKey::from(account.usk().orchard());
-    // Index 20 was paid before 19, so extending only future scanning loses it.
+    // Index 50 was paid before 49, so extending only future scanning loses it.
     let (first, _, _) = st.generate_next_block(
-        &IronwoodFvk(KeyId::new(Purpose::Receive, 20).derive(&parent).unwrap()),
+        &IronwoodFvk(KeyId::new(Purpose::Receive, 50).derive(&parent).unwrap()),
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(50_000),
     );
     st.generate_next_block(
-        &IronwoodFvk(KeyId::new(Purpose::Receive, 19).derive(&parent).unwrap()),
+        &IronwoodFvk(KeyId::new(Purpose::Receive, 49).derive(&parent).unwrap()),
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(60_000),
     );
     st.wallet_mut()
         .db_mut()
-        .maintain_swap_receive_lookahead(account.id(), 20, first)
+        .maintain_swap_receive_lookahead(account.id(), 50, first)
         .unwrap();
     st.scan_cached_blocks(first, 2);
     let notes = st
@@ -400,11 +400,11 @@ fn incoming_seed_lookahead_replays_payments_before_the_window_edge() {
     assert_eq!(notes.len(), 1);
     assert_eq!(
         notes[0].swap_key_id(),
-        Some(KeyId::new(Purpose::Receive, 19))
+        Some(KeyId::new(Purpose::Receive, 49))
     );
     st.wallet_mut()
         .db_mut()
-        .maintain_swap_receive_lookahead(account.id(), 20, first)
+        .maintain_swap_receive_lookahead(account.id(), 50, first)
         .unwrap();
     assert!(
         st.wallet()
@@ -423,6 +423,6 @@ fn incoming_seed_lookahead_replays_payments_before_the_window_edge() {
     assert!(
         notes
             .iter()
-            .any(|n| n.swap_key_id() == Some(KeyId::new(Purpose::Receive, 20)))
+            .any(|n| n.swap_key_id() == Some(KeyId::new(Purpose::Receive, 50)))
     );
 }

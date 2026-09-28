@@ -12,8 +12,13 @@ pub(crate) mod lifecycle;
 mod payments;
 mod private;
 mod recovery;
+mod reservations;
 pub use payments::{PendingPayment, SpendStatus};
 pub use recovery::RecoveredRefund;
+pub use reservations::{
+    RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, RECEIVE_UNFUNDED_LIMIT, ReceiveQuote,
+    ReceiveReservation,
+};
 
 use std::borrow::{Borrow, BorrowMut};
 
@@ -36,6 +41,8 @@ pub enum Error {
     Derivation(DerivationError),
     /// This purpose's index space is exhausted. Never wrap back to zero.
     IndexExhausted,
+    /// Address allocation is waiting for recovery or an existing reservation.
+    ReservationPolicy(&'static str),
 }
 
 impl std::fmt::Display for Error {
@@ -44,6 +51,7 @@ impl std::fmt::Display for Error {
             Self::Wallet(e) => e.fmt(f),
             Self::Derivation(e) => e.fmt(f),
             Self::IndexExhausted => f.write_str("swap receiving index space exhausted"),
+            Self::ReservationPolicy(message) => f.write_str(message),
         }
     }
 }
@@ -53,7 +61,7 @@ impl std::error::Error for Error {
         match self {
             Self::Wallet(e) => Some(e),
             Self::Derivation(e) => Some(e),
-            Self::IndexExhausted => None,
+            Self::IndexExhausted | Self::ReservationPolicy(_) => None,
         }
     }
 }
