@@ -14,7 +14,8 @@
 //!
 //! This migration adds the column where it is absent. On a wallet whose table was created after the
 //! DDL edit the column is already present and this is a no-op, so both paths converge on the schema
-//! in [`crate::wallet::db::TABLE_ORCHARD_IRONWOOD_MIGRATIONS`].
+//! in [`orchard_ironwood_migration_tables::CREATE_TABLES_SQL`]. The
+//! [`drop_zip318_pool_migration`](super::drop_zip318_pool_migration) migration later drops the table.
 //!
 //! [`WalletDb::put_blocks`]: crate::WalletDb
 
@@ -190,7 +191,8 @@ mod tests {
     #[test]
     fn is_a_no_op_when_the_column_is_present() {
         let mut conn = Connection::open_in_memory().unwrap();
-        crate::wallet::db::init_orchard_ironwood_migration_tables(&conn).unwrap();
+        conn.execute_batch(orchard_ironwood_migration_tables::CREATE_TABLES_SQL)
+            .unwrap();
         assert!(has_anchor_column(&conn));
 
         let tx = conn.transaction().unwrap();

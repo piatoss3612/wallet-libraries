@@ -317,14 +317,6 @@ CREATE TABLE blocks (
 /// - `trust_status`: A flag indicating whether the transaction should be considered "trusted".
 ///   When set to `1`, outputs of this transaction will be considered spendable with `trusted`
 ///   confirmations instead of `untrusted` confirmations.
-/// - `zip318_kind`: how the transaction classifies against ZIP 318, encoded by
-///   [`Zip318Classification::to_code`]. The default, `0`, means NOT CLASSIFIED, and is what a row
-///   holds until the wallet has decrypted the transaction; it is deliberately distinct from the
-///   code for "nonconforming", which is a decision that the transaction is not a ZIP 318 one. A
-///   client must render the default as no label, never as "not a migration". Rows written before
-///   this column existed keep the default and need the transaction rescanned.
-///
-/// [`Zip318Classification::to_code`]: zcash_protocol::zip318::Zip318Classification::to_code
 pub(super) const TABLE_TRANSACTIONS: &str = r#"
 CREATE TABLE "transactions" (
     id_tx INTEGER PRIMARY KEY,
@@ -340,7 +332,6 @@ CREATE TABLE "transactions" (
     min_observed_height INTEGER NOT NULL,
     confirmed_unmined_at_height INTEGER,
     trust_status INTEGER,
-    zip318_kind INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (block) REFERENCES blocks(height),
     CONSTRAINT height_consistency CHECK (
         block IS NULL OR mined_height = block
@@ -661,177 +652,6 @@ CREATE TABLE ironwood_enhance_routing (
     route INTEGER NOT NULL CHECK (route IN (0, 1)),
     history_expiry_height INTEGER
         CHECK (history_expiry_height >= 0 AND history_expiry_height < 500000000)
-)";
-
-// The in-progress Orchard -> Ironwood pool migration (ZIP 318). The table DDL and store live in the
-// `crate::pool_migration` module; these golden copies track the normalized schema those tables
-// install into `wallet.db`. Every structured value is stored in typed columns and child tables; the
-// only `BLOB` is the pre-signed transaction (`pczt`), which is already-versioned, unstructured bytes.
-
-/// One row per account's active migration: its status and the scalar fields of its denomination
-/// plan. The crossing values are an ordered list in `orchard_ironwood_migration_crossing_values`.
-/// `account_id` is enforced unique by `INDEX_ORCHARD_IRONWOOD_MIGRATIONS_ACCOUNT`, so an account
-/// has at most one migration in progress. It is a foreign key into `accounts` with `ON DELETE
-/// CASCADE`, so deleting an account removes its migration (and its child rows cascade in turn).
-///
-/// `anchor_bucket_interval` records the anchor retention grid the migration was committed against,
-/// in blocks. Every transfer's `anchor_boundary` lies on that grid, and it is provable only while
-/// the wallet still retains those checkpoints, so a mismatch against the wallet's current interval
-/// is reported as an error rather than left to surface as a missing checkpoint at proving time. Its
-/// `DEFAULT` is [`AnchorBucketInterval::ZIP_318`] (144 blocks), present only so that a table created
-/// by the `orchard_ironwood_migration_tables` DDL and one repaired by the
-/// `orchard_ironwood_migration_anchor_interval` `ADD COLUMN` share this schema text; the store
-/// always writes the column explicitly.
-///
-/// `replan_threshold` is the integer percent above which unsatisfiable planned transfer value
-/// triggers an immediate replan, stamped at commit. Its `DEFAULT` is
-/// `ReplanThreshold::DEFAULT`'s percent (20), present only so that a table created by the
-/// `orchard_ironwood_migration_tables` DDL and one repaired by the
-/// `orchard_ironwood_migration_unsatisfiability` `ADD COLUMN` share this schema text; the store
-/// always writes the column explicitly.
-///
-/// [`AnchorBucketInterval::ZIP_318`]: zcash_protocol::zip318::AnchorBucketInterval::ZIP_318
-pub(super) const TABLE_ORCHARD_IRONWOOD_MIGRATIONS: &str = "
-CREATE TABLE orchard_ironwood_migrations (
-    id INTEGER PRIMARY KEY,
-    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    status TEXT NOT NULL,
-    note_split_fee_buffer INTEGER NOT NULL,
-    note_split_change INTEGER,
-    note_split_prep_fees INTEGER NOT NULL,
-    note_split_total_input INTEGER NOT NULL,
-    note_split_total_migratable INTEGER NOT NULL,
-    anchor_bucket_interval INTEGER NOT NULL DEFAULT 144,
-    replan_threshold INTEGER NOT NULL DEFAULT 20
-)";
-/// The denomination crossing values (an ordered list of zatoshi amounts). The funding-note values
-/// have no table of their own: each is its crossing value plus the denomination fee buffer.
-pub(super) const TABLE_ORCHARD_IRONWOOD_MIGRATION_CROSSING_VALUES: &str = "
-CREATE TABLE orchard_ironwood_migration_crossing_values (
-    migration_id INTEGER NOT NULL REFERENCES orchard_ironwood_migrations(id) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL,
-    value INTEGER NOT NULL,
-    PRIMARY KEY (migration_id, ordinal)
-)";
-/// The inputs of each preparation transaction (`source` is `wallet` or `prior`), keyed by the
-/// transaction's `(layer, tx_index)` grid coordinate. The layers/transactions grid has no tables
-/// of its own: every transaction a real plan produces has at least one input and one output (and
-/// no layer is empty), so the grid is implied by the input and output rows.
-pub(super) const TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_INPUTS: &str = "
-CREATE TABLE orchard_ironwood_migration_prep_inputs (
-    migration_id INTEGER NOT NULL REFERENCES orchard_ironwood_migrations(id) ON DELETE CASCADE,
-    layer INTEGER NOT NULL,
-    tx_index INTEGER NOT NULL,
-    ordinal INTEGER NOT NULL,
-    source TEXT NOT NULL,
-    wallet_index INTEGER,
-    prior_layer INTEGER,
-    prior_transaction INTEGER,
-    prior_output INTEGER,
-    value INTEGER NOT NULL,
-    PRIMARY KEY (migration_id, layer, tx_index, ordinal)
-)";
-/// The outputs of each preparation transaction (`role` is `funding`, `intermediate`, or `change`),
-/// keyed like the inputs.
-pub(super) const TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_OUTPUTS: &str = "
-CREATE TABLE orchard_ironwood_migration_prep_outputs (
-    migration_id INTEGER NOT NULL REFERENCES orchard_ironwood_migrations(id) ON DELETE CASCADE,
-    layer INTEGER NOT NULL,
-    tx_index INTEGER NOT NULL,
-    ordinal INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    value INTEGER NOT NULL,
-    PRIMARY KEY (migration_id, layer, tx_index, ordinal)
-)";
-/// The preparation plan's direct-funding wallet notes (used as a funding note with no preparation).
-pub(super) const TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_DIRECT_FUNDING: &str = "
-CREATE TABLE orchard_ironwood_migration_prep_direct_funding (
-    migration_id INTEGER NOT NULL REFERENCES orchard_ironwood_migrations(id) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL,
-    wallet_index INTEGER NOT NULL,
-    value INTEGER NOT NULL,
-    PRIMARY KEY (migration_id, ordinal)
-)";
-/// One row per migration transaction. `transfer_id` is the transaction's ordinal WITHIN its
-/// migration (a `MigrationTransferId`), not a transaction ID — it is created as `tx_id` by the
-/// released `orchard_ironwood_migration_tables` DDL and renamed here by the
-/// `orchard_ironwood_migration_unsatisfiability` schema migration, which is why this text is the
-/// renamed one rather than the created one. `kind` is `preparation` or `transfer`; `pczt` is
-/// the pre-signed transaction (an opaque, already-versioned `BLOB`); `state` is the lifecycle
-/// discriminant, with the hex consensus transaction ID in `txid` (`NULL` until broadcast) and
-/// `mined_height`. `lock_owner` records the `LockOwner` under which this
-/// transaction's notes are locked, if any. `unsatisfiable_at` is the height of the chain state a
-/// spent-input observation rests on, when the transaction has been determined unsatisfiable, and
-/// `unsatisfiable_kind` the wire name of WHICH observation that was (`inputs_spent`,
-/// `inputs_invalidated`, `anchor_invalidated`, or `inherited` for a mark that arrived through the
-/// dependency closure); the two are `NULL` together or non-`NULL` together, and a row where they
-/// disagree is rejected as corrupt. `broadcast_failure_at` is the chain tip an application
-/// observed from a node that REJECTED a broadcast of this transaction, standing until the engine
-/// adjudicates that rejection against the wallet's own view, and independent of the
-/// unsatisfiability columns in both directions. Dependencies are edges in
-/// `orchard_ironwood_migration_transaction_deps`, and the real-spend nullifiers cached from the
-/// stored PCZT are rows of `orchard_ironwood_migration_spend_nullifiers`.
-pub(super) const TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTIONS: &str = "
-CREATE TABLE orchard_ironwood_migration_transactions (
-    migration_id INTEGER NOT NULL REFERENCES orchard_ironwood_migrations(id) ON DELETE CASCADE,
-    transfer_id INTEGER NOT NULL,
-    kind TEXT NOT NULL,
-    kind_layer INTEGER,
-    kind_index INTEGER,
-    kind_crossing INTEGER,
-    pczt BLOB NOT NULL,
-    scheduled_height INTEGER NOT NULL,
-    expiry_height INTEGER NOT NULL,
-    anchor_boundary INTEGER,
-    state TEXT NOT NULL,
-    txid TEXT,
-    mined_height INTEGER,
-    lock_owner BLOB,
-    unsatisfiable_at INTEGER,
-    unsatisfiable_kind TEXT,
-    broadcast_failure_at INTEGER,
-    PRIMARY KEY (migration_id, transfer_id)
-)";
-/// The dependency edges between migration transactions: `transfer_id` depends on
-/// `depends_on_transfer_id`, in `ordinal` order. Both columns are ordinals within the migration
-/// named by `migration_id`, and both were created as `tx_id` / `depends_on_tx_id` by the released
-/// `orchard_ironwood_migration_tables` DDL and renamed by the
-/// `orchard_ironwood_migration_unsatisfiability` schema migration.
-pub(super) const TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTION_DEPS: &str = "
-CREATE TABLE orchard_ironwood_migration_transaction_deps (
-    migration_id INTEGER NOT NULL,
-    transfer_id INTEGER NOT NULL,
-    ordinal INTEGER NOT NULL,
-    depends_on_transfer_id INTEGER NOT NULL,
-    PRIMARY KEY (migration_id, transfer_id, ordinal),
-    FOREIGN KEY (migration_id, transfer_id)
-        REFERENCES orchard_ironwood_migration_transactions(migration_id, transfer_id) ON DELETE CASCADE
-)";
-/// The nullifiers of each migration transaction's REAL spends, cached from its stored PCZT so the
-/// pool-migration state machine never has to parse one: `transfer_id` names the transaction within
-/// the migration, `ordinal` the nullifier's position in that transaction's list, and `nullifier`
-/// the 32-byte value (the width is a `CHECK`, since no other length can have been written here). A
-/// transaction with no rows here has an empty cache, which only a `mined` transaction may have:
-/// the `orchard_ironwood_migration_unsatisfiability` schema migration, which populates this table
-/// for transactions committed before it existed, exempts exactly those rows.
-pub(super) const TABLE_ORCHARD_IRONWOOD_MIGRATION_SPEND_NULLIFIERS: &str = "
-CREATE TABLE orchard_ironwood_migration_spend_nullifiers (
-    migration_id INTEGER NOT NULL,
-    transfer_id INTEGER NOT NULL,
-    ordinal INTEGER NOT NULL,
-    nullifier BLOB NOT NULL CHECK (length(nullifier) = 32),
-    PRIMARY KEY (migration_id, transfer_id, ordinal),
-    FOREIGN KEY (migration_id, transfer_id)
-        REFERENCES orchard_ironwood_migration_transactions(migration_id, transfer_id) ON DELETE CASCADE
-)";
-pub(super) const INDEX_ORCHARD_IRONWOOD_MIGRATION_TX_DUE: &str = "
-CREATE INDEX idx_orchard_ironwood_migration_tx_due ON orchard_ironwood_migration_transactions (
-    state, scheduled_height
-)";
-/// Enforces at most one migration per account.
-pub(super) const INDEX_ORCHARD_IRONWOOD_MIGRATIONS_ACCOUNT: &str = "
-CREATE UNIQUE INDEX idx_orchard_ironwood_migrations_account ON orchard_ironwood_migrations (
-    account_id
 )";
 
 /// Stores the transparent outputs received by the wallet.
@@ -1593,8 +1413,7 @@ SELECT accounts.uuid                AS account_uuid,
        -- between shielded pools; NULL when it is not such a transfer. A transaction is one
        -- exactly when this column is non-NULL.
        pool_crossings.crossing_value AS pool_crossing_value,
-       transactions.trust_status,
-       transactions.zip318_kind
+       transactions.trust_status
 FROM notes
 JOIN accounts ON accounts.id = notes.account_id
 JOIN transactions ON transactions.id_tx = notes.transaction_id
@@ -2027,34 +1846,6 @@ pub(super) const VIEW_ADDRESS_FIRST_USE: &str = "
     GROUP BY
         address_id, account_id, key_scope,
         diversifier_index_be, transparent_child_index";
-
-/// Creates the Orchard -> Ironwood pool-migration tables at their current shape.
-///
-/// The pool-migration engine used to own this, and it built the tables from the
-/// same DDL constants below. This fork does not carry the engine, but it does
-/// carry the migrations that create these tables, and their tests need a
-/// fixture database that already has them.
-#[cfg(test)]
-pub(super) fn init_orchard_ironwood_migration_tables(
-    conn: &rusqlite::Connection,
-) -> rusqlite::Result<()> {
-    for statement in [
-        TABLE_ORCHARD_IRONWOOD_MIGRATIONS,
-        TABLE_ORCHARD_IRONWOOD_MIGRATION_CROSSING_VALUES,
-        TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_INPUTS,
-        TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_OUTPUTS,
-        TABLE_ORCHARD_IRONWOOD_MIGRATION_PREP_DIRECT_FUNDING,
-        TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTIONS,
-        TABLE_ORCHARD_IRONWOOD_MIGRATION_TRANSACTION_DEPS,
-        TABLE_ORCHARD_IRONWOOD_MIGRATION_SPEND_NULLIFIERS,
-        INDEX_ORCHARD_IRONWOOD_MIGRATION_TX_DUE,
-        INDEX_ORCHARD_IRONWOOD_MIGRATIONS_ACCOUNT,
-    ] {
-        conn.execute_batch(statement)?;
-    }
-
-    Ok(())
-}
 
 #[cfg(test)]
 pub(super) const TABLE_IRONWOOD_ENHANCE_METADATA_QUEUE: &str = "

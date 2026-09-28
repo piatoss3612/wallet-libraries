@@ -518,16 +518,8 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Sets the interval on which this wallet retains note commitment tree checkpoints as durable
     /// anchors, exempt from ordinary checkpoint pruning.
     ///
-    /// A ZIP 318 pool migration planned over this wallet reads the interval back through
-    /// [`WalletRead::anchor_retention_interval`] and draws its transfers' anchors from the same
-    /// grid, so the two cannot disagree.
-    ///
-    /// This setting is not persisted, but it does not need to be: once a migration is committed,
-    /// the grid it was committed under is recorded with it, and this wallet keeps retaining that
-    /// grid's boundaries for as long as the migration is in flight, whatever it is currently
-    /// configured with. Reopening the wallet without reapplying a non-default interval therefore
-    /// cannot strand an in-flight migration; it only affects what grid the NEXT migration is
-    /// planned against.
+    /// A ZIP 318 pool migration planned over this wallet must draw its transfers' anchors from
+    /// the same grid. This setting is not persisted.
     ///
     /// The default is [`AnchorRetentionInterval::ZIP_318`], which every wallet on the production
     /// network must use.
@@ -847,14 +839,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         }
     }
 
-    fn anchor_computable(
-        &self,
-        protocol: ShieldedPool,
-        height: BlockHeight,
-    ) -> Result<bool, Self::Error> {
-        wallet::anchor_computable(self.conn.borrow(), protocol, height)
-    }
-
     fn select_spendable_notes(
         &self,
         account: Self::AccountId,
@@ -1002,77 +986,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         };
 
         Ok(ConsolidationNotes::from_parts(funding, additional))
-    }
-
-    fn select_single_spendable_note(
-        &self,
-        account: Self::AccountId,
-        value: Zatoshis,
-        sources: &[ShieldedPool],
-        target_height: TargetHeight,
-        confirmations_policy: ConfirmationsPolicy,
-        exclude: &[Self::NoteRef],
-        lock_filter: LockFilter<'_>,
-    ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
-        // Pools are tried in the caller's preference order; the first pool holding a covering
-        // note supplies it.
-        for pool in sources {
-            match pool {
-                ShieldedPool::Sapling => {
-                    if let Some(note) = wallet::sapling::select_single_spendable_sapling_note(
-                        self.conn.borrow(),
-                        &self.params,
-                        account,
-                        value,
-                        target_height,
-                        confirmations_policy,
-                        exclude,
-                        lock_filter,
-                    )? {
-                        return Ok(ReceivedNotes::new(
-                            vec![note],
-                            #[cfg(feature = "orchard")]
-                            vec![],
-                            #[cfg(feature = "orchard")]
-                            vec![],
-                        ));
-                    }
-                }
-                #[cfg(feature = "orchard")]
-                ShieldedPool::Orchard => {
-                    if let Some(note) = wallet::orchard::select_single_spendable_orchard_note(
-                        self.conn.borrow(),
-                        &self.params,
-                        account,
-                        value,
-                        target_height,
-                        confirmations_policy,
-                        exclude,
-                        lock_filter,
-                    )? {
-                        return Ok(ReceivedNotes::new(vec![], vec![note], vec![]));
-                    }
-                }
-                #[cfg(feature = "orchard")]
-                ShieldedPool::Ironwood => {
-                    if let Some(note) = wallet::orchard::select_single_spendable_ironwood_note(
-                        self.conn.borrow(),
-                        &self.params,
-                        account,
-                        value,
-                        target_height,
-                        confirmations_policy,
-                        exclude,
-                        lock_filter,
-                    )? {
-                        return Ok(ReceivedNotes::new(vec![], vec![], vec![note]));
-                    }
-                }
-                #[cfg(not(feature = "orchard"))]
-                ShieldedPool::Orchard | ShieldedPool::Ironwood => {}
-            }
-        }
-        Ok(ReceivedNotes::empty())
     }
 
     fn select_unspent_notes(
@@ -1437,10 +1350,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
 
     fn chain_height(&self) -> Result<Option<BlockHeight>, Self::Error> {
         wallet::chain_tip_height(self.conn.borrow()).map_err(SqliteClientError::from)
-    }
-
-    fn anchor_retention_interval(&self) -> AnchorRetentionInterval {
-        self.anchor_retention_interval
     }
 
     fn get_block_hash(&self, block_height: BlockHeight) -> Result<Option<BlockHash>, Self::Error> {
@@ -3038,14 +2947,6 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             txid,
             status,
         )
-    }
-
-    fn put_zip318_classification(
-        &mut self,
-        tx_ref: Self::TxRef,
-        classification: zcash_protocol::zip318::Zip318Classification,
-    ) -> Result<(), Self::Error> {
-        wallet::put_zip318_classification(self.conn.borrow(), tx_ref, classification)
     }
 
     fn put_received_sapling_note<T: ReceivedSaplingOutput<AccountId = Self::AccountId>>(

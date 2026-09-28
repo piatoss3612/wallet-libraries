@@ -10,6 +10,29 @@ workspace.
 
 ## [Unreleased]
 
+### Removed
+- ZIP 318 transaction classification and the canonical-crossing send policy.
+  Vizor schedules its own Orchard -> Ironwood migration transfers, so the
+  library no longer classifies transactions or reshapes ordinary sends to look
+  like migration transfers:
+  - `data_api::zip318` and `LowLevelWalletWrite::put_zip318_classification`.
+  - `anchor_retention::PoolMigrationParams`,
+    `WalletRead::anchor_retention_interval` and
+    `WalletRead::pool_migration_params`.
+  - `fees::canonical_crossing_fee`, `proposal::Step::is_canonical_crossing`,
+    `ConfirmationsPolicy::bucketed` and
+    `data_api::error::Error::ExpiryHeightConflictsWithCanonicalCrossing`.
+  - `NoteSelection::PreferSingle`, `InputSource::select_single_spendable_note`,
+    `InputSource::anchor_computable` and `ReceivedNotes::into_single_covering`.
+  Ironwood bundles are now always padded to the default floor, and
+  `propose_transfer` always proposes against the ordinary anchor. Anchor
+  retention in `put_blocks` is unchanged.
+
+### Changed
+- `ChangeStrategy::compute_balance` no longer takes `anchor_height` or ZIP 318
+  parameters, and `InputSelector::propose_transaction` and
+  `InputSelector::propose_shielding` no longer take ZIP 318 parameters.
+
 ## [0.1.0-rc7] - 2026-09-27
 
 Breaking release that separates transaction status observation from payload

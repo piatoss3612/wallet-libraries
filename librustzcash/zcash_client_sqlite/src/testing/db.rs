@@ -115,8 +115,7 @@ impl TestDb {
         &mut self.wallet_db
     }
 
-    /// The wallet database's own SQLite connection, over which a sibling store (a
-    /// `pool_migration` store, say) is opened.
+    /// The wallet database's own SQLite connection.
     pub fn conn(&self) -> &Connection {
         &self.wallet_db.conn
     }

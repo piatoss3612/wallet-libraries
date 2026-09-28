@@ -10,6 +10,16 @@ workspace.
 
 ## [Unreleased]
 
+### Removed
+- The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`
+  migration drops the `orchard_ironwood_migration*` tables and their indexes,
+  which nothing read or wrote, and the `zip318_kind` column of `transactions`
+  and `v_transactions`. The migrations that created them stay registered, so
+  existing databases still migrate.
+- The implementations of the removed backend APIs
+  (`put_zip318_classification`, `select_single_spendable_note`,
+  `anchor_computable` and `anchor_retention_interval`).
+
 ## [0.1.0-rc7] - 2026-09-27
 
 Breaking storage release for independently routed transaction status and
