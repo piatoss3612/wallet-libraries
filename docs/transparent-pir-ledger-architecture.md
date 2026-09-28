@@ -65,6 +65,8 @@ remain the representation used by wallet history and transaction construction.
 | `transparent_received_outputs` | Output index, script, value, account/address ownership, unspent-observation information, and proposal locks. |
 | `transparent_received_output_spends` | Links known received outputs to transactions that spend them. |
 | `transparent_spend_map` | Records spent outpoints, including those whose corresponding receives are not yet available. |
+| Shielded note and spend tables | Received notes and detected spends, linked to the same transaction identities as transparent effects. |
+| `sent_notes` | Known sent-output details, including recipient and amount, from local construction or supported outgoing recovery. |
 | Transaction/output views | The representation consumed by transaction history and other wallet reads. |
 
 A concrete decomposition of the new ledger storage could look like this.
@@ -93,7 +95,8 @@ The relationships matter more than the table names:
 - One event can have multiple publication observations. Seeing it in another
   revision is not itself a contradiction.
 - One LRZ record can have multiple origins. Removing invalid PIR evidence must
-  not delete an independently recorded local transaction or reservation.
+  not delete an independently recorded local transaction, reservation, or
+  shielded-scan contribution to a shared transaction.
 - Balances are computed from active events/projection and wallet rules. A cached
   amount cannot substitute for the underlying evidence.
 
@@ -145,6 +148,24 @@ transactions or fees cannot turn private ledger discovery into public txid
 queries. Payload recovery and status observation retain their separate work and
 evidence contracts.
 
+### How shielded sync and history fit
+
+There are two logical discovery loops: shielded compact-block scanning and
+transparent script recovery. They share one wallet database and accepted chain,
+and join their effects through the same `transactions` row by txid. Enhance PIR
+adds supported transaction details; it is not a third ownership-discovery loop.
+Status work observes known transactions under its separate evidence contract.
+
+Shielding and unshielding can therefore be reconstructed as movements between
+pools within one transaction. Restoring a balance does not imply restoring every
+recipient, memo, or fee: the transparent ledger discovers wallet-owned scripts,
+and the current Ironwood Enhance record does not contain external transparent
+outputs. Existing local-send details must survive migration; a seed restore may
+have only partial payment details. The [sync contract](#shielded-sync-and-shared-transactions)
+and [history contract](#shielding-unshielding-and-history-reconstruction) below
+define how to combine discoveries without duplicate accounting, hidden debits,
+or public lookups to fill missing details.
+
 ### Primary API and data-layout changes
 
 | Area | Existing behavior | Intended behavior after the refactor |
@@ -155,6 +176,7 @@ evidence contracts.
 | Chain target | Callers work with scanned heights and transaction target heights. | Explicit `ChainPoint { height, hash }`; coverage through `H` supports a transaction targeting `H + 1`, subject to current-chain and other eligibility rules. |
 | Rewind | LRZ rewinds plus application discovery/cache handling. | Ledger evidence and projection participate in applicable LRZ rewind transactions, using the actual retained height. |
 | Privacy configuration | Enhance/Status policy alongside separate transparent discovery paths. | The same user setting governs transparent recovery, with durable applied policy and generation checks across handles and entry points. |
+| Transaction history | Existing transaction/output views and Vizor classification, often supplemented by full payloads. | The same transaction identity joins pool effects; history also exposes incomplete classification, recipient details, memos, and fees without fabricating values. |
 | Financial storage | Existing LRZ output/spend records and public-path discovery caches. | Those records remain, with same-database `tpir_*` evidence, coverage, progress, and provenance supporting authoritative private projection. |
 | Migration | Existing records support public discovery behavior. | Legacy evidence, isolated candidate recovery, and guarded per-account promotion become explicit states. |
 
@@ -208,9 +230,11 @@ The central invariant is:
         +-- authoritative ledger + LRZ projection: activated account
 ```
 
-The three recovery lanes share policy resolution and transport facilities but
-retain independent queues, completion rules, evidence, and retries. Success in
-one lane never completes another or authorizes a different source.
+The diagram expands transparent discovery and its follow-on work. Shielded
+compact scanning continues alongside it. The two discovery loops, payload
+recovery, and status observation share policy resolution and transport
+facilities but retain independent queues, completion rules, evidence, and
+retries. Success in one never completes another or authorizes a different source.
 
 | Owner | Responsibilities |
 | --- | --- |
@@ -222,6 +246,200 @@ No HTTP, filter layout, shard wire type, or PIR client type appears in the
 wallet-facing API. The adapter accepts normalized events and bounded opaque
 source/revision identifiers. Applications and protocol clients cannot write LRZ
 projection tables directly.
+
+## Shielded sync and shared transactions
+
+### Two discovery loops, one wallet state
+
+| Process | Facts it contributes | What its completion does not establish |
+| --- | --- | --- |
+| Shielded compact scanning | Wallet-owned received notes, spends matched to known nullifiers, and scanned chain state. | Transparent script coverage or complete recipient, memo, and fee details. |
+| Transparent ledger recovery | Receives and spends for watched scripts, with continuous source-bound coverage. | Shielded scan completion or a complete list of external transaction outputs. |
+| Payload recovery, including Enhance PIR | Details supported by the selected format, such as shielded memos and recoverable outgoing outputs, or an authorized full transaction. | Completion of either discovery loop or transaction-status work. |
+| Status observation, including Status PIR | Status evidence for already known transactions, subject to its own coverage and trust rules. | Discovery of all wallet effects or recovery of payment details. |
+
+These are logical responsibilities, not a requirement for separate threads or
+one combined network loop. Vizor can interleave or schedule them concurrently.
+Transparent recovery captures a fixed locally accepted, contiguously scanned
+chain point as specified in [coverage](#coverage-synchronization-and-financial-authorization);
+it does not establish a competing chain tip. The loops may finish different
+ranges at different times. A shielded scan checkpoint cannot certify transparent
+coverage, and transparent completion cannot advance a shielded scan checkpoint.
+
+### Joining mixed transactions
+
+A transaction spending both a wallet-owned transparent output and a wallet-owned
+shielded note has one transaction identity in the wallet database. The scanner
+attaches the shielded spend and received notes; the active transparent ledger
+attaches the transparent spend and receives. Neither arrival order changes the
+result. LRZ already upserts scanned and full transactions by txid in
+[`put_tx_meta` and `put_tx_data`](../librustzcash/zcash_client_sqlite/src/wallet.rs);
+the ledger projection must preserve this behavior.
+
+Required integration rules are:
+
+- Keep one shared transaction row and pool-specific output/spend identities.
+  Repeated observations and later payload ingestion are idempotent; neither
+  discovery path replaces the other path's effects with its partial view.
+- Commit each source's validated facts atomically with its own progress. Do not
+  wait for both network loops to finish before recording a known spend. Active
+  facts participate in existing spend/conflict rules immediately; isolated
+  candidate facts remain subject to promotion and cannot mutate production state.
+- Preserve independently recorded local sends. LRZ's local-send ingestion
+  records selected transparent and shielded spends, sent outputs, and available
+  transaction metadata together. Preserve Vizor's existing send/outbox lifecycle;
+  later discovery confirms or augments those records rather than reconstructing
+  the user's intent from scratch.
+- Deduplicate follow-on work at its actual identity, such as transaction plus
+  action/output and requested detail. Completing one action's memo must not
+  mark all outputs, fees, or other recovery lanes complete.
+- Keep ownership account-scoped. A transaction involving two wallet accounts
+  can have a wallet-internal transfer and separate account debits/credits.
+  Owning one input does not prove that every output was paid by that account.
+- Reconcile mined placement against the same accepted chain. Conflicting source
+  assertions are integrity failures, not last-writer-wins updates. Rewinds
+  invalidate affected pool evidence and derived history together while
+  preserving independent local origins and shared transaction identities.
+
+### Shared privacy policy and the current Enhance gap
+
+The required-private policy must apply before either discovery path dispatches
+follow-on requests. A shielded scan may discover a mixed transaction first;
+waiting until the transparent ledger tags that transaction would leave a public
+lookup race. Dispatch checks must also cover already queued payload/status work,
+reopened handles, and retries after a setting transition. A server's transaction
+shape flag cannot authorize disclosure of a txid or parent outpoint.
+
+The current Enhance implementation is not yet sufficient for this contract:
+
+- [`EnhanceRecordParts`](../zakura/pir-enhance-types/src/lib.rs) enhances one
+  Ironwood action. It includes transparent-presence flags and transaction
+  metadata, but no transparent input/output list. It is not a generic payload
+  format for every shielded pool or mixed transaction.
+- [SQLite enhancement application](../librustzcash/zcash_client_sqlite/src/wallet/enhance_pir.rs)
+  currently sends `has_transparent` results through `require_lwd` and returns
+  `LwdRequired`.
+- [Private outgoing recovery](../librustzcash/zcash_client_backend/src/data_api/enhance_pir/storage.rs)
+  skips mixed transactions. Removing the routing branch alone would not supply
+  the missing recipient data or make outgoing recovery correct.
+
+Before production private activation, route unavailable mixed-transaction
+details to explicit pending/unsupported private work, and retain the discovered
+financial facts. Implement and qualify any supported private mixed enhancement
+with its own identity, decryption, metadata, and partial-completion checks.
+`LwdRequired` is not permission for a public request in `PrivateRequired`.
+Do not claim equivalent memo/outgoing recovery across shielded pools until each
+pool's format and path are supported and tested.
+
+## Shielding, unshielding, and history reconstruction
+
+### Reconstructing movements between pools
+
+| Transaction | Shielded discovery | Transparent discovery | Intended history |
+| --- | --- | --- | --- |
+| Own transparent funds to own shielded address | Owned shielded receive. | Owned transparent spend and any transparent change. | One shielding operation with pool movements and fee shown separately when known. |
+| Own shielded funds to own transparent address | Owned shielded spend and any shielded change. | Owned transparent receive. | One unshielding operation, distinguished from ordinary change using available scope and intent evidence. |
+| Own shielded funds to an external transparent address | Owned shielded spend and any shielded change. | No external recipient output from owned-script recovery. | An outgoing payment; recipient, amount breakdown, and fee may need additional payload recovery. |
+| Own transparent and shielded inputs in the same transaction | Owned shielded spends/receives. | Owned transparent spends/receives. | One logical transaction containing all known effects and any external payments. |
+
+The table describes effects that can be recovered, not classifications that
+may be finalized from the first arriving rows. Receiving a shielded note funded
+by someone else's transparent inputs is an incoming payment, not the wallet's
+own shielding. A transaction may combine self-transfer, change, and external
+payments; an internal-transfer label must not hide those payments. Preserve
+account and address scope, including internal/ephemeral change, and distinguish
+locally recorded intent from reconstructed classification.
+
+For a known transaction with only 5 ZEC of own transparent inputs and an own
+shielded output of `5 ZEC - fee`, history shows one shielding operation, and
+the total wallet balance changes only by the fee. Apply that interpretation
+only when the transaction details justify the assumed shape. The presence of
+an owned spend and receive alone does not establish that all other effects
+are absent or that the wallet's net loss equals the transaction fee.
+
+### Existing wallet migration versus seed restoration
+
+An upgrade preserves local transaction bytes, known sent outputs, recipients,
+fees, and available operation/grouping metadata. The ledger adds chain evidence
+to this history. It must not replace rich local records with event-only stubs.
+
+A seed restore or discovery of a transaction created on another device may lack
+those local records. Shielded scanning plus complete transparent coverage can
+recover the wallet's owned effects, subject to the supported keys/scripts and
+recovery bounds. This is not a promise to recover every payment detail. In
+particular, an external transparent recipient is outside the owned-script
+ledger, and shielded outgoing-note recovery does not reveal transparent outputs.
+
+For example, a restored 5 ZEC shielded spend and 1 ZEC shielded change imply a
+4 ZEC wallet debit only after other owned effects have been accounted for. They
+do not identify the external recipients or split that debit into payments and
+fees. The same limitation affects external transparent outputs in other mixed
+or transparent-only sends. Never display the full debit as the payment amount
+by treating an unavailable fee as zero.
+
+Multi-transaction operations such as TEX funding and payment steps are a
+separate grouping problem. Preserve local grouping evidence when available;
+do not promise to recover the original UI grouping from a seed. Reconstructed
+grouping needs validated transaction links and sufficient details, not matching
+amounts or timestamps alone. Individual transactions remain visible when
+grouping cannot be established.
+
+### History completeness and storage contract
+
+The library/consumer boundary must expose the following distinctions, using
+existing transaction/output views where possible. Exact type names and any
+additional metadata tables are implementation choices; `TransparentLedgerSnapshot`
+continues to describe transparent financial recovery, not whole-wallet history.
+
+| History facet | Required meaning |
+| --- | --- |
+| Owned effects | Known per-account, per-pool spends and receives, with discovery completeness relative to the relevant chain point and recovery bounds. Partial net amounts are not final transaction deltas. |
+| Classification | Local intent or an evidence-based reconstruction; provisional while missing effects/details could change it. |
+| Recipients and payment amounts | Known outputs plus explicit completeness; missing output rows do not mean there were no external payments. |
+| Memos | Per-output availability and recovery state; one recovered memo does not complete the transaction. |
+| Fee and other metadata | Optional values with source/trust provenance. Unknown, zero, and not applicable remain distinct. Server metadata is not authenticated merely because a note decrypts. |
+| Mining/status | Placement and status evidence on the accepted chain, independent of payment-detail completeness. |
+
+Persist facts and resumable work, and derive the history result from a consistent
+database read. A cached classification is invalidated when relevant discovery,
+enhancement, policy, or chain state changes. Any stored detail-completion marker
+must be tied to its evidence and supported capability, not the presence of a
+transaction row or absence of queued work. Retain independent projection origins
+so invalidating one source cannot delete valid details from another.
+
+Vizor groups pool effects under the same transaction as recovery proceeds. A
+simple self-transfer should not become unrelated sent and received payments;
+a complex transaction may legitimately expose multiple payment details. Show
+known activity with an explicit incomplete-details state while one side is
+missing, then refine the classification under the same transaction identity.
+Do not hide a known debit because its external outputs have not been recovered.
+
+The current Vizor `rust/src/wallet/sync/transactions.rs` needs explicit changes
+for this contract: `HISTORY_BASES_CTE` infers shielding from currently present
+rows, `read_history_bases` maps missing fees to zero, and `classify_history_tx`
+can suppress a mined transaction with spends and change when no displayable
+outgoing details are available. These are implementation gaps to cover with
+partial-recovery fixtures, not behavior that the new projection may assume is
+already safe.
+
+### Capability and rollout boundary
+
+Full private reconstruction of external unshielding recipients requires an
+additional payload capability: a privately retrieved transaction, or a complete
+enough transaction summary including transparent outputs. Define its identity
+binding, completeness/trust model, size limits, and fee evidence explicitly.
+Raw transaction bytes alone need not supply transparent prevout values required
+for fee computation; any supplementary retrieval must obey the same privacy
+policy. Display metadata never establishes ledger coverage or spendability.
+
+Preparation must preserve existing history and support honest partial history,
+including fixtures for mixed transactions and both discovery orders. Production
+activation requires all mixed-transaction paths to obey the shared privacy
+policy and to expose unsupported details accurately. Full seed-restored
+recipient/memo/fee parity is a separate capability gate, not implied by a
+qualified transparent balance. Missing display-only details need not block
+otherwise eligible spending; missing coverage required for the selected inputs
+still does. Private failures never authorize public enrichment.
 
 ## Trust and privacy model
 
@@ -361,10 +579,12 @@ set. Test fixtures cannot qualify a production account.
 
 An account is promotable when the complete current watch set has continuous
 coverage through the accepted decision point, address-window expansion is
-stable, no relevant pages or unresolved spends remain, supported history is
-available, and legacy discrepancies have been explained against accepted-chain
-evidence. Neither agreement with an incomplete legacy snapshot nor deleting
-mismatching rows resolves a discrepancy.
+stable, no relevant pages or unresolved spends remain, supported receive/spend
+history is available, and legacy discrepancies have been explained against
+accepted-chain evidence. Display-only recipient, memo, or fee gaps are tracked
+separately under the [history contract](#history-completeness-and-storage-contract).
+Neither agreement with an incomplete legacy snapshot nor deleting mismatching
+rows resolves a discrepancy.
 
 A wallet-libraries transaction rechecks these conditions, materializes the
 candidate projection, merges independent local evidence, records active
@@ -431,7 +651,7 @@ canonical fields and meanings are:
 | Authorized balance | Optional transparent balance split into regular and coinbase `Balance` values, with existing confirmation and lock categories; absent when current financial authority cannot be established. |
 | Last-known balance | Optional prior balance with its source and available chain point; legacy observations without a verified anchor retain that uncertainty. |
 | Recovered net | Optional candidate amount from currently recovered events, explicitly unverified until coverage is complete. |
-| Completion and blockers | Recovery state plus reasons such as publication lag, pending pages, unsupported history, unresolved spends, or integrity failure. |
+| Completion and blockers | Financial recovery state plus reasons such as publication lag, pending pages, unsupported receive/spend history, unresolved spends, or integrity failure; separate from display-only history gaps. |
 | Diagnostic counts | Remaining work, unresolved spends, and unsupported scripts relevant to this account. |
 
 A partially recovered net amount can overstate or understate the true balance.
@@ -512,11 +732,14 @@ costs bandwidth, not evidence. Projection rollback removes only the invalidated
 source's contribution, preserving independent local origins. The ledger does
 not read back its own projection as evidence.
 
-Projection supports history without raw transaction bytes. Preserve explicit
-coinbase classification in the existing balance and input-selection queries:
-a missing transaction index must not make a PIR-created output non-coinbase.
-Unknown fee, time, or other unavailable metadata stays unknown rather than
-becoming a fabricated zero or triggering public enrichment.
+Projection supports known wallet activity in history without raw transaction
+bytes; it does not promise a complete external-recipient list. Join transparent
+effects to existing shielded effects by transaction identity and expose missing
+details under the [history contract](#history-completeness-and-storage-contract).
+Preserve explicit coinbase classification in the existing balance and
+input-selection queries: a missing transaction index must not make a PIR-created
+output non-coinbase. Unknown fee, time, or other unavailable metadata stays
+unknown rather than becoming a fabricated zero or triggering public enrichment.
 
 ## Coverage, synchronization, and financial authorization
 
@@ -559,11 +782,12 @@ Stale work is retried from new context, not committed under obsolete authority.
 Ordinary chain advance can leave an earlier valid commit useful but cannot make
 it sufficient for a newer financial decision.
 
-For private spending or shielding, the affected account must have complete
-coverage for its current watch set through the decision point, no relevant
-pending pages or unresolved spends, no unsupported history/scripts, and a valid
-accepted receive. Apply existing confirmations, coinbase maturity, spend,
-reservation, and lock rules as well. There is no freshness tolerance.
+To consume transparent inputs in private spending or shielding, the affected
+account must have complete coverage for its current watch set through the
+decision point, no relevant pending pages or unresolved spends, no unsupported
+receive/spend history or scripts, and a valid accepted receive. Apply existing
+confirmations, coinbase maturity, spend, reservation, and lock rules as well.
+There is no freshness tolerance.
 
 Enforce this in individual-outpoint, address, batched, and value-bounded input
 queries, plus proposal consumption and hardware finalization. Revalidate and
@@ -573,6 +797,14 @@ local construction evidence and reservations, not fictitious mined coverage.
 A selector may continue with eligible shielded pools; a transparent-only
 operation reports recovery unavailable rather than misleading insufficient
 funds.
+
+This gate follows the inputs being consumed. An unshielding payment funded
+entirely by independently eligible shielded notes is not blocked merely because
+transparent recovery is incomplete. Its discovery and enhancement still obey
+the shared privacy policy. Any resulting own transparent output must satisfy
+transparent eligibility before later spending, subject to the existing
+same-proposal chained-output exception above. Receiving an output or knowing a
+local send's details does not establish coverage of other transparent activity.
 
 ## Rewinds and account lifecycle
 
@@ -618,12 +850,24 @@ spend, UTXO, balance, and coverage results. Include:
   pages, unknown bounds/anchors, and address-window growth;
 - coinbase maturity, all input selectors, software shielding, Ledger rounds,
   Keystone PCZTs, stale proposals, and local chained outputs;
+- shielding, self-unshielding, external unshielding, combined transparent/shielded
+  spends, and cross-account transfers, for preserved local history and seed
+  restoration; include shielded-funded unshielding during incomplete transparent
+  recovery and assert both financial effects and visible history;
+- both discovery orders, duplicate/payload replay, and interruption between
+  pool commits; retain a stable transaction identity, pending detail work, and
+  correct history after restart and reorg;
+- incomplete external outputs with shielded change, unknown fees/memos, mixed
+  self-transfers and payments, and missing TEX grouping evidence; known debits
+  remain visible without fabricated payment amounts or double-counted transfers;
 - same-height and sealed/provisional reorgs, re-mining, actual rewind heights,
   and concurrent import/deletion/policy changes;
 - proof that shadow cannot alter public balances, selection, locks, address-use,
   or receive-address choice;
 - request capture across sync, import, preview, fee/payload recovery, startup,
-  setting transitions, cancellation, and native/background entry points; and
+  setting transitions, cancellation, and native/background entry points,
+  including shielded-first mixed discovery, stale queued public work, and
+  server-supplied transparent-presence flags; and
 - outage/lag exercises, supported rollback, and mobile resource and network-route
   measurements.
 
