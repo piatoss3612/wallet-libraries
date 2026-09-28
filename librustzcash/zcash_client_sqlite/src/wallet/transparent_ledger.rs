@@ -196,7 +196,8 @@ pub(crate) fn check_public_discovery(
     }
 }
 
-/// Returns whether the whole-wallet summary may report transparent funds as current.
+/// Returns whether the whole-wallet summary and direct transparent balance reads may report
+/// transparent funds as current.
 ///
 /// Under a required-private policy, whether configured on the handle or durably applied, no
 /// current transparent authority exists, so the summary omits those funds; the ledger snapshot

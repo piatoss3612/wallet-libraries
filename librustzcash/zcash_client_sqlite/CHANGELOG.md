@@ -49,7 +49,8 @@ workspace.
   `put_received_transparent_utxo` fails with
   `SqliteClientError::PublicTransparentDiscoveryForbidden`. `get_wallet_summary`
   omits transparent funds when private authority is required by the handle or
-  by the durable policy.
+  by the durable policy, and `get_transparent_balances` then fails with
+  `TransparentAuthorityUnavailable`.
 - A `tpir_meta` table without its policy row, or a missing `tpir_meta` after
   the ledger migration has been recorded, is reported as corrupted data, never
   as a wallet without a policy.

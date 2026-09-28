@@ -1536,6 +1536,14 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<TransparentBalances, Self::Error> {
+        // Under a required-private policy these legacy public rows are not current balances;
+        // report the absence of authority rather than an empty or public result.
+        if !wallet::transparent_ledger::summary_includes_transparent(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )? {
+            return Err(SqliteClientError::TransparentAuthorityUnavailable);
+        }
         wallet::transparent::get_transparent_balances(
             self.conn.borrow(),
             &self.params,

@@ -926,9 +926,9 @@ mod handles {
 
         conn(&st)
             .execute(
-                "INSERT INTO tpir_sources (source_id, accepted_lineage, quarantined, qualification,
-                     trust_epoch)
-                 VALUES (X'0A', 4, 1, 0, 2)",
+                "INSERT INTO tpir_sources (source_id, accepted_lineage, accepted_revision_id,
+                     quarantined, qualification, trust_epoch)
+                 VALUES (X'0A', 4, X'0B', 1, 0, 2)",
                 [],
             )
             .unwrap();
@@ -1011,6 +1011,14 @@ mod handles {
         ));
         // The summary no longer reports the public amount as current funds.
         assert_eq!(transparent_total(&st), Zatoshis::ZERO);
+        // Direct balance reads report unavailable authority rather than current funds.
+        let target = TargetHeight::from(height + 1);
+        assert!(matches!(
+            st.wallet()
+                .db()
+                .get_transparent_balances(account, target, ConfirmationsPolicy::MIN),
+            Err(SqliteClientError::TransparentAuthorityUnavailable)
+        ));
 
         // A durable private policy has the same effect on a weaker handle's summary.
         set_mode(&mut st, Public);
