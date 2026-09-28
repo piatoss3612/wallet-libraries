@@ -1,4 +1,4 @@
-//! Only locally persisted operations enable temporary compact trial decryption.
+//! Local operations and fixed recovery targets bound compact trial decryption.
 //! Registry entries and note ownership remain available for PIR and spending.
 use super::{Error, KeyId, corrupt, payments::key_ref};
 use crate::{AccountUuid, WalletDb, wallet};
@@ -20,7 +20,12 @@ pub(crate) fn scan_window(
         return Ok((true, None));
     }
     let mut stmt = conn.prepare(
-        "SELECT scan_from,scan_through FROM ironwood_swap_scan_uses WHERE receiving_key_id=?1",
+        "SELECT scan_from,scan_through FROM ironwood_swap_scan_uses WHERE receiving_key_id=?1
+         UNION ALL
+         SELECT k.scan_from,t.height FROM ironwood_swap_recovery_targets t
+         JOIN ironwood_receiving_keys k ON k.id=t.receiving_key_id
+         JOIN blocks b ON b.height=t.height AND b.hash=t.block_hash
+         WHERE k.id=?1",
     )?;
     let rows = stmt.query_map([id], |r| {
         Ok((r.get::<_, u32>(0)?, r.get::<_, Option<u32>>(1)?))

@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- Bounded local recovery for swap receiving keys when private queries are disabled.
+  Completed local restore coverage can satisfy discovery without a directory lookup.
+  Known swap operations retain their final directory-check obligation.
+
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`
   migration drops the `orchard_ironwood_migration*` tables and their indexes,

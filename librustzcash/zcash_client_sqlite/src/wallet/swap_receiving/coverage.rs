@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, named_params};
 use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
 use zcash_protocol::consensus::BlockHeight;
 
-use super::{KeyId, purpose_code};
+use super::{Error, KeyId, corrupt, purpose_code};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 fn key_ref(
@@ -125,6 +125,37 @@ pub(crate) fn queue_missing(conn: &Transaction<'_>) -> Result<(), SqliteClientEr
     drop(rows);
     drop(stmt);
 
+    queue_gaps(conn, gaps)
+}
+
+/// Explicit local recovery for callers whose transport policy does not allow PIR.
+/// The caller must first prepare a recovery target or register a local operation.
+pub(super) fn queue_key(
+    conn: &Transaction<'_>,
+    account: AccountUuid,
+    key: KeyId,
+    start: BlockHeight,
+    through: BlockHeight,
+) -> Result<(), Error> {
+    let end = u32::from(through)
+        .checked_add(1)
+        .ok_or_else(|| corrupt("recovery height cannot be represented as a scan range"))?;
+    let mut cursor = u32::from(start);
+    let mut gaps = Vec::new();
+    for range in ranges(conn, account, key)?.ok_or_else(|| corrupt("unknown recovery key"))? {
+        if cursor < u32::from(range.start).min(end) {
+            gaps.push(cursor..u32::from(range.start).min(end));
+        }
+        cursor = cursor.max(u32::from(range.end));
+    }
+    if cursor < end {
+        gaps.push(cursor..end);
+    }
+    queue_gaps(conn, gaps)?;
+    Ok(())
+}
+
+fn queue_gaps(conn: &Transaction<'_>, mut gaps: Vec<Range<u32>>) -> Result<(), SqliteClientError> {
     // Many keys need the same blocks. Queue their union once.
     gaps.sort_unstable_by_key(|r| r.start);
     let mut merged: Vec<Range<u32>> = Vec::new();

@@ -45,10 +45,22 @@ coverage during migration. Otherwise absence is `Unknown`, not evidence of an
 unspent note. The method also works inside the transaction helper so eventual
 note insertion can share its database snapshot.
 
-The caller must still verify commitment inclusion and position against an
-independently accepted tree root before inserting a note. These APIs do not yet
-apply candidates, integrate a witness service, or retire scanning keys. No
-public retrieval fallback is triggered by incomplete recovery.
+`apply_pending_swap_payment` verifies commitment inclusion and position against
+the accepted tree before inserting a note. It accepts a supplied witness or one
+already built by local scanning. Incomplete evidence leaves the candidate queued.
+
+Enable the recovery policy before the first scan to retain spend evidence.
+Address issuance preferences must not gate memo recovery or incoming lookahead.
+With private queries selected, use `prepare_swap_recovery_target` and
+`swap_recovery_needs_directory` to find unfinished lookups. When the user selects
+ordinary retrieval, `queue_swap_recovery_scan` explicitly queues missing local
+coverage instead. It is not an automatic fallback on PIR failure.
+
+Restored keys have a fixed target at their first accepted tip. Repeating recovery
+does not extend their watch as the tip moves. Local operations keep their pending
+watch and terminal grace deadline, and still require the final directory check
+when private queries are enabled again. After recovering a payment, maintain the
+incoming lookahead and finish the new window before reporting restore complete.
 
 ## License
 
