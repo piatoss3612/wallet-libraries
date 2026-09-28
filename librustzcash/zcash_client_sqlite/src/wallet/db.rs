@@ -821,8 +821,9 @@ CREATE TABLE tpir_account_state (
 /// Recovery sources known to the ledger.
 ///
 /// ### Columns
-/// - `accepted_lineage`: the newest publication lineage accepted from the source; commits
-///   from an older lineage are rejected as superseded.
+/// - `accepted_lineage`, `accepted_revision_id`: the newest publication revision accepted from
+///   the source. Commits from an older lineage are rejected as superseded, and a commit at the
+///   same lineage must cite the same revision to be accepted as a retry.
 /// - `quarantined`: set when the source's commit contradicted accepted state.
 /// - `qualification`: 0 unqualified, 1 production-qualified. Set only by source verification,
 ///   never by a commit; promotion requires every contributing source to be qualified.
@@ -832,6 +833,7 @@ pub(super) const TABLE_TPIR_SOURCES: &str = r#"
 CREATE TABLE tpir_sources (
     source_id BLOB PRIMARY KEY,
     accepted_lineage INTEGER NOT NULL,
+    accepted_revision_id BLOB NOT NULL,
     quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
     qualification INTEGER NOT NULL DEFAULT 0 CHECK (qualification IN (0, 1)),
     trust_epoch INTEGER NOT NULL DEFAULT 0
@@ -986,7 +988,9 @@ CREATE INDEX idx_tpir_pending_page_scripts_script
 /// reported them. They block the owning account until another source covers the range.
 ///
 /// ### Columns
-/// - `to_height`: the last unsupported height; null extends through the reporting run's target.
+/// - `to_height`: the last unsupported height; null extends through `target_height`.
+/// - `target_height`, `target_hash`: the accepted chain point of the reporting run, which
+///   bounds an open-ended range durably.
 /// - `reason`: 0 unsupported script type, 1 history unavailable.
 pub(super) const TABLE_TPIR_UNSUPPORTED_COVERAGE: &str = r#"
 CREATE TABLE tpir_unsupported_coverage (
@@ -999,7 +1003,10 @@ CREATE TABLE tpir_unsupported_coverage (
     source_id BLOB NOT NULL,
     revision_id BLOB NOT NULL,
     lineage INTEGER NOT NULL,
-    CHECK (to_height IS NULL OR from_height <= to_height)
+    target_height INTEGER NOT NULL,
+    target_hash BLOB NOT NULL,
+    CHECK (to_height IS NULL OR from_height <= to_height),
+    CHECK (from_height <= target_height)
 )"#;
 pub(super) const INDEX_TPIR_UNSUPPORTED_COVERAGE_SCRIPT: &str = r#"
 CREATE INDEX idx_tpir_unsupported_coverage_script

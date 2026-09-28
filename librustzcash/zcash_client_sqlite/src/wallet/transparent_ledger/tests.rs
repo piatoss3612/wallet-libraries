@@ -320,6 +320,42 @@ fn outbox_creation_evidence_adds_local_origins_in_either_order() {
 }
 
 #[test]
+fn creation_evidence_and_local_origins_commit_together() {
+    use zcash_client_backend::data_api::status::TransactionStatusWrite as _;
+    let (mut st, taddr, _) = funded_wallet();
+    let height = st.wallet().chain_height().unwrap().unwrap();
+    let outpoint = OutPoint::new([0x61; 32], 0);
+    put_public_utxo(&mut st, &taddr, outpoint.clone(), 8_000);
+    conn(&st)
+        .execute_batch(
+            "CREATE TEMP TRIGGER inject_origin_failure BEFORE INSERT ON tpir_output_origins
+             BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .record_transaction_created(
+                zcash_primitives::transaction::TxId::from_bytes([0x61; 32]),
+                height,
+            )
+            .is_err()
+    );
+    let target: Option<u32> = conn(&st)
+        .query_row(
+            "SELECT target_height FROM transactions WHERE txid = ?1",
+            [outpoint.hash()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        target, None,
+        "creation evidence must not outlive a failed origin write"
+    );
+    assert_eq!(output_origins(conn(&st), &outpoint), vec![LEGACY_PUBLIC]);
+}
+
+#[test]
 fn conflicting_output_content_is_refused() {
     let (mut st, taddr, funded) = funded_wallet();
     let account = st.test_account().cloned().unwrap();

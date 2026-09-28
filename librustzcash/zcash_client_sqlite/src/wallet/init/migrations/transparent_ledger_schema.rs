@@ -77,6 +77,7 @@ impl RusqliteMigration for Migration {
             CREATE TABLE tpir_sources (
                 source_id BLOB PRIMARY KEY,
                 accepted_lineage INTEGER NOT NULL,
+                accepted_revision_id BLOB NOT NULL,
                 quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
                 qualification INTEGER NOT NULL DEFAULT 0 CHECK (qualification IN (0, 1)),
                 trust_epoch INTEGER NOT NULL DEFAULT 0
@@ -173,7 +174,10 @@ impl RusqliteMigration for Migration {
                 source_id BLOB NOT NULL,
                 revision_id BLOB NOT NULL,
                 lineage INTEGER NOT NULL,
-                CHECK (to_height IS NULL OR from_height <= to_height)
+                target_height INTEGER NOT NULL,
+                target_hash BLOB NOT NULL,
+                CHECK (to_height IS NULL OR from_height <= to_height),
+                CHECK (from_height <= target_height)
             );
             CREATE INDEX idx_tpir_unsupported_coverage_script
                 ON tpir_unsupported_coverage (script_id);

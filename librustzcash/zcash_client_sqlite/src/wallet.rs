@@ -5384,6 +5384,23 @@ pub(crate) fn record_transaction_created(
     txid: TxId,
     earliest: BlockHeight,
 ) -> Result<(), SqliteClientError> {
+    // Creation evidence and the local provenance it implies are recorded atomically: on a
+    // handle outside a transaction, run both in one; inside one, the caller's scope applies.
+    if conn.is_autocommit() {
+        let tx = conn.unchecked_transaction()?;
+        record_transaction_created_in(&tx, txid, earliest)?;
+        tx.commit()?;
+        Ok(())
+    } else {
+        record_transaction_created_in(conn, txid, earliest)
+    }
+}
+
+fn record_transaction_created_in(
+    conn: &rusqlite::Connection,
+    txid: TxId,
+    earliest: BlockHeight,
+) -> Result<(), SqliteClientError> {
     // Read chain context and write evidence in one statement, so a concurrent rewind cannot
     // interleave between reading the tip and inserting an outbox's transaction metadata.
     let updated = conn.execute(
