@@ -92,7 +92,7 @@ pub enum MiningEvidence {
     Unknown,
 }
 
-/// Owned-effect completeness for one pool a transaction touches.
+/// Owned-effect completeness for one pool supported by the wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoolEffectsCompleteness {
     /// The pool.
@@ -106,8 +106,10 @@ pub struct PoolEffectsCompleteness {
 /// Per-output memo state is reported alongside each output as a [`DetailState`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionHistoryCompleteness {
-    /// Owned-effect completeness for each pool the transaction touches. A mixed transaction
-    /// can be complete in one pool and incomplete in another.
+    /// Owned-effect completeness for every pool the wallet supports, not only the pools with
+    /// known effects. A pool whose effects on this transaction may still be undiscovered is
+    /// `Incomplete`; `Complete` with no known effects is evidence that the pool is untouched.
+    /// A mixed transaction can be complete in one pool and incomplete in another.
     pub owned_effects: Vec<PoolEffectsCompleteness>,
     /// The basis of the displayed classification.
     pub classification: ClassificationBasis,

@@ -147,6 +147,11 @@ pub struct SourceRevision {
     pub source: SourceId,
     /// The publication revision.
     pub revision: RevisionId,
+    /// The revision's position in the source's publication lineage, strictly increasing with
+    /// each replacement. Captured with the revision before any retrieval; the store rejects a
+    /// commit whose lineage is older than one it has already accepted from the same source,
+    /// so a delayed result cannot resurrect replaced coverage.
+    pub lineage: u64,
     /// Whether the revision is sealed or provisional.
     pub status: PublicationStatus,
     /// The publication's asserted anchor, retained alongside each accepted endpoint.
@@ -261,6 +266,9 @@ pub struct PendingPage {
     pub from: BlockHeight,
     /// The last height the page covers, inclusive.
     pub to: BlockHeight,
+    /// The watched scripts whose matches opened the page. Only their accounts are blocked
+    /// while the page is outstanding.
+    pub scripts: Vec<Script>,
 }
 
 /// Pending-page progress recorded atomically with a commit.
@@ -349,6 +357,8 @@ pub enum CommitRejection {
     StalePolicy,
     /// Account, watch-set, lifecycle, or chain state changed after capture.
     StaleContext,
+    /// The store has already accepted a newer revision of the commit's source.
+    SupersededRevision,
     /// The commit contradicts accepted content or placement; trust in the session ends.
     Integrity,
 }
