@@ -103,6 +103,7 @@ pub(crate) fn record_spend_origin(
 
 /// Adds local origins to the transparent records already projected for `txid`, when local
 /// creation evidence is recorded after projection.
+#[cfg(feature = "transparent-inputs")]
 pub(crate) fn record_local_origins_for_tx(
     conn: &rusqlite::Connection,
     txid: &[u8],
