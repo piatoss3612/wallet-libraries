@@ -925,11 +925,13 @@ mod handles {
         assert!(snapshot.sources.is_empty());
 
         conn(&st)
-            .execute(
+            .execute_batch(
                 "INSERT INTO tpir_sources (source_id, accepted_lineage, accepted_revision_id,
-                     quarantined, qualified_revision_id, qualified_lineage, trust_epoch)
-                 VALUES (X'0A', 4, X'0B', 1, X'0C', 3, 2)",
-                [],
+                     accepted_sealed, accepted_anchor_height, accepted_anchor_hash, quarantined,
+                     trust_epoch)
+                 VALUES (X'0A', 4, X'0B', 1, 30, zeroblob(32), 1, 2);
+                 INSERT INTO tpir_qualified_revisions (source_id, revision_id, lineage)
+                 VALUES (X'0A', X'0C', 3), (X'0A', X'0D', 1);",
             )
             .unwrap();
         let sources = st
@@ -942,10 +944,24 @@ mod handles {
         assert_eq!(sources[0].source.as_bytes(), &[0x0a]);
         assert!(sources[0].quarantined);
         assert_eq!(sources[0].trust_epoch, 2);
-        // Qualification binds to the verified revision, not the source's newer revision.
-        let qualified = sources[0].qualified_revision.as_ref().unwrap();
-        assert_eq!(qualified.revision.as_bytes(), &[0x0c]);
-        assert_eq!(qualified.lineage.value(), 3);
+        // Qualification binds to each verified revision, not to the source; qualifying a later
+        // revision leaves the earlier one qualified, and the newer accepted revision is not.
+        let qualified = &sources[0].qualified_revisions;
+        assert_eq!(qualified.len(), 2);
+        assert_eq!(
+            (
+                qualified[0].revision.as_bytes(),
+                qualified[0].lineage.value()
+            ),
+            (&[0x0d][..], 1)
+        );
+        assert_eq!(
+            (
+                qualified[1].revision.as_bytes(),
+                qualified[1].lineage.value()
+            ),
+            (&[0x0c][..], 3)
+        );
     }
 
     #[test]
@@ -1048,9 +1064,9 @@ mod handles {
                      watch_generation)
                  VALUES (1, 1, X'76A9', 0, NULL, 1);
                  INSERT INTO tpir_pending_pages (id, source_id, revision_id, lineage, sealed,
-                     anchor_height, anchor_hash, page_id, from_height, to_height, lifecycle,
-                     policy_generation, target_height, target_hash)
-                 VALUES (1, X'01', X'02', 3, 1, 20, zeroblob(32), X'03', 5, 9, 0, 0, 18,
+                     anchor_height, anchor_hash, source_trust_epoch, page_id, from_height,
+                     to_height, lifecycle, policy_generation, target_height, target_hash)
+                 VALUES (1, X'01', X'02', 3, 1, 20, zeroblob(32), 6, X'03', 5, 9, 0, 0, 18,
                      zeroblob(32));
                  INSERT INTO tpir_pending_page_scripts (pending_page_id, script_id) VALUES (1, 1);",
             )
@@ -1073,6 +1089,7 @@ mod handles {
         assert_eq!(page.page.scripts.len(), 1);
         assert_eq!(page.lifecycle, LedgerLifecycle::Candidate);
         assert_eq!(page.target.height, BlockHeight::from(18));
+        assert_eq!(page.source_trust_epoch, 6);
     }
 
     #[test]

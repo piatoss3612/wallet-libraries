@@ -387,7 +387,7 @@ pub(crate) fn watched_scripts(
         .collect::<Result<_, _>>()?;
     let mut sources = vec![];
     let mut stmt = conn.prepare(
-        "SELECT source_id, qualified_revision_id, qualified_lineage, quarantined, trust_epoch
+        "SELECT source_id, quarantined, trust_epoch
          FROM tpir_sources
          ORDER BY source_id",
     )?;
@@ -395,20 +395,9 @@ pub(crate) fn watched_scripts(
     while let Some(row) = rows.next()? {
         sources.push(SourceTrust {
             source: opaque(row.get(0)?, SourceId::new)?,
-            qualified_revision: match (
-                row.get::<_, Option<Vec<u8>>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ) {
-                (Some(revision), Some(lineage)) => Some(QualifiedRevision {
-                    revision: opaque(revision, RevisionId::new)?,
-                    lineage: Lineage::new(to_u64(lineage)?).ok_or_else(|| {
-                        SqliteClientError::CorruptedData("ledger lineage out of range".into())
-                    })?,
-                }),
-                _ => None,
-            },
-            quarantined: row.get(3)?,
-            trust_epoch: to_u64(row.get(4)?)?,
+            qualified_revisions: qualified_revisions(conn, &row.get::<_, Vec<u8>>(0)?)?,
+            quarantined: row.get(1)?,
+            trust_epoch: to_u64(row.get(2)?)?,
         });
     }
     Ok(WatchedScriptSnapshot {
@@ -445,6 +434,29 @@ fn opaque<T>(
     new(bytes).map_err(|e| SqliteClientError::CorruptedData(format!("invalid ledger id: {e:?}")))
 }
 
+/// Reads the revisions of `source` that passed production qualification.
+fn qualified_revisions(
+    conn: &rusqlite::Connection,
+    source: &[u8],
+) -> Result<Vec<QualifiedRevision>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT revision_id, lineage FROM tpir_qualified_revisions
+         WHERE source_id = ?1
+         ORDER BY lineage",
+    )?;
+    let mut rows = stmt.query([source])?;
+    let mut revisions = vec![];
+    while let Some(row) = rows.next()? {
+        revisions.push(QualifiedRevision {
+            revision: opaque(row.get(0)?, RevisionId::new)?,
+            lineage: Lineage::new(to_u64(row.get(1)?)?).ok_or_else(|| {
+                SqliteClientError::CorruptedData("ledger lineage out of range".into())
+            })?,
+        });
+    }
+    Ok(revisions)
+}
+
 /// Reads every durable pending page with its source revision, captured context, and affected
 /// watched scripts.
 pub(crate) fn pending_pages(
@@ -459,7 +471,7 @@ pub(crate) fn pending_pages(
     let mut stmt = conn.prepare(
         "SELECT id, source_id, revision_id, lineage, sealed, anchor_height, anchor_hash,
                 page_id, from_height, to_height, lifecycle, policy_generation,
-                target_height, target_hash
+                target_height, target_hash, source_trust_epoch
          FROM tpir_pending_pages
          ORDER BY id",
     )?;
@@ -503,6 +515,7 @@ pub(crate) fn pending_pages(
                 LedgerLifecycle::Candidate
             },
             policy_generation: to_u64(row.get(11)?)?,
+            source_trust_epoch: to_u64(row.get(14)?)?,
             target: ChainPoint {
                 height: to_height(row.get(12)?)?,
                 hash: to_hash(row.get(13)?)?,
