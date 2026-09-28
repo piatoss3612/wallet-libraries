@@ -927,8 +927,8 @@ mod handles {
         conn(&st)
             .execute(
                 "INSERT INTO tpir_sources (source_id, accepted_lineage, accepted_revision_id,
-                     quarantined, qualification, trust_epoch)
-                 VALUES (X'0A', 4, X'0B', 1, 0, 2)",
+                     quarantined, qualified_revision_id, qualified_lineage, trust_epoch)
+                 VALUES (X'0A', 4, X'0B', 1, X'0C', 3, 2)",
                 [],
             )
             .unwrap();
@@ -942,10 +942,10 @@ mod handles {
         assert_eq!(sources[0].source.as_bytes(), &[0x0a]);
         assert!(sources[0].quarantined);
         assert_eq!(sources[0].trust_epoch, 2);
-        assert_eq!(
-            sources[0].qualification,
-            zcash_client_backend::data_api::transparent_ledger::SourceQualification::Unqualified
-        );
+        // Qualification binds to the verified revision, not the source's newer revision.
+        let qualified = sources[0].qualified_revision.as_ref().unwrap();
+        assert_eq!(qualified.revision.as_bytes(), &[0x0c]);
+        assert_eq!(qualified.lineage.value(), 3);
     }
 
     #[test]

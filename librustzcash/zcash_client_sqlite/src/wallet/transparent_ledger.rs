@@ -14,8 +14,8 @@ use zcash_client_backend::data_api::{
         AccountLifecycle, ChainPoint, CommitOutcome, CommitRejection, LastKnownBalance,
         LastKnownSource, LedgerLifecycle, Lineage, OutstandingPage, PageId, PendingPage,
         PromotionContext, PromotionOutcome, PromotionRejection, PublicationAnchor,
-        PublicationStatus, RecoveryBlocker, RecoveryCompletion, RecoveryDiagnostics, RecoveryStart,
-        RevisionId, SourceId, SourceQualification, SourceRevision, SourceTrust,
+        PublicationStatus, QualifiedRevision, RecoveryBlocker, RecoveryCompletion,
+        RecoveryDiagnostics, RecoveryStart, RevisionId, SourceId, SourceRevision, SourceTrust,
         TransparentAuthority, TransparentLedgerBalance, TransparentLedgerCommit,
         TransparentLedgerMode, TransparentLedgerSnapshot, WatchedAccount, WatchedScript,
         WatchedScriptSnapshot,
@@ -387,7 +387,7 @@ pub(crate) fn watched_scripts(
         .collect::<Result<_, _>>()?;
     let mut sources = vec![];
     let mut stmt = conn.prepare(
-        "SELECT source_id, qualification, quarantined, trust_epoch
+        "SELECT source_id, qualified_revision_id, qualified_lineage, quarantined, trust_epoch
          FROM tpir_sources
          ORDER BY source_id",
     )?;
@@ -395,12 +395,20 @@ pub(crate) fn watched_scripts(
     while let Some(row) = rows.next()? {
         sources.push(SourceTrust {
             source: opaque(row.get(0)?, SourceId::new)?,
-            qualification: match row.get::<_, i64>(1)? {
-                1 => SourceQualification::Production,
-                _ => SourceQualification::Unqualified,
+            qualified_revision: match (
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ) {
+                (Some(revision), Some(lineage)) => Some(QualifiedRevision {
+                    revision: opaque(revision, RevisionId::new)?,
+                    lineage: Lineage::new(to_u64(lineage)?).ok_or_else(|| {
+                        SqliteClientError::CorruptedData("ledger lineage out of range".into())
+                    })?,
+                }),
+                _ => None,
             },
-            quarantined: row.get(2)?,
-            trust_epoch: to_u64(row.get(3)?)?,
+            quarantined: row.get(3)?,
+            trust_epoch: to_u64(row.get(4)?)?,
         });
     }
     Ok(WatchedScriptSnapshot {
