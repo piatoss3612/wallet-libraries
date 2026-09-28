@@ -68,8 +68,15 @@ impl RusqliteMigration for Migration {
                 watch_generation INTEGER NOT NULL,
                 activated_height INTEGER,
                 activated_hash BLOB,
+                quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
                 CHECK ((activated_height IS NULL) = (activated_hash IS NULL)),
                 CHECK (lifecycle = 0 OR activated_height IS NOT NULL)
+            );
+
+            CREATE TABLE tpir_sources (
+                source_id BLOB PRIMARY KEY,
+                accepted_lineage INTEGER NOT NULL,
+                quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1))
             );
 
             CREATE TABLE tpir_scripts (
@@ -144,6 +151,7 @@ impl RusqliteMigration for Migration {
                 through_hash BLOB NOT NULL,
                 source_id BLOB NOT NULL,
                 revision_id BLOB NOT NULL,
+                lineage INTEGER NOT NULL,
                 sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
                 anchor_height INTEGER NOT NULL,
                 anchor_hash BLOB NOT NULL,
@@ -155,6 +163,10 @@ impl RusqliteMigration for Migration {
                 id INTEGER PRIMARY KEY,
                 source_id BLOB NOT NULL,
                 revision_id BLOB NOT NULL,
+                lineage INTEGER NOT NULL,
+                sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
+                anchor_height INTEGER NOT NULL,
+                anchor_hash BLOB NOT NULL,
                 page_id BLOB NOT NULL,
                 from_height INTEGER NOT NULL,
                 to_height INTEGER NOT NULL,
@@ -165,6 +177,16 @@ impl RusqliteMigration for Migration {
                 UNIQUE (source_id, revision_id, page_id),
                 CHECK (from_height <= to_height)
             );
+
+            CREATE TABLE tpir_pending_page_scripts (
+                pending_page_id INTEGER NOT NULL
+                    REFERENCES tpir_pending_pages(id) ON DELETE CASCADE,
+                script_id INTEGER NOT NULL
+                    REFERENCES tpir_scripts(id) ON DELETE CASCADE,
+                UNIQUE (pending_page_id, script_id)
+            );
+            CREATE INDEX idx_tpir_pending_page_scripts_script
+                ON tpir_pending_page_scripts (script_id);
 
             CREATE TABLE tpir_output_origins (
                 output_id INTEGER NOT NULL
@@ -440,6 +462,8 @@ mod tests {
             "tpir_event_observations",
             "tpir_coverage",
             "tpir_pending_pages",
+            "tpir_pending_page_scripts",
+            "tpir_sources",
         ] {
             assert_eq!(count(&db.conn, table), 0, "{table} must start empty");
         }

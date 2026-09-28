@@ -800,6 +800,8 @@ CREATE TABLE tpir_meta (
 /// - `lifecycle_generation`: incremented on each lifecycle change.
 /// - `watch_generation`: incremented when the account's watched scripts or bounds change.
 /// - `activated_height`, `activated_hash`: the accepted point of promotion, when active.
+/// - `quarantined`: set when a commit touching the account's scripts contradicted accepted
+///   state; its transparent authority stays blocked until recovery revalidates it.
 pub(super) const TABLE_TPIR_ACCOUNT_STATE: &str = r#"
 CREATE TABLE tpir_account_state (
     account_id INTEGER PRIMARY KEY
@@ -809,8 +811,21 @@ CREATE TABLE tpir_account_state (
     watch_generation INTEGER NOT NULL,
     activated_height INTEGER,
     activated_hash BLOB,
+    quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
     CHECK ((activated_height IS NULL) = (activated_hash IS NULL)),
     CHECK (lifecycle = 0 OR activated_height IS NOT NULL)
+)"#;
+/// Recovery sources known to the ledger.
+///
+/// ### Columns
+/// - `accepted_lineage`: the newest publication lineage accepted from the source; commits
+///   from an older lineage are rejected as superseded.
+/// - `quarantined`: set when the source's commit contradicted accepted state.
+pub(super) const TABLE_TPIR_SOURCES: &str = r#"
+CREATE TABLE tpir_sources (
+    source_id BLOB PRIMARY KEY,
+    accepted_lineage INTEGER NOT NULL,
+    quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1))
 )"#;
 /// Scripts watched by transparent ledger recovery.
 ///
@@ -914,6 +929,7 @@ CREATE TABLE tpir_coverage (
     through_hash BLOB NOT NULL,
     source_id BLOB NOT NULL,
     revision_id BLOB NOT NULL,
+    lineage INTEGER NOT NULL,
     sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
     anchor_height INTEGER NOT NULL,
     anchor_hash BLOB NOT NULL,
@@ -927,6 +943,10 @@ CREATE TABLE tpir_pending_pages (
     id INTEGER PRIMARY KEY,
     source_id BLOB NOT NULL,
     revision_id BLOB NOT NULL,
+    lineage INTEGER NOT NULL,
+    sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
+    anchor_height INTEGER NOT NULL,
+    anchor_hash BLOB NOT NULL,
     page_id BLOB NOT NULL,
     from_height INTEGER NOT NULL,
     to_height INTEGER NOT NULL,
@@ -937,6 +957,19 @@ CREATE TABLE tpir_pending_pages (
     UNIQUE (source_id, revision_id, page_id),
     CHECK (from_height <= to_height)
 )"#;
+/// The watched scripts whose matches opened each pending page. Only their accounts are
+/// blocked while the page is outstanding.
+pub(super) const TABLE_TPIR_PENDING_PAGE_SCRIPTS: &str = r#"
+CREATE TABLE tpir_pending_page_scripts (
+    pending_page_id INTEGER NOT NULL
+        REFERENCES tpir_pending_pages(id) ON DELETE CASCADE,
+    script_id INTEGER NOT NULL
+        REFERENCES tpir_scripts(id) ON DELETE CASCADE,
+    UNIQUE (pending_page_id, script_id)
+)"#;
+pub(super) const INDEX_TPIR_PENDING_PAGE_SCRIPTS_SCRIPT: &str = r#"
+CREATE INDEX idx_tpir_pending_page_scripts_script
+    ON tpir_pending_page_scripts (script_id)"#;
 /// The provenance of each [`TABLE_TRANSPARENT_RECEIVED_OUTPUTS`] row.
 ///
 /// Every transparent output has at least one origin; origins are removed with their output.
