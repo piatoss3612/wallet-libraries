@@ -527,6 +527,12 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// and financial authority. This is not persisted; each reopened handle must select a mode.
     /// Transparent ledger APIs reject unconfigured handles, and a mode weaker than a policy
     /// durably applied to the wallet is rejected rather than weakening that policy.
+    ///
+    /// The mode governs work this handle produces from now on. Discovery requests already
+    /// obtained, such as address-bearing [`TransactionDataRequest`]s, are owned values the
+    /// handle cannot recall: before switching to a stricter mode, the caller must cancel or
+    /// discard all outstanding transparent discovery work and must not dispatch it afterwards.
+    /// Durable policy generations, checked at dispatch and commit, enforce this across handles.
     pub fn set_transparent_ledger_mode(&mut self, mode: TransparentLedgerMode) {
         self.transparent_ledger_mode = Some(mode);
     }
@@ -2710,8 +2716,16 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         transactions: &[SentTransaction<<Self as WalletRead>::AccountId>],
     ) -> Result<(), <Self as WalletRead>::Error> {
         // Consuming transparent inputs requires transparent authority; check before any write.
+        // Wallet-owned inputs are derived from each transaction itself, not only from the
+        // caller-supplied `utxos_spent`, which could omit them.
         #[cfg(feature = "transparent-inputs")]
-        if transactions.iter().any(|tx| !tx.utxos_spent().is_empty()) {
+        if transactions.iter().try_fold(false, |found, tx| {
+            Ok::<_, SqliteClientError>(
+                found
+                    || !tx.utxos_spent().is_empty()
+                    || wallet::transparent_ledger::spends_wallet_outputs(self.conn.0, tx.tx())?,
+            )
+        })? {
             wallet::transparent_ledger::check_transparent_authority(
                 self.conn.0,
                 self.transparent_ledger_mode,

@@ -12,10 +12,10 @@ use rusqlite::OptionalExtension as _;
 use zcash_client_backend::data_api::{
     transparent_ledger::{
         AccountLifecycle, ChainPoint, CommitOutcome, CommitRejection, LastKnownBalance,
-        LastKnownSource, LedgerLifecycle, OutstandingPage, PageId, PendingPage, PromotionContext,
-        PromotionOutcome, PromotionRejection, PublicationAnchor, PublicationStatus,
-        RecoveryBlocker, RecoveryCompletion, RecoveryDiagnostics, RecoveryStart, RevisionId,
-        SourceId, SourceRevision, TransparentAuthority, TransparentLedgerBalance,
+        LastKnownSource, LedgerLifecycle, Lineage, OutstandingPage, PageId, PendingPage,
+        PromotionContext, PromotionOutcome, PromotionRejection, PublicationAnchor,
+        PublicationStatus, RecoveryBlocker, RecoveryCompletion, RecoveryDiagnostics, RecoveryStart,
+        RevisionId, SourceId, SourceRevision, TransparentAuthority, TransparentLedgerBalance,
         TransparentLedgerCommit, TransparentLedgerMode, TransparentLedgerSnapshot, WatchedAccount,
         WatchedScript, WatchedScriptSnapshot,
     },
@@ -340,7 +340,8 @@ pub(crate) fn watched_scripts(
 ) -> Result<WatchedScriptSnapshot<AccountUuid>, SqliteClientError> {
     let mut accounts = vec![];
     let mut stmt = conn.prepare(
-        "SELECT a.uuid, IFNULL(s.watch_generation, 0), s.lifecycle, IFNULL(s.quarantined, 0)
+        "SELECT a.uuid, IFNULL(s.watch_generation, 0), s.lifecycle, IFNULL(s.quarantined, 0),
+                IFNULL(s.quarantine_epoch, 0)
          FROM accounts a
          LEFT JOIN tpir_account_state s ON s.account_id = a.id
          ORDER BY a.id",
@@ -361,6 +362,7 @@ pub(crate) fn watched_scripts(
                 }
             },
             quarantined: row.get(3)?,
+            quarantine_epoch: to_u64(row.get(4)?)?,
         });
     }
     let scripts = conn
@@ -447,7 +449,9 @@ pub(crate) fn pending_pages(
             source: SourceRevision {
                 source: opaque(row.get(1)?, SourceId::new)?,
                 revision: opaque(row.get(2)?, RevisionId::new)?,
-                lineage: to_u64(row.get(3)?)?,
+                lineage: Lineage::new(to_u64(row.get(3)?)?).ok_or_else(|| {
+                    SqliteClientError::CorruptedData("ledger lineage out of range".into())
+                })?,
                 status: if row.get(4)? {
                     PublicationStatus::Sealed
                 } else {
@@ -648,3 +652,32 @@ pub(crate) fn record_local_origins_for_tx(
 
 #[cfg(all(test, feature = "transparent-inputs"))]
 mod tests;
+
+/// Returns whether `tx` spends any transparent output the wallet has recorded.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn spends_wallet_outputs(
+    conn: &rusqlite::Connection,
+    tx: &zcash_primitives::transaction::Transaction,
+) -> Result<bool, SqliteClientError> {
+    let Some(bundle) = tx.transparent_bundle() else {
+        return Ok(false);
+    };
+    let mut stmt = conn.prepare_cached(
+        "SELECT EXISTS (
+             SELECT 1 FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id
+             WHERE t.txid = :prevout_txid AND o.output_index = :prevout_idx
+         )",
+    )?;
+    for input in &bundle.vin {
+        let prevout = input.prevout();
+        let owned: bool = stmt.query_row(
+            named_params![":prevout_txid": prevout.hash(), ":prevout_idx": prevout.n()],
+            |row| row.get(0),
+        )?;
+        if owned {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

@@ -192,6 +192,8 @@ fn public_and_local_writes_record_their_origins() {
 
     assert_eq!(spend_origins(conn(&st), &funded), vec![LOCAL_CONSTRUCTION]);
     let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
+    // The store derives wallet-owned transparent inputs from the transaction itself.
+    assert!(super::spends_wallet_outputs(conn(&st), &tx).unwrap());
     let vout = &tx.transparent_bundle().unwrap().vout;
     let recipient_script: transparent::address::Script =
         TransparentAddress::PublicKeyHash([7; 20]).script().into();
@@ -380,6 +382,8 @@ fn conflicting_output_content_is_refused() {
         )
         .unwrap();
     assert_eq!(value, 100_000);
+}
+
 mod handles {
     use std::convert::Infallible;
 
@@ -455,7 +459,8 @@ mod handles {
             source: SourceRevision {
                 source: SourceId::new(b"source".to_vec()).unwrap(),
                 revision: RevisionId::new(b"revision".to_vec()).unwrap(),
-                lineage: 0,
+                lineage: zcash_client_backend::data_api::transparent_ledger::Lineage::new(0)
+                    .unwrap(),
                 status: PublicationStatus::Provisional,
                 anchor: PublicationAnchor {
                     height: BlockHeight::from(2),
@@ -1010,7 +1015,7 @@ mod handles {
         let page = &pages[0];
         assert_eq!(page.source.source.as_bytes(), &[1]);
         assert_eq!(page.source.revision.as_bytes(), &[2]);
-        assert_eq!(page.source.lineage, 3);
+        assert_eq!(page.source.lineage.value(), 3);
         assert_eq!(page.source.status, PublicationStatus::Sealed);
         assert_eq!(page.source.anchor.height, BlockHeight::from(20));
         assert_eq!(page.page.page.as_bytes(), &[3]);

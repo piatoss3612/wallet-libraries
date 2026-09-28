@@ -58,6 +58,9 @@ workspace.
 - `transparent_ledger_pending_pages` enumerates durable pending pages with their
   source revision, captured context, and affected scripts. The watched-script
   snapshot reports each account's lifecycle and quarantine.
+- Storing a transaction checks transparent authority when the transaction
+  spends any wallet-owned transparent output, derived from its transparent
+  bundle rather than only from the caller-supplied `utxos_spent`.
 - Projection origins for new transparent records: public discovery writes
   record a legacy-public origin, and local construction records a local
   origin, in the same transaction as the record.
