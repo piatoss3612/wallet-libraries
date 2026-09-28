@@ -346,7 +346,7 @@ pub struct CommitSummary {
     pub coverage_intervals: usize,
 }
 
-/// Why a commit was not applied. A rejected commit writes nothing.
+/// Why a commit was not applied. A rejected commit records none of its submitted facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CommitRejection {
     /// The store cannot accept ledger commits in its current state.
@@ -360,6 +360,11 @@ pub enum CommitRejection {
     /// The store has already accepted a newer revision of the commit's source.
     SupersededRevision,
     /// The commit contradicts accepted content or placement; trust in the session ends.
+    ///
+    /// Unlike other rejections, this durably quarantines the commit's source and the accounts
+    /// whose watched scripts it touched, in the same transaction that refuses its facts. Their
+    /// transparent authority stays blocked with [`RecoveryBlocker::IntegrityFailure`] across
+    /// restarts until recovery revalidates them.
     Integrity,
 }
 
@@ -368,7 +373,8 @@ pub enum CommitRejection {
 pub enum CommitOutcome {
     /// Events, coverage, and progress were recorded together.
     Committed(CommitSummary),
-    /// Nothing was recorded.
+    /// None of the submitted facts were recorded; see [`CommitRejection::Integrity`] for the
+    /// quarantine it records.
     Rejected(CommitRejection),
 }
 
@@ -539,6 +545,42 @@ pub enum RecoveryStart {
     Unknown,
 }
 
+/// An account's transparent ledger lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AccountLifecycle {
+    /// The account has no private ledger state; its transparent records came from public
+    /// discovery. Its recovery commits target [`LedgerLifecycle::Candidate`].
+    LegacyPublic,
+    /// Isolated candidate recovery is under way; commits target [`LedgerLifecycle::Candidate`].
+    Candidate,
+    /// The account was promoted; commits target [`LedgerLifecycle::Active`], including while
+    /// its authorization is paused for recovery to catch up.
+    Active,
+}
+
+impl AccountLifecycle {
+    /// Returns the destination that recovery commits for this account must declare.
+    pub fn commit_destination(self) -> LedgerLifecycle {
+        match self {
+            Self::LegacyPublic | Self::Candidate => LedgerLifecycle::Candidate,
+            Self::Active => LedgerLifecycle::Active,
+        }
+    }
+}
+
+/// An account in a watched-script snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WatchedAccount<AccountId> {
+    /// The account.
+    pub account: AccountId,
+    /// Its watch-set generation, to place in a commit's context.
+    pub watch_generation: u64,
+    /// Its lifecycle, which determines the commit destination.
+    pub lifecycle: AccountLifecycle,
+    /// Whether an integrity failure has quarantined the account's recovery.
+    pub quarantined: bool,
+}
+
 /// A script watched by transparent ledger recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WatchedScript<AccountId> {
@@ -558,10 +600,26 @@ pub struct WatchedScript<AccountId> {
 pub struct WatchedScriptSnapshot<AccountId> {
     /// The applied policy generation.
     pub policy_generation: u64,
-    /// Each account's current watch-set generation.
-    pub accounts: Vec<AccountWatchGeneration<AccountId>>,
+    /// Each account's watch-set generation, lifecycle, and quarantine state. A run commits
+    /// candidate and active accounts separately, each with its declared destination.
+    pub accounts: Vec<WatchedAccount<AccountId>>,
     /// The watched scripts across all listed accounts.
     pub scripts: Vec<WatchedScript<AccountId>>,
+}
+
+/// A durable pending page with everything a restarted coordinator needs to resume it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutstandingPage {
+    /// The source revision the page belongs to; completion must cite this exact revision.
+    pub source: SourceRevision,
+    /// The page identity, range, and affected watched scripts.
+    pub page: PendingPage,
+    /// The applied policy generation when the page was opened.
+    pub policy_generation: u64,
+    /// The accepted chain point of the run that opened the page.
+    pub target: ChainPoint,
+    /// The destination of the run that opened the page.
+    pub lifecycle: LedgerLifecycle,
 }
 
 /// Reads transparent ledger configuration and recovery state.
@@ -591,6 +649,10 @@ pub trait TransparentLedgerRead: WalletRead {
     fn transparent_ledger_watched_scripts(
         &self,
     ) -> Result<WatchedScriptSnapshot<Self::AccountId>, Self::Error>;
+
+    /// Returns every durable pending page, so that a restarted coordinator can resume or
+    /// revalidate outstanding work instead of replaying whole sources.
+    fn transparent_ledger_pending_pages(&self) -> Result<Vec<OutstandingPage>, Self::Error>;
 }
 
 /// Applies recovery results and guarded account promotion.
