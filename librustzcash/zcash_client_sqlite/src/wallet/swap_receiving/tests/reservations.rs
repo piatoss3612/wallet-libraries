@@ -86,6 +86,77 @@ fn anchor(st: &State) -> ChainAnchor {
 }
 
 #[test]
+fn reclamation_waits_until_latest_quote_deadline_plus_cooldown() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let r = prepare(&mut st, NOW);
+    quote(&mut st, &r, "first", false);
+    let db = st.wallet_mut().db_mut();
+    db.begin_swap_receive_quote(account, r.id, "second", NOW + 30)
+        .unwrap();
+    db.record_swap_receive_quote(account, "second", "second", None, NOW + 120)
+        .unwrap();
+    db.start_swap_receive_quote(account, "second").unwrap();
+
+    let eligible_at = NOW + 120 + RECEIVE_RECLAIM_SECONDS;
+    for request in ["first", "second"] {
+        observe(&mut st, request, "PENDING_DEPOSIT", false, eligible_at - 1);
+    }
+    let a = anchor(&st);
+    let db = st.wallet_mut().db_mut();
+    db.mark_swap_directory_checked(account, r.key.key_id(), a)
+        .unwrap();
+    assert!(
+        db.swap_receive_reclaim_candidates(account, eligible_at - 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !db.reclaim_swap_receive_reservation(account, r.id, eligible_at - 1, a)
+            .unwrap()
+    );
+    assert_eq!(
+        db.swap_receive_reclaim_candidates(account, eligible_at)
+            .unwrap(),
+        vec![r.id]
+    );
+    assert!(
+        db.reclaim_swap_receive_reservation(account, r.id, eligible_at, a)
+            .unwrap()
+    );
+}
+
+#[test]
+fn unquoted_draft_waits_until_creation_plus_cooldown() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let r = prepare(&mut st, NOW);
+    let a = anchor(&st);
+    let db = st.wallet_mut().db_mut();
+    let eligible_at = NOW + RECEIVE_RECLAIM_SECONDS;
+    db.mark_swap_directory_checked(account, r.key.key_id(), a)
+        .unwrap();
+    assert!(
+        db.swap_receive_reclaim_candidates(account, eligible_at - 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !db.reclaim_swap_receive_reservation(account, r.id, eligible_at - 1, a)
+            .unwrap()
+    );
+    assert_eq!(
+        db.swap_receive_reclaim_candidates(account, eligible_at)
+            .unwrap(),
+        vec![r.id]
+    );
+    assert!(
+        db.reclaim_swap_receive_reservation(account, r.id, eligible_at, a)
+            .unwrap()
+    );
+}
+
+#[test]
 fn fills_lowest_expired_hole_and_preserves_old_quotes() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
