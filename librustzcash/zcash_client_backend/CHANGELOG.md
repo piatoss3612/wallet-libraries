@@ -13,8 +13,8 @@ workspace.
 ### Added
 - `data_api::transparent_ledger`: the storage-neutral contract for privately
   recovered transparent ledger state. It adds `ChainPoint`,
-  `TransparentLedgerMode`, `TransparentLedgerSnapshot`, the normalized commit
-  and context types, commit and promotion outcomes, and the
+  `TransparentLedgerMode`, `TransparentLedgerSnapshot`, the watched-script snapshot, the
+  normalized commit and context types, commit and promotion outcomes, and the
   `TransparentLedgerRead` and `TransparentLedgerWrite` traits. Stores must reject
   unconfigured handles and must not fabricate coverage or a spendable private
   balance.

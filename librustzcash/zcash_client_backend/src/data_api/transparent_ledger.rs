@@ -128,6 +128,18 @@ pub enum PublicationStatus {
     Provisional,
 }
 
+/// A block height and hash asserted by a publication.
+///
+/// Unlike [`ChainPoint`], this is not local chain evidence: it may lie beyond the wallet's
+/// accepted chain, and a matching hash never substitutes for local acceptance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PublicationAnchor {
+    /// The asserted height.
+    pub height: BlockHeight,
+    /// The asserted block hash.
+    pub hash: BlockHash,
+}
+
 /// The publication that supplied a commit's events and coverage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceRevision {
@@ -137,8 +149,8 @@ pub struct SourceRevision {
     pub revision: RevisionId,
     /// Whether the revision is sealed or provisional.
     pub status: PublicationStatus,
-    /// The publication's own chain anchor, retained alongside each accepted endpoint.
-    pub anchor: ChainPoint,
+    /// The publication's asserted anchor, retained alongside each accepted endpoint.
+    pub anchor: PublicationAnchor,
 }
 
 /// Immutable content of a transparent output paying a watched script.
@@ -177,6 +189,9 @@ pub struct SpendEvent {
     pub input_index: u32,
     /// The output consumed by this input.
     pub spent: OutPoint,
+    /// The watched script of the consumed output, which identifies the owning account even
+    /// when the spend arrives before its output. Checked against the output once it arrives.
+    pub spent_script: Script,
 }
 
 impl SpendEvent {
@@ -210,6 +225,31 @@ pub struct CoverageInterval {
     pub from: BlockHeight,
     /// The accepted endpoint, inclusive.
     pub through: ChainPoint,
+}
+
+/// Why a source cannot cover a watched script or range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UnsupportedReason {
+    /// The source does not index this script type.
+    ScriptType,
+    /// The source has no history for the range, such as heights before its first publication.
+    HistoryUnavailable,
+}
+
+/// A watched script range the commit's source explicitly cannot cover.
+///
+/// This is distinct from work not yet attempted: it blocks completeness for the owning
+/// account until another source covers the range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnsupportedCoverage {
+    /// The watched script.
+    pub script: Script,
+    /// The first unsupported height, inclusive.
+    pub from: BlockHeight,
+    /// The last unsupported height, inclusive; `None` extends through the commit target.
+    pub to: Option<BlockHeight>,
+    /// Why the source cannot cover the range.
+    pub reason: UnsupportedReason,
 }
 
 /// Bounded resumable retrieval work, keyed by the commit's source revision.
@@ -281,6 +321,8 @@ pub struct TransparentLedgerCommit<AccountId> {
     pub spends: Vec<Placed<SpendEvent>>,
     /// Completed coverage, including checked intervals without events.
     pub coverage: Vec<CoverageInterval>,
+    /// Ranges the source explicitly cannot cover.
+    pub unsupported: Vec<UnsupportedCoverage>,
     /// Resumable page progress.
     pub pages: PendingPageUpdate,
 }
@@ -430,6 +472,8 @@ pub enum RecoveryBlocker {
     UnsupportedHistory,
     /// Recovered content contradicted accepted state.
     IntegrityFailure,
+    /// This build cannot read the wallet's transparent state.
+    TransparentSupportUnavailable,
 }
 
 /// Counts that explain an account's recovery state.
@@ -476,6 +520,40 @@ pub struct TransparentLedgerSnapshot<AccountId> {
     pub diagnostics: RecoveryDiagnostics,
 }
 
+/// Where a watched script's history must be recovered from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RecoveryStart {
+    /// A justified conservative lower bound. It may move earlier, never later.
+    From(BlockHeight),
+    /// The start is unknown; recovery must begin at genesis.
+    Unknown,
+}
+
+/// A script watched by transparent ledger recovery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchedScript<AccountId> {
+    /// The owning account.
+    pub account: AccountId,
+    /// The exact output script.
+    pub script: Script,
+    /// Where the script's history must be recovered from.
+    pub required_from: RecoveryStart,
+}
+
+/// The watched scripts, with the generations a recovery run must capture in its context.
+///
+/// An account listed with no scripts has none enumerated; that is not evidence of an empty
+/// history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchedScriptSnapshot<AccountId> {
+    /// The applied policy generation.
+    pub policy_generation: u64,
+    /// Each account's current watch-set generation.
+    pub accounts: Vec<AccountWatchGeneration<AccountId>>,
+    /// The watched scripts across all listed accounts.
+    pub scripts: Vec<WatchedScript<AccountId>>,
+}
+
 /// Reads transparent ledger configuration and recovery state.
 ///
 /// Implementations reject unconfigured handles, including for an empty wallet, and must not
@@ -497,6 +575,12 @@ pub trait TransparentLedgerRead: WalletRead {
         account: Self::AccountId,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<TransparentLedgerSnapshot<Self::AccountId>, Self::Error>;
+
+    /// Returns the watched scripts with ownership, recovery bounds, and the policy and
+    /// watch-set generations to place in a [`TransparentLedgerContext`], from one read.
+    fn transparent_ledger_watched_scripts(
+        &self,
+    ) -> Result<WatchedScriptSnapshot<Self::AccountId>, Self::Error>;
 }
 
 /// Applies recovery results and guarded account promotion.
@@ -564,6 +648,7 @@ mod tests {
             spending_txid: TxId::from_bytes([2; 32]),
             input_index: 4,
             spent: outpoint,
+            spent_script: Default::default(),
         };
         let conflicting = SpendEvent {
             spent: OutPoint::new([9; 32], 0),

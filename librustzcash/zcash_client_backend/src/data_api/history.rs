@@ -5,7 +5,7 @@
 //! evidence of completeness. These types define the contract only; stores expose them when
 //! the history read path is integrated.
 
-use zcash_protocol::value::Zatoshis;
+use zcash_protocol::{PoolType, value::Zatoshis};
 
 use super::transparent_ledger::ChainPoint;
 
@@ -92,13 +92,23 @@ pub enum MiningEvidence {
     Unknown,
 }
 
+/// Owned-effect completeness for one pool a transaction touches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolEffectsCompleteness {
+    /// The pool.
+    pub pool: PoolType,
+    /// Whether the wallet's effects in that pool are fully known.
+    pub completeness: OwnedEffectsCompleteness,
+}
+
 /// The completeness facets of one transaction in wallet history.
 ///
 /// Per-output memo state is reported alongside each output as a [`DetailState`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionHistoryCompleteness {
-    /// Owned-effect completeness across the pools the transaction touches.
-    pub owned_effects: OwnedEffectsCompleteness,
+    /// Owned-effect completeness for each pool the transaction touches. A mixed transaction
+    /// can be complete in one pool and incomplete in another.
+    pub owned_effects: Vec<PoolEffectsCompleteness>,
     /// The basis of the displayed classification.
     pub classification: ClassificationBasis,
     /// Whether all recipients are known.
