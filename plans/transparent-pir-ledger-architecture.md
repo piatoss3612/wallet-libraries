@@ -3,6 +3,176 @@
 Status: proposed design; production private authority is not enabled by the
 [preparatory refactor](transparent-pir-preparatory-refactor.md).
 
+## Reader's guide
+
+The transparent ledger gives the wallet a durable answer to three questions:
+**what transparent activity happened, how much history has been checked, and
+whether the resulting funds are safe to spend**.
+
+LRZ already stores transparent outputs and spends. Here LRZ denotes the existing
+`zcash_client_backend` and `zcash_client_sqlite` APIs, published by this repository
+as `zakura-client-backend` and `zakura-client-sqlite`. The refactor adds the
+recovery evidence and lifecycle rules needed to make private discovery
+authoritative while continuing to use LRZ's wallet machinery.
+
+The new ledger APIs and tables below are proposed, not implemented by these
+documents. The design specifies the `tpir_*` namespace and storage
+responsibilities; the exact SQL schema remains to be implemented. This guide
+explains the arrangement before the detailed contracts later in the document.
+
+### What the ledger does
+
+1. **Tracks wallet-owned scripts and their recovery bounds.** A script is the
+   output's spending condition, such as P2PKH or P2SH. Each watched script has
+   account ownership, derivation/import information, and a conservative history
+   start. Deriving an address today does not establish coverage of its past.
+2. **Recovers receives and spends.** A receive identifies an output by txid and
+   output index, with its script, amount, and coinbase classification. A spend
+   identifies the spending transaction/input and the outpoint it consumes.
+   Spends received before their outputs remain unresolved until the outputs
+   arrive.
+3. **Tracks continuous coverage.** Knowing some transactions is different from
+   knowing that all relevant activity in a range has been recovered. Coverage
+   binds each checked script and height interval to a publication and accepted
+   chain anchor. Checked empty ranges count; an absence of stored rows does not.
+4. **Determines financial eligibility.** Coverage combines with LRZ's existing
+   confirmation, maturity, pending-spend, and lock rules. An output that looks
+   unspent can still be unavailable because a missing range may contain its
+   spend.
+5. **Handles restart, reorganization, and migration.** The ledger preserves
+   pending retrieval work, rejects contradictory records, invalidates evidence
+   from replaced blocks, and preserves local transactions and reservations.
+   Isolated shadow recovery and guarded account promotion are part of this
+   lifecycle.
+
+For example, an output received 3 ZEC at height 120 and spent at height 160
+looks unspent if recovery has reached only height 150. At decision height 200,
+the recovered amount is 3 ZEC but the actual unspent amount is zero. The API
+therefore returns balance together with coverage and authority. A partially
+recovered amount is not necessarily a lower bound.
+
+### How the data is stored
+
+Retain LRZ's existing tables and add the ledger tables inside the **same SQLite
+wallet database**. The new tables hold recovery evidence; the existing tables
+remain the representation used by wallet history and transaction construction.
+
+| Existing LRZ structure | What it already provides |
+| --- | --- |
+| `accounts`, `addresses` | Account ownership, derivation/scope, imported receivers, and address exposure information. |
+| `blocks`, `scan_queue` | Locally stored block hashes and scanning progress, including contiguous scanning. |
+| `transactions` | Transaction identity, mining placement, optional raw bytes, and transaction metadata. |
+| `transparent_received_outputs` | Output index, script, value, account/address ownership, unspent-observation information, and proposal locks. |
+| `transparent_received_output_spends` | Links known received outputs to transactions that spend them. |
+| `transparent_spend_map` | Records spent outpoints, including those whose corresponding receives are not yet available. |
+| Transaction/output views | The representation consumed by transaction history and other wallet reads. |
+
+A concrete decomposition of the new ledger storage could look like this.
+These table names and fields illustrate the responsibilities, rather than
+constituting finalized migration DDL:
+
+| Proposed table or group | Main data |
+| --- | --- |
+| `tpir_meta` | Applied privacy policy, policy generation, and reader compatibility/version metadata. |
+| `tpir_account_state` | Per-account candidate/active lifecycle and activation context. |
+| `tpir_scripts` | Script bytes, owning account, scope/derivation information, recovery start, and watch-set generation. |
+| `tpir_receive_events` | Immutable receive identity and content: txid, output index, script, value, and coinbase classification. |
+| `tpir_spend_events` | Immutable spend identity and content: spending txid, input index, and spent outpoint; unresolved spends remain here. |
+| Event placement and observation tables | Canonical mined height/hash, plus publications/revisions that supplied each event and their record digests. |
+| `tpir_coverage` | Per-script checked intervals, accepted terminal hashes, source revisions, and sealed/provisional status. |
+| `tpir_pending_pages` | Bounded resumable retrieval work with its source, revision, and operation context. |
+| `tpir_projection_origins` | Links projected LRZ records to ledger evidence, legacy observations, local construction, or independently authorized payloads. |
+| `tpir_shadow_runs` | Local comparison results and qualification summaries. |
+
+The relationships matter more than the table names:
+
+- Events and coverage are separate. A range can have complete coverage with no
+  events, or recovered events with incomplete coverage.
+- Event identity and mining placement are separate. A transaction can be mined
+  again after a reorg without becoming a different receive.
+- One event can have multiple publication observations. Seeing it in another
+  revision is not itself a contradiction.
+- One LRZ record can have multiple origins. Removing invalid PIR evidence must
+  not delete an independently recorded local transaction or reservation.
+- Balances are computed from active events/projection and wallet rules. A cached
+  amount cannot substitute for the underlying evidence.
+
+**Projection** means writing recovered events into the existing LRZ output,
+spend, and transaction representation. The deliberate duplication lets the
+ledger retain its evidence while established wallet APIs continue to work.
+For an activated account, evidence, coverage, and projection commit in one
+transaction. A crash cannot leave new coverage committed while its corresponding
+spend is missing from the projection. Shadow commits remain isolated from the
+production projection.
+
+### What LRZ already enables
+
+`WalletDb::transactionally` supplies the all-or-nothing database boundary.
+Account/address APIs provide ownership and derivation information; block-hash
+and fully-scanned-state APIs provide accepted-chain context. Existing
+output/spend handling, locks, confirmation policies, and input selectors supply
+the transaction-building rules. Rewind entry points provide the place to roll
+back ledger evidence together with wallet chain state.
+
+The `tpir_*` tables are library-owned schema. Vizor does not implement this
+ledger through application extension tables or a separate database. The new
+library work is source-bound coverage, candidate isolation, guarded promotion,
+and enforcement of those rules throughout transparent financial operations.
+There is no replacement transaction builder or independent input selector.
+
+### What Vizor implements
+
+The existing application obtains transparent information through UTXO refresh,
+Ledger address-history discovery, and transparent-history enhancement. Those
+paths insert outputs or decoded transactions into LRZ. A `.receive.redb`
+sidecar assists receive/discovery caching.
+
+Currently, a UTXO refresh inserts the output and queues full transaction
+retrieval because the UTXO response alone does not provide everything needed
+for spend detection and coinbase recognition. The new private ledger supplies
+explicit events and classification without requiring a public payload lookup
+to make its outputs usable.
+
+Vizor's new coordinator resolves the existing private-queries setting, captures
+an accepted chain point, obtains the watched-script snapshot, runs the selected
+source under cancellation/resource limits, and submits normalized results through
+the ledger API. It repeats when address-window growth introduces more scripts
+and exposes recovery state through Rust/Flutter results.
+
+Vizor continues to own networking, scheduling, and presentation. Wallet-libraries
+decides whether a commit, promotion, or input selection is valid. Missing raw
+transactions or fees cannot turn private ledger discovery into public txid
+queries. Payload recovery and status observation retain their separate work and
+evidence contracts.
+
+### Primary API and data-layout changes
+
+| Area | Existing behavior | Intended behavior after the refactor |
+| --- | --- | --- |
+| Discovery writes | Individual UTXO insertion and full-transaction ingestion. | Ledger commits combine normalized events, coverage, provenance, and progress; local-send and authorized-payload paths retain independent roles. |
+| Balance reads | LRZ balances/summaries with application recovery checks. | `TransparentLedgerSnapshot<AccountId>` exposes authority, target, coverage, authorized balance, last-known amount, and blockers together. |
+| Input selection | Individual, address, batched, and value-bounded selectors. | The same selectors enforce ledger eligibility internally; callers cannot bypass it by choosing another selector. |
+| Chain target | Callers work with scanned heights and transaction target heights. | Explicit `ChainPoint { height, hash }`; coverage through `H` supports a transaction targeting `H + 1`, subject to current-chain and other eligibility rules. |
+| Rewind | LRZ rewinds plus application discovery/cache handling. | Ledger evidence and projection participate in applicable LRZ rewind transactions, using the actual retained height. |
+| Privacy configuration | Enhance/Status policy alongside separate transparent discovery paths. | The same user setting governs transparent recovery, with durable applied policy and generation checks across handles and entry points. |
+| Financial storage | Existing LRZ output/spend records and public-path discovery caches. | Those records remain, with same-database `tpir_*` evidence, coverage, progress, and provenance supporting authoritative private projection. |
+| Migration | Existing records support public discovery behavior. | Legacy evidence, isolated candidate recovery, and guarded per-account promotion become explicit states. |
+
+Preparation keeps public discovery authoritative and exercises the new lifecycle
+with fixtures. When production private recovery is later enabled, public
+transparent queries stop immediately. Incomplete accounts cannot use transparent
+inputs; qualified accounts are promoted atomically. Vizor keeps its established
+sending, shielding, and hardware-wallet flows while their discovery source gains
+a stricter wallet-library contract.
+
+Coverage remains relative to the accepted publication and its trust model. The
+publisher is trusted for accurate and complete indexing; matching hashes and
+digests do not independently prove every event against the chain. The detailed
+[trust model](#trust-and-privacy-model),
+[wallet contract](#wallet-facing-contract), and
+[storage rules](#durable-state-and-atomic-projection) below define the required
+boundaries.
+
 ## Objective and boundaries
 
 Recover transparent receives and spends privately while retaining Vizor's
@@ -15,10 +185,6 @@ The central invariant is:
 > A private transparent balance is authoritative only when validated ledger
 > events, continuous per-script coverage, the locally accepted chain, and the
 > LRZ projection agree in one durable database state.
-
-Here LRZ denotes the existing `zcash_client_backend` and `zcash_client_sqlite`
-APIs, published by this repository as `zakura-client-backend` and
-`zakura-client-sqlite`.
 
 ```text
                   Vizor private queries setting
