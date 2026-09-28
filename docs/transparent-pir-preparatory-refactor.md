@@ -1,273 +1,397 @@
 # Preparatory refactor for a transparent PIR ledger
 
-Status: proposed implementation sequence; no production authority change.
+Status: proposed execution plan. All phases below remain to be implemented and
+qualified; production transparent authority stays public during preparation.
 
-## Purpose and fixed decisions
+## Objective and fixed boundaries
 
-Prepare wallet-libraries and Vizor for the
-[transparent-ledger architecture](transparent-pir-ledger-architecture.md) in
-five dependency-ordered slices. That document owns the invariants, migration
-lifecycle, and API semantics; this document owns the implementation order and
-acceptance gates.
+Prepare wallet-libraries and Vizor incrementally for the
+[transparent-ledger architecture](transparent-pir-ledger-architecture.md).
+That document owns the invariants and API semantics. This plan owns the order
+of changes, repository handoffs, intermediate behavior, and acceptance gates.
 
-Public discovery remains authoritative during preparation. Exercise isolated
-shadow recovery and private activation with fixtures before adding a real PIR
-source. Keep the existing LRZ wallet core and database. Wallet-libraries owns
-financial correctness; Vizor owns the shared private-queries setting,
-scheduling, transport, and UI.
+Keep the existing LRZ wallet core, database, input selectors, transaction
+builder, and hardware flows. Wallet-libraries owns durable evidence and financial
+authorization; Vizor owns the shared private-queries setting, networking,
+scheduling, and presentation. No new user toggle is introduced.
 
-The existing private-queries setting will govern transparent recovery together
-with Enhance and Status. There is no new user toggle. The policy applies to a
-whole wallet database on its network; account recovery can finish independently.
-Once production private authority is enabled, public transparent discovery stops
-immediately and incomplete accounts pause transparent spending and shielding.
-The gate follows transparent inputs: independently eligible shielded-funded
-operations, including unshielding, continue. Rollback is supported only to
-privacy-aware releases or by forward repair.
-
-Keep two logical discovery loops, shielded scanning and transparent recovery,
-with one shared transaction identity by txid. Enhance and Status retain separate
-work and completion rules. Financial recovery and payment-detail completeness
-are distinct: preparation preserves existing local history and supports partial
-restored history. The architecture owns the detailed
-[sync contract](transparent-pir-ledger-architecture.md#shielded-sync-and-shared-transactions)
+Shielded scanning and transparent recovery remain two logical discovery loops
+joined by txid. Enhance and Status have separate work and completion rules.
+Follow the architecture's [sync contract](transparent-pir-ledger-architecture.md#shielded-sync-and-shared-transactions)
 and [history contract](transparent-pir-ledger-architecture.md#history-completeness-and-storage-contract).
 
-Use the current checkout and consumer pin as implementation baselines. At the
-2026-09-28 review, wallet-libraries was `21569fb795`; Vizor's
-`roman/ironwood-memo-pir` branch was `a3a2683ef` and pinned wallet-libraries
-to `2e206f7894`. Recheck these before implementation. Upgrade the consumer pin
-as a separately validated dependency change; do not attribute unrelated
-dependency or consensus changes to this refactor.
+Private activation is exercised only in tests/development during this plan.
+Once production activation is introduced in a later stage, the saved shared
+setting applies before discovery, public transparent queries stop immediately,
+and incomplete accounts cannot consume transparent inputs. Independently
+eligible shielded-funded operations, including unshielding, remain available.
+Missing display-only payment details do not block otherwise eligible spending.
 
-## Implementation sequence
+## Execution order and repository handoffs
 
-Each slice includes its own contract and regression tests. Slice 5 adds
-cross-repository qualification; it is not where earlier safety tests begin.
-No intermediate release may expose authoritative ledger projection without its
-rewind and provenance handling.
+Complete Phase 0, then Phases 1–6 in order. Within each phase, implement and test
+the wallet-libraries steps first, then integrate that exact revision into Vizor.
+A phase can contain several small changes; its acceptance gate must pass before
+enabling behavior that depends on it. Tests belong with each change, not only
+in the final qualification phase.
 
-### 1. Contract and migration foundation — wallet-libraries
+| Phase | Wallet-libraries deliverable | Vizor deliverable | Behavior available at phase exit |
+| --- | --- | --- | --- |
+| 0. Baseline | Contract/call-site inventory and reference fixtures. | Consumer baseline and discovery/handle inventory. | Existing public behavior recorded. |
+| 1. Contract and migration | Types, additive schema, provenance, configured handles. | Dependency upgrade and explicit handle configuration. | Schema upgrades; private transparent input use remains unavailable. |
+| 2. Privacy boundaries | Durable policy transitions and guarded follow-on work. | Shared policy, dispatch guards, native/preview coverage. | Required-private fixtures fail closed before any unsupported request. |
+| 3. Candidate recovery | Watched scripts, candidate events, coverage, resumable commits. | Disabled/fixture source and bounded coordinator. | Isolated shadow recovery; no production projection changes. |
+| 4. Safe activation | Atomic projection, rewind, promotion, and all financial gates. | Balance/operation integration and activation fixtures. | Per-account private activation and spending exercised with fixtures. |
+| 5. History integration | Evidence-backed history reads and detail state. | Partial-history classification, FFI, and UI. | Mixed transactions and restored history represented accurately. |
+| 6. Qualification | Lifecycle/failure evidence and repair compatibility. | Cross-repository regression and request-capture results. | Preparatory refactor complete; real PIR integration still gated. |
 
-Add `data_api::transparent_ledger` in the backend and its additive SQLite
-schema through the normal migration machinery.
+For each handoff:
 
-- Define `ChainPoint`, `TransparentLedgerMode`, and the single
-  `TransparentLedgerSnapshot<AccountId>` specified in the architecture.
-  Ledger read/write traits extend the existing wallet traits and reuse their
-  account/error types.
-- Define history read semantics separately from the transparent balance snapshot:
-  owned-effect completeness, provisional classification, recipient details,
-  per-output memos, optional fees with provenance, and independent mining/status
-  evidence. Reuse existing views and add only required metadata/work state.
-- Provide watched-script snapshots with conservative recovery bounds and
-  generations. Define normalized commits with expected policy/chain/watch
-  context, and the guarded account-promotion interface.
-- Store policy/lifecycle metadata, scripts, events and source observations,
-  coverage, pending progress, and projection provenance. Keep protocol wire
-  layouts out of these APIs.
-- Classify existing remote records as legacy evidence without private coverage.
-  Preserve independently established local transactions, known sent outputs,
-  recipients/fees/grouping metadata, outboxes, locks, address reservations, and
-  payload provenance. Support multiple origins for one projected record,
-  including shielded-scan contributions to shared transactions.
-- New ledger operations require explicit configuration; introducing schema and
-  types alone does not change current production authority.
+1. Record the tested wallet-libraries commit and enabled features.
+2. Update Vizor's related dependency pins and lockfile consistently; verify the
+   resolved graph rather than assuming all packages use the same revision.
+3. Run the phase's consumer checks against that revision. Keep dependency or
+   consensus changes unrelated to this refactor visible as separate changes.
+4. Record the gate result and remaining limitations. Do not enable production
+   private authority merely because a pin, schema, or fixture test is present.
 
-**Acceptance:** fresh and representative existing databases migrate without
-seeds, changed public balances, or loss of known local payment details. Include
-multi-seed, imported-only, hardware-first, pending-send, and previously rewound
-fixtures. Interrupted migration and storage failure must remain recoverable
-without fabricating coverage or history completeness.
+For library paths below, `backend/` means
+`librustzcash/zcash_client_backend/src/` and `sqlite/` means
+`librustzcash/zcash_client_sqlite/src/`. Vizor paths are relative to its repository
+root. New modules are marked proposed. Reuse existing transport and database
+boundaries; do not create a general sync plugin framework or a second
+authoritative database.
 
-### 2. Atomic ledger lifecycle — wallet-libraries
+## Phase 0 — Establish the implementation baseline
 
-Implement event persistence, projection, promotion, and rollback together.
+Planning snapshot: wallet-libraries `1709e4dd3d` on
+`docs/transparent-pir-design`; Vizor `a3a2683ef` on
+`roman/ironwood-memo-pir`, with wallet-libraries dependencies pinned to
+`2e206f7894`. Recheck both checkouts, dirty work, dependency graphs, and feature
+configuration before implementation. A newer library checkout is not evidence
+that Vizor already runs its behavior.
 
-- Make candidate commits isolated from production balances, spends, locks,
-  address-use, and receive-address choice. Candidate window growth stays in the
-  candidate watch set.
-- Make authoritative commits persist events, complete coverage, page progress,
-  source observations, and LRZ projection in one transaction. Partial pages
-  cannot advance coverage; negative filter results can establish validated
-  empty coverage.
-- Separate immutable content from mining placement and publication observations.
-  Support replay across revisions, spend-before-receive, and re-mining after
-  rewind; reject contradictory contents or canonical spends.
-- Join transparent and shielded effects by txid with idempotent pool-specific
-  identities. Either discovery order and later payload ingestion must preserve
-  the other source's facts and account ownership. Each source commits its own
-  validated progress; active known spends do not wait for both loops to finish.
-- Keep detail work scoped to its transaction/action/output and requested field.
-  Represent unavailable private mixed-transaction details as pending or
-  unsupported without discarding financial facts. Under `PrivateRequired`,
-  `has_transparent`/`LwdRequired` cannot authorize public work; disabling that
-  route alone does not implement private outgoing recovery.
-- Implement promotion as a guarded transaction that reconciles the complete
-  candidate state, preserves local overlays, materializes the projection, and
-  changes account authority. Test fixtures cannot qualify production accounts.
-- Integrate with all applicable LRZ rewind/rescan paths using their actual
-  retained height and rescan floor. Integrate account deletion, import, and
-  birthday lowering, including stale-work invalidation.
-- Preserve explicit coinbase classification and history without raw payloads.
-  Track missing details independently of financial coverage. Unknown metadata
-  cannot become fabricated values or public lookup authority; detail-completion
-  markers and derived history must invalidate with their supporting evidence.
+**Wallet-libraries steps**
 
-**Acceptance:** fixture receive/spend, replay, revision, promotion, and reorg
-flows leave ledger and projection consistent across transaction failure and
-restart. Shadow changes no production financial or address-allocation state.
-Mixed transactions retain one identity and both pools' effects across replay
-and interruption between source commits. Rewind preserves independent local and
-shielded evidence where valid, plus issued-address history. Completing one
-detail never completes unrelated work or triggers a source change.
+1. Map the contract onto `backend/data_api.rs` and `backend/data_api/`, plus
+   `sqlite/lib.rs`, `sqlite/wallet.rs`, `sqlite/wallet/transparent.rs`, and
+   `sqlite/wallet/init/`.
+2. Inventory transparent selectors, transaction/proposal consumption, rewind and
+   rescan entry points, local-send ingestion, and enhancement/status routing.
+   Identify where shared transaction origins must survive projection rollback.
+3. Define synthetic reference fixtures for receives, spends, empty ranges,
+   coinbase, mixed transactions, local sends, and imported/hardware accounts.
+   Derive expected effects independently of the candidate ledger implementation.
 
-### 3. Financial integration — wallet-libraries
+**Vizor steps**
 
-Connect the ledger to existing financial reads and transaction operations.
+1. Map DB constructors in `rust/src/wallet/db.rs` and their exceptions; include
+   foreground, read-only, transaction, native/background, and pre-DB import or
+   preview entry points.
+2. Inventory UTXO refresh, `ledger_discovery.rs`, `address_history.rs`, and
+   enhancement auxiliary lanes under `rust/src/wallet/sync_engine/`, plus
+   `rust/src/wallet/transaction_data/`. Record current source authorization.
+3. Record reference balances, known local payment details, pending sends, locks,
+   and account/address behavior using fixtures. Run the relevant existing
+   tests and distinguish pre-existing failures from refactor regressions.
 
-- Read balance, accepted point, authority, and coverage in one snapshot. Keep
-  authorized, last-known, and recovered-but-unverified amounts distinguishable.
-  Do not present incomplete recovery as zero or a lower-bound balance.
-- Enforce coverage in existing individual-outpoint, address, batched, and
-  value-bounded transparent input queries. Add no parallel selector.
-- Distinguish recovery through accepted block `H` from LRZ transaction target
-  `H + 1`. Require current accepted coverage and recheck context at financial
-  authorization; historical snapshots do not authorize live spending.
-- Retain confirmations, coinbase maturity, spend and lock rules. Revalidate
-  transparent inputs at proposal consumption and hardware finalization.
-  Preserve legitimate local chained outputs and their reservations.
-- Keep existing public behavior when explicitly configured public. Private
-  recovery blocks transparent input use without blocking independently
-  eligible shielded-funded operations, including unshielding. Resulting own
-  transparent outputs require transparent eligibility before later spending,
-  subject to the existing same-proposal chained-output rules. Missing
-  display-only recipients, memos, or fees must not gate financial authorization.
+**Exit gate:** both repositories have a concrete call-site and fixture inventory,
+with an agreed dependency baseline. No source, schema, or authority change.
 
-**Acceptance:** every transparent selector and shielding path rejects incomplete
-private coverage, including stale proposals. Test coinbase boundaries, locks,
-mixed-pool selection, local chained outputs, shielded-funded unshielding during
-incomplete transparent recovery, and unchanged public-mode results.
+## Phase 1 — Add the contract, schema, and configured handles
 
-### 4. Vizor policy, coordinator, and presentation
+**Wallet-libraries steps**
 
-Integrate the new APIs into the existing application rather than replacing
-its sync engine.
+1. Add proposed `backend/data_api/transparent_ledger.rs` with `ChainPoint`,
+   `TransparentLedgerMode`, `TransparentLedgerRead/Write`,
+   `TransparentLedgerSnapshot<AccountId>`, normalized commit/context types,
+   and guarded promotion signatures. Reuse wallet account/error types and keep
+   protocol layouts, HTTP, and PIR-client types out of the API.
+2. Define history completeness separately from the transparent balance snapshot:
+   owned effects, provisional classification, recipients, per-output memos,
+   optional fees/provenance, and mining/status evidence. Define contracts now;
+   implement the complete read path in Phase 5.
+3. Add seedless, additive migrations through `sqlite/wallet/init.rs` and
+   `sqlite/wallet/init/migrations/`. Establish `tpir_*` policy/account state,
+   scripts, event observations, coverage, pending work, and projection origins.
+   Classify existing remote rows as legacy evidence, never private coverage.
+4. Preserve local transaction bytes, sent outputs, known recipients/fees/grouping,
+   outboxes, locks, reservations, and independent shielded/payload origins.
+   Do not infer local creation from a row's presence.
+5. Add explicit handle configuration and inheritance in `WalletDb`. New APIs
+   reject unconfigured use, including an empty DB. Until Phase 4,
+   `PrivateRequired` rejects promotion and transparent financial authorization
+   as unavailable; incomplete implementations cannot fabricate successful
+   coverage or a spendable private transparent balance.
 
-- Extend the existing private-queries policy and paused setting-transition flow.
-  Configure foreground, read-only, reopened, transaction, and native/background
-  handles consistently. Persist applied policy/generation and reconcile
-  interrupted preference/database transitions conservatively before networking.
-- Apply authorization to UTXO refresh, Ledger discovery, transparent history,
-  software account discovery, and balance previews. Calls before DB creation
-  resolve the same shared setting. An unsupported private preview reports
-  unavailable.
-- Enforce shared policy before either discovery loop dispatches follow-on
-  payload, status, fee, or parent-transaction work. Cover shielded-first mixed
-  discovery, server-supplied shape flags, stale public queues, and retries; do
-  not wait for the transparent ledger to tag a transaction. Preserve Enhance
-  and Status evidence rules and expose pending/unsupported private details.
-- Add a dedicated bounded coordinator that captures a fixed accepted target and
-  operation context, enumerates scripts, invokes a source, commits through
-  wallet-libraries, and repeats on window growth. Completion comes from durable
-  state. Interleave with shielded scanning without combining their checkpoints
-  or requiring both loops to complete before recording known effects.
-- Initial sources are disabled and fixture implementations. Disabled means
-  unavailable, never successful coverage. Fixtures are restricted to tests and
-  development; production remains on its existing public path during preparation.
-- Expose account recovery and transparent-operation availability through simple
-  FFI results. Carry history completeness and optional metadata through
-  Rust/Flutter. Display last-known and unverified amounts accurately, and
-  invalidate history/summary caches on discovery, enhancement, policy,
-  promotion, and lifecycle changes.
-- Update Vizor's history query/classifier to stop mapping missing fees to zero,
-  treating currently absent rows as complete shielding evidence, or suppressing
-  a known debit with change when recipient details are missing. Keep a stable
-  transaction identity as classification improves; preserve account/scope and
-  local intent, avoid double-counting self-transfers, and keep ungrouped TEX
-  transactions visible when grouping evidence is unavailable.
-- Reuse existing HTTPS routing, cancellation, deadlines, and transport tests.
-  Move only the common transport boundary when the real source needs it;
-  publication revision handling stays source-specific.
+**Vizor steps**
 
-**Acceptance:** fixture recovery drives Rust/Flutter balance, history, software
-shielding, Ledger rounds, and Keystone PCZT behavior without application writes
-to ledger/projection tables. A private transition revokes stale work across all
-entry points and leaves eligible shielded-funded operations available. Partial
-history shows known activity and unavailable details without invented amounts,
-hidden debits, or public enrichment.
+1. Upgrade the dependency pin/lockfile to this library revision and exercise the
+   migration using existing wallet initialization paths, including imported-only
+   and hardware-first databases without access to a seed.
+2. Configure the new transparent mode on every relevant handle from the Phase 0
+   inventory. Preparatory production builds explicitly retain public transparent
+   authority and the existing Enhance/Status behavior; development fixtures can
+   request stricter modes.
+3. Keep the saved user setting intact. Never overwrite a durably applied
+   `PrivateRequired` policy with `Public` because a build lacks support.
+   Such a database must remain blocked or use a supported privacy-aware release.
 
-### 5. Shadow and migration qualification
+**Exit gate:** representative databases upgrade without seeds, changed public
+balances, or lost local history. Transactional/reopened handles retain the
+required configuration; unconfigured/private-unavailable paths fail explicitly.
+Migration interruption and storage failures fabricate neither coverage nor
+history completeness.
 
-Build an end-to-end fixture harness and a real-source-ready comparison boundary.
+## Phase 2 — Enforce privacy before adding recovery networking
 
-- Compare exact receive/spend, UTXO, and balance sets at a common accepted point;
-  validate fixtures against an independent block-derived oracle. Legacy parity
-  alone does not prove correctness or completeness.
-- Exercise public-to-shadow, private activation before recovery, reuse of
-  qualified shadow state, per-account promotion, interrupted activation,
-  restart, and outage after activation.
-- Cover shielding, self/external unshielding, combined transparent/shielded
-  spends, and cross-account transfers with both preserved local history and
-  seed-restored fixtures. Assert exact owned effects and visible history,
-  including mixed self-transfers/payments and incomplete recipient/fee/memo data.
-- Run both discovery orders, duplicate observations, later payload enrichment,
-  interruption between pool commits, and restart/reorg. Verify no duplicate
-  accounting, lost local details, hidden debits, or unsupported TEX grouping.
-- Capture requests at sync, import, preview, metadata, startup, and native
-  boundaries, including shielded-first mixed discovery and queued public work.
-  Private failures, missing data, shape flags, cancellation, and setting races
-  must produce no unauthorized public lookup.
-- Test account import/deletion, earlier recovery bounds, same-height reorgs,
-  actual rewind heights, and cache invalidation during recovery.
-- Validate forward repair and the designated privacy-aware rollback release.
-  Preserve pending sends, reservations, and the shared setting across recovery.
-- Keep exact comparisons local; record only redacted aggregate qualification
-  results and the tested application/library revisions.
+**Wallet-libraries steps**
 
-**Acceptance:** no shadow financial side effects, no unexplained qualifying
-discrepancies, no unauthorized public requests, and consistent restart/rewind
-results. Partial history is explicit while existing local history is preserved.
-This qualifies the wallet integration, not a remote PIR service or full private
-recipient recovery.
+1. Implement durable applied policy, generations, and compatibility requirements.
+   A transition revokes stale operation contexts; commit checks must reject
+   obsolete policy generations even when an older handle remains open.
+2. Audit work creation and routing in `backend/data_api/enhance_pir/`,
+   `sqlite/wallet/enhance_pir.rs`, and status/transaction-retrieval APIs. Under
+   `PrivateRequired`, mixed results such as `has_transparent` or
+   `LwdRequired` must yield explicit pending/unsupported private details,
+   without deleting financial facts or authorizing a public request.
+3. Keep transaction/action/output detail work independent. A recovered memo,
+   unsupported payload, or incomplete status response cannot complete another
+   obligation or establish ledger coverage. Preserve existing trusted local
+   evidence rules for status and expiry.
 
-## Validation and completion
+**Vizor steps**
 
-Run focused backend/SQLite tests with the transparent feature enabled, their
-applicable existing balance/selection/migration regression suites, and Vizor
-Rust and Dart tests for the changed interfaces. Validate the actual consumer
-dependency graph and feature configuration when updating its pin. Heavy
-regtest/device qualification is a separate explicitly scheduled release gate;
-fixture success must not be reported as that gate passing.
+1. Extend the existing policy in
+   `rust/src/wallet/sync_engine/enhancement/policy.rs`,
+   `lib/src/providers/enhance_pir_provider.dart`, and
+   `lib/src/core/storage/enhance_pir_preference_store.dart`. Extend the paused
+   setting-transition flow; reconcile preference and database policy
+   conservatively before dispatch and capture one immutable policy per operation.
+2. Guard UTXO refresh, Ledger/address-history discovery, software account
+   discovery, and previews. Resolve the same policy before pre-DB requests;
+   unsupported private previews report unavailable.
+3. Guard payload, fee/parent, and status dispatch from either discovery loop,
+   including already queued public work and retries. Shielded-first mixed
+   discovery must be protected before the transparent ledger sees the txid;
+   server shape flags cannot grant disclosure authority.
+4. Apply the policy to `rust/src/ffi.rs`, mobile/native preparation adapters,
+   and their reopened handles. Preserve foreground handoff where a background
+   task cannot establish the required private anchor. Reuse existing route,
+   cancellation, and deadline handling.
+5. Add request-capture tests for private transitions and unsupported sources
+   before the coordinator can issue requests. Production transparent authority
+   remains public during preparation; the stricter path is exercised with
+   test/development policy, not a new user setting.
 
-The preparatory stage is complete when a deterministic source can recover
-receives and spends, preserve unresolved work, project history and balances,
-block or permit transparent input use based on coverage, promote an account,
-restart, and rewind through the intended APIs. It must also demonstrate that
-shadow is isolated, both discovery orders join mixed transactions correctly,
-history completeness follows durable evidence across restart/rewind, and
-shared-policy transitions cover every disclosure entry point.
+**Exit gate:** private fixtures emit no unauthorized address, script, outpoint,
+or txid lookup through any inventoried entry point. Test startup, interrupted
+setting writes, cancellation, stale queues/handles, mixed shape flags, and
+missing configuration. Explicit public behavior remains covered by regression
+tests. No real transparent PIR client is needed to pass this gate.
 
-The next stage supplies real filters, manifests, shards, PIR retrieval, and
-publication verification. Production activation additionally requires protocol
-known-answer/malformed-input validation, real-source shadow qualification,
-independent publication verification, a controlled private cohort, and measured
-mobile/network-route behavior.
+## Phase 3 — Recover an isolated candidate ledger
+
+**Wallet-libraries steps**
+
+1. Implement proposed `sqlite/wallet/transparent_ledger.rs` storage and
+   `apply_transparent_ledger_commit` for candidate state. Enumerate owned
+   scripts with account/scope, conservative recovery bounds, and watch-set
+   generations; unknown starts require recovery from genesis.
+2. Persist immutable receive/spend content separately from mined placement and
+   publication observations. Accept idempotent replay, retain spends received
+   before their outputs, and reject contradictory content or canonical spends.
+3. Commit source-bound coverage, negative filter results, pending pages, and
+   candidate address-window progress atomically. Partial pages, missing anchors,
+   unsupported scripts, or unresolved spends cannot certify completeness.
+4. Validate policy/account/watch/chain context on every commit. Handle candidate
+   rewind, account deletion/import, and earlier recovery bounds now; restart
+   must resume durable work, not infer completion from absent rows.
+5. Keep candidate writes isolated from LRZ balances, spend links, locks,
+   production address-use flags, and receive-address selection. Read candidate
+   diagnostics through the library, never by treating the projection as evidence.
+
+**Vizor steps**
+
+1. Add a proposed `rust/src/wallet/sync_engine/transparent_ledger.rs`
+   coordinator and a narrow source boundary returning normalized results.
+   Implement disabled and deterministic fixture sources only. Disabled returns
+   unavailable; fixtures cannot qualify a production account.
+2. Capture a fixed accepted contiguous chain point and operation context,
+   enumerate scripts, call the source under query/byte/page/time bounds, and
+   commit through the library. Repeat on window growth at the same target.
+   Hold no write lock across network/source I/O.
+3. Schedule alongside shielded scanning while keeping separate checkpoints,
+   queues, retries, and completion. In shadow mode retain the public projection
+   and `.receive.redb` cache as before; neither becomes private evidence.
+4. Add local exact-set comparison against fixtures at a common chain point.
+   Expose only development diagnostics at this stage, with candidate amounts
+   explicitly unverified and potentially above or below the real balance.
+
+**Exit gate:** fixture receives/spends, empty ranges, partial pages, cancellation,
+window growth, and restart converge to expected candidate state. Reorg/import
+races reject stale commits. Shadow changes no production balances, selection,
+locks, address allocation, or history.
+
+## Phase 4 — Activate safely and enforce every financial path
+
+Projection, rewind, promotion, and financial gating form one release boundary.
+They may be implemented in smaller changes. Keep successful promotion unavailable
+outside focused tests until those library components pass together; only then
+let Vizor's fixture coordinator exercise activation.
+
+**Wallet-libraries steps**
+
+1. Project candidate events into existing transaction/output/spend structures.
+   Join mixed transactions by txid with pool-specific identities, preserving
+   independent local, shielded, and payload contributions. Keep coinbase
+   classification explicit even without raw bytes or transaction indices.
+2. Implement authoritative commits and projection in one SQLite transaction.
+   Add rollback to every applicable height/chain-state truncation and rescan
+   path using its actual retained height. Invalidate evidence, coverage, work,
+   and derived state without deleting valid independent origins or issued-address
+   history.
+3. Implement guarded per-account promotion: recheck complete watch-set coverage,
+   accepted anchors, stable window expansion, resolved spends/pages, production
+   source qualification, and explained legacy discrepancies. Atomically project,
+   merge local overlays, switch authority, and revoke candidate work. Allow
+   fixture promotion only through test/development paths.
+4. Implement the atomic ledger snapshot, distinguishing authorized, last-known,
+   and recovered-unverified amounts. Historical snapshots and incomplete net
+   amounts cannot authorize a current spend.
+5. Enforce eligibility inside existing individual, address, batched, and
+   value-bounded transparent selectors, plus proposal consumption and hardware
+   finalization. Coverage through accepted `H` supports target `H + 1`;
+   recheck the current chain and retain confirmations, maturity, spend,
+   reservation, and lock rules. No freshness tolerance or alternate selector.
+6. Preserve legitimate same-proposal chained outputs through local evidence.
+   Block incomplete transparent inputs without blocking independently eligible
+   shielded-funded unshielding. Its resulting own transparent outputs must pass
+   transparent eligibility before later spending.
+
+**Vizor steps**
+
+1. Consume the snapshot in balance/summary and operation availability paths,
+   including `rust/src/wallet/wallet_summary_cache.rs`. Show unavailable or
+   last-known amounts accurately; invalidate caches on commits, policy,
+   promotion, rewind, and account lifecycle changes.
+2. Integrate software send/shielding, `rust/src/wallet/sync/send.rs`,
+   `rust/src/wallet/sync/pczt.rs`, and Ledger/Keystone completion paths with
+   the existing library selectors and revalidation rules. Preserve the current
+   signing, outbox, persistence, and broadcast lifecycle; a UI precheck never
+   substitutes for authorization.
+3. Exercise private activation with fixtures: immediately stop public
+   transparent discovery, leave incomplete accounts unavailable, promote ready
+   accounts independently, and handle lag or outage without source fallback.
+   Reuse shadow state only after revalidating its full activation context.
+
+**Exit gate:** commit/promotion/rewind failpoints and WAL restart leave a
+consistent projection and authority. Both discovery orders and payload replay
+preserve mixed effects. All transparent selectors and stale proposals reject
+incomplete coverage; coinbase, locks, local chains, shielded-funded unshielding,
+account isolation, and explicit public behavior have focused regression tests.
+
+## Phase 5 — Integrate complete and partial transaction history
+
+**Wallet-libraries steps**
+
+1. Implement the Phase 1 history read contract using existing transaction/output
+   views where possible. Read effects and completeness consistently, retaining
+   account/scope, local intent, optional metadata, and source provenance.
+2. Tie any stored detail-completion markers to evidence and supported
+   capabilities. Keep missing recipients, per-output memos, fees, and status
+   distinct from missing owned-effect coverage. Empty queues are not proof of
+   complete history.
+3. Invalidate derived classifications/detail state with affected evidence on
+   rewind, promotion, account changes, and later enhancement. Preserve richer
+   independently recorded local-send details when partial discoveries arrive.
+
+**Vizor steps**
+
+1. Update `rust/src/wallet/sync/transactions.rs`: make
+   `HISTORY_BASES_CTE` classification completeness-aware, remove unknown-fee
+   coalescing in `read_history_bases`, and fix `classify_history_tx` so
+   missing external outputs cannot hide a known debit with change.
+2. Carry recovery state and optional fields through flat Rust API/Flutter
+   results. Regenerate bindings with `scripts/generate-rust-bridge.sh` when
+   the API changes; adapt providers and activity/details views together.
+3. Keep transaction identity stable while details arrive. Represent shielding,
+   self-unshielding, mixed payments, and cross-account effects without duplicate
+   accounting. A provisional net debit is not a final recipient amount.
+4. Show known activity with incomplete details instead of invented zero fees
+   or recipients. Preserve local TEX grouping; without sufficient restored
+   grouping evidence, retain the individual transactions. Invalidate history
+   and summary caches when discovery or enhancement changes these results.
+
+**Exit gate:** Rust and Dart fixtures cover preserved local history and seed
+restoration for shielding, self/external unshielding, mixed inputs, and
+cross-account transfers. Test both arrival orders, missing external outputs
+with change, unknown fees/memos, and later enrichment. Known debits remain
+visible, self-transfers are not double-counted, and no history gap triggers
+public enrichment.
+
+## Phase 6 — Qualify migration, restart, and cross-repository behavior
+
+**Wallet-libraries steps**
+
+1. Run the independent block-derived oracle over exact receive/spend, UTXO,
+   balance, coverage, and projected-effect results. Legacy parity alone does
+   not qualify correctness or completeness.
+2. Exercise fresh, long-lived, multi-seed, imported-only, and hardware-first
+   migration fixtures, including pending sends, reservations, and prior rewinds.
+3. Inject commit/promotion/rewind failures, disk-full/storage errors, and restart.
+   Cover same-height and sealed/provisional reorgs, re-mining, account deletion,
+   earlier bounds, and stale generations.
+4. Validate forward repair and the designated privacy-aware rollback release.
+   Preserve local evidence and applied private policy; arbitrary historical
+   binaries are not supported rollback targets.
+
+**Vizor steps**
+
+1. Run the fixture coordinator through the integrated Rust/Flutter interfaces:
+   public-to-shadow, initial private recovery, qualified shadow reuse, per-account
+   promotion, interrupted activation, lag, outage, and restart.
+2. Capture requests across sync, import, preview, startup, fee/payload/status
+   work, and native boundaries. Include setting races, shielded-first mixed
+   discovery, stale queued public work, and server shape flags.
+3. Verify that balances, visible history, operation availability, and caches agree
+   after both discovery orders, payload replay, account changes, and rewinds.
+   Preserve local sends and hardware-flow state throughout.
+4. Record exact library/application revisions, feature configuration, fixture
+   provenance, gate outcomes, and remaining unsupported details. Keep sensitive
+   comparisons local and export only redacted aggregate diagnostics.
+
+**Exit gate:** no unexplained qualifying discrepancies, shadow financial side
+effects, unauthorized public requests, duplicate accounting, or lost local
+history. Restart/repair behavior and the supported rollback release have direct
+evidence. This completes preparation, not remote-service or production-private
+qualification.
+
+## Validation and completion boundary
+
+Run focused backend/SQLite tests with transparent support and applicable
+existing balance, selection, migration, status, and enhancement regressions.
+For each consumer handoff, validate the actual dependency graph and run the
+relevant Vizor Rust and Dart tests. Use FVM for Flutter; run mobile-tagged tests
+with the repository's mobile form-factor define when changing mobile UI.
+Heavy regtest/device runs require a separately scheduled explicit request and
+remain release gates; unit/fixture success does not imply they passed.
+
+Preparation is complete when Phases 1–6 pass against an identified pair of
+library/consumer revisions: deterministic recovery can resume, promote, project,
+authorize or block inputs, reconstruct honest history, and rewind through the
+intended APIs while shared-policy transitions cover all disclosure paths.
+
+The next stage adds real filters, manifests, shards, PIR retrieval, publication
+verification, protocol known-answer/malformed-input tests, real-source shadow
+qualification, a controlled private cohort, and measured mobile/network-route
+behavior. No phase here removes the public source or enables production private
+authority.
 
 Full private reconstruction of external transparent recipients requires an
-additional payload/summary capability, with identity binding, supported-pool
-coverage, and explicit fee evidence as defined by the architecture's
-[capability boundary](transparent-pir-ledger-architecture.md#capability-and-rollout-boundary).
-It is a separate gate from balance recovery. Preparation must support honest
-partial history and block unauthorized fallback; it does not implement that
-protocol or claim complete seed-restored recipient/memo/fee parity.
-
-## Deliberate exclusions
-
-Preparation does not change production source authority, remove the public
-source, replace the whole wallet core, introduce a public-source ledger migration,
-or combine transparent, status, and payload work queues. It does not move
-authoritative state into another database or create a general sync plugin
-framework. It adds no standalone private-runtime project, cryptographic
-completeness proof, or claim that historical Vizor binaries enforce the new
-privacy policy.
+additional payload/summary capability with identity binding, supported-pool
+coverage, and explicit fee evidence. It has its own
+[capability gate](transparent-pir-ledger-architecture.md#capability-and-rollout-boundary).
+This plan requires honest partial history and blocks unauthorized fallback;
+it does not claim full seed-restored recipient/memo/fee parity, cryptographic
+completeness proofs, or support for privacy-unaware rollback binaries.
