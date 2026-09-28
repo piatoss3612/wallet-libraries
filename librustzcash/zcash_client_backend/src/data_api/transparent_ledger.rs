@@ -139,18 +139,20 @@ impl Lineage {
     }
 }
 
-/// Whether a source may qualify accounts for promotion.
+/// The one publication revision of a source that passed production qualification.
 ///
 /// Qualification is store-held metadata established by the store's source-verification path,
-/// never asserted by a commit. A newly seen source, including every deterministic fixture
-/// source, is unqualified; promotion requires every source that contributed an account's
-/// coverage to be qualified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SourceQualification {
-    /// The source may populate candidate state only.
-    Unqualified,
-    /// The source has passed production qualification.
-    Production,
+/// never asserted by a commit, and it binds to this exact revision: verification checks one
+/// publication's digest and anchors. Any other revision of the source, including every later
+/// replacement, is unqualified until verified in turn, and every deterministic fixture source
+/// is unqualified. Promotion requires each revision that contributed an account's coverage to
+/// be the qualified revision of its source.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct QualifiedRevision {
+    /// The verified revision.
+    pub revision: RevisionId,
+    /// Its lineage.
+    pub lineage: Lineage,
 }
 
 /// Whether a publication revision can still be replaced by its publisher.
@@ -536,7 +538,8 @@ pub enum RecoveryBlocker {
     /// accepted-chain evidence. This is not an integrity failure: legacy records are not
     /// authoritative, but the discrepancy must be explained before promotion.
     UnexplainedLegacyDiscrepancy,
-    /// A source contributing the account's coverage is not production-qualified.
+    /// A revision contributing the account's coverage is not its source's production-qualified
+    /// revision.
     UnqualifiedSource,
 }
 
@@ -598,8 +601,9 @@ pub enum RecoveryStart {
 pub struct SourceTrust {
     /// The source.
     pub source: SourceId,
-    /// Whether the source may qualify accounts for promotion.
-    pub qualification: SourceQualification,
+    /// The revision that passed production qualification, if any. Coverage from any other
+    /// revision cannot qualify an account for promotion.
+    pub qualified_revision: Option<QualifiedRevision>,
     /// Whether an integrity failure has quarantined the source.
     pub quarantined: bool,
     /// Advanced by the store whenever the source is quarantined or re-verified. A run captures
