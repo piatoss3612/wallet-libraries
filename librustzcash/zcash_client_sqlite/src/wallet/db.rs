@@ -826,12 +826,15 @@ CREATE TABLE tpir_account_state (
 /// - `quarantined`: set when the source's commit contradicted accepted state.
 /// - `qualification`: 0 unqualified, 1 production-qualified. Set only by source verification,
 ///   never by a commit; promotion requires every contributing source to be qualified.
+/// - `trust_epoch`: advanced whenever the source is quarantined or re-verified; commits citing
+///   an older epoch are rejected as stale.
 pub(super) const TABLE_TPIR_SOURCES: &str = r#"
 CREATE TABLE tpir_sources (
     source_id BLOB PRIMARY KEY,
     accepted_lineage INTEGER NOT NULL,
     quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
-    qualification INTEGER NOT NULL DEFAULT 0 CHECK (qualification IN (0, 1))
+    qualification INTEGER NOT NULL DEFAULT 0 CHECK (qualification IN (0, 1)),
+    trust_epoch INTEGER NOT NULL DEFAULT 0
 )"#;
 /// Scripts watched by transparent ledger recovery.
 ///
