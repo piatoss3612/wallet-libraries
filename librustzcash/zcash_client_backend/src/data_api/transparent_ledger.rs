@@ -353,6 +353,8 @@ pub struct TransparentLedgerContext<AccountId> {
     pub lifecycle: LedgerLifecycle,
     /// The watch-set generation observed for each account in the run.
     pub accounts: Vec<AccountWatchGeneration<AccountId>>,
+    /// The source's trust epoch captured before I/O; a source never seen before has epoch 0.
+    pub source_trust_epoch: u64,
 }
 
 /// One normalized, atomically applied recovery result.
@@ -591,6 +593,21 @@ pub enum RecoveryStart {
     Unknown,
 }
 
+/// Store-held trust state for one recovery source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceTrust {
+    /// The source.
+    pub source: SourceId,
+    /// Whether the source may qualify accounts for promotion.
+    pub qualification: SourceQualification,
+    /// Whether an integrity failure has quarantined the source.
+    pub quarantined: bool,
+    /// Advanced by the store whenever the source is quarantined or re-verified. A run captures
+    /// it before I/O; a commit citing an older epoch is rejected as stale, so work started
+    /// before a quarantine is never accepted after the source is re-verified.
+    pub trust_epoch: u64,
+}
+
 /// An account's transparent ledger lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AccountLifecycle {
@@ -654,6 +671,8 @@ pub struct WatchedScriptSnapshot<AccountId> {
     pub accounts: Vec<WatchedAccount<AccountId>>,
     /// The watched scripts across all listed accounts.
     pub scripts: Vec<WatchedScript<AccountId>>,
+    /// Every source the store has recorded, with the trust epoch a run must capture.
+    pub sources: Vec<SourceTrust>,
 }
 
 /// A durable pending page with everything a restarted coordinator needs to resume it.
