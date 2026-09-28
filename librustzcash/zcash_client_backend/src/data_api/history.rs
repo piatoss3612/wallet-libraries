@@ -92,9 +92,11 @@ pub enum MiningEvidence {
     Unknown,
 }
 
-/// Owned-effect completeness for one pool supported by the wallet.
+/// Owned-effect completeness for one wallet account in one supported pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PoolEffectsCompleteness {
+pub struct PoolEffectsCompleteness<AccountId> {
+    /// The account whose effects are described.
+    pub account: AccountId,
     /// The pool.
     pub pool: PoolType,
     /// Whether the wallet's effects in that pool are fully known.
@@ -105,12 +107,13 @@ pub struct PoolEffectsCompleteness {
 ///
 /// Per-output memo state is reported alongside each output as a [`DetailState`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransactionHistoryCompleteness {
-    /// Owned-effect completeness for every pool the wallet supports, not only the pools with
-    /// known effects. A pool whose effects on this transaction may still be undiscovered is
-    /// `Incomplete`; `Complete` with no known effects is evidence that the pool is untouched.
-    /// A mixed transaction can be complete in one pool and incomplete in another.
-    pub owned_effects: Vec<PoolEffectsCompleteness>,
+pub struct TransactionHistoryCompleteness<AccountId> {
+    /// Owned-effect completeness for every wallet account and every pool the wallet supports,
+    /// not only those with known effects. An account's pool whose effects on this transaction
+    /// may still be undiscovered is `Incomplete`; `Complete` with no known effects is evidence
+    /// that the account has no effects in that pool. A mixed or cross-account transaction can
+    /// be complete for one account or pool and incomplete for another.
+    pub owned_effects: Vec<PoolEffectsCompleteness<AccountId>>,
     /// The basis of the displayed classification.
     pub classification: ClassificationBasis,
     /// Whether all recipients are known.

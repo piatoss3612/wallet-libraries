@@ -117,6 +117,42 @@ opaque_id!(
     PageId
 );
 
+/// A position in a source's publication lineage, strictly increasing with each replacement.
+///
+/// Values are bounded by [`Lineage::MAX`] so that stores can persist and order them as signed
+/// 64-bit integers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Lineage(u64);
+
+impl Lineage {
+    /// The largest representable lineage.
+    pub const MAX: u64 = i64::MAX as u64;
+
+    /// Accepts values up to [`Lineage::MAX`].
+    pub fn new(value: u64) -> Option<Self> {
+        (value <= Self::MAX).then_some(Self(value))
+    }
+
+    /// Returns the lineage value.
+    pub fn value(self) -> u64 {
+        self.0
+    }
+}
+
+/// Whether a source may qualify accounts for promotion.
+///
+/// Qualification is store-held metadata established by the store's source-verification path,
+/// never asserted by a commit. A newly seen source, including every deterministic fixture
+/// source, is unqualified; promotion requires every source that contributed an account's
+/// coverage to be qualified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceQualification {
+    /// The source may populate candidate state only.
+    Unqualified,
+    /// The source has passed production qualification.
+    Production,
+}
+
 /// Whether a publication revision can still be replaced by its publisher.
 ///
 /// Sealed is not chain finality: a reorg invalidates affected sealed coverage too.
@@ -151,7 +187,7 @@ pub struct SourceRevision {
     /// each replacement. Captured with the revision before any retrieval; the store rejects a
     /// commit whose lineage is older than one it has already accepted from the same source,
     /// so a delayed result cannot resurrect replaced coverage.
-    pub lineage: u64,
+    pub lineage: Lineage,
     /// Whether the revision is sealed or provisional.
     pub status: PublicationStatus,
     /// The publication's asserted anchor, retained alongside each accepted endpoint.
@@ -296,6 +332,9 @@ pub struct AccountWatchGeneration<AccountId> {
     pub account: AccountId,
     /// The account's watch-set generation at enumeration time.
     pub watch_generation: u64,
+    /// The account's quarantine epoch at enumeration time. An integrity failure advances it,
+    /// so work captured before the failure is rejected as stale and cannot clear the quarantine.
+    pub quarantine_epoch: u64,
 }
 
 /// The immutable operation context a recovery run captured before any network I/O.
@@ -364,7 +403,8 @@ pub enum CommitRejection {
     /// Unlike other rejections, this durably quarantines the commit's source and the accounts
     /// whose watched scripts it touched, in the same transaction that refuses its facts. Their
     /// transparent authority stays blocked with [`RecoveryBlocker::IntegrityFailure`] across
-    /// restarts until recovery revalidates them.
+    /// restarts. The quarantine advances each affected account's quarantine epoch, so only a
+    /// run captured afterwards can revalidate the account and clear it.
     Integrity,
 }
 
@@ -490,6 +530,12 @@ pub enum RecoveryBlocker {
     IntegrityFailure,
     /// This build cannot read the wallet's transparent state.
     TransparentSupportUnavailable,
+    /// Candidate recovery disagrees with legacy public records in a way not yet explained by
+    /// accepted-chain evidence. This is not an integrity failure: legacy records are not
+    /// authoritative, but the discrepancy must be explained before promotion.
+    UnexplainedLegacyDiscrepancy,
+    /// A source contributing the account's coverage is not production-qualified.
+    UnqualifiedSource,
 }
 
 /// Counts that explain an account's recovery state.
@@ -579,6 +625,9 @@ pub struct WatchedAccount<AccountId> {
     pub lifecycle: AccountLifecycle,
     /// Whether an integrity failure has quarantined the account's recovery.
     pub quarantined: bool,
+    /// The quarantine epoch to place in a commit's context. Only a run captured at the current
+    /// epoch can revalidate a quarantined account and clear the quarantine.
+    pub quarantine_epoch: u64,
 }
 
 /// A script watched by transparent ledger recovery.
@@ -696,6 +745,16 @@ mod tests {
         );
         let page = PageId::new(vec![7; MAX_OPAQUE_ID_LEN]).unwrap();
         assert_eq!(page.as_bytes(), &[7; MAX_OPAQUE_ID_LEN][..]);
+    }
+
+    #[test]
+    fn lineage_is_bounded_for_signed_storage() {
+        assert_eq!(
+            super::Lineage::new(super::Lineage::MAX).unwrap().value(),
+            i64::MAX as u64
+        );
+        assert_eq!(super::Lineage::new(super::Lineage::MAX + 1), None);
+        assert!(super::Lineage::new(1).unwrap() < super::Lineage::new(2).unwrap());
     }
 
     #[test]
