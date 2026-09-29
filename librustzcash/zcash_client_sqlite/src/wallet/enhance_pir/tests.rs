@@ -7,12 +7,12 @@ use zcash_client_backend::data_api::enhance_pir::EnhanceRecord;
 use zcash_client_backend::data_api::enhance_pir::EnhanceRecordParts;
 use zcash_client_backend::data_api::{
     TransactionStatus, WalletRead, WalletWrite,
-    transparent_ledger::TransparentLedgerMode,
     enhance_pir::{EnhancePirRead, EnhancePirWrite, EnhancementMode},
     testing::{
         AddressType, IronwoodFvk, TestBuilder, TestState, orchard::OrchardPoolTester,
         pool::ShieldedPoolTester,
     },
+    transparent_ledger::TransparentLedgerMode,
 };
 use zcash_client_backend::wallet::IronwoodEnhanceCandidate;
 use zcash_primitives::block::BlockHash;
@@ -223,9 +223,9 @@ fn either_transparent_flag_routes_the_entire_transaction_and_is_sticky() {
             EnhancePirStoreResult::AlreadyResolved
         );
         queue_transaction(
-        st.wallet().conn(),
-        Some(TransparentLedgerMode::Public),
-        tx_ref,
+            st.wallet().conn(),
+            Some(TransparentLedgerMode::Public),
+            tx_ref,
             &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
         )
         .unwrap();
@@ -861,7 +861,7 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
         .wallet()
         .conn()
         .query_row(
-            "INSERT INTO transactions (txid, mined_height, observed_height)
+            "INSERT INTO transactions (txid, mined_height, min_observed_height)
          VALUES (:txid, 100001, 100001) RETURNING id_tx",
             named_params![":txid": txid.as_ref()],
             |row| row.get(0).map(crate::TxRef),
@@ -890,10 +890,22 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
         vec![],
     )
     .with_ironwood_enhancement_plan(IronwoodEnhancementPlan::Ineligible);
-    queue_scanned(st.wallet().conn(), Some(TransparentLedgerMode::Public), tx_ref, &scanned).unwrap();
+    queue_scanned(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
+        tx_ref,
+        &scanned,
+    )
+    .unwrap();
     let provisional = scanned
         .with_ironwood_enhancement_plan(IronwoodEnhancementPlan::Eligible { outgoing: vec![] });
-    queue_scanned(st.wallet().conn(), Some(TransparentLedgerMode::Public), tx_ref, &provisional).unwrap();
+    queue_scanned(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
+        tx_ref,
+        &provisional,
+    )
+    .unwrap();
     let route: i64 = st
         .wallet()
         .conn()
@@ -1016,7 +1028,12 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
         EnhancePirStoreResult::NotRecoverable,
     );
     // This incoming-only fixture has no durable spending associations.
-    super::discovery::queue(st.wallet().conn(), Some(TransparentLedgerMode::Public), tx_ref).unwrap();
+    super::discovery::queue(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
+        tx_ref,
+    )
+    .unwrap();
     let suspended = vec![
         EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(
             IronwoodEnhanceDiscoveryFailure {
@@ -1810,9 +1827,9 @@ fn batch_transparent_routing_is_order_independent_and_sticky() {
             .db_mut()
             .set_enhancement_mode(EnhancementMode::PrivateIronwood);
         queue_transaction(
-        st.wallet().conn(),
-        Some(TransparentLedgerMode::Public),
-        tx_ref,
+            st.wallet().conn(),
+            Some(TransparentLedgerMode::Public),
+            tx_ref,
             &IronwoodEnhancementPlan::Eligible {
                 outgoing: [(98, 3), (99, 4)]
                     .map(|(position, index)| {
@@ -2156,7 +2173,7 @@ fn routed(st: &State) -> (Vec<TxId>, Vec<EnhancePirWork>) {
 fn queue_ordinary(st: &State, txid: TxId, route: Option<i64>) {
     let conn = st.wallet().conn();
     conn.execute(
-        "INSERT INTO transactions (txid, expiry_height, observed_height) VALUES (:txid, 0, 1)",
+        "INSERT INTO transactions (txid, expiry_height, min_observed_height) VALUES (:txid, 0, 1)",
         named_params![":txid": txid.as_ref()],
     )
     .unwrap();
@@ -2283,7 +2300,12 @@ fn private_suspensions_are_never_routed_publicly() {
     );
     finish_incoming(&mut st, incoming);
     // This incoming-only fixture has no durable spending associations.
-    super::discovery::queue(st.wallet().conn(), Some(TransparentLedgerMode::Public), tx_ref).unwrap();
+    super::discovery::queue(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
+        tx_ref,
+    )
+    .unwrap();
 
     assert_eq!(
         routed(&st),

@@ -21,8 +21,8 @@ use super::{
     LWD_REQUIRED, PRIVATE_DETAILS_UNSUPPORTED, TxQueryType, outgoing_position_owned_by_other,
     queue_transaction, retire_enhancement_if_complete, route, route_transparent_details,
 };
-use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 use crate::wallet::transparent_ledger;
+use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 
 struct ReconstructedCandidates {
     outgoing: Vec<IronwoodEnhanceCandidate<AccountUuid>>,
@@ -85,7 +85,7 @@ pub(crate) fn queue(
          ON CONFLICT(txid, query_type) DO NOTHING",
         named_params![
             ":tx": tx_ref.0,
-            ":enhancement": TxQueryType::Enhancement.durable_code(conn)?,
+            ":enhancement": TxQueryType::Enhancement.code(),
             ":generation": i64::try_from(expected).map_err(|_| {
                 SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
             })?,

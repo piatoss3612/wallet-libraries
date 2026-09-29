@@ -28,8 +28,8 @@ use zip32::Scope;
 
 use crate::{AccountUuid, error::SqliteClientError};
 
-use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 use super::transparent_ledger;
+use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
 use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 
@@ -99,7 +99,7 @@ fn retire_enhancement_if_complete(
         concat!(
             "DELETE FROM tx_retrieval_queue
          WHERE txid = (SELECT txid FROM transactions WHERE id_tx = :tx)
-           AND query_type IN (:enhancement, :withheld_enhancement)
+           AND query_type = :enhancement
            AND EXISTS (SELECT 1 FROM ironwood_enhance_routing
                        WHERE transaction_id = :tx AND route = ",
             private_protected!(),
@@ -113,7 +113,6 @@ fn retire_enhancement_if_complete(
         named_params![
             ":tx": tx_ref.0,
             ":enhancement": TxQueryType::Enhancement.code(),
-            ":withheld_enhancement": TxQueryType::Enhancement.withheld_code(),
         ],
     )?;
     Ok(())
@@ -285,7 +284,7 @@ fn require_lwd(
          ON CONFLICT(txid, query_type) DO NOTHING",
         named_params![
             ":tx": tx_ref.0,
-            ":enhancement": TxQueryType::Enhancement.durable_code(conn)?,
+            ":enhancement": TxQueryType::Enhancement.code(),
             ":generation": i64::try_from(expected_generation).map_err(|_| {
                 SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
             })?,

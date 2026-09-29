@@ -1222,7 +1222,7 @@ pub(crate) mod tests {
         let tx = conn.transaction().unwrap();
         let tx_ref = tx
             .query_row(
-                "INSERT INTO transactions (txid, observed_height)
+                "INSERT INTO transactions (txid, min_observed_height)
                  VALUES (:txid, 0)
                  RETURNING id_tx",
                 named_params![":txid": [0x7fu8; 32].as_slice()],

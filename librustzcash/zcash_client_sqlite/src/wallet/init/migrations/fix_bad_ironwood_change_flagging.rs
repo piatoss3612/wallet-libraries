@@ -160,12 +160,12 @@ mod tests {
     /// is what `v_received_outputs` joins on, so the two describe one output rather than two.
     fn seed_unflagged_ironwood_note(conn: &Transaction, account_id: i64, key_scope: KeyScope) {
         conn.execute(
-            "INSERT INTO transactions (id_tx, txid, observed_height)
-             VALUES (:id_tx, :txid, :observed_height)",
+            "INSERT INTO transactions (id_tx, txid, min_observed_height)
+             VALUES (:id_tx, :txid, :min_observed_height)",
             named_params! {
                 ":id_tx": TX_ROW_ID,
                 ":txid": &TXID[..],
-                ":observed_height": OBSERVED_HEIGHT,
+                ":min_observed_height": OBSERVED_HEIGHT,
             },
         )
         .unwrap();
@@ -214,12 +214,12 @@ mod tests {
     /// shielding transaction by definition receives nothing transparent.
     fn spend_a_transparent_output(conn: &Transaction, account_id: i64, address_id: i64) {
         conn.execute(
-            "INSERT INTO transactions (id_tx, txid, observed_height)
-             VALUES (:id_tx, :txid, :observed_height)",
+            "INSERT INTO transactions (id_tx, txid, min_observed_height)
+             VALUES (:id_tx, :txid, :min_observed_height)",
             named_params! {
                 ":id_tx": FUNDING_TX_ROW_ID,
                 ":txid": &FUNDING_TXID[..],
-                ":observed_height": OBSERVED_HEIGHT,
+                ":min_observed_height": OBSERVED_HEIGHT,
             },
         )
         .unwrap();
@@ -256,12 +256,12 @@ mod tests {
     /// leaving Orchard can only reappear in Ironwood.
     fn spend_an_orchard_note(conn: &Transaction, account_id: i64) {
         conn.execute(
-            "INSERT INTO transactions (id_tx, txid, observed_height)
-             VALUES (:id_tx, :txid, :observed_height)",
+            "INSERT INTO transactions (id_tx, txid, min_observed_height)
+             VALUES (:id_tx, :txid, :min_observed_height)",
             named_params! {
                 ":id_tx": FUNDING_TX_ROW_ID,
                 ":txid": &FUNDING_TXID[..],
-                ":observed_height": OBSERVED_HEIGHT,
+                ":min_observed_height": OBSERVED_HEIGHT,
             },
         )
         .unwrap();

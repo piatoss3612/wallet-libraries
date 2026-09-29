@@ -44,7 +44,7 @@ pub(super) fn queue(
         WHERE t.id_tx = :tx ON CONFLICT(txid, query_type) DO NOTHING",
         named_params![
             ":tx": tx_ref.0,
-            ":enhancement": TxQueryType::Enhancement.durable_code(conn)?,
+            ":enhancement": TxQueryType::Enhancement.code(),
             ":generation": i64::try_from(expected).map_err(|_| {
                 SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
             })?,

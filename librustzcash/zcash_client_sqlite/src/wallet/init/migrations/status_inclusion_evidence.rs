@@ -85,14 +85,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema, after);
-        // This migration still writes the pre-rename column. The later rename exposes that
-        // widened bound as `observed_height`, which is what the current unexpired predicate
-        // reads. Widening private coverage must not make unknown-expiry local transactions
-        // expire early.
-        conn.execute_batch(
-            "ALTER TABLE transactions RENAME COLUMN min_observed_height TO observed_height;",
-        )
-        .unwrap();
+        // Widening private coverage must not make unknown-expiry local transactions expire early.
         let live: bool = conn
             .query_row(
                 &format!(

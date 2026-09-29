@@ -42,7 +42,7 @@ fn queue_both(st: &State, txid: TxId, height: BlockHeight, raw: Option<&[u8]>) {
     st.wallet()
         .conn()
         .execute(
-            "INSERT INTO transactions (txid, expiry_height, observed_height, raw)
+            "INSERT INTO transactions (txid, expiry_height, min_observed_height, raw)
          VALUES (?1, 0, ?2, ?3)",
             params![txid.as_ref(), u32::from(height), raw],
         )
@@ -738,7 +738,7 @@ fn expiry_dormancy_preserves_obligations_and_reactivates_after_rewind() {
             )
             .unwrap();
         st.wallet().conn().execute(
-            "UPDATE transactions SET target_height = ?1, observed_height = 0 WHERE txid = ?2",
+            "UPDATE transactions SET target_height = ?1, min_observed_height = 0 WHERE txid = ?2",
             params![u32::from(height), legacy.as_ref()],
         ).unwrap();
         st.wallet()

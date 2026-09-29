@@ -20,7 +20,7 @@ use zcash_client_backend::data_api::{
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
 
-use crate::{error::SqliteClientError, wallet::chain_tip_height, AccountUuid};
+use crate::{AccountUuid, error::SqliteClientError, wallet::chain_tip_height};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -56,9 +56,7 @@ pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
 }
 
 /// The highest `tpir_meta.min_reader_version` this build can interpret. A wallet requiring a
-/// newer reader is refused rather than operated on with semantics this build lacks. Raised to
-/// 2 when `PrivateRequired` is applied so Phase 1 readers fail closed instead of dispatching
-/// public follow-on work.
+/// newer reader is refused rather than operated on with semantics this build lacks.
 pub(crate) const TPIR_READER_VERSION: i64 = 2;
 
 /// The policy durably applied to the wallet.
@@ -388,7 +386,7 @@ fn last_known_source(
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
 ) -> Result<LastKnownSource, SqliteClientError> {
-    use super::transparent::{transparent_balance_provenance, BalanceProvenance};
+    use super::transparent::{BalanceProvenance, transparent_balance_provenance};
     Ok(
         match transparent_balance_provenance(conn, account, target_height, confirmations_policy)? {
             BalanceProvenance::LegacyPublic => LastKnownSource::LegacyPublic,

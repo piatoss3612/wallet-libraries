@@ -1682,11 +1682,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);
         }
-        wallet::transaction_status_work(
-            self.conn.borrow(),
-            mode,
-            self.transparent_ledger_mode,
-        )
+        wallet::transaction_status_work(self.conn.borrow(), mode, self.transparent_ledger_mode)
     }
     fn transaction_status_work_for(
         &self,
