@@ -50,6 +50,7 @@ mod standalone_p2sh;
 mod status_inclusion_evidence;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
+mod swap_nullifier_retention;
 mod swap_payment_recovery;
 mod swap_private_recovery;
 mod swap_receive_reservations;
@@ -395,6 +396,7 @@ pub(super) fn all_migrations<
         Box::new(swap_scan_lifecycle::Migration),
         Box::new(swap_receive_reservations::Migration),
         Box::new(swap_receive_verification::Migration),
+        Box::new(swap_nullifier_retention::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -621,7 +623,7 @@ pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     ivk_item_cache::MIGRATION_ID,
     add_transparent_receiver_address_index::MIGRATION_ID,
     add_transparent_value_index::MIGRATION_ID,
-    swap_receive_verification::MIGRATION_ID,
+    swap_nullifier_retention::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(

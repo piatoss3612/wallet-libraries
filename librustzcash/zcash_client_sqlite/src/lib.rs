@@ -2873,8 +2873,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         )
     }
 
-    fn requires_full_nullifier_history(&self) -> Result<bool, Self::Error> {
-        wallet::requires_full_nullifier_history(self.conn.borrow())
+    fn ironwood_nullifier_retention_height(&self) -> Result<Option<BlockHeight>, Self::Error> {
+        wallet::ironwood_nullifier_retention_height(self.conn.borrow())
     }
 
     fn select_receiving_address(

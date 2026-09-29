@@ -13,14 +13,15 @@ mod payments;
 mod private;
 mod recovery;
 mod reservations;
+mod retention;
 mod verification;
-pub use verification::RECEIVE_VERIFICATION_MAX_LAG;
 pub use payments::{PendingPayment, SpendStatus};
 pub use recovery::RecoveredRefund;
 pub use reservations::{
     RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, RECEIVE_UNFUNDED_LIMIT, ReceiveQuote,
     ReceiveReservation,
 };
+pub use verification::RECEIVE_VERIFICATION_MAX_LAG;
 
 use std::borrow::{Borrow, BorrowMut};
 

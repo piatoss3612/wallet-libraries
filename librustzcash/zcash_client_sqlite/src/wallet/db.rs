@@ -1884,7 +1884,8 @@ CREATE TABLE ironwood_receiving_key_scan_ranges (
 )
 ";
 
-pub(super) const TABLE_IRONWOOD_NULLIFIER_SCAN_BLOCKS: &str = "CREATE TABLE ironwood_nullifier_scan_blocks (
+pub(super) const TABLE_IRONWOOD_NULLIFIER_SCAN_BLOCKS: &str =
+    "CREATE TABLE ironwood_nullifier_scan_blocks (
             height INTEGER PRIMARY KEY CHECK (height >= 0 AND height <= 4294967295)
         )";
 
@@ -1901,8 +1902,11 @@ pub(super) const TABLE_IRONWOOD_SWAP_PAYMENT_RECOVERY: &str = "CREATE TABLE iron
         )";
 
 #[cfg(test)]
-pub(super) const TABLE_IRONWOOD_SWAP_PRIVATE_RECOVERY: &str = "CREATE TABLE ironwood_swap_private_recovery (
-            account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
+pub(super) const TABLE_IRONWOOD_SWAP_PRIVATE_RECOVERY: &str =
+    "CREATE TABLE ironwood_swap_private_recovery (
+            account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+            nullifier_retention_height INTEGER NOT NULL DEFAULT 0
+            CHECK(nullifier_retention_height BETWEEN 0 AND 4294967295)
         )";
 #[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_DIRECTORY_CHECKS: &str = "CREATE TABLE ironwood_swap_directory_checks (

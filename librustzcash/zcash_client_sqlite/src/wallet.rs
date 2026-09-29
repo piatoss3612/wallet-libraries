@@ -828,6 +828,10 @@ pub(crate) fn delete_account(
     // Known wallet spends are omitted from the unlinked nullifier map. Deleting
     // their account removes that evidence, so absence needs fresh scan coverage.
     conn.execute("DELETE FROM ironwood_nullifier_scan_blocks", [])?;
+    conn.execute(
+        "UPDATE ironwood_swap_private_recovery SET nullifier_retention_height=0",
+        [],
+    )?;
 
     let mut delete_tx = conn.prepare_cached("DELETE FROM transactions WHERE id_tx = :tx")?;
     for (id, _) in exclusive_transactions {
@@ -4246,6 +4250,11 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // equal to the truncation height + 1. This sets our view of the chain tip back
     // to the retained height.
     trim_scan_queue_to(conn, truncation_height)?;
+    conn.execute(
+        "UPDATE ironwood_swap_private_recovery SET nullifier_retention_height =
+         MIN(nullifier_retention_height, ?1 + 1)",
+        [u32::from(truncation_height)],
+    )?;
     // Coverage must follow canonical blocks even in builds without swap support.
     conn.execute(
         "DELETE FROM ironwood_receiving_key_scan_ranges WHERE range_start > ?1",
@@ -5857,40 +5866,49 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     .map(Some)
 }
 
-/// Late note discovery needs every scanned spend, including ones not yet linked to a note.
-pub(crate) fn requires_full_nullifier_history(
+/// Shared retention uses the oldest unfinished account. A completed account cannot
+/// release another account's spend evidence.
+pub(crate) fn ironwood_nullifier_retention_height(
     conn: &Connection,
-) -> Result<bool, SqliteClientError> {
+) -> Result<Option<BlockHeight>, SqliteClientError> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_swap_private_recovery)",
+        "SELECT MIN(nullifier_retention_height) FROM ironwood_swap_private_recovery",
         [],
-        |row| row.get(0),
+        |row| {
+            row.get::<_, Option<u32>>(0)
+                .map(|h| h.map(BlockHeight::from))
+        },
     )
     .map_err(SqliteClientError::from)
 }
 
-/// Deletes from the nullifier map any entries with a locator referencing a block height
-/// lower than the pruning height.
+/// Prunes unrelated spends while retaining Ironwood evidence needed by recovery.
 pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
-    // The experimental private restore learns old notes after scanning. Keep the
-    // shared locator map until an external complete spend-history source replaces it.
-    if requires_full_nullifier_history(conn)? {
-        return Ok(());
-    }
-    let mut stmt_delete_locators = conn.prepare_cached(
-        "DELETE FROM tx_locator_map
-        WHERE block_height < :block_height",
-    )?;
-
-    stmt_delete_locators.execute(named_params![":block_height": u32::from(block_height)])?;
+    let ironwood_floor = ironwood_nullifier_retention_height(conn)?
+        .map_or(block_height, |floor| floor.min(block_height));
     conn.execute(
-        "DELETE FROM ironwood_nullifier_scan_blocks WHERE height < ?1",
+        "DELETE FROM nullifier_map WHERE block_height < ?1
+         AND (spend_pool != ?2 OR block_height < ?3)",
+        rusqlite::params![
+            u32::from(block_height),
+            encoding::pool_code(PoolType::IRONWOOD),
+            u32::from(ironwood_floor)
+        ],
+    )?;
+    // Locators are shared by pools. Keep one only while some retained nullifier needs it.
+    conn.execute(
+        "DELETE FROM tx_locator_map WHERE block_height < ?1 AND NOT EXISTS (
+            SELECT 1 FROM nullifier_map n WHERE n.block_height=tx_locator_map.block_height
+            AND n.tx_index=tx_locator_map.tx_index)",
         [u32::from(block_height)],
     )?;
-
+    conn.execute(
+        "DELETE FROM ironwood_nullifier_scan_blocks WHERE height < ?1",
+        [u32::from(ironwood_floor)],
+    )?;
     Ok(())
 }
 

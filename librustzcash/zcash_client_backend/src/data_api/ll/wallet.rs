@@ -303,7 +303,7 @@ pub struct PutBlocksRows {
 /// either received in an already-scanned block (so its spend is detected directly against
 /// the wallet's own nullifiers rather than the map) or is received later in this same
 /// ascending batch (so the spend is linked when the receiving transaction is processed).
-/// Stores requiring full nullifier history bypass this optimization.
+/// Late Ironwood discovery can lower that pool's tracking floor independently.
 /// For every out-of-order range — scanning after a gap, recent-first, or chain-tip
 /// pre-scans — the nullifiers of every block are tracked.
 pub fn put_blocks_rows<DbT, SE, TE>(
@@ -343,20 +343,23 @@ where
         });
     }
 
-    // A contiguous scan can still miss notes learned later through private discovery.
-    let nullifier_tracking_floor = if wallet_db
-        .requires_full_nullifier_history()
-        .map_err(PutBlocksError::Storage)?
-    {
-        None
-    } else {
-        nullifier_tracking_floor(
-            wallet_db
-                .block_fully_scanned_height()
-                .map_err(PutBlocksError::Storage)?,
-            from_state.block_height(),
-            blocks.last().map(|block| block.height()),
-        )
+    let nullifier_tracking_floor = nullifier_tracking_floor(
+        wallet_db
+            .block_fully_scanned_height()
+            .map_err(PutBlocksError::Storage)?,
+        from_state.block_height(),
+        blocks.last().map(|block| block.height()),
+    );
+    #[cfg(feature = "orchard")]
+    let ironwood_tracking_floor = match (
+        nullifier_tracking_floor,
+        wallet_db
+            .ironwood_nullifier_retention_height()
+            .map_err(PutBlocksError::Storage)?,
+    ) {
+        (Some(ordinary), Some(recovery)) => Some(ordinary.min(recovery)),
+        (ordinary, None) => ordinary,
+        (None, _) => None,
     };
 
     let mut sapling_commitments = vec![];
@@ -527,8 +530,9 @@ where
             wallet_db
                 .track_block_orchard_nullifiers(block.height(), block.orchard().nullifier_map())
                 .map_err(PutBlocksError::Storage)?;
-
-            #[cfg(feature = "orchard")]
+        }
+        #[cfg(feature = "orchard")]
+        if should_track_nullifiers(ironwood_tracking_floor, block.height()) {
             wallet_db
                 .track_block_ironwood_nullifiers(block.height(), block.ironwood().nullifier_map())
                 .map_err(PutBlocksError::Storage)?;

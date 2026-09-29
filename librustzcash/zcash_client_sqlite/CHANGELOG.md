@@ -11,8 +11,11 @@ workspace.
 ## [Unreleased]
 
 ### Changed
-- Removed the temporary local replay alternative for swap recovery. Restored
-  receiving keys use private discovery with fixed recovery targets.
+- Restored swap keys use private discovery with fixed recovery targets. Temporary
+  Ironwood spend history is released after memo, lookahead and payment recovery
+  completes. Other pools keep ordinary pruning. Missing spend history queues
+  the account's public compact-block recovery interval after note inclusion is
+  verified, without substituting public address discovery for PIR.
 
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`

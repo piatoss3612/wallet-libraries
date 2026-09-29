@@ -29,6 +29,9 @@ workspace.
   retention in `put_blocks` is unchanged.
 
 ### Changed
+- Replace the experimental full-nullifier-history switch with a pool-specific
+  Ironwood retention height. Late discovery no longer disables ordinary Sapling
+  and Orchard insertion limits.
 - `ChangeStrategy::compute_balance` no longer takes `anchor_height` or ZIP 318
   parameters, and `InputSelector::propose_transaction` and
   `InputSelector::propose_shielding` no longer take ZIP 318 parameters.

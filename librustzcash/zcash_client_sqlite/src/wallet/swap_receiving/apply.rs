@@ -70,10 +70,6 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         {
             return Ok(PaymentApplication::AwaitingScan);
         }
-        let spent = self.swap_payment_spend_status(account, key, candidate, through)?;
-        if spent == SpendStatus::Unknown {
-            return Ok(PaymentApplication::AwaitingSpendHistory);
-        }
         let (end, count): (u64, u64) = conn.query_row(
             "SELECT ironwood_commitment_tree_size, ironwood_action_count FROM blocks WHERE height=?1",
             [u32::from(candidate.height)], |r| Ok((r.get(0)?, r.get(1)?)),
@@ -129,6 +125,12 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         recovered
             .verify_position(u64::from(candidate.position), path, root.into())
             .map_err(|_| corrupt("swap note witness does not match accepted chain"))?;
+        let spent = self.swap_payment_spend_status(account, key, candidate, through)?;
+        if spent == SpendStatus::Unknown {
+            // Authenticate inclusion before a directory answer can trigger a replay.
+            self.queue_swap_spend_history(account, through.height)?;
+            return Ok(PaymentApplication::AwaitingSpendHistory);
+        }
         let anchor_size: u64 = conn.query_row(
             "SELECT ironwood_commitment_tree_size FROM blocks WHERE height=?1",
             [u32::from(checkpoint)],

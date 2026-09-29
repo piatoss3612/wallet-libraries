@@ -267,87 +267,127 @@ fn swap_payment_incomplete_history_preserves_queue_and_balance() {
 #[test]
 fn swap_payment_imports_an_already_spent_note_without_crediting_it() {
     use zcash_keys::address::{Address, UnifiedAddress};
-    let (mut st, key, candidate, _, _) = fixture();
-    let account = st.test_account().unwrap().id();
-    let recovered = candidate
-        .encrypted_note
-        .decrypt(
-            &FullViewingKey::from(st.test_account().unwrap().usk().orchard()),
-            key.key_id(),
-        )
-        .unwrap();
-    let to =
-        Address::Unified(UnifiedAddress::from_receivers(Some(key.receiver()), None, None).unwrap());
-    let (height, _) = st.generate_next_block_spending(
-        &IronwoodFvk(key.full_viewing_key().clone()),
-        (*recovered.nullifier(), Zatoshis::const_from_u64(100_000)),
-        to,
-        Zatoshis::const_from_u64(20_000),
-    );
-    st.scan_cached_blocks(height, 1);
-    let through = ChainAnchor {
-        height,
-        hash: st.wallet().get_block_hash(height).unwrap().unwrap().0,
-    };
-    let mut tree =
-        incrementalmerkletree::frontier::CommitmentTree::<MerkleHashOrchard, 32>::empty();
-    let mut witness = None;
-    let mut stmt = st
-        .cache()
-        .0
-        .prepare("SELECT data FROM compactblocks ORDER BY height")
-        .unwrap();
-    for block in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)).unwrap() {
-        let block = CompactBlock::decode(block.unwrap().as_slice()).unwrap();
-        for tx in block.vtx {
-            for action in tx.ironwood_actions {
-                let cmx = MerkleHashOrchard::from_cmx(&action.cmx().unwrap());
-                match &mut witness {
-                    None => {
-                        tree.append(cmx).unwrap();
-                        witness = incrementalmerkletree::witness::IncrementalWitness::from_tree(
-                            tree.clone(),
-                        );
+    for pruned in [false, true] {
+        let (mut st, key, candidate, _, _) = fixture();
+        let account = st.test_account().unwrap().id();
+        let recovered = candidate
+            .encrypted_note
+            .decrypt(
+                &FullViewingKey::from(st.test_account().unwrap().usk().orchard()),
+                key.key_id(),
+            )
+            .unwrap();
+        let to = Address::Unified(
+            UnifiedAddress::from_receivers(Some(key.receiver()), None, None).unwrap(),
+        );
+        let (height, _) = st.generate_next_block_spending(
+            &IronwoodFvk(key.full_viewing_key().clone()),
+            (*recovered.nullifier(), Zatoshis::const_from_u64(100_000)),
+            to,
+            Zatoshis::const_from_u64(20_000),
+        );
+        st.scan_cached_blocks(height, 1);
+        let through = ChainAnchor {
+            height,
+            hash: st.wallet().get_block_hash(height).unwrap().unwrap().0,
+        };
+        let mut tree =
+            incrementalmerkletree::frontier::CommitmentTree::<MerkleHashOrchard, 32>::empty();
+        let mut witness = None;
+        let mut stmt = st
+            .cache()
+            .0
+            .prepare("SELECT data FROM compactblocks ORDER BY height")
+            .unwrap();
+        for block in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)).unwrap() {
+            let block = CompactBlock::decode(block.unwrap().as_slice()).unwrap();
+            for tx in block.vtx {
+                for action in tx.ironwood_actions {
+                    let cmx = MerkleHashOrchard::from_cmx(&action.cmx().unwrap());
+                    match &mut witness {
+                        None => {
+                            tree.append(cmx).unwrap();
+                            witness = incrementalmerkletree::witness::IncrementalWitness::from_tree(
+                                tree.clone(),
+                            );
+                        }
+                        Some(witness) => witness.append(cmx).unwrap(),
                     }
-                    Some(witness) => witness.append(cmx).unwrap(),
                 }
             }
         }
-    }
-    drop(stmt);
-    let proof: MerklePath = witness.unwrap().path().unwrap().into();
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .apply_pending_swap_payment(
-                account,
-                key.key_id(),
-                &candidate,
-                through,
-                Some((through, &proof))
+        drop(stmt);
+        let proof: MerklePath = witness.unwrap().path().unwrap().into();
+        if pruned {
+            st.wallet_mut()
+                .db_mut()
+                .enable_private_swap_recovery(account)
+                .unwrap();
+            st.wallet()
+                .conn()
+                .execute("DELETE FROM nullifier_map", [])
+                .unwrap();
+            st.wallet()
+                .conn()
+                .execute("DELETE FROM ironwood_nullifier_scan_blocks", [])
+                .unwrap();
+            assert_eq!(
+                st.wallet_mut()
+                    .db_mut()
+                    .apply_pending_swap_payment(
+                        account,
+                        key.key_id(),
+                        &candidate,
+                        through,
+                        Some((through, &proof))
+                    )
+                    .unwrap(),
+                PaymentApplication::AwaitingSpendHistory
+            );
+            let reopened = WalletDb::for_path(
+                st.wallet().data_file_path(),
+                *st.network(),
+                test_clock(),
+                test_rng(),
             )
-            .unwrap(),
-        PaymentApplication::Applied
-    );
-    let spent: u64 = st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM ironwood_received_notes n
+            .unwrap();
+            *st.wallet_mut().db_mut() = reopened;
+            st.scan_cached_blocks(candidate.height, 2);
+        }
+
+        assert_eq!(
+            st.wallet_mut()
+                .db_mut()
+                .apply_pending_swap_payment(
+                    account,
+                    key.key_id(),
+                    &candidate,
+                    through,
+                    Some((through, &proof))
+                )
+                .unwrap(),
+            PaymentApplication::Applied
+        );
+        let spent: u64 = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM ironwood_received_notes n
         JOIN ironwood_received_note_spends s ON s.ironwood_received_note_id=n.id WHERE n.nf=?1",
-            [recovered.nullifier().to_bytes()],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(spent, 1);
-    assert!(
-        st.wallet()
-            .db()
-            .get_unspent_ironwood_notes_at_historical_height(account, height)
-            .unwrap()
-            .iter()
-            .all(|n| n.note().nullifier(key.full_viewing_key()) != *recovered.nullifier())
-    );
+                [recovered.nullifier().to_bytes()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spent, 1);
+        assert!(
+            st.wallet()
+                .db()
+                .get_unspent_ironwood_notes_at_historical_height(account, height)
+                .unwrap()
+                .iter()
+                .all(|n| n.note().nullifier(key.full_viewing_key()) != *recovered.nullifier())
+        );
+    }
 }
 
 #[test]
