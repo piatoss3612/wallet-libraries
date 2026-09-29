@@ -43,14 +43,17 @@ workspace.
 - The following now require an explicitly configured transparent ledger mode;
   they never default to public authority:
   - transparent input selection;
-  - storing a transaction that spends wallet transparent outputs, detected from
-    its transparent bundle in every build;
+  - storing any transaction with transparent inputs, in every build;
   - `put_received_transparent_utxo`;
   - the transparent spend-detection and address-history requests of
     `transaction_data_requests`.
-- Under `PrivateRequired`, set on the handle or durably applied:
-  - transparent inputs and transparent-spending stores fail;
-  - public transparent discovery stops;
+- Under `PrivateRequired`, set on the handle or durably applied, public
+  transparent discovery stops.
+- Transparent authority is unavailable under `PrivateRequired`, while the chain
+  tip is unknown, and in builds without `transparent-inputs`. While it is
+  unavailable:
+  - transparent input selection and storing transactions with transparent
+    inputs fail;
   - `get_wallet_summary` omits transparent funds;
   - `get_transparent_balances` fails;
   - `get_received_outputs` reports transparent outputs as not spendable

@@ -186,14 +186,14 @@ pub(crate) fn check_public_discovery(
     }
 }
 
-/// Returns whether the whole-wallet summary and direct transparent balance reads may report
-/// transparent funds as current.
+/// Returns whether balance reads may report transparent funds as current.
 ///
-/// Under a required-private policy, whether configured on the handle or durably applied, no
-/// current transparent authority exists, so the summary omits those funds; the ledger snapshot
-/// reports them as last-known instead. The summary is display-only, so an unconfigured handle
-/// on a wallet without a private policy keeps reporting them.
-pub(crate) fn summary_includes_transparent(
+/// This applies the snapshot's availability rules: no current transparent authority exists
+/// under a required-private policy (configured on the handle or durably applied), before the
+/// chain tip is known, or in a build that cannot read transparent state. The ledger snapshot
+/// then reports the funds as last-known instead. Balance reads are display-only, so an
+/// unconfigured handle on a wallet without a private policy keeps reporting them.
+pub(crate) fn transparent_funds_current(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<bool, SqliteClientError> {
@@ -204,7 +204,10 @@ pub(crate) fn summary_includes_transparent(
             ..
         })
     );
-    Ok(!durable_private && configured != Some(TransparentLedgerMode::PrivateRequired))
+    Ok(cfg!(feature = "transparent-inputs")
+        && !durable_private
+        && configured != Some(TransparentLedgerMode::PrivateRequired)
+        && chain_tip_height(conn)?.is_some())
 }
 
 /// Reads the account's transparent balance. Without transparent support this build cannot
@@ -493,31 +496,10 @@ pub(crate) fn record_local_origins_for_tx(
 #[cfg(all(test, feature = "transparent-inputs"))]
 mod tests;
 
-/// Returns whether `tx` spends any transparent output the wallet has recorded. This reads the
-/// feature-independent schema, so it applies in every build.
-pub(crate) fn spends_wallet_outputs(
-    conn: &rusqlite::Connection,
-    tx: &zcash_primitives::transaction::Transaction,
-) -> Result<bool, SqliteClientError> {
-    let Some(bundle) = tx.transparent_bundle() else {
-        return Ok(false);
-    };
-    let mut stmt = conn.prepare_cached(
-        "SELECT EXISTS (
-             SELECT 1 FROM transparent_received_outputs o
-             JOIN transactions t ON t.id_tx = o.transaction_id
-             WHERE t.txid = :prevout_txid AND o.output_index = :prevout_idx
-         )",
-    )?;
-    for input in &bundle.vin {
-        let prevout = input.prevout();
-        let owned: bool = stmt.query_row(
-            rusqlite::named_params![":prevout_txid": prevout.hash(), ":prevout_idx": prevout.n()],
-            |row| row.get(0),
-        )?;
-        if owned {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+/// Returns whether `tx` consumes transparent inputs. A locally stored transaction with
+/// transparent inputs spends transparent funds, whatever its caller-supplied metadata claims,
+/// so it requires transparent authority. This applies in every build.
+pub(crate) fn has_transparent_inputs(tx: &zcash_primitives::transaction::Transaction) -> bool {
+    tx.transparent_bundle()
+        .is_some_and(|bundle| !bundle.vin.is_empty())
 }

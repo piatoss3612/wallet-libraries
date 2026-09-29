@@ -1387,7 +1387,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         // This will return a runtime error if we call `get_wallet_summary` from two
         // threads at the same time, as transactions cannot nest.
         let tx = self.conn.borrow().unchecked_transaction()?;
-        let include_transparent = wallet::transparent_ledger::summary_includes_transparent(
+        let include_transparent = wallet::transparent_ledger::transparent_funds_current(
             &tx,
             self.transparent_ledger_mode,
         )?;
@@ -1536,7 +1536,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     ) -> Result<TransparentBalances, Self::Error> {
         // Under a required-private policy these legacy public rows are not current balances;
         // report the absence of authority rather than an empty or public result.
-        if !wallet::transparent_ledger::summary_includes_transparent(
+        if !wallet::transparent_ledger::transparent_funds_current(
             self.conn.borrow(),
             self.transparent_ledger_mode,
         )? {
@@ -1619,7 +1619,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         )?;
         // Without current transparent authority, transparent outputs are not spendable however
         // many confirmations they gain.
-        if wallet::transparent_ledger::summary_includes_transparent(
+        if wallet::transparent_ledger::transparent_funds_current(
             self.conn.borrow(),
             self.transparent_ledger_mode,
         )? {
@@ -2683,20 +2683,13 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         transactions: &[SentTransaction<<Self as WalletRead>::AccountId>],
     ) -> Result<(), <Self as WalletRead>::Error> {
-        // Consuming transparent inputs requires transparent authority. Each transaction is
-        // checked as it is staged, so wallet outputs created by earlier transactions in this
-        // batch are recognized; a failure rolls back the whole batch. Wallet-owned inputs are
-        // derived from the transaction itself, not only from the caller-supplied `utxos_spent`,
-        // and this applies in every build: a database may hold transparent outputs recorded by
-        // a build with transparent support.
+        // Consuming transparent inputs requires transparent authority, checked before each
+        // transaction is staged; a failure rolls back the whole batch. Transparent inputs are
+        // read from the transaction itself rather than from caller-supplied metadata, and this
+        // applies in every build: a database may hold transparent outputs recorded by a build
+        // with transparent support.
         for sent_tx in transactions {
-            #[cfg(feature = "transparent-inputs")]
-            let listed_spends = !sent_tx.utxos_spent().is_empty();
-            #[cfg(not(feature = "transparent-inputs"))]
-            let listed_spends = false;
-            if listed_spends
-                || wallet::transparent_ledger::spends_wallet_outputs(self.conn.0, sent_tx.tx())?
-            {
+            if wallet::transparent_ledger::has_transparent_inputs(sent_tx.tx()) {
                 wallet::transparent_ledger::check_transparent_authority(
                     self.conn.0,
                     self.transparent_ledger_mode,

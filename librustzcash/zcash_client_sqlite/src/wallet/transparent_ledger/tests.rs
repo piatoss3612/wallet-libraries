@@ -192,8 +192,8 @@ fn public_and_local_writes_record_their_origins() {
 
     assert_eq!(spend_origins(conn(&st), &funded), vec![LOCAL_CONSTRUCTION]);
     let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
-    // The store derives wallet-owned transparent inputs from the transaction itself.
-    assert!(super::spends_wallet_outputs(conn(&st), &tx).unwrap());
+    // The store detects transparent inputs from the transaction itself.
+    assert!(super::has_transparent_inputs(&tx));
     let vout = &tx.transparent_bundle().unwrap().vout;
     let recipient_script: transparent::address::Script =
         TransparentAddress::PublicKeyHash([7; 20]).script().into();
@@ -944,6 +944,15 @@ mod handles {
         // matching the snapshot.
         assert!(matches!(
             check_transparent_authority(conn(&st), Some(Public)),
+            Err(SqliteClientError::TransparentAuthorityUnavailable)
+        ));
+        // Balance reads apply the same availability rule for any caller-supplied target.
+        assert!(matches!(
+            st.wallet().db().get_transparent_balances(
+                account,
+                TargetHeight::from(zcash_protocol::consensus::BlockHeight::from(1)),
+                ConfirmationsPolicy::MIN,
+            ),
             Err(SqliteClientError::TransparentAuthorityUnavailable)
         ));
     }
