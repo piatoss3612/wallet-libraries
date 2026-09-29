@@ -32,6 +32,10 @@ workspace.
   configured transparent ledger mode retains public authority. The mode is
   resolved before any request, so an unconfigured store fails instead of
   disclosing its transparent receivers.
+- Public UTXO refresh captures the durable transparent-policy generation and
+  revalidates it immediately before each network request. A stricter transition
+  cannot start another account refresh; callers must cancel and join any request
+  already in flight before applying `PrivateRequired`.
 - `validate_and_apply_records` treats `PrivateDetailsUnsupported` as sticky for
   later actions in the same batch without rewriting it as `LwdRequired`.
 

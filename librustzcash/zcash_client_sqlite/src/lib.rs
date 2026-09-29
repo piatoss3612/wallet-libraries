@@ -1595,36 +1595,40 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
-        // Transparent spend-detection and address-history requests are public discovery. The
-        // mode is resolved first, so an unconfigured handle fails even before a chain tip exists.
-        #[cfg(feature = "transparent-inputs")]
-        let public_discovery = wallet::transparent_ledger::public_discovery_permitted(
-            self.conn.borrow(),
-            self.transparent_ledger_mode,
-        )?;
-        if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
-            let iter = std::iter::empty();
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            // Transparent spend-detection and address-history requests are public discovery.
+            // Resolve their authority, chain tip, and rows from one snapshot so a concurrent
+            // private-required transition cannot pair stale public authority with private-era
+            // wallet state.
             #[cfg(feature = "transparent-inputs")]
-            let iter = iter.chain(
-                public_discovery
-                    .then(|| {
-                        wallet::transparent::transaction_data_requests(
-                            self.conn.borrow(),
-                            &self.params,
-                            _chain_tip_height,
-                        )
-                    })
-                    .transpose()?
-                    .into_iter()
-                    .flatten(),
-            );
+            let public_discovery = wallet::transparent_ledger::public_discovery_permitted(
+                conn,
+                self.transparent_ledger_mode,
+            )?;
+            if let Some(_chain_tip_height) = wallet::chain_tip_height(conn)? {
+                let iter = std::iter::empty();
+                #[cfg(feature = "transparent-inputs")]
+                let iter = iter.chain(
+                    public_discovery
+                        .then(|| {
+                            wallet::transparent::transaction_data_requests(
+                                conn,
+                                &self.params,
+                                _chain_tip_height,
+                            )
+                        })
+                        .transpose()?
+                        .into_iter()
+                        .flatten(),
+                );
 
-            Ok(iter.collect())
-        } else {
-            // If the chain tip height is unknown, we're not in a state where it makes sense to process
-            // transaction data requests anyway so we just return the empty vector of requests.
-            Ok(vec![])
-        }
+                Ok(iter.collect())
+            } else {
+                // If the chain tip height is unknown, we're not in a state where it makes sense to process
+                // transaction data requests anyway so we just return the empty vector of requests.
+                Ok(vec![])
+            }
+        })
     }
 
     fn get_received_outputs(

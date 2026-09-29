@@ -385,15 +385,22 @@ fn conflicting_output_content_is_refused() {
 }
 
 mod handles {
-    use std::convert::Infallible;
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
+    use rusqlite::hooks::{AuthAction, Authorization};
     use tempfile::NamedTempFile;
     use transparent::{address::TransparentAddress, bundle::OutPoint};
     use zcash_client_backend::{
         data_api::{
             Account as _, CoinbaseFilter, InputSource as _, TargetValue, WalletRead as _,
             WalletWrite as _,
-            testing::{AddressType, single_output_change_strategy},
+            testing::{AddressType, TestBuilder, single_output_change_strategy},
             transparent_ledger::{
                 LastKnownSource, RecoveryBlocker, RecoveryCompletion, TransparentAuthority,
                 TransparentLedgerMode, TransparentLedgerRead as _, TransparentLedgerWrite as _,
@@ -418,7 +425,10 @@ mod handles {
     use crate::{
         AccountUuid, WalletDb,
         error::SqliteClientError,
-        testing::db::{test_clock, test_rng},
+        testing::{
+            BlockCache,
+            db::{TestDbFactory, test_clock, test_rng},
+        },
         wallet::{
             init::WalletMigrator,
             transparent_ledger::{check_public_discovery, check_transparent_authority},
@@ -826,6 +836,63 @@ mod handles {
             db.transaction_data_requests(),
             Err(SqliteClientError::TransparentLedgerModeNotConfigured)
         ));
+    }
+
+    #[test]
+    fn transaction_data_requests_use_one_policy_snapshot() {
+        let st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::file_backed())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let tip = st.test_account().unwrap().birthday().height();
+        assert_eq!(st.wallet().chain_height().unwrap(), None);
+
+        st.wallet()
+            .conn()
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        let mut writer = WalletDb::for_path(
+            st.wallet().data_file_path(),
+            *st.network(),
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap()
+        .with_transparent_ledger_mode(Public);
+
+        let transition_started = Arc::new(AtomicBool::new(false));
+        let transition_error = Arc::new(Mutex::new(None));
+        let callback_started = Arc::clone(&transition_started);
+        let callback_error = Arc::clone(&transition_error);
+        st.wallet()
+            .conn()
+            .authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "scan_queue",
+                        ..
+                    }
+                ) && !callback_started.swap(true, Ordering::SeqCst)
+                {
+                    let result = writer
+                        .apply_transparent_policy(PrivateRequired)
+                        .and_then(|_| writer.update_chain_tip(tip));
+                    if let Err(error) = result {
+                        *callback_error.lock().unwrap() = Some(error.to_string());
+                    }
+                }
+                Authorization::Allow
+            }));
+
+        let requests = st.wallet().transaction_data_requests().unwrap();
+        assert!(transition_started.load(Ordering::SeqCst));
+        assert_eq!(transition_error.lock().unwrap().take(), None);
+        assert!(
+            requests.is_empty(),
+            "the read must not combine pre-transition public authority with the new chain tip"
+        );
     }
 
     #[test]
