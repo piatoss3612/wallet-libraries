@@ -3,7 +3,8 @@
 //! This is the preparatory surface of the private transparent ledger: explicit handle modes
 //! and an honest balance-and-authority snapshot. Recovery commits, promotion, and their
 //! supporting types are added with the recovery and activation work that implements them;
-//! see `docs/transparent-pir-ledger-architecture.md` and `docs/transparent-pir-baseline.md`.
+//! see `docs/transparent-pir-ledger-architecture.md` and
+//! `docs/transparent-pir-ledger-design-notes.md`.
 
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;
