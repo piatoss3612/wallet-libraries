@@ -252,14 +252,14 @@ pub(crate) fn snapshot(
 
     // No account can hold private ledger state yet, so authority follows the mode alone.
     let mut blockers = vec![];
-    let chain_known = chain_tip_height(conn)?.is_some();
-    let balance = match chain_tip_height(conn)? {
+    let target = chain_tip_height(conn)?.map(|tip| TargetHeight::from(tip + 1));
+    let chain_known = target.is_some();
+    let balance = match target {
         None => {
             blockers.push(RecoveryBlocker::ChainUnknown);
             None
         }
-        Some(tip) => {
-            let target = TargetHeight::from(tip + 1);
+        Some(target) => {
             let balance = transparent_balance(conn, account, target, confirmations_policy)?;
             if balance.is_none() {
                 blockers.push(RecoveryBlocker::TransparentSupportUnavailable);
@@ -293,7 +293,12 @@ pub(crate) fn snapshot(
                     .map(|balance| {
                         Ok::<_, SqliteClientError>(LastKnownBalance {
                             balance,
-                            source: last_known_source(conn, account)?,
+                            source: last_known_source(
+                                conn,
+                                account,
+                                target.expect("a balance implies a known chain tip"),
+                                confirmations_policy,
+                            )?,
                             at: None,
                         })
                     })
@@ -313,35 +318,32 @@ pub(crate) fn snapshot(
     })
 }
 
-/// Classifies the provenance of an account's unspent transparent outputs: legacy public rows
-/// alone, or together with rows recorded only by local construction.
+/// Classifies the provenance of the outputs counted in the account's transparent balance.
+#[cfg(feature = "transparent-inputs")]
 fn last_known_source(
     conn: &rusqlite::Connection,
     account: AccountUuid,
+    target_height: TargetHeight,
+    confirmations_policy: ConfirmationsPolicy,
 ) -> Result<LastKnownSource, SqliteClientError> {
-    let local_only: bool = conn.query_row(
-        "SELECT EXISTS (
-             SELECT 1
-             FROM transparent_received_outputs o
-             JOIN accounts a ON a.id = o.account_id
-             WHERE a.uuid = ?1
-             AND NOT EXISTS (
-                 SELECT 1 FROM transparent_received_output_spends s
-                 WHERE s.transparent_received_output_id = o.id
-             )
-             AND NOT EXISTS (
-                 SELECT 1 FROM tpir_output_origins oo
-                 WHERE oo.output_id = o.id AND oo.origin = 0
-             )
-         )",
-        [account.0],
-        |row| row.get(0),
-    )?;
-    Ok(if local_only {
-        LastKnownSource::LegacyPublicAndLocal
-    } else {
-        LastKnownSource::LegacyPublic
-    })
+    use super::transparent::{BalanceProvenance, transparent_balance_provenance};
+    Ok(
+        match transparent_balance_provenance(conn, account, target_height, confirmations_policy)? {
+            BalanceProvenance::LegacyPublic => LastKnownSource::LegacyPublic,
+            BalanceProvenance::IncludesLocalOnly => LastKnownSource::LegacyPublicAndLocal,
+        },
+    )
+}
+
+/// Without transparent support no balance is read, so no last-known amount is classified.
+#[cfg(not(feature = "transparent-inputs"))]
+fn last_known_source(
+    _: &rusqlite::Connection,
+    _: AccountUuid,
+    _: TargetHeight,
+    _: ConfirmationsPolicy,
+) -> Result<LastKnownSource, SqliteClientError> {
+    Ok(LastKnownSource::LegacyPublic)
 }
 
 /// Durably applies `mode` for test fixtures. Production policy transitions are not yet

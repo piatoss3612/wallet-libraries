@@ -687,6 +687,42 @@ mod handles {
             snapshot.last_known.unwrap().source,
             LastKnownSource::LegacyPublicAndLocal
         );
+
+        // A spend by an expired transaction does not remove the local output from the balance,
+        // so it still counts toward provenance.
+        conn(&st)
+            .execute_batch(
+                "INSERT INTO transactions (id_tx, txid, expiry_height, min_observed_height)
+                 VALUES (9999, X'77', 1, 1);
+                 INSERT INTO transparent_received_output_spends
+                     (transparent_received_output_id, transaction_id)
+                 SELECT o.id, 9999 FROM transparent_received_outputs o
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM tpir_output_origins oo
+                     WHERE oo.output_id = o.id AND oo.origin = 0
+                 );",
+            )
+            .unwrap();
+        let snapshot = st
+            .wallet()
+            .db()
+            .transparent_ledger_snapshot(account.id(), ConfirmationsPolicy::MIN)
+            .unwrap();
+        assert_eq!(
+            snapshot.last_known.unwrap().source,
+            LastKnownSource::LegacyPublicAndLocal
+        );
+
+        // Missing provenance is corruption, never evidence of local construction.
+        conn(&st)
+            .execute_batch("DELETE FROM tpir_output_origins")
+            .unwrap();
+        assert!(matches!(
+            st.wallet()
+                .db()
+                .transparent_ledger_snapshot(account.id(), ConfirmationsPolicy::MIN),
+            Err(SqliteClientError::CorruptedData(_))
+        ));
     }
 
     #[test]
