@@ -160,7 +160,6 @@ pub(crate) fn resolve_mode(
 /// Public authority is retained only by explicitly configured `Public` and `PrivateShadow`
 /// handles; financial authorization never defaults to public. Private authority is not yet
 /// available, so `PrivateRequired` handles are rejected.
-#[cfg(feature = "transparent-inputs")]
 pub(crate) fn check_transparent_authority(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
@@ -307,11 +306,15 @@ pub(crate) fn snapshot(
             (
                 TransparentAuthority::Unavailable,
                 None,
-                balance.map(|balance| LastKnownBalance {
-                    balance,
-                    source: LastKnownSource::LegacyPublic,
-                    at: None,
-                }),
+                balance
+                    .map(|balance| {
+                        Ok::<_, SqliteClientError>(LastKnownBalance {
+                            balance,
+                            source: last_known_source(conn, account)?,
+                            at: None,
+                        })
+                    })
+                    .transpose()?,
                 RecoveryCompletion::Blocked,
             )
         };
@@ -525,6 +528,37 @@ pub(crate) fn pending_pages(
     Ok(pages)
 }
 
+/// Classifies the provenance of an account's unspent transparent outputs: legacy public rows
+/// alone, or together with rows recorded only by local construction.
+fn last_known_source(
+    conn: &rusqlite::Connection,
+    account: AccountUuid,
+) -> Result<LastKnownSource, SqliteClientError> {
+    let local_only: bool = conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM transparent_received_outputs o
+             JOIN accounts a ON a.id = o.account_id
+             WHERE a.uuid = ?1
+             AND NOT EXISTS (
+                 SELECT 1 FROM transparent_received_output_spends s
+                 WHERE s.transparent_received_output_id = o.id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM tpir_output_origins oo
+                 WHERE oo.output_id = o.id AND oo.origin = 0
+             )
+         )",
+        [account.0],
+        |row| row.get(0),
+    )?;
+    Ok(if local_only {
+        LastKnownSource::LegacyPublicAndLocal
+    } else {
+        LastKnownSource::LegacyPublic
+    })
+}
+
 /// Validates a commit's context and rejects it: no ledger state is writable yet. Nothing is
 /// written.
 pub(crate) fn apply_commit(
@@ -695,8 +729,8 @@ pub(crate) fn record_local_origins_for_tx(
 #[cfg(all(test, feature = "transparent-inputs"))]
 mod tests;
 
-/// Returns whether `tx` spends any transparent output the wallet has recorded.
-#[cfg(feature = "transparent-inputs")]
+/// Returns whether `tx` spends any transparent output the wallet has recorded. This reads the
+/// feature-independent schema, so it applies in every build.
 pub(crate) fn spends_wallet_outputs(
     conn: &rusqlite::Connection,
     tx: &zcash_primitives::transaction::Transaction,
@@ -714,7 +748,7 @@ pub(crate) fn spends_wallet_outputs(
     for input in &bundle.vin {
         let prevout = input.prevout();
         let owned: bool = stmt.query_row(
-            named_params![":prevout_txid": prevout.hash(), ":prevout_idx": prevout.n()],
+            rusqlite::named_params![":prevout_txid": prevout.hash(), ":prevout_idx": prevout.n()],
             |row| row.get(0),
         )?;
         if owned {

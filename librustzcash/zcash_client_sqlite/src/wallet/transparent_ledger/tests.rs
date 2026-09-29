@@ -770,6 +770,38 @@ mod handles {
             &proposal,
         )
         .unwrap();
+
+        // The new own transparent output was recorded by local construction after private
+        // authority applied, so the last-known amount is not purely legacy public.
+        let snapshot = st
+            .wallet()
+            .db()
+            .transparent_ledger_snapshot(account.id(), ConfirmationsPolicy::MIN)
+            .unwrap();
+        assert_eq!(
+            snapshot.last_known.unwrap().source,
+            LastKnownSource::LegacyPublicAndLocal
+        );
+    }
+
+    #[test]
+    fn received_transparent_outputs_are_unspendable_without_authority() {
+        let (mut st, _, funded) = funded_wallet();
+        let txid = zcash_primitives::transaction::TxId::from_bytes(*funded.hash());
+        let target = TargetHeight::from(st.wallet().chain_height().unwrap().unwrap() + 1);
+        let transparent_confirmations = |st: &State| {
+            st.wallet()
+                .db()
+                .get_received_outputs(txid, target, ConfirmationsPolicy::MIN)
+                .unwrap()
+                .into_iter()
+                .find(|o| o.pool_type() == zcash_protocol::PoolType::Transparent)
+                .unwrap()
+                .confirmations_until_spendable()
+        };
+        assert!(transparent_confirmations(&st) < u32::MAX);
+        set_mode(&mut st, PrivateRequired);
+        assert_eq!(transparent_confirmations(&st), u32::MAX);
     }
 
     #[test]

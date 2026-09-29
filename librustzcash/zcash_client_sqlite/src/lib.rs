@@ -1613,12 +1613,36 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Vec<ReceivedTransactionOutput>, Self::Error> {
-        wallet::get_received_outputs(
+        let outputs = wallet::get_received_outputs(
             self.conn.borrow(),
             txid,
             target_height,
             confirmations_policy,
-        )
+        )?;
+        // Without current transparent authority, transparent outputs are not spendable however
+        // many confirmations they gain.
+        if wallet::transparent_ledger::summary_includes_transparent(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )? {
+            Ok(outputs)
+        } else {
+            Ok(outputs
+                .into_iter()
+                .map(|output| {
+                    if output.pool_type() == PoolType::Transparent {
+                        ReceivedTransactionOutput::from_parts(
+                            output.pool_type(),
+                            output.output_index(),
+                            output.value(),
+                            u32::MAX,
+                        )
+                    } else {
+                        output
+                    }
+                })
+                .collect())
+        }
     }
 }
 
@@ -2726,14 +2750,18 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         // Consuming transparent inputs requires transparent authority; check before any write.
         // Wallet-owned inputs are derived from each transaction itself, not only from the
         // caller-supplied `utxos_spent`, which could omit them.
-        #[cfg(feature = "transparent-inputs")]
-        if transactions.iter().try_fold(false, |found, tx| {
-            Ok::<_, SqliteClientError>(
-                found
-                    || !tx.utxos_spent().is_empty()
-                    || wallet::transparent_ledger::spends_wallet_outputs(self.conn.0, tx.tx())?,
-            )
-        })? {
+        // This applies in every build: a database may hold transparent outputs recorded by a
+        // build with transparent support.
+        let mut spends_transparent = false;
+        for tx in transactions {
+            #[cfg(feature = "transparent-inputs")]
+            {
+                spends_transparent |= !tx.utxos_spent().is_empty();
+            }
+            spends_transparent = spends_transparent
+                || wallet::transparent_ledger::spends_wallet_outputs(self.conn.0, tx.tx())?;
+        }
+        if spends_transparent {
             wallet::transparent_ledger::check_transparent_authority(
                 self.conn.0,
                 self.transparent_ledger_mode,
