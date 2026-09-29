@@ -42,6 +42,11 @@ impl<AccountId> SwapScanningKey<AccountId> {
         self.key_id
     }
 
+    /// The derived viewing key, retaining this key's account and sequence identity.
+    pub fn full_viewing_key(&self) -> &FullViewingKey {
+        &self.fvk
+    }
+
     /// Derives the receiving FVK from the owning account's ordinary external FVK.
     pub fn derive(
         account: AccountId,

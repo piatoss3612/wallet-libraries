@@ -70,6 +70,25 @@ impl EncryptedNote {
         &self.0
     }
 
+    /// Public commitment bytes used to request the matching common witness.
+    pub fn commitment(&self) -> [u8; 32] {
+        self.0[32..64].try_into().unwrap()
+    }
+
+    /// Compare rediscovered compact data without discarding a saved ciphertext suffix.
+    pub fn matches_compact(
+        &self,
+        nullifier: [u8; 32],
+        commitment: [u8; 32],
+        ephemeral_key: [u8; 32],
+        prefix: [u8; 52],
+    ) -> bool {
+        self.0[..32] == nullifier
+            && self.0[32..64] == commitment
+            && self.0[64..96] == ephemeral_key
+            && self.0[96..148] == prefix
+    }
+
     /// Derives the expected key and authenticates the full note, including its memo.
     /// This deliberately does not use the public zero OVK to establish ownership.
     pub fn decrypt(

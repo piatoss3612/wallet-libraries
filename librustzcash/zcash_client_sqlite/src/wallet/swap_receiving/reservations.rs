@@ -39,7 +39,11 @@ pub struct ReceiveQuote {
     pub deposit_memo: Option<String>,
 }
 
-pub(super) fn reservation_key(conn: &Connection, account: AccountUuid, id: i64) -> Result<i64, Error> {
+pub(super) fn reservation_key(
+    conn: &Connection,
+    account: AccountUuid,
+    id: i64,
+) -> Result<i64, Error> {
     conn.query_row("SELECT r.receiving_key_id FROM ironwood_swap_receive_reservations r
         JOIN ironwood_receiving_keys k ON k.id=r.receiving_key_id JOIN accounts a ON a.id=k.account_id
         WHERE a.uuid=?1 AND r.id=?2", params![account.0,id], |r| r.get(0)).map_err(Into::into)
@@ -54,9 +58,19 @@ fn used(conn: &Connection, key: i64) -> Result<bool, Error> {
 }
 
 // New payment evidence invalidates absence claims independently of closeout.
-pub(super) fn request_recheck(conn: &Connection, key: i64, anchor: ChainAnchor) -> Result<(), Error> {
-    conn.execute("DELETE FROM ironwood_swap_receive_checks WHERE receiving_key_id=?1",[key])?;
-    conn.execute("DELETE FROM ironwood_swap_directory_checks WHERE receiving_key_id=?1",[key])?;
+pub(super) fn request_recheck(
+    conn: &Connection,
+    key: i64,
+    anchor: ChainAnchor,
+) -> Result<(), Error> {
+    conn.execute(
+        "DELETE FROM ironwood_swap_receive_checks WHERE receiving_key_id=?1",
+        [key],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_swap_directory_checks WHERE receiving_key_id=?1",
+        [key],
+    )?;
     conn.execute("INSERT INTO ironwood_swap_recovery_targets(receiving_key_id,height,block_hash) VALUES (?1,?2,?3)
         ON CONFLICT(receiving_key_id) DO UPDATE SET height=excluded.height,block_hash=excluded.block_hash",params![key,u32::from(anchor.height),anchor.hash])?;
     Ok(())
@@ -186,18 +200,11 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         account: AccountUuid,
         id: i64,
     ) -> Result<ReceiveReservation, Error> {
-        let key = reservation_key(self.conn.borrow(), account, id)?;
-        let index: Vec<u8> = self.conn.borrow().query_row(
-            "SELECT key_index FROM ironwood_receiving_keys WHERE id=?1",
-            [key],
-            |r| r.get(0),
-        )?;
-        let key_id = KeyId::new(Purpose::Receive, decode_index(index)?);
-        let key = self
-            .get_swap_receiving_keys(account)?
-            .into_iter()
-            .find(|k| k.key_id() == key_id)
-            .ok_or_else(|| corrupt("missing reserved receive key"))?;
+        let key = self.swap_receiving_key_matching(
+            account,
+            "k.id=(SELECT receiving_key_id FROM ironwood_swap_receive_reservations WHERE id=?2)",
+            params![account.0, id],
+        )?.ok_or_else(|| corrupt("missing reserved receive key"))?;
         Ok(ReceiveReservation { id, key })
     }
 
@@ -248,9 +255,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             return Err(corrupt("expected receive key"));
         }
         self.transactionally(|db| {
-            let id=key_ref(db.conn.0,account,key)?;
-            if wallet::get_block_hash(db.conn.0,anchor.height)?!=Some(BlockHash(anchor.hash)) {return Err(corrupt("receive check anchor changed"));}
-            request_recheck(db.conn.0,id,anchor)?;
+            let id = key_ref(db.conn.0, account, key)?;
+            if wallet::get_block_hash(db.conn.0, anchor.height)? != Some(BlockHash(anchor.hash)) {
+                return Err(corrupt("receive check anchor changed"));
+            }
+            request_recheck(db.conn.0, id, anchor)?;
             Ok(())
         })
     }
@@ -275,14 +284,14 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 JOIN ironwood_receiving_keys k ON k.id=r.receiving_key_id WHERE k.account_id=?1
                 AND r.closed_at IS NULL AND r.started=0 ORDER BY r.id LIMIT 1",[a.0],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             if let Some((id,index))=draft {
-                if decode_index(index)? >= end {return Err(Error::ReservationPolicy("SWAP_RECEIVE_GAP: Incoming address recovery window is waiting for canonical payments."));}
+                if decode_index(index)? >= end {return Err(Error::ReservationPolicy(super::ReservationPolicy::Gap));}
                 return Ok::<_,Error>(id);
             }
             let unfunded:u32=db.conn.0.query_row("SELECT COUNT(*) FROM ironwood_swap_receive_reservations r
                 JOIN ironwood_receiving_keys k ON k.id=r.receiving_key_id WHERE k.account_id=?1 AND r.closed_at IS NULL
                 AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_used u WHERE u.receiving_key_id=k.id)
                 AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q WHERE q.reservation_id=r.id AND q.funded=1)", [a.0],|r|r.get(0))?;
-            if unfunded>=RECEIVE_UNFUNDED_LIMIT {return Err(Error::ReservationPolicy("SWAP_RECEIVE_LIMIT: Three incoming swaps are awaiting deposits. Resume an existing swap or wait for abandoned swaps to be checked."));}
+            if unfunded>=RECEIVE_UNFUNDED_LIMIT {return Err(Error::ReservationPolicy(super::ReservationPolicy::Limit));}
             for index in 0..end {
                 let blocked:bool=db.conn.0.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k WHERE k.account_id=?1 AND k.purpose=1 AND k.key_index=?2 AND (
                     EXISTS(SELECT 1 FROM ironwood_swap_receive_used u WHERE u.receiving_key_id=k.id)
@@ -294,7 +303,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 db.conn.0.execute("INSERT INTO ironwood_swap_receive_reservations(receiving_key_id,created_at) VALUES (?1,?2)",params![key_id,now])?;
                 return Ok(db.conn.0.last_insert_rowid());
             }
-            Err(Error::ReservationPolicy("SWAP_RECEIVE_GAP: Incoming address recovery window is full. Wait for a payment or abandoned-address reconciliation."))
+            Err(Error::ReservationPolicy(super::ReservationPolicy::Gap))
         })?;
         self.swap_receive_reservation(account, id)
     }
@@ -314,18 +323,18 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         self.transactionally(|db| {
             let key=reservation_key(db.conn.0,account,reservation)?;
             let open:bool=db.conn.0.query_row("SELECT closed_at IS NULL AND started=0 FROM ironwood_swap_receive_reservations WHERE id=?1",[reservation],|r|r.get(0))?;
-            if !open || used(db.conn.0,key)? {return Err(Error::ReservationPolicy("SWAP_RECEIVE_STALE: This receive reservation is no longer available. Request a new quote."));}
+            if !open || used(db.conn.0,key)? {return Err(Error::ReservationPolicy(super::ReservationPolicy::Stale));}
             let (owner,index):(i64,Vec<u8>)=db.conn.0.query_row("SELECT account_id,key_index FROM ironwood_receiving_keys WHERE id=?1",[key],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            if decode_index(index)? >= recovery_end(db.conn.0,owner)? {return Err(Error::ReservationPolicy("SWAP_RECEIVE_GAP: Incoming address recovery window is waiting for canonical payments."));}
+            if decode_index(index)? >= recovery_end(db.conn.0,owner)? {return Err(Error::ReservationPolicy(super::ReservationPolicy::Gap));}
             if super::verification::verified(db.conn.0,&db.params,key)?.is_none() {
-                return Err(Error::ReservationPolicy("SWAP_RECEIVE_COVERAGE: Receive-address verification changed. Refresh the quote."));
+                return Err(Error::ReservationPolicy(super::ReservationPolicy::Coverage));
             }
             db.conn.0.execute("INSERT INTO ironwood_swap_receive_quotes(request_id,reservation_id,requested_at) VALUES (?1,?2,?3)",params![request,reservation,now])?;
             let tip=wallet::chain_tip_height(db.conn.0)?.ok_or_else(||corrupt("missing chain tip"))?;
             let from=wallet::block_fully_scanned(db.conn.0,&db.params)?.ok_or_else(||corrupt("missing scan frontier"))?.block_height()+1;
-            db.conn.0.execute("INSERT INTO ironwood_swap_scan_uses(receiving_key_id,operation_id,scan_from) VALUES (?1,?2,?3)",params![key,format!("receive-quote:{request}"),u32::from(from.min(tip))])?;
+            db.conn.0.execute("INSERT INTO ironwood_swap_scan_uses(receiving_key_id,operation_id,scan_from,local,observed_at) VALUES (?1,?2,?3,1,?4)",params![key,format!("receive-quote:{request}"),u32::from(from.min(tip)),now])?;
             db.conn.0.execute("DELETE FROM ironwood_swap_recovery_targets WHERE receiving_key_id=?1",[key])?;
-            db.conn.0.execute("DELETE FROM ironwood_swap_directory_checks WHERE receiving_key_id=?1",[key])?;
+            db.conn.0.execute("UPDATE ironwood_swap_discovery SET closed=0,next_attempt_at=0,completed_at=NULL WHERE receiving_key_id=?1",[key])?;
             Ok(())
         })
     }
@@ -378,7 +387,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             let changed=db.conn.0.execute("UPDATE ironwood_swap_receive_reservations SET started=1 WHERE closed_at IS NULL
                 AND receiving_key_id IN (SELECT id FROM ironwood_receiving_keys WHERE account_id=?1)
                 AND id IN (SELECT reservation_id FROM ironwood_swap_receive_quotes WHERE operation_id=?2 AND rejected=0)",params![a.0,operation])?;
-            if changed==0 {return Err(Error::ReservationPolicy("SWAP_RECEIVE_STALE: This receive reservation expired. Request a new quote."));} Ok(())
+            if changed==0 {return Err(Error::ReservationPolicy(super::ReservationPolicy::Stale));} Ok(())
         })
     }
 
@@ -398,15 +407,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             let changed=db.conn.0.execute("UPDATE ironwood_swap_receive_quotes SET status=?2,funded=MAX(funded,?3),checked_at=?4
                 WHERE request_id=?1 AND operation_id IS NOT NULL AND (checked_at IS NULL OR checked_at<=?4)",params![request,status,funded,checked_at])?;
             if changed==0 {return Ok(());}
-            let terminal=match status {"SUCCESS"|"REFUNDED"|"FAILED"=>true,"PENDING_DEPOSIT"|"KNOWN_DEPOSIT_TX"|"PROCESSING"|"INCOMPLETE_DEPOSIT"=>false,_=>return Ok(())};
-            let operation=format!("receive-quote:{request}");
-            let saved:Option<Option<u32>>=db.conn.0.query_row("SELECT scan_through FROM ironwood_swap_scan_uses WHERE receiving_key_id=?1 AND operation_id=?2",params![key,operation],|r|r.get(0)).optional()?;
-            if saved.is_some_and(|end|end.is_some()==terminal) {return Ok(());}
-            let tip=wallet::chain_tip_height(db.conn.0)?.ok_or_else(||corrupt("missing chain tip"))?;
-            let end=if terminal {Some(u32::from(CompletionPolicy::default().scan_through(tip).map_err(|e|corrupt(&e.to_string()))?))}else{None};
-            db.conn.0.execute("UPDATE ironwood_swap_scan_uses SET scan_through=?3 WHERE receiving_key_id=?1 AND operation_id=?2",params![key,operation,end])?;
-            db.conn.0.execute("DELETE FROM ironwood_swap_recovery_targets WHERE receiving_key_id=?1",[key])?;
-            db.conn.0.execute("DELETE FROM ironwood_swap_directory_checks WHERE receiving_key_id=?1",[key])?;
+            if let Some(status)=zakura_swap_receiving::lifecycle::near_status(super::Purpose::Receive,status) {
+                super::lifecycle::record_observation(db.conn.0,key,&format!("receive-quote:{request}"),status,checked_at,true)?;
+            }
             Ok(())
         })
     }
@@ -426,7 +429,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             if !reusable(db.conn.0,id,now)? {return Ok(false);}
             let tip=wallet::chain_tip_height(db.conn.0)?.ok_or_else(||corrupt("missing chain tip"))?;
             if anchor.height<tip || wallet::get_block_hash(db.conn.0,anchor.height)?!=Some(BlockHash(anchor.hash)) {
-                return Err(Error::ReservationPolicy("SWAP_RECEIVE_COVERAGE: Receive-address verification is waiting for PIR coverage."));
+                return Err(Error::ReservationPolicy(super::ReservationPolicy::Coverage));
             }
             let checked=super::verification::verified(db.conn.0,&db.params,key)?==Some(anchor);
             let pending:bool=db.conn.0.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery WHERE receiving_key_id=?1)",[key],|r|r.get(0))?;

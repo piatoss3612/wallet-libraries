@@ -9,13 +9,8 @@ fn check_keys<CL, R>(
     through: ChainAnchor,
 ) {
     for key in db.get_swap_receiving_keys(account).unwrap() {
-        if let Some(target) = db
-            .prepare_swap_recovery_target(account, key.key_id(), through)
-            .unwrap()
-        {
-            db.mark_swap_directory_checked(account, key.key_id(), target)
-                .unwrap();
-        }
+        db.finish_swap_discovery_attempt(account, key.key_id(), through, 1_000_000)
+            .unwrap();
     }
 }
 
@@ -429,5 +424,106 @@ fn completion_does_not_enable_discovery_for_an_unregistered_account() {
     assert_eq!(
         crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap(),
         None
+    );
+}
+
+#[test]
+fn covered_history_releases_while_provider_outcome_is_pending() {
+    let (mut st, key, candidate, through, path) = fixture();
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.enable_private_swap_recovery(account).unwrap();
+    db.record_swap_observation(
+        account,
+        key.key_id(),
+        "restored",
+        zakura_swap_receiving::lifecycle::OperationStatus::Active,
+        1000,
+        false,
+    )
+    .unwrap();
+    db.apply_pending_swap_payment(
+        account,
+        key.key_id(),
+        &candidate,
+        through,
+        Some((through, &path)),
+    )
+    .unwrap();
+    assert!(
+        !db.finish_swap_nullifier_recovery(account, through, 1)
+            .unwrap()
+    );
+    // Close the new lookahead and record processed coverage for the unresolved swap.
+    for k in db.get_swap_receiving_keys(account).unwrap() {
+        db.finish_swap_discovery_attempt(account, k.key_id(), through, 1000)
+            .unwrap();
+    }
+    assert!(
+        db.finish_swap_nullifier_recovery(account, through, 1)
+            .unwrap()
+    );
+}
+
+#[test]
+fn repeated_missing_history_does_not_restart_the_public_replay() {
+    let (mut st, _, _, through, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.transactionally::<_, _, Error>(|tx| tx.queue_swap_spend_history(account, through.height))
+        .unwrap();
+    db.conn.borrow().execute_batch("CREATE TEMP TABLE replay_queue_writes(n INTEGER); INSERT INTO replay_queue_writes VALUES(0);
+        CREATE TEMP TRIGGER replay_insert AFTER INSERT ON scan_queue BEGIN UPDATE replay_queue_writes SET n=n+1; END;
+        CREATE TEMP TRIGGER replay_delete AFTER DELETE ON scan_queue BEGIN UPDATE replay_queue_writes SET n=n+1; END;
+        CREATE TEMP TRIGGER replay_update AFTER UPDATE ON scan_queue BEGIN UPDATE replay_queue_writes SET n=n+1; END;").unwrap();
+    db.transactionally::<_, _, Error>(|tx| tx.queue_swap_spend_history(account, through.height))
+        .unwrap();
+    assert_eq!(
+        db.conn
+            .borrow()
+            .query_row("SELECT n FROM replay_queue_writes", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn note_before_public_restore_bound_is_blocked_without_queuing_replay() {
+    let (mut st, key, candidate, through, path) = fixture();
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    let (owner, _) = account_key(db.conn.borrow(), &db.params, account).unwrap();
+    db.conn
+        .borrow()
+        .execute(
+            "UPDATE accounts SET birthday_height=?2 WHERE id=?1",
+            rusqlite::params![owner.0, u32::from(candidate.height) + 1],
+        )
+        .unwrap();
+    assert_eq!(
+        db.apply_pending_swap_payment(
+            account,
+            key.key_id(),
+            &candidate,
+            through,
+            Some((through, &path))
+        )
+        .unwrap(),
+        PaymentApplication::OutsideRecoveryRange
+    );
+    assert_eq!(
+        db.pending_swap_payments(account, key.key_id())
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        db.conn
+            .borrow()
+            .query_row("SELECT COUNT(*) FROM ironwood_swap_spend_replay", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        0
     );
 }

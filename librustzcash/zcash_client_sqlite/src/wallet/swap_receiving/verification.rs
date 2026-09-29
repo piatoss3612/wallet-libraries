@@ -21,9 +21,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 pub const RECEIVE_VERIFICATION_MAX_LAG: u32 = 5;
 
 fn coverage_error() -> Error {
-    Error::ReservationPolicy(
-        "SWAP_RECEIVE_COVERAGE: Receive-address verification is waiting for complete coverage. Try again shortly.",
-    )
+    Error::ReservationPolicy(super::ReservationPolicy::Coverage)
 }
 
 fn target<P: Parameters>(conn: &Connection, params: &P) -> Result<ChainAnchor, Error> {
@@ -117,9 +115,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         let key = reservation_key(conn, account, reservation)?;
         let through = target(conn, &self.params)?;
         if !available(conn, key)? {
-            return Err(Error::ReservationPolicy(
-                "SWAP_RECEIVE_STALE: This address already has a payment. Request a new quote.",
-            ));
+            return Err(Error::ReservationPolicy(super::ReservationPolicy::Stale));
         }
         if history.height > through.height
             || through.height - history.height > RECEIVE_VERIFICATION_MAX_LAG

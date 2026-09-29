@@ -324,3 +324,40 @@ mod reservations;
 mod verification;
 
 mod retention;
+
+mod key_access;
+
+mod planner;
+
+// Compatibility shorthand for fixtures that provide a fresh, already accepted
+// block. Production callers persist the observation before refreshing that block.
+impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
+    fn observe_swap_operation(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        operation: &str,
+        terminal: bool,
+        height: BlockHeight,
+    ) -> Result<(), Error> {
+        use zakura_swap_receiving::lifecycle::{ChainAnchor, OperationStatus, ReceiptExpectation};
+        let status = if terminal {
+            OperationStatus::Terminal(ReceiptExpectation::None)
+        } else {
+            OperationStatus::Active
+        };
+        self.record_swap_observation(account, key, operation, status, 0, true)?;
+        if terminal {
+            if let Some(hash) = crate::wallet::get_block_hash(self.conn.borrow(), height)? {
+                self.anchor_swap_observations(
+                    ChainAnchor {
+                        height,
+                        hash: hash.0,
+                    },
+                    1,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}

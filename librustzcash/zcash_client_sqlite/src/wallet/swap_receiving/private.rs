@@ -82,15 +82,32 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         key: KeyId,
         anchor: ChainAnchor,
     ) -> Result<(), Error> {
-        self.transactionally(|db| {
-            let id=key_ref(db.conn.0,account,key)?;
-            if wallet::get_block_hash(db.conn.0,anchor.height)?!=Some(BlockHash(anchor.hash)) || !db.pending_swap_payments(account,key)?.is_empty() {
-                return Err(corrupt("directory check is incomplete or its anchor changed"));
-            }
-            db.conn.0.execute("INSERT INTO ironwood_swap_directory_checks(receiving_key_id,height,block_hash) VALUES (?1,?2,?3) ON CONFLICT(receiving_key_id) DO UPDATE SET height=excluded.height,block_hash=excluded.block_hash",params![id,u32::from(anchor.height),anchor.hash])?;
-            Ok(())
-        })
+        self.transactionally(|db| mark_checked(db.conn.0, account, key, anchor))
     }
+}
+
+pub(super) fn mark_checked(
+    conn: &Connection,
+    account: AccountUuid,
+    key: KeyId,
+    anchor: ChainAnchor,
+) -> Result<(), Error> {
+    let id = key_ref(conn, account, key)?;
+    let pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery WHERE receiving_key_id=?1)",
+        [id],
+        |r| r.get(0),
+    )?;
+    if wallet::get_block_hash(conn, anchor.height)? != Some(BlockHash(anchor.hash)) || pending {
+        return Err(corrupt(
+            "directory check is incomplete or its anchor changed",
+        ));
+    }
+    conn.execute("INSERT INTO ironwood_swap_directory_checks(receiving_key_id,height,block_hash) VALUES (?1,?2,?3)
+        ON CONFLICT(receiving_key_id) DO UPDATE SET height=excluded.height,block_hash=excluded.block_hash
+        WHERE height<=excluded.height",params![id,u32::from(anchor.height),anchor.hash])?;
+    conn.execute("UPDATE ironwood_swap_discovery SET completed_at=COALESCE(completed_at,0) WHERE receiving_key_id=?1",[id])?;
+    Ok(())
 }
 
 // Use u64 for the exclusive end so the maximum block height cannot overflow.

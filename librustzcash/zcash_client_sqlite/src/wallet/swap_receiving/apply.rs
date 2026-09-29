@@ -25,6 +25,8 @@ pub enum PaymentApplication {
     AwaitingWitness,
     /// Locally retained history cannot establish absence of a spend.
     AwaitingSpendHistory,
+    /// The authenticated note predates the public account restore range. Widen that range before retrying.
+    OutsideRecoveryRange,
     /// Note, memo, witness, key identity, and any known spend were committed together.
     Applied,
 }
@@ -65,6 +67,16 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             return Err(corrupt("swap payment is not queued or changed"));
         }
         let (key_ref, recovered) = authenticate(conn, &self.params, account, key, candidate)?;
+        let (owner, _) = super::account_key(conn, &self.params, account)?;
+        let birthday: u32 = conn.query_row(
+            "SELECT birthday_height FROM accounts WHERE id=?1",
+            [owner.0],
+            |r| r.get(0),
+        )?;
+        if u32::from(candidate.height) < birthday {
+            return Ok(PaymentApplication::OutsideRecoveryRange);
+        }
+
         if wallet::fully_scanned_height(conn)? != Some(through.height)
             || wallet::chain_tip_height(conn)? != Some(through.height)
         {

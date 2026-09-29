@@ -55,36 +55,14 @@ not trigger separate transactions or delete receiving keys.
 
 ## Completion policy
 
-`lifecycle::Lifecycle` holds one operation's completion state. Store its terminal
-observation, receipt expectation, and reconciliation state together. Restore them
-with `from_parts` so reopening and later policy changes preserve saved deadlines.
-The route adapter supplies an explicit zero, positive, or unknown Zcash receipt
-expectation. Missing API data stays unknown.
+Normalize NEAR status with `near_status(purpose, status)`. An outgoing refund
+expects a Zcash receipt. An incoming source-chain refund does not. Unknown
+responses leave the previous observation unchanged.
 
-On the first terminal observation, save the accepted tip, a grace target 10 blocks
-later, and a reconciliation time 12 hours later. Repeated observations preserve
-those deadlines. `scan_decision` checks actual per-key coverage through the target
-and current canonical receipt accounting. Positive expectations require confirmed
-notes with enough on-chain value. Unknown expectations also require completed
-directory reconciliation. Ambiguous operation attribution remains unresolved.
-
-`key_needs_scanning` combines every linked operation's decision. Unresolved uses
-and restored keys without operation history remain active. A `Retire` decision
-only stops trial decryption. Preserve the key, reservation, and delayed query.
-
-When due, `begin_reconciliation` saves a fixed chain target across retries and
-pages. Validate publication coverage, chain binding, and all returned payments
-before calling `finish_reconciliation`. Incomplete results leave the query pending.
-Transport failures and unknown statuses preserve state. Backoff belongs to the
-caller's network scheduler.
-
-After a supported status regression call `resume`. After a reorg call `rewind`
-and update coverage and receipt accounting in the same storage transaction.
-Recompute scan decisions even for retired keys. Never credit a note to multiple
-operations sharing a receiver.
-
-This helper is unit tested. SQLite operation persistence and active-key filtering
-are the next integration step. SQLite private recovery uses the bounded policy described below.
+SQLite persists the observation immediately. A later independently refreshed
+chain view anchors ten further scanning blocks. A separate directory check is
+required twelve hours after terminal observation. Completed checks and expected
+receipt accounting govern closeout. No provider response credits a note.
 
 ## Derivation
 
@@ -211,33 +189,24 @@ keys or claim that a provider's terminal status rules out future payments.
 
 ### Bounded private recovery policy
 
-The SQLite private recovery opt-in separates temporary trial decryption from PIR
-closeout. Persist each local operation with `observe_swap_operation` before showing
-its deposit instruction. Supported terminal observations save an inclusive deadline
-of the first observed chain height plus ten blocks; duplicates do not extend it.
-Unknown statuses and transport failures must not update the watch. Shared addresses
-scan while any linked operation is pending or within its grace window.
+`prepare_swap_discovery_batch` selects at most 64 metadata records in Vizor and
+reports all remaining uncached lookups for transport selection. Lease each record
+when its attempt starts. Persist a complete lookup and authenticated ciphertexts
+atomically with `queue_swap_lookup`, then apply queued notes using independently
+accepted inclusion and spend evidence. `finish_swap_discovery_attempt` records
+processed coverage and schedules closeout or another follow-up.
 
-`WalletRead::get_swap_scan_window` filters before deriving inactive keys and returns
-an exclusive boundary so even large catch-up batches stop at the deadline. Unlike
-the conservative receipt-based `Lifecycle::scan_decision` helper, this policy stops
-trial decryption when the height budget is exhausted even if PIR is unavailable.
-It does not delete registry entries, received notes, witnesses, or spend metadata.
+Local operations scan without a count cap. Restored operations use directory
+work only. Two days without a supported status observation moves a local watch
+to directory follow-ups without marking it complete. Fresh active observations
+have no age limit. Follow-ups back off from one to twelve hours. Completed work
+makes no routine requests. Reorgs reopen affected coverage and candidates.
 
-`prepare_swap_recovery_target` selects a durable canonical target after grace. With
-no local operation, restored and lookahead keys are PIR-only and use the first
-accepted restore tip. Wait until a publication covers the saved target before doing
-receiver queries, resolve all returned payments, then mark directory completion.
-New tips do not extend completed targets. Rewinds invalidate affected target and
-publication anchors. Scan deadlines are height budgets rather than block identity
-claims, so replay below the deadline uses the original bounded watch again.
-Payments sent after this one-time closeout require a later explicit recovery; these
-addresses are intended for individual swaps, not indefinite address reuse.
+Historical spend retention follows the earliest coverage gap or pending note,
+independently of provider completion. Missing spend evidence queues one coalesced
+replay of the public account recovery interval. A note before that interval
+stays explicitly blocked until the account's restore range is widened.
 
-
-Address issuance preferences must not disable discovery. Recover funding memos
-and incoming lookahead for software accounts independently of those preferences.
-The application can always use PIR for receiver recovery, including the encrypted
-note data needed for matching payments, while ordinary transaction retrieval
-follows its general privacy setting. Finish any extended lookahead window before
-reporting restore complete. Completed targets do not require ongoing polling.
+Address issuance preferences do not disable recovery. Directory discovery can
+use encrypted PIR or the identical common row file. Full ciphertext retrieval
+and witness validation are unchanged, including when issuance is switched off.

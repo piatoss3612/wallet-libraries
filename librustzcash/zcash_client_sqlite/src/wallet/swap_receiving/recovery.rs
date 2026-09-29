@@ -30,6 +30,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// inputs or memos are not yet available remain eligible on subsequent calls.
     /// Spent and zero-value marker notes are included. Unsupported records return
     /// an error and remain stored, rather than silently completing recovery.
+    /// Returns only records processed by this call. Completed records are skipped
+    /// across restarts unless their memo or funding height changes. Progress is
+    /// committed atomically with the key registration and provider watch.
     pub fn recover_swap_refund_memos(
         &mut self,
         account: AccountUuid,
@@ -59,7 +62,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                  JOIN ironwood_receiving_keys k ON k.id=w.receiving_key_id
                  JOIN ironwood_swap_scan_uses s ON s.receiving_key_id=w.receiving_key_id
                     AND s.operation_id=w.operation_id
-                 WHERE k.account_id=?1 AND s.scan_through IS NULL AND w.next_check_at<=?2
+                 WHERE k.account_id=?1 AND s.terminal_at IS NULL AND w.next_check_at<=?2
                  ORDER BY w.next_check_at,w.receiving_key_id,w.operation_id LIMIT ?3",
             )?;
             let rows = stmt
@@ -109,24 +112,30 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         let (account_ref, _) = account_key(self.conn.0, &self.params, account)?;
         let records = {
             let mut stmt = self.conn.0.prepare_cached(
-                "SELECT n.memo, t.mined_height
+                "SELECT n.memo, t.mined_height, n.id
                  FROM ironwood_received_notes n
                  JOIN transactions t ON t.id_tx = n.transaction_id
                  WHERE n.account_id = ?1 AND n.recipient_key_scope = 1
                    AND n.receiving_key_id IS NULL AND t.mined_height IS NOT NULL
                    AND substr(n.memo, 1, 5) = X'FF5A535750'
+                   AND NOT EXISTS (SELECT 1 FROM ironwood_swap_refund_memo_progress p
+                                   WHERE p.note_id=n.id AND p.funding_height=t.mined_height)
                    AND EXISTS (SELECT 1 FROM v_received_output_spends s
                                WHERE s.transaction_id = n.transaction_id
                                  AND s.account_id = n.account_id)",
             )?;
             stmt.query_map([account_ref.0], |row| {
-                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u32>(1)?))
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
         let restored_through = wallet::fully_scanned_height(self.conn.0)?;
         let mut recovered = Vec::new();
-        for (bytes, height) in records {
+        for (bytes, height, note_id) in records {
             // SQLite omits trailing zero padding when storing MemoBytes.
             let bytes = zcash_protocol::memo::MemoBytes::from_bytes(&bytes)
                 .map_err(|_| super::corrupt("invalid stored swap memo length"))?;
@@ -152,7 +161,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 )?;
             }
             // Seed restoration has no local activity record. Persist its provider
-            // identity and activate future scanning before returning the new key.
+            // identity for directory follow-ups without activating historical keys.
             if let Some(scanned) = restored_through {
                 let id = super::payments::key_ref(self.conn.0, account, key_id)?;
                 let local: bool = self.conn.0.query_row(
@@ -172,6 +181,14 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                     "INSERT OR IGNORE INTO ironwood_swap_scan_uses
                     (receiving_key_id,operation_id,scan_from,scan_through) VALUES(?1,?2,?3,NULL)",
                     params![id, memo.deposit_address(), height],
+                )?;
+                self.conn.0.execute(
+                    "INSERT INTO ironwood_swap_refund_memo_progress
+                    (note_id,receiving_key_id,funding_height) VALUES(?1,?2,?3)
+                    ON CONFLICT(note_id) DO UPDATE SET
+                        receiving_key_id=excluded.receiving_key_id,
+                        funding_height=excluded.funding_height",
+                    params![note_id, id, height],
                 )?;
             }
             recovered.push(RecoveredRefund {

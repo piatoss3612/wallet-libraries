@@ -88,6 +88,23 @@ pub(crate) fn record(
 /// Requeues missing key coverage, including keys registered while a scan was running.
 /// This also repairs gaps after scanning with swap support disabled.
 pub(crate) fn queue_missing(conn: &Transaction<'_>) -> Result<(), SqliteClientError> {
+    queue_missing_between(conn, i64::MIN, i64::MAX)
+}
+
+/// Registration changes only this key's required history. Ordinary scan completion
+/// still checks the whole registry to catch keys added while a batch was in flight.
+pub(super) fn queue_missing_for_key(
+    conn: &Transaction<'_>,
+    id: i64,
+) -> Result<(), SqliteClientError> {
+    queue_missing_between(conn, id, id)
+}
+
+fn queue_missing_between(
+    conn: &Transaction<'_>,
+    first: i64,
+    last: i64,
+) -> Result<(), SqliteClientError> {
     let Some(tip) = wallet::chain_tip_height(conn)? else {
         return Ok(());
     };
@@ -96,10 +113,11 @@ pub(crate) fn queue_missing(conn: &Transaction<'_>) -> Result<(), SqliteClientEr
         "SELECT k.id, k.scan_from, r.range_start, r.range_end
          FROM ironwood_receiving_keys k
          LEFT JOIN ironwood_receiving_key_scan_ranges r ON r.receiving_key_id = k.id
-         WHERE NOT EXISTS (SELECT 1 FROM ironwood_swap_private_recovery p WHERE p.account_id=k.account_id)
+         WHERE k.id BETWEEN ?1 AND ?2
+         AND NOT EXISTS (SELECT 1 FROM ironwood_swap_private_recovery p WHERE p.account_id=k.account_id)
          ORDER BY k.id, r.range_start",
     )?;
-    let mut rows = stmt.query([])?;
+    let mut rows = stmt.query([first, last])?;
     let mut current = None;
     let mut cursor = end;
     let mut gaps = Vec::new();

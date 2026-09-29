@@ -11,6 +11,15 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- Direct swap receiving-key lookups by identity and receiver. Reservation lookup
+  reconstructs only its key, and scanning reuses that validated derivation.
+- Bounded, durable swap recovery scheduling with metadata-only work selection,
+  atomic candidate queues, persisted backoff, and completed lookup reuse.
+  Restored operations use directory recovery without joining live scanning.
+- Typed provider observations anchor terminal grace to a later fresh chain view.
+  Expected payments remain unresolved until applied, and delayed closeout survives
+  restart. Covered spend history can be released independently of provider status.
+- Typed receive-reservation policy errors replace message-prefix classification.
 - The seedless `transparent_ledger_schema` migration. It adds `tpir_meta`, the
   durable transparent policy recorded as public, and the `tpir_output_origins`
   and `tpir_spend_origins` provenance tables. It classifies every existing
@@ -40,6 +49,9 @@ workspace.
   migration has run, is reported as corrupted data.
 
 ### Changed
+- Funding-memo recovery persists completion per note, so maintenance and restart
+  process only new or deferred records. Key registration queues only that key's
+  missing history rather than rechecking every registered key.
 - Restored swap keys use private discovery with fixed recovery targets. Temporary
   Ironwood spend history is released after memo, lookahead and payment recovery
   completes. Other pools keep ordinary pruning. Missing spend history queues

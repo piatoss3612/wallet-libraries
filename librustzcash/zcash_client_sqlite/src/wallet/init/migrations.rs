@@ -55,9 +55,12 @@ mod swap_payment_recovery;
 mod swap_private_recovery;
 mod swap_receive_reservations;
 mod swap_receive_verification;
+mod swap_receiver_index;
 mod swap_receiving_coverage;
 mod swap_receiving_keys;
 mod swap_receiving_notes;
+mod swap_recovery_schedule;
+mod swap_refund_memo_progress;
 mod swap_refund_watches;
 mod swap_scan_lifecycle;
 mod transparent_gap_limit_handling;
@@ -401,6 +404,9 @@ pub(super) fn all_migrations<
         Box::new(swap_receive_verification::Migration),
         Box::new(swap_nullifier_retention::Migration),
         Box::new(swap_refund_watches::Migration),
+        Box::new(swap_receiver_index::Migration),
+        Box::new(swap_refund_memo_progress::Migration),
+        Box::new(swap_recovery_schedule::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -627,7 +633,7 @@ pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema:
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     transparent_ledger_schema::MIGRATION_ID,
-    swap_refund_watches::MIGRATION_ID,
+    swap_recovery_schedule::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(

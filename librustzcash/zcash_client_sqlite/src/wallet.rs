@@ -4269,6 +4269,21 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
          MIN(nullifier_retention_height, ?1 + 1)",
         [u32::from(truncation_height)],
     )?;
+    conn.execute(
+        "UPDATE ironwood_swap_discovery SET closed=0,next_attempt_at=0,completed_at=NULL,
+        lookup_height=NULL,lookup_hash=NULL WHERE lookup_height>?1 OR receiving_key_id IN
+        (SELECT receiving_key_id FROM ironwood_swap_directory_checks WHERE height>?1)",
+        [u32::from(truncation_height)],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_swap_scan_uses SET anchor_height=NULL,scan_through=NULL
+        WHERE anchor_height>?1",
+        [u32::from(truncation_height)],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_swap_spend_replay SET through_height=MIN(through_height,?1)",
+        [u32::from(truncation_height)],
+    )?;
     // Coverage must follow canonical blocks even in builds without swap support.
     conn.execute(
         "DELETE FROM ironwood_receiving_key_scan_ranges WHERE range_start > ?1",

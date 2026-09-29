@@ -2277,10 +2277,24 @@ pub trait WalletRead {
         Ok(vec![])
     }
 
+    /// Selects keys for full transaction decryption, retaining known-note ownership
+    /// even after a watch retires. `receivers` come from ordinary authenticated
+    /// decryption and preserve self-payments before compact scanning.
+    /// Stores without a transaction index can conservatively return all keys.
+    #[cfg(feature = "experimental-swap-receiving")]
+    fn get_swap_transaction_keys(
+        &self,
+        _txid: TxId,
+        _height: Option<BlockHeight>,
+        _receivers: &[orchard::Address],
+    ) -> Result<Vec<SwapScanningKey<Self::AccountId>>, Self::Error> {
+        self.get_swap_scanning_keys()
+    }
+
     /// Keys active at `from_height` and an optional exclusive batch boundary.
     /// A caller must stop before that boundary and reload the set for the next batch.
-    /// Full-transaction enhancement continues to use `get_swap_scanning_keys` so
-    /// retiring trial decryption never removes note ownership or spending metadata.
+    /// Full-transaction enhancement uses `get_swap_transaction_keys` to retain
+    /// retired note ownership without trying unrelated historical keys.
     #[cfg(feature = "experimental-swap-receiving")]
     fn get_swap_scan_window(
         &self,

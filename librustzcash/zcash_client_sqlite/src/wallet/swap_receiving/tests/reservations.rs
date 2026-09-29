@@ -275,9 +275,14 @@ fn only_three_distinct_unfunded_reservations_are_allowed() {
         let r = prepare(&mut st, NOW);
         quote(&mut st, &r, &format!("quote-{i}"), true);
     }
-    assert!(
-        matches!(st.wallet_mut().db_mut().prepare_swap_receive_reservation(account, NOW, start()), Err(Error::ReservationPolicy(s)) if s.starts_with("SWAP_RECEIVE_LIMIT:"))
-    );
+    assert!(matches!(
+        st.wallet_mut()
+            .db_mut()
+            .prepare_swap_receive_reservation(account, NOW, start()),
+        Err(Error::ReservationPolicy(
+            super::super::ReservationPolicy::Limit
+        ))
+    ));
     observe(&mut st, "quote-0", "PROCESSING", true, NOW + 1);
     assert_eq!(prepare(&mut st, NOW + 1).key.key_id().index(), 3);
 }
@@ -297,9 +302,14 @@ fn funded_deposits_without_zec_receipts_cannot_exceed_recovery_gap() {
             first = Some(r);
         }
     }
-    assert!(
-        matches!(st.wallet_mut().db_mut().prepare_swap_receive_reservation(account, NOW, start()), Err(Error::ReservationPolicy(s)) if s.starts_with("SWAP_RECEIVE_GAP:"))
-    );
+    assert!(matches!(
+        st.wallet_mut()
+            .db_mut()
+            .prepare_swap_receive_reservation(account, NOW, start()),
+        Err(Error::ReservationPolicy(
+            super::super::ReservationPolicy::Gap
+        ))
+    ));
     pay(&mut st, &first.unwrap());
     assert_eq!(
         prepare(&mut st, NOW + 2).key.key_id().index(),
@@ -421,9 +431,14 @@ fn reorg_retains_used_marker_and_rechecks_draft_recovery_bound() {
     let draft = prepare(&mut st, NOW);
     assert_eq!(draft.key.key_id().index(), RECEIVE_GAP_LIMIT);
     st.truncate_to_height_retaining_cache(before_payment);
-    assert!(
-        matches!(st.wallet_mut().db_mut().prepare_swap_receive_reservation(account, NOW, start()), Err(Error::ReservationPolicy(s)) if s.starts_with("SWAP_RECEIVE_GAP:"))
-    );
+    assert!(matches!(
+        st.wallet_mut()
+            .db_mut()
+            .prepare_swap_receive_reservation(account, NOW, start()),
+        Err(Error::ReservationPolicy(
+            super::super::ReservationPolicy::Gap
+        ))
+    ));
     observe(
         &mut st,
         "first",

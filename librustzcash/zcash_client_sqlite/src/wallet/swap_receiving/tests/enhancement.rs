@@ -264,6 +264,20 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .is_empty()
     );
     decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+    // A failed enclosing transaction must leave both the registration and memo
+    // progress eligible for retry.
+    let aborted: Result<(), Error> = st.wallet_mut().db_mut().transactionally(|db| {
+        assert_eq!(db.recover_swap_refund_memos(restored)?.len(), 1);
+        Err(corrupt("test rollback"))
+    });
+    assert!(aborted.is_err());
+    assert!(
+        st.wallet()
+            .db()
+            .get_swap_receiving_keys(restored)
+            .unwrap()
+            .is_empty()
+    );
     let records = st
         .wallet_mut()
         .db_mut()
@@ -276,12 +290,21 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].key_id(), KeyId::new(Purpose::Refund, 7));
     assert_eq!(keys[0].scan_from(), mined);
-    assert_eq!(
+    assert!(
         st.wallet_mut()
             .db_mut()
             .recover_swap_refund_memos(restored)
-            .unwrap(),
-        records
+            .unwrap()
+            .is_empty()
+    );
+    // Identical re-enhancement preserves completion rather than reviving work.
+    decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap()
+            .is_empty()
     );
 
     // The first pass already crossed the refund without its key. Registration
@@ -314,13 +337,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .unwrap()
             .0,
     };
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .prepare_swap_recovery_target(restored, key, initial)
-            .unwrap(),
-        Some(initial)
-    );
+
     assert_eq!(
         st.wallet_mut()
             .db_mut()
@@ -343,6 +360,13 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert!(
         st.wallet_mut()
             .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        st.wallet_mut()
+            .db_mut()
             .take_swap_refund_status_checks(restored, 1_059, std::num::NonZeroU32::new(8).unwrap())
             .unwrap()
             .is_empty()
@@ -359,13 +383,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .db_mut()
         .mark_swap_directory_checked(restored, key, initial)
         .unwrap();
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .prepare_swap_recovery_target(restored, key, initial)
-            .unwrap(),
-        None
-    );
+
     st.truncate_to_height_retaining_cache(refunded);
     let (late, _, _) = st.generate_next_block(
         &IronwoodFvk(keys[0].full_viewing_key().clone()),
@@ -381,7 +399,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .iter()
             .filter(|n| n.swap_key_id() == Some(key))
             .count(),
-        2
+        1
     );
     st.wallet_mut()
         .db_mut()
@@ -422,13 +440,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .db_mut()
         .mark_swap_directory_checked(restored, key, initial)
         .unwrap();
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .prepare_swap_recovery_target(restored, key, initial)
-            .unwrap(),
-        None
-    );
+
     for _ in 0..10 {
         st.generate_empty_block();
     }
@@ -443,13 +455,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .unwrap()
             .0,
     };
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .prepare_swap_recovery_target(restored, key, closed)
-            .unwrap(),
-        Some(closed)
-    );
+
     st.wallet_mut()
         .db_mut()
         .mark_swap_directory_checked(restored, key, closed)
@@ -493,6 +499,17 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             [memo_bytes.as_slice()],
         )
         .unwrap();
+    let spends: Vec<(i64, i64)> = st
+        .wallet()
+        .conn()
+        .prepare(
+            "SELECT ironwood_received_note_id,transaction_id FROM ironwood_received_note_spends",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
     st.wallet()
         .conn()
         .execute("DELETE FROM ironwood_received_note_spends", [])
@@ -503,5 +520,78 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .recover_swap_refund_memos(restored)
             .unwrap()
             .is_empty()
+    );
+
+    for (note, transaction) in spends {
+        st.wallet()
+            .conn()
+            .execute(
+                "INSERT INTO ironwood_received_note_spends VALUES(?1,?2)",
+                rusqlite::params![note, transaction],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap(),
+        records
+    );
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap()
+            .is_empty()
+    );
+
+    // A progress record for a different funding height cannot suppress recovery.
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE ironwood_swap_refund_memo_progress
+        SET funding_height=funding_height+1",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap(),
+        records
+    );
+
+    // Changing the memo invalidates only that note's progress. Unsupported data
+    // fails without committing a new completion marker.
+    let mut invalid = memo.encode();
+    invalid[5] = 0xff;
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE ironwood_received_notes SET memo=?1 WHERE memo=?2",
+            rusqlite::params![invalid.as_slice(), memo_bytes.as_slice()],
+        )
+        .unwrap();
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .is_err()
+    );
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE ironwood_received_notes SET memo=?1 WHERE memo=?2",
+            rusqlite::params![memo_bytes.as_slice(), invalid.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .recover_swap_refund_memos(restored)
+            .unwrap(),
+        records
     );
 }

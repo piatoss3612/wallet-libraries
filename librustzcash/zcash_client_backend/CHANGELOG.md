@@ -11,6 +11,11 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `WalletRead::get_swap_transaction_keys` scopes full-transaction enhancement to
+  known outputs, queued payments, live watches and ordinarily recovered recipients.
+  The default remains conservative for stores without a specialized selector.
+- `SwapScanningKey::full_viewing_key` exposes the already derived viewing key so
+  stores can validate registrations and reuse it for scanning.
 - `data_api::transparent_ledger`: the storage-neutral contract for transparent
   ledger configuration and financial authority. It adds `ChainPoint`,
   `TransparentLedgerMode`, the atomic `TransparentLedgerSnapshot`, and the

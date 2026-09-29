@@ -357,6 +357,7 @@ fn retired_reservation_reclaims_only_after_full_tail_and_provider_checks() {
     db.start_swap_receive_quote(account, "deposit").unwrap();
     db.observe_swap_receive_quote(account, "expired", "FAILED", false, 1_000_061)
         .unwrap();
+    db.anchor_swap_observations(initial, 1_000_062).unwrap();
     st.generate_and_scan_empty_blocks(10);
     let history = anchor(&st);
     st.generate_and_scan_empty_blocks(5);

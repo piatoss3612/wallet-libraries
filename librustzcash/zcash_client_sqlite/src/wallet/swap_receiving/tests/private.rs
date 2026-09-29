@@ -128,219 +128,6 @@ fn completed_directory_coverage_requires_continuous_scan_coverage() {
 }
 
 #[test]
-fn private_scan_deadline_survives_restart_and_delayed_directory_then_reorgs() {
-    use zcash_client_backend::data_api::testing::{AddressType, IronwoodFvk};
-    use zcash_protocol::value::Zatoshis;
-    let (mut st, _, _, through, _) = fixture();
-    let account = st.test_account().unwrap().id();
-    st.wallet_mut()
-        .db_mut()
-        .enable_private_swap_recovery(account)
-        .unwrap();
-    let key = st
-        .wallet_mut()
-        .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Refund, through.height + 1)
-        .unwrap();
-    let lookahead = st
-        .wallet_mut()
-        .db_mut()
-        .watch_swap_receive_key(account, 10, through.height)
-        .unwrap();
-    assert!(
-        st.wallet()
-            .db()
-            .get_swap_scan_window(through.height + 1)
-            .unwrap()
-            .0
-            .is_empty()
-    );
-    st.wallet_mut()
-        .db_mut()
-        .observe_swap_operation(account, key.key_id(), "swap", false, through.height)
-        .unwrap();
-    assert_eq!(
-        st.wallet()
-            .db()
-            .get_swap_scan_window(through.height + 1)
-            .unwrap()
-            .0
-            .len(),
-        1
-    );
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .prepare_swap_recovery_target(account, key.key_id(), through)
-            .unwrap(),
-        None
-    );
-    st.wallet_mut()
-        .db_mut()
-        .observe_swap_operation(account, key.key_id(), "swap", true, through.height)
-        .unwrap();
-    let reopened = WalletDb::for_path(
-        st.wallet().data_file_path(),
-        *st.network(),
-        test_clock(),
-        test_rng(),
-    )
-    .unwrap();
-    *st.wallet_mut().db_mut() = reopened;
-    // Re-observation after reopening must not move the saved deadline.
-    st.wallet_mut()
-        .db_mut()
-        .observe_swap_operation(account, key.key_id(), "swap", true, through.height + 5)
-        .unwrap();
-    let end = through.height + 10;
-    for _ in 0..12 {
-        st.generate_next_block(
-            &IronwoodFvk(key.full_viewing_key().clone()),
-            AddressType::DefaultExternal,
-            Zatoshis::const_from_u64(20_000),
-        );
-    }
-    // Even a batch crossing the deadline is split before an inactive key is tried.
-    let summary = st.scan_cached_blocks(through.height + 1, 12);
-    assert_eq!(summary.scanned_range().end, end + 1);
-    st.scan_cached_blocks(end + 1, 2);
-    assert!(
-        st.wallet()
-            .db()
-            .get_swap_scan_window(end + 1)
-            .unwrap()
-            .0
-            .is_empty()
-    );
-    let notes = st
-        .wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(account, end + 2)
-        .unwrap();
-    assert_eq!(
-        notes
-            .iter()
-            .filter(|n| n.swap_key_id() == Some(key.key_id()))
-            .count(),
-        10
-    );
-    let tip = zakura_swap_receiving::lifecycle::ChainAnchor {
-        height: end + 2,
-        hash: st.wallet().db().get_block_hash(end + 2).unwrap().unwrap().0,
-    };
-    let target = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_swap_recovery_target(account, key.key_id(), tip)
-        .unwrap()
-        .unwrap();
-    assert_eq!(target.height, end);
-    assert!(
-        st.wallet()
-            .db()
-            .swap_directory_check(account, key.key_id())
-            .unwrap()
-            .is_none()
-    );
-    // A completed empty lookahead query is fixed too, despite later tip movement.
-    let restored = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_swap_recovery_target(account, lookahead.key_id(), tip)
-        .unwrap()
-        .unwrap();
-    st.wallet_mut()
-        .db_mut()
-        .mark_swap_directory_checked(account, lookahead.key_id(), tip)
-        .unwrap();
-    let (next, _) = st.generate_empty_block();
-    st.scan_cached_blocks(next, 1);
-    let newer = zakura_swap_receiving::lifecycle::ChainAnchor {
-        height: next,
-        hash: st.wallet().db().get_block_hash(next).unwrap().unwrap().0,
-    };
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .prepare_swap_recovery_target(account, key.key_id(), newer)
-            .unwrap(),
-        Some(target)
-    );
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .prepare_swap_recovery_target(account, lookahead.key_id(), newer)
-            .unwrap(),
-        Some(restored)
-    );
-    st.wallet_mut()
-        .db_mut()
-        .mark_swap_directory_checked(account, key.key_id(), tip)
-        .unwrap();
-    // Canonical rewind invalidates the PIR anchors and reactivates only the bounded window.
-    st.truncate_to_height_retaining_cache(end - 1);
-    assert_eq!(
-        st.wallet()
-            .db()
-            .swap_recovery_target(account, key.key_id())
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        st.wallet()
-            .db()
-            .swap_directory_check(account, key.key_id())
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        st.wallet().db().get_swap_scan_window(end).unwrap().0.len(),
-        1
-    );
-    assert!(
-        st.wallet()
-            .db()
-            .get_swap_scan_window(end + 1)
-            .unwrap()
-            .0
-            .is_empty()
-    );
-    st.scan_cached_blocks(end, 1);
-    let anchor = zakura_swap_receiving::lifecycle::ChainAnchor {
-        height: end,
-        hash: st.wallet().db().get_block_hash(end).unwrap().unwrap().0,
-    };
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .prepare_swap_recovery_target(account, key.key_id(), anchor)
-            .unwrap(),
-        Some(anchor)
-    );
-    // A distinct pending use sharing the address must keep it active.
-    st.wallet_mut()
-        .db_mut()
-        .observe_swap_operation(account, key.key_id(), "another-swap", false, end)
-        .unwrap();
-    assert_eq!(
-        st.wallet()
-            .db()
-            .get_swap_scan_window(end + 1)
-            .unwrap()
-            .0
-            .len(),
-        1
-    );
-    assert_eq!(
-        st.wallet()
-            .db()
-            .swap_recovery_target(account, key.key_id())
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
 fn private_recovery_keeps_early_spends_and_empty_coverage_in_large_batches() {
     use orchard::keys::SpendingKey;
     use zakura_swap_receiving::lifecycle::ChainAnchor;
@@ -467,5 +254,125 @@ fn restored_refund_status_batches_prioritize_unchecked_operations() {
             .take_swap_refund_status_checks(account, 160, one)
             .unwrap(),
         vec![(key.key_id(), "a".into())]
+    );
+}
+
+#[test]
+fn discovery_work_retries_candidates_but_leaves_completed_and_pending_operations_alone() {
+    let (mut st, key, candidate, through, path) = fixture();
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.enable_private_swap_recovery(account).unwrap();
+    db.watch_swap_receive_key(account, key.key_id().index(), through.height)
+        .unwrap();
+    let active = db
+        .reserve_swap_receiving_key(account, Purpose::Refund, through.height)
+        .unwrap();
+    db.observe_swap_operation(account, active.key_id(), "pending", false, through.height)
+        .unwrap();
+    let work = db
+        .prepare_swap_discovery_batch(
+            account,
+            through,
+            1000,
+            std::num::NonZeroU32::new(64).unwrap(),
+        )
+        .unwrap()
+        .work;
+    assert_eq!(work.len(), 1);
+    assert_eq!(work[0].key, key.key_id());
+    assert_eq!(work[0].receiver, key.receiver().to_raw_address_bytes());
+    assert_eq!(
+        db.swap_recovery_target(account, key.key_id()).unwrap(),
+        Some(through)
+    );
+    assert_eq!(
+        db.apply_pending_swap_payment(
+            account,
+            key.key_id(),
+            &candidate,
+            through,
+            Some((through, &path))
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    db.mark_swap_directory_checked(account, key.key_id(), through)
+        .unwrap();
+    assert!(
+        db.prepare_swap_discovery_batch(
+            account,
+            through,
+            1000,
+            std::num::NonZeroU32::new(64).unwrap()
+        )
+        .unwrap()
+        .work
+        .is_empty()
+    );
+
+    // A candidate queued after a completed check must still be applied.
+    db.queue_swap_payment(account, key.key_id(), &candidate)
+        .unwrap();
+    let work = db
+        .prepare_swap_discovery_batch(
+            account,
+            through,
+            1000,
+            std::num::NonZeroU32::new(64).unwrap(),
+        )
+        .unwrap()
+        .work;
+    assert_eq!(work.len(), 1);
+    assert_eq!(work[0].key, key.key_id());
+    assert_eq!(
+        db.apply_pending_swap_payment(
+            account,
+            key.key_id(),
+            &candidate,
+            through,
+            Some((through, &path))
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    assert!(
+        db.prepare_swap_discovery_batch(
+            account,
+            through,
+            1000,
+            std::num::NonZeroU32::new(64).unwrap()
+        )
+        .unwrap()
+        .work
+        .is_empty()
+    );
+
+    let reopened = WalletDb::for_path(
+        st.wallet().data_file_path(),
+        *st.network(),
+        test_clock(),
+        test_rng(),
+    )
+    .unwrap();
+    *st.wallet_mut().db_mut() = reopened;
+    let (height, _) = st.generate_empty_block();
+    st.scan_cached_blocks(height, 1);
+    let tip = zakura_swap_receiving::lifecycle::ChainAnchor {
+        height,
+        hash: st.wallet().db().get_block_hash(height).unwrap().unwrap().0,
+    };
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .prepare_swap_discovery_batch(
+                account,
+                tip,
+                1000,
+                std::num::NonZeroU32::new(64).unwrap()
+            )
+            .unwrap()
+            .work
+            .is_empty()
     );
 }
