@@ -8,6 +8,38 @@ provenance, and authority-snapshot surface. The decisions below are recorded so
 that later phases start from them. They are not implemented contracts. Each
 phase should confirm or revise them alongside the code that uses them.
 
+## Phase 3 outcome
+
+Phase 3 implements candidate recovery and settles these notes as follows.
+
+- **Implemented as written:**
+  - opaque identifiers and lineage;
+  - supersession and accepted-revision matching;
+  - event identities and spend attribution;
+  - unsupported coverage;
+  - pending pages, recorded with their target and scripts;
+  - resuming from durable pages and coverage.
+- **Revised:**
+  - **Recovery bound.** Every watched script is required from the account
+    birthday. This is Roman's call, and it deviates from the architecture,
+    which accepts a birthday only as a justified transparent bound.
+    Completeness is computed from the current birthday, so lowering it makes the
+    account incomplete without a hook.
+  - **Watch-set generation.** It is replaced by per-address checks. A commit
+    must name only addresses the account still watches. New addresses are
+    uncovered rather than invalidating work. Coordinators repeat while the
+    watch set changes or a commit reports `window_grew`.
+  - **Pending-page policy context.** Pages do not store a policy generation.
+    A policy transition deletes them, and a commit checks the generation it
+    captured.
+  - **Commit destination.** Every Phase 3 commit is a candidate commit. Account
+    lifecycle arrives with promotion.
+- **Still open, for Phase 4:**
+  - integrity quarantine and trust epochs;
+  - qualification and privileged verification;
+  - promotion blockers beyond the candidate blockers;
+  - history completeness.
+
 ## Recovery sources and revisions
 
 - **Opaque identifiers.** Sources, revisions, and pages are opaque byte strings,

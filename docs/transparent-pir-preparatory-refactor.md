@@ -1,8 +1,10 @@
 # Preparatory refactor for a transparent PIR ledger
 
 Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
-its Vizor half is pending. Phases 2–6 remain to be implemented and qualified.
-Production transparent authority stays public during preparation.
+its Vizor half is pending. Phase 2's wallet-libraries half is in review (#64),
+with Phase 3's stacked on it. The Vizor halves of Phases 2–3 and all of
+Phases 4–6 remain to be implemented and qualified. Production transparent
+authority stays public during preparation.
 
 ## Objective and fixed boundaries
 
@@ -246,26 +248,123 @@ tests. No real transparent PIR client is needed to pass this gate.
 
 ## Phase 3 — Recover an isolated candidate ledger
 
-**Wallet-libraries steps**
+Phase 3 adds candidate recovery that the library owns and keeps apart from the
+wallet's balances. It stores what a source reports about each watched address
+and checks every commit against the current policy, account, addresses, and
+chain. It never writes the LRZ tables that balances, input selection,
+receiving-address allocation, and history read.
 
-1. Add the recovery tables deferred from Phase 1 (scripts, event observations,
-   coverage, pending work) as a new seedless, additive migration.
-   Implement proposed `sqlite/wallet/transparent_ledger.rs` storage and
-   `apply_transparent_ledger_commit` for candidate state. Enumerate owned
-   scripts with account/scope, conservative recovery bounds, and watch-set
-   generations; unknown starts require recovery from genesis.
-2. Persist immutable receive/spend content separately from mined placement and
-   publication observations. Accept idempotent replay, retain spends received
-   before their outputs, and reject contradictory content or canonical spends.
-3. Commit source-bound coverage, negative filter results, pending pages, and
-   candidate address-window progress atomically. Partial pages, missing anchors,
-   unsupported scripts, or unresolved spends cannot certify completeness.
-4. Validate policy/account/watch/chain context on every commit. Handle candidate
-   rewind, account deletion/import, and earlier recovery bounds now; restart
-   must resume durable work, not infer completion from absent rows.
-5. Keep candidate writes isolated from LRZ balances, spend links, locks,
-   production address-use flags, and receive-address selection. Read candidate
-   diagnostics through the library, never by treating the projection as evidence.
+**What the wallet-libraries half adds**
+
+1. **Watch set.** `TransparentLedgerRead::transparent_watch_set(account)`
+   returns, from one read:
+   - every watched address:
+     - the account's rows in `addresses` (external, internal, ephemeral, and
+       imported standalone keys and scripts);
+     - the legacy external address, which may have no row;
+     - the candidate window (see step 5);
+   - the capture context: the policy generation, and the highest contiguously
+     scanned local block as the target;
+   - the pages earlier runs left open.
+
+   Every address must be covered from the account birthday.
+2. **Commit.** `TransparentLedgerWrite::apply_transparent_ledger_commit`
+   applies one pass for one account atomically. A commit carries:
+   - receive and spend events;
+   - checked ranges, including ranges with no events;
+   - ranges the source cannot check;
+   - opened and completed pages;
+   - the source revision;
+   - an anchor: the highest local block the source verified the revision agrees
+     with.
+
+   Nothing in a commit may extend past the anchor, and the anchor may not
+   extend past the target.
+3. **Context checks.** A commit is refused, applying nothing, unless:
+   - the policy is still at the captured generation;
+   - the policy permits private recovery (`PrivateShadow` or
+     `PrivateRequired`) both on the handle and durably;
+   - the account still exists;
+   - the target is still a contiguously scanned local block, and the anchor is
+     still a local block;
+   - every address the commit names is still watched by the account.
+
+   Rejections are `Stale` (retry from a fresh watch set), `Integrity` (stop
+   trusting the session), or `Invalid` (malformed).
+4. **Evidence rules.**
+   - A receive is identified by its outpoint, and a spend by its txid and input
+     index. Content is immutable; a later commit can set only a placement that
+     is missing.
+   - A spend names the address of the output it consumes. It stays unresolved
+     until that output arrives, and is checked against it.
+   - Refused as integrity failures: contradictory content, a different
+     placement on the local chain, and two mined spends of one output.
+   - Each revision that reports an event is recorded as an observation.
+   - Within a source, a higher lineage replaces a lower one. Accepting it
+     removes the coverage and pages of the source's older provisional
+     revisions; sealed revisions are never superseded.
+   - Within one revision, supported coverage and an open page cannot overlap
+     for the same address, in either order, and no range can be both checked
+     and unsupported. Other revisions' pages and coverage
+     are independent evidence.
+   - All events of one transaction share one placement and one coinbase
+     classification, and a coinbase transaction spends nothing. No commit
+     anchor may lie above its revision's asserted publication height.
+     Unsupported ranges block completeness until another source covers them.
+5. **Candidate window.** Mined activity within a gap limit of a derived scope's
+   window end extends the window in `tpir_candidate_windows`. The commit then
+   reports `window_grew`. Window addresses are derived on read. They are never
+   written to `addresses`, so they are never marked used or offered for
+   receiving.
+6. **Lifecycle.**
+   - *Truncation* runs in every build, at the rescan floor: a rewind can keep a
+     higher checkpoint but requeues the blocks above the floor. It clears event
+     placements above the floor and removes pages opened for a later target.
+     Coverage anchored above the floor is clipped to it and re-anchored there:
+     the revision agreed with the old chain at its anchor, and that chain equals
+     the surviving one up to the floor. Coverage is deleted when the floor block
+     is unknown.
+   - *Policy transitions* remove open pages.
+   - *Re-attributing an imported receiver* to another account forgets the
+     previous account's evidence for it.
+   - *Deleting an account* removes its candidate state.
+   - *Reader version.* The first candidate commit raises
+     `tpir_meta.min_reader_version` to 3, so earlier builds, which would leave
+     candidate state stale across rewinds, fail closed.
+   - *Lowering a birthday* needs no hook: completeness is computed from the
+     current birthday, so coverage from the old birthday no longer suffices.
+7. **Diagnostics.** `TransparentLedgerRead::transparent_candidate_recovery`
+   returns, from one read:
+   - continuous coverage from the birthday (vacuous while the target is below
+     it), and blockers;
+   - counts;
+   - the mined receives and spends, and the unspent outputs;
+   - their sum, which is unverified: it can be above or below the real balance,
+     and is absent when it exceeds `MAX_MONEY`.
+8. **Schema.** The seedless, additive `transparent_recovery_schema` migration
+   adds nine empty `tpir_*` tables:
+   - `tpir_candidate_windows`, `tpir_revisions`, `tpir_coverage`;
+   - `tpir_receive_events` and `tpir_spend_events`, each with its observations
+     table;
+   - `tpir_pending_pages` and `tpir_pending_page_scripts`;
+   - indexes for the per-event lookups: coverage by script, events by account,
+     and spends by prevout.
+
+**Deviations from the original plan**
+
+- **The bound is the birthday.** The architecture accepts a birthday only when
+  it is also a justified transparent-history bound. Phase 3 uses the account
+  birthday for every script, trusting a restored wallet's user-supplied
+  birthday as shielded scanning does.
+- **Addresses are checked one by one; there is no watch-set generation.** Each
+  named address must still be watched. Addresses added mid-run are simply
+  uncovered, so in-flight work survives. The coordinator repeats while
+  `window_grew` is set or the watch set changes.
+- **Deferred to Phase 4:**
+  - durable integrity quarantine and trust epochs;
+  - source qualification;
+  - recovered-unverified amounts in `TransparentLedgerSnapshot`;
+  - projection, promotion, and the history-completeness contract.
 
 **Vizor steps**
 
