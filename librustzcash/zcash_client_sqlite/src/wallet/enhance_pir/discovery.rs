@@ -18,9 +18,11 @@ use zcash_primitives::transaction::TxId;
 use crate::{AccountUuid, TxRef, error::SqliteClientError, wallet::KeyScope};
 
 use super::{
-    LWD_REQUIRED, TxQueryType, outgoing_position_owned_by_other, queue_transaction,
-    retire_enhancement_if_complete, route,
+    LWD_REQUIRED, PRIVATE_DETAILS_UNSUPPORTED, TxQueryType, outgoing_position_owned_by_other,
+    queue_transaction, retire_enhancement_if_complete, route, route_transparent_details,
 };
+use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
+use crate::wallet::transparent_ledger;
 
 struct ReconstructedCandidates {
     outgoing: Vec<IronwoodEnhanceCandidate<AccountUuid>>,
@@ -31,7 +33,11 @@ struct ReconstructedCandidates {
 
 /// Reopens outgoing discovery in the same transaction that persists the spend link.
 /// This is mode-independent; Standard exposes the restored request, PrivateIronwood withholds it.
-pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClientError> {
+pub(crate) fn queue(
+    conn: &Connection,
+    configured: Option<TransparentLedgerMode>,
+    tx_ref: TxRef,
+) -> Result<(), SqliteClientError> {
     let needs_work: bool = conn.query_row(
         "SELECT raw IS NULL AND mined_height IS NOT NULL FROM transactions WHERE id_tx = :tx",
         named_params![":tx": tx_ref.0],
@@ -53,8 +59,9 @@ pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClient
          )",
         named_params![":tx": tx_ref.0, ":internal_scope": KeyScope::INTERNAL.encode()],
     )?;
-    if route(conn, tx_ref)? == Some(LWD_REQUIRED) {
-        return super::require_lwd(conn, tx_ref);
+    let existing = route(conn, tx_ref)?;
+    if existing == Some(LWD_REQUIRED) || existing == Some(PRIVATE_DETAILS_UNSUPPORTED) {
+        return route_transparent_details(conn, configured, tx_ref);
     }
     conn.execute(
         "INSERT INTO ironwood_enhance_discovery_queue (transaction_id, suspended) VALUES (:tx, :suspended)
@@ -70,11 +77,19 @@ pub(crate) fn queue(conn: &Connection, tx_ref: TxRef) -> Result<(), SqliteClient
         ),
         named_params![":tx": tx_ref.0],
     )?;
+    let expected = transparent_ledger::capture_policy_generation(conn)?;
+    transparent_ledger::ensure_policy_generation(conn, expected)?;
     conn.execute(
-        "INSERT INTO tx_retrieval_queue (txid, query_type)
-         SELECT txid, :enhancement FROM transactions WHERE id_tx = :tx
+        "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
+         SELECT txid, :enhancement, :generation FROM transactions WHERE id_tx = :tx
          ON CONFLICT(txid, query_type) DO NOTHING",
-        named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()],
+        named_params![
+            ":tx": tx_ref.0,
+            ":enhancement": TxQueryType::Enhancement.code(),
+            ":generation": i64::try_from(expected).map_err(|_| {
+                SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+            })?,
+        ],
     )?;
     Ok(())
 }
@@ -101,6 +116,7 @@ pub(super) fn funding(
 /// associations under the caller's SQL transaction (not a pre-network account snapshot).
 pub(crate) fn rebuild(
     conn: &Transaction<'_>,
+    configured: Option<TransparentLedgerMode>,
     request: IronwoodEnhanceDiscoveryRequest,
     block: &CompactBlock,
 ) -> Result<IronwoodEnhanceDiscoveryResult, SqliteClientError> {
@@ -284,7 +300,7 @@ pub(crate) fn rebuild(
         if eligible {
             super::metadata::bind(conn, tx_ref, u64::from(position), 0)?;
         } else {
-            super::require_lwd(conn, tx_ref)?;
+            super::route_transparent_details(conn, configured, tx_ref)?;
         }
     }
     for (tx_ref, received_context) in received_context_plans {
@@ -298,7 +314,7 @@ pub(crate) fn rebuild(
     }
     for (tx_ref, plan, received_context) in plans {
         restore_received_context(conn, tx_ref, received_context)?;
-        queue_transaction(conn, tx_ref, &plan)?;
+        queue_transaction(conn, configured, tx_ref, &plan)?;
         conn.execute(
             "DELETE FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx",
             named_params![":tx": tx_ref.0],

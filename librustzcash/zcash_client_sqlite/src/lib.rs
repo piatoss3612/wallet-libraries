@@ -42,7 +42,8 @@ use zcash_client_backend::data_api::status::{
     TransactionStatusMode, TransactionStatusRead, TransactionStatusWork, TransactionStatusWrite,
 };
 use zcash_client_backend::data_api::transparent_ledger::{
-    TransparentLedgerMode, TransparentLedgerRead, TransparentLedgerSnapshot,
+    AppliedTransparentPolicy, PrivateTransparentDetail, TransparentLedgerMode,
+    TransparentLedgerRead, TransparentLedgerSnapshot, TransparentLedgerWrite,
 };
 
 use std::{
@@ -1658,7 +1659,11 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);
         }
-        wallet::transaction_status_work(self.conn.borrow(), mode)
+        wallet::transaction_status_work(
+            self.conn.borrow(),
+            mode,
+            self.transparent_ledger_mode,
+        )
     }
     fn transaction_status_work_for(
         &self,
@@ -1667,7 +1672,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         let mode = self
             .status_mode
             .ok_or(SqliteClientError::StatusModeNotConfigured)?;
-        wallet::transaction_status_work_for(self.conn.borrow(), mode, txid)
+        wallet::transaction_status_work_for(
+            self.conn.borrow(),
+            mode,
+            self.transparent_ledger_mode,
+            txid,
+        )
     }
 }
 
@@ -1688,6 +1698,29 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
 {
     fn transparent_ledger_mode(&self) -> Result<TransparentLedgerMode, Self::Error> {
         wallet::transparent_ledger::resolve_mode(self.conn.borrow(), self.transparent_ledger_mode)
+    }
+
+    fn applied_transparent_policy(&self) -> Result<AppliedTransparentPolicy, Self::Error> {
+        wallet::transparent_ledger::applied_transparent_policy(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )
+    }
+
+    fn check_transparent_policy_generation(&self, expected: u64) -> Result<(), Self::Error> {
+        wallet::transparent_ledger::check_transparent_policy_generation(
+            self.conn.borrow(),
+            expected,
+        )
+    }
+
+    fn pending_private_transparent_details(
+        &self,
+    ) -> Result<Vec<PrivateTransparentDetail>, Self::Error> {
+        wallet::transparent_ledger::pending_private_transparent_details(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )
     }
 
     fn transparent_ledger_snapshot(
@@ -1713,6 +1746,21 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
     }
 }
 
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentLedgerWrite
+    for WalletDb<C, P, CL, R>
+{
+    fn apply_transparent_policy(
+        &mut self,
+        mode: TransparentLedgerMode,
+    ) -> Result<AppliedTransparentPolicy, Self::Error> {
+        wallet::transparent_ledger::apply_transparent_policy(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+            mode,
+        )
+    }
+}
+
 /// Without Orchard support, only public payload work exists: no transaction can be privately
 /// protected, and no Enhance PIR snapshot can be accepted.
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePirRead
@@ -1726,9 +1774,13 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
             return Ok(vec![]);
         }
         #[cfg(feature = "orchard")]
-        return wallet::enhance_pir::transaction_enhancement_work(self.conn.borrow(), mode);
+        return wallet::enhance_pir::transaction_enhancement_work(
+            self.conn.borrow(),
+            mode,
+            self.transparent_ledger_mode,
+        );
         #[cfg(not(feature = "orchard"))]
-        return wallet::public_enhancement_work(self.conn.borrow());
+        return wallet::public_enhancement_work(self.conn.borrow(), self.transparent_ledger_mode);
     }
 
     fn enhance_pir_snapshot_status(
@@ -1782,7 +1834,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         block: &CompactBlock,
     ) -> Result<IronwoodEnhanceDiscoveryResult, Self::Error> {
         self.transactionally(|wdb| {
-            wallet::enhance_pir::discovery::rebuild(wdb.conn.0, request, block)
+            wallet::enhance_pir::discovery::rebuild(
+                wdb.conn.0,
+                wdb.transparent_ledger_mode,
+                request,
+                block,
+            )
         })
     }
 
@@ -1793,7 +1850,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     {
         use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult;
         let tx = self.conn.borrow_mut().transaction()?;
-        let result = wallet::enhance_pir::apply_records(&tx, &self.params, records)?;
+        let result = wallet::enhance_pir::apply_records(
+            &tx,
+            &self.params,
+            self.transparent_ledger_mode,
+            records,
+        )?;
         if matches!(result, EnhancePirBatchResult::Committed(_)) {
             tx.commit()?;
         } else {
@@ -3179,7 +3241,12 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         tx_ref: Self::TxRef,
         tx: &zcash_client_backend::wallet::WalletTx<Self::AccountId>,
     ) -> Result<(), Self::Error> {
-        wallet::enhance_pir::queue_scanned(self.conn.borrow(), tx_ref, tx)
+        wallet::enhance_pir::queue_scanned(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+            tx_ref,
+            tx,
+        )
     }
 
     #[cfg(feature = "orchard")]

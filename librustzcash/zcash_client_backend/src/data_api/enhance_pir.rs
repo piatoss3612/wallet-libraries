@@ -232,6 +232,10 @@ pub enum EnhancePirStoreResult {
     NotRecoverable,
     /// The whole transaction requires ordinary LWD enhancement.
     LwdRequired,
+    /// The transaction has transparent details that cannot be recovered over a public
+    /// request under the current private-required policy. Financial facts already stored
+    /// for the transaction are retained; a private-details marker replaces public LWD.
+    PrivateDetailsUnsupported,
     /// Authentication or action binding failed; nothing was changed.
     Rejected,
 }

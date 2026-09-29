@@ -68,6 +68,14 @@ pub enum SqliteClientError {
         /// The minimum reader version the wallet requires.
         required: i64,
     },
+    /// An operation captured a durable policy generation that no longer matches the wallet.
+    /// Another connection applied a policy transition first; the queue is left unchanged.
+    StaleTransparentPolicy {
+        /// The generation the operation captured at the start of its SQLite transaction.
+        expected: u64,
+        /// The generation currently stored on the wallet.
+        applied: u64,
+    },
 
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
@@ -373,6 +381,10 @@ impl fmt::Display for SqliteClientError {
             SqliteClientError::TransparentLedgerIncompatible { required } => write!(
                 f,
                 "Transparent ledger state requires reader version {required}; this build cannot operate on this wallet's transparent funds"
+            ),
+            SqliteClientError::StaleTransparentPolicy { expected, applied } => write!(
+                f,
+                "Transparent policy generation {expected} is stale; the wallet is now at generation {applied}"
             ),
             SqliteClientError::TransparentAuthorityUnavailable => write!(
                 f,

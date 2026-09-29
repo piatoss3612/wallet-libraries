@@ -646,13 +646,13 @@ CREATE TABLE ironwood_enhance_outgoing_accounts (
     PRIMARY KEY(commitment_tree_position, account_id)
 )";
 
-pub(super) const TABLE_IRONWOOD_ENHANCE_ROUTING: &str = "
-CREATE TABLE ironwood_enhance_routing (
+pub(super) const TABLE_IRONWOOD_ENHANCE_ROUTING: &str = r#"
+CREATE TABLE "ironwood_enhance_routing" (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
-    route INTEGER NOT NULL CHECK (route IN (0, 1)),
+    route INTEGER NOT NULL CHECK (route IN (0, 1, 2)),
     history_expiry_height INTEGER
         CHECK (history_expiry_height >= 0 AND history_expiry_height < 500000000)
-)";
+)"#;
 
 /// Stores the transparent outputs received by the wallet.
 ///
@@ -887,12 +887,15 @@ CREATE INDEX idx_sent_notes_transaction_id ON sent_notes (
 ///   about transparent inputs to a transaction, this is a reference to that transaction record.
 ///   NULL for transactions where the request for enhancement data is based on discovery due
 ///   to blockchain scanning.
+/// - `policy_generation`: The durable transparent-policy generation that produced this row.
+///   Public dispatch requires a matching current generation.
 pub(super) const TABLE_TX_RETRIEVAL_QUEUE: &str = r#"
 CREATE TABLE "tx_retrieval_queue" (
     txid BLOB NOT NULL,
     query_type INTEGER NOT NULL,
     dependent_transaction_id INTEGER
         REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    policy_generation INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT tx_retrieval_intent UNIQUE (txid, query_type)
 )"#;
 pub(super) const INDEX_TX_RETIREVAL_QUEUE_DEPENDENT_TX: &str = r#"

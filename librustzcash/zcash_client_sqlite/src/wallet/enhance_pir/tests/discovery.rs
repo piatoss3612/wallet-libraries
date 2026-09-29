@@ -1406,8 +1406,9 @@ fn reconstruction_cannot_take_an_outgoing_position_from_another_transaction() {
             .unwrap();
         assert!(
             queue_transaction(
-                send.st.wallet().conn(),
-                claimant,
+            send.st.wallet().conn(),
+            Some(zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public),
+            claimant,
                 &IronwoodEnhancementPlan::Eligible {
                     outgoing: vec![IronwoodEnhanceCandidate::from_parts(
                         u64::from(position).into(),
@@ -1550,7 +1551,10 @@ fn deleting_an_exclusively_owned_transaction_cascades_its_discovery_job() {
         )
         .unwrap()
         .with_enhancement_mode(mode)
-        .with_status_mode(zcash_client_backend::data_api::status::TransactionStatusMode::Public);
+        .with_status_mode(zcash_client_backend::data_api::status::TransactionStatusMode::Public)
+        .with_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+        );
         assert!(
             !reopened
                 .transaction_enhancement_work()
@@ -2202,7 +2206,7 @@ fn rewind_and_full_data_clear_discovery() {
                 )
                 .unwrap();
             clear_work(send.st.wallet().conn(), send.tx_ref()).unwrap();
-            super::super::discovery::queue(send.st.wallet().conn(), send.tx_ref()).unwrap();
+            super::super::discovery::queue(send.st.wallet().conn(), Some(zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public), send.tx_ref()).unwrap();
         } else {
             send.st
                 .wallet_mut()

@@ -17,12 +17,21 @@ workspace.
   `TransparentLedgerRead` trait. Stores must reject unconfigured handles and must
   not fabricate a spendable private balance. Recovery commits and promotion are
   added with the work that implements them.
+- `AppliedTransparentPolicy`, `PrivateTransparentDetail`, and
+  `TransparentLedgerWrite::apply_transparent_policy`. `TransparentLedgerRead`
+  gains `applied_transparent_policy`, `check_transparent_policy_generation`, and
+  `pending_private_transparent_details`.
+- `EnhancePirStoreResult::PrivateDetailsUnsupported` for mixed transactions
+  whose transparent details cannot be recovered over a public request under
+  `PrivateRequired`.
 
 ### Changed
 - `sync::run` requires `TransparentLedgerRead` and refreshes UTXOs only when the
   configured transparent ledger mode retains public authority. The mode is
   resolved before any request, so an unconfigured store fails instead of
   disclosing its transparent receivers.
+- `validate_and_apply_records` treats `PrivateDetailsUnsupported` as sticky for
+  later actions in the same batch without rewriting it as `LwdRequired`.
 
 - `InputSource::anchor_retention_interval`, the grid on which the wallet
   retains durable anchors. It defaults to `AnchorRetentionInterval::ZIP_318`;

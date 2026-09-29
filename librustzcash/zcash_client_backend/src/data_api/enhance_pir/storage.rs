@@ -320,10 +320,13 @@ pub fn validate_and_apply_records<DbT: EnhancePirStorage>(
             }
         }
     }
-    let mut routed = false;
+    // Transparent shape flags are sticky for later actions in the same batch. The label
+    // records whether public LWD or private-unsupported routing was chosen; it never
+    // rewrites PrivateDetailsUnsupported as LwdRequired.
+    let mut sticky_route: Option<EnhancePirStoreResult> = None;
     for (index, mut value) in validated {
-        if routed {
-            results[index] = EnhancePirStoreResult::LwdRequired;
+        if let Some(route) = sticky_route {
+            results[index] = route;
             continue;
         }
         // Earlier actions may have filled the same transaction's unknown fee.
@@ -336,7 +339,13 @@ pub fn validate_and_apply_records<DbT: EnhancePirStorage>(
         if result == EnhancePirStoreResult::Rejected {
             return Ok(reject(Some(index), Reason::RecordRejected));
         }
-        routed = result == EnhancePirStoreResult::LwdRequired;
+        if matches!(
+            result,
+            EnhancePirStoreResult::LwdRequired
+                | EnhancePirStoreResult::PrivateDetailsUnsupported
+        ) {
+            sticky_route = Some(result);
+        }
         results[index] = result;
     }
     for (index, previous) in aliases {
