@@ -395,3 +395,33 @@ fn completed_recovery_retains_the_next_large_batch_until_reconciled() {
         1
     );
 }
+
+#[test]
+fn completion_does_not_enable_discovery_for_an_unregistered_account() {
+    let (mut st, _, _, through, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    let before = st
+        .wallet()
+        .db()
+        .get_swap_receiving_keys(account)
+        .unwrap()
+        .len();
+    assert!(
+        !st.wallet_mut()
+            .db_mut()
+            .finish_swap_nullifier_recovery(account, through, 50)
+            .unwrap()
+    );
+    assert_eq!(
+        st.wallet()
+            .db()
+            .get_swap_receiving_keys(account)
+            .unwrap()
+            .len(),
+        before
+    );
+    assert_eq!(
+        crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap(),
+        None
+    );
+}

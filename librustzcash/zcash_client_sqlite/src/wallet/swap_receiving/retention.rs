@@ -26,6 +26,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         }
         self.transactionally(|db| {
             let (id, _) = account_key(db.conn.0, &db.params, account)?;
+            let enabled: bool = db.conn.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_private_recovery WHERE account_id=?1)",
+                [id.0], |r| r.get(0),
+            )?;
+            if !enabled { return Ok(false); }
             if wallet::fully_scanned_height(db.conn.0)? != Some(through.height)
                 || wallet::chain_tip_height(db.conn.0)? != Some(through.height)
                 || wallet::get_block_hash(db.conn.0, through.height)? != Some(BlockHash(through.hash))
