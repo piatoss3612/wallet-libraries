@@ -1330,3 +1330,108 @@ fn a_failed_projection_write_rolls_back_the_commit() {
     );
     assert_eq!(count(&st, "tpir_quarantined_accounts"), 0);
 }
+
+#[test]
+fn rewinding_below_projected_events_pauses_authority_until_recovered() {
+    let (mut st, account, unspent) = active_wallet();
+    cover(&mut st, account, &revision(1, true), vec![]);
+    assert_eq!(
+        snapshot(&st, account).authority,
+        TransparentAuthority::Private
+    );
+    let exposed = |st: &State| -> i64 {
+        conn(st)
+            .query_row(
+                "SELECT COUNT(*) FROM addresses WHERE exposed_at_height IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let exposed_before = exposed(&st);
+    let qualified = count(&st, "tpir_qualified_revisions");
+
+    let floor = unspent.mined_height - 2;
+    st.truncate_to_height(floor);
+    // Coverage is clipped to the retained block, which is now the local tip: the rewound
+    // receive is unmined, so it no longer counts.
+    assert_eq!(
+        st.wallet().get_tx_height(*unspent.outpoint.txid()).unwrap(),
+        None
+    );
+    let s = snapshot(&st, account);
+    assert_eq!(s.covered_through.map(|c| c.height), Some(floor));
+    assert_eq!(s.authorized.unwrap().regular.total(), Zatoshis::ZERO);
+    // Once the wallet learns of the replacement chain, authority pauses until it is covered.
+    st.wallet_mut().update_chain_tip(floor + 4).unwrap();
+    let s = snapshot(&st, account);
+    assert_eq!(s.authority, TransparentAuthority::Unavailable);
+    assert_eq!(s.blockers, vec![RecoveryBlocker::ChainBehindTip]);
+    assert_eq!(s.last_known.unwrap().source, LastKnownSource::PrivateLedger);
+    // Activation, qualification, and address exposure survive the rewind.
+    assert_eq!(lifecycle(&st, account), AccountLifecycle::Active);
+    assert_eq!(count(&st, "tpir_qualified_revisions"), qualified);
+    assert_eq!(exposed(&st), exposed_before);
+
+    // The receive is mined again on the new chain, and recovery restores authority.
+    scan_new_blocks(&mut st, 4);
+    let remined = ReceiveEvent {
+        mined_height: floor + 3,
+        ..unspent.clone()
+    };
+    cover(&mut st, account, &revision(1, true), vec![remined.clone()]);
+    let s = snapshot(&st, account);
+    assert_eq!(s.authority, TransparentAuthority::Private);
+    assert_eq!(
+        s.authorized.unwrap().regular.total(),
+        Zatoshis::const_from_u64(40_000)
+    );
+    assert_eq!(
+        st.wallet().get_tx_height(*unspent.outpoint.txid()).unwrap(),
+        Some(remined.mined_height)
+    );
+}
+
+#[test]
+fn leaving_private_required_demotes_every_account() {
+    let (mut st, accounts) = shadow_wallet_with(1);
+    let fixture = revision(1, true);
+    for (tag, account) in accounts.iter().enumerate() {
+        let ws = watch(&st, *account);
+        let received = receive(tag as u8 + 1, external(&ws), 40_000, below_target(&ws, 3));
+        cover(&mut st, *account, &fixture, vec![received]);
+    }
+    qualify(&mut st, &fixture);
+    set_policy(&mut st, PrivateRequired);
+    for account in &accounts {
+        promote(&mut st, *account).unwrap();
+    }
+    assert_eq!(count(&st, "tpir_active_accounts"), 2);
+
+    set_policy(&mut st, PrivateShadow);
+    assert_eq!(count(&st, "tpir_active_accounts"), 0);
+    for account in &accounts {
+        assert_eq!(lifecycle(&st, *account), AccountLifecycle::Candidate);
+        // Projected outputs remain; public authority counts them again.
+        assert_eq!(
+            snapshot(&st, *account).authorized.unwrap().regular.total(),
+            Zatoshis::const_from_u64(40_000)
+        );
+    }
+
+    // Returning to PrivateRequired requires promotion again.
+    set_policy(&mut st, PrivateRequired);
+    assert_eq!(
+        snapshot(&st, accounts[0]).blockers,
+        vec![RecoveryBlocker::NotActivated]
+    );
+    promote(&mut st, accounts[0]).unwrap();
+    assert_eq!(
+        snapshot(&st, accounts[0]).authority,
+        TransparentAuthority::Private
+    );
+    assert_eq!(
+        snapshot(&st, accounts[1]).authority,
+        TransparentAuthority::Unavailable
+    );
+}
