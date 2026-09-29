@@ -20,7 +20,7 @@ use zcash_client_backend::data_api::{
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
 
-use crate::{AccountUuid, error::SqliteClientError, wallet::chain_tip_height};
+use crate::{error::SqliteClientError, wallet::chain_tip_height, AccountUuid};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -74,6 +74,29 @@ impl From<DurablePolicy> for AppliedTransparentPolicy {
             mode: policy.mode,
             generation: policy.generation,
         }
+    }
+}
+
+/// Runs `f` against one SQLite snapshot.
+///
+/// Public follow-on dispatch reads the resolved mode, the durable generation, and queued work.
+/// Those must not be mixed across a concurrent `Public` → `PrivateRequired` transition: a stale
+/// public-authority result combined with the new generation would emit newly queued txids as
+/// public work. Callers already inside a transaction reuse that snapshot.
+pub(crate) fn with_read_snapshot<T, F>(
+    conn: &rusqlite::Connection,
+    f: F,
+) -> Result<T, SqliteClientError>
+where
+    F: FnOnce(&rusqlite::Connection) -> Result<T, SqliteClientError>,
+{
+    if conn.is_autocommit() {
+        let tx = conn.unchecked_transaction()?;
+        let value = f(&tx)?;
+        tx.commit()?;
+        Ok(value)
+    } else {
+        f(conn)
     }
 }
 
@@ -365,7 +388,7 @@ fn last_known_source(
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
 ) -> Result<LastKnownSource, SqliteClientError> {
-    use super::transparent::{BalanceProvenance, transparent_balance_provenance};
+    use super::transparent::{transparent_balance_provenance, BalanceProvenance};
     Ok(
         match transparent_balance_provenance(conn, account, target_height, confirmations_policy)? {
             BalanceProvenance::LegacyPublic => LastKnownSource::LegacyPublic,

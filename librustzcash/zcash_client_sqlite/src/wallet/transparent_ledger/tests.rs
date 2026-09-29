@@ -1183,6 +1183,102 @@ mod handles {
     }
 
     #[test]
+    fn public_dispatch_does_not_mix_stale_authority_with_new_generation() {
+        use std::time::Duration;
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancementMode, TransactionEnhancementWork},
+            status::{PublicTransactionStatusRequest, TransactionStatusMode, TransactionStatusWork},
+        };
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut writer =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(Public);
+        WalletMigrator::new().init_or_migrate(&mut writer).unwrap();
+        writer.conn.busy_timeout(Duration::from_secs(2)).unwrap();
+        let journal: String = writer
+            .conn
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal.to_lowercase(), "wal");
+
+        let stale = zcash_primitives::transaction::TxId::from_bytes([0x41; 32]);
+        let fresh = zcash_primitives::transaction::TxId::from_bytes([0x42; 32]);
+        let tx = writer.conn.unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(stale), None).unwrap();
+        crate::wallet::queue_tx_status(&tx, stale).unwrap();
+        tx.commit().unwrap();
+
+        let reader =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(Public);
+        reader.conn.busy_timeout(Duration::from_secs(2)).unwrap();
+
+        // Pin a snapshot after public authority is observed, then transition on another
+        // connection. Dispatch on the snapshot must not emit work stamped at the new
+        // generation as public.
+        let snapshot = reader.conn.unchecked_transaction().unwrap();
+        assert!(
+            crate::wallet::transparent_ledger::retains_public_authority(&snapshot, Some(Public))
+                .unwrap()
+        );
+
+        writer.apply_transparent_policy(PrivateRequired).unwrap();
+        let tx = writer.conn.unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(fresh), None).unwrap();
+        crate::wallet::queue_tx_status(&tx, fresh).unwrap();
+        tx.commit().unwrap();
+
+        let enhancement = crate::wallet::enhance_pir::transaction_enhancement_work(
+            &snapshot,
+            EnhancementMode::Standard,
+            Some(Public),
+        )
+        .unwrap();
+        assert!(enhancement.contains(&TransactionEnhancementWork::Public(
+            PublicTransactionEnhancementRequest::new(stale)
+        )));
+        assert!(!enhancement.contains(&TransactionEnhancementWork::Public(
+            PublicTransactionEnhancementRequest::new(fresh)
+        )));
+
+        let status = crate::wallet::transaction_status_work(
+            &snapshot,
+            TransactionStatusMode::Public,
+            Some(Public),
+        )
+        .unwrap();
+        assert!(status.contains(&TransactionStatusWork::Public(
+            PublicTransactionStatusRequest::new(stale)
+        )));
+        assert!(!status.contains(&TransactionStatusWork::Public(
+            PublicTransactionStatusRequest::new(fresh)
+        )));
+
+        snapshot.commit().unwrap();
+
+        assert!(matches!(
+            crate::wallet::enhance_pir::transaction_enhancement_work(
+                &reader.conn,
+                EnhancementMode::Standard,
+                Some(Public),
+            ),
+            Err(SqliteClientError::TransparentLedgerPolicyConflict { .. })
+        ));
+        assert!(matches!(
+            crate::wallet::transaction_status_work(
+                &reader.conn,
+                TransactionStatusMode::Public,
+                Some(Public),
+            ),
+            Err(SqliteClientError::TransparentLedgerPolicyConflict { .. })
+        ));
+    }
+
+    #[test]
     fn commit_with_old_generation_inserts_nothing() {
         use crate::testing::db::{test_clock, test_rng};
         let file = tempfile::NamedTempFile::new().unwrap();

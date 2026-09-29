@@ -513,7 +513,9 @@ pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClien
         .collect())
 }
 
-/// Routes public and private payload work from one statement, and therefore one snapshot.
+/// Routes public and private payload work from one snapshot: resolved mode, generation, and
+/// queued rows are read together so a concurrent `PrivateRequired` transition cannot pair stale
+/// public authority with a newer generation.
 ///
 /// `Standard` exposes every ordinary enhancement request and no private work. `PrivateIronwood`
 /// exposes private work for protected transactions and ordinary requests for all others.
@@ -524,23 +526,25 @@ pub(crate) fn transaction_enhancement_work(
     mode: EnhancementMode,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
-    let private = mode == EnhancementMode::PrivateIronwood;
-    let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
-    let current_generation = transparent_ledger::durable_policy(conn)?
-        .map(|p| p.generation)
-        .unwrap_or(0);
-    let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(private, true))?;
-    read_work(
-        &mut stmt,
-        named_params![
-            ":enhancement_type": TxQueryType::Enhancement.code(),
-            ":protect_ironwood": private,
-            ":public_authority": public_authority,
-            ":current_generation": i64::try_from(current_generation).map_err(|_| {
-                SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
-            })?,
-        ],
-    )
+    transparent_ledger::with_read_snapshot(conn, |conn| {
+        let private = mode == EnhancementMode::PrivateIronwood;
+        let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
+        let current_generation = transparent_ledger::durable_policy(conn)?
+            .map(|p| p.generation)
+            .unwrap_or(0);
+        let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(private, true))?;
+        read_work(
+            &mut stmt,
+            named_params![
+                ":enhancement_type": TxQueryType::Enhancement.code(),
+                ":protect_ironwood": private,
+                ":public_authority": public_authority,
+                ":current_generation": i64::try_from(current_generation).map_err(|_| {
+                    SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+                })?,
+            ],
+        )
+    })
 }
 
 /// Authentication context and writes share the transaction owned by the public operation.
