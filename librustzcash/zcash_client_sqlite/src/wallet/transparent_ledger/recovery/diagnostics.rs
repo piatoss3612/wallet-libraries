@@ -34,7 +34,7 @@ pub(crate) struct RecoveryStatus {
 /// Returns `watch`'s account recovery progress at the local target. The caller provides the
 /// read snapshot.
 #[cfg(feature = "transparent-inputs")]
-fn recovery_status(
+pub(super) fn recovery_status(
     conn: &rusqlite::Connection,
     gap_limits: &GapLimits,
     watch: &Watch,
@@ -136,11 +136,17 @@ fn recovery_status(
         recovered_unverified = recovered_unverified.and_then(|sum| sum + value);
     }
 
+    // A window reaching `WINDOW_LIMIT` covers the last non-hardened index, which the wallet's
+    // address table cannot hold: its ranges end exclusively at a child index. Promotion could
+    // not make that address the wallet's own, so it is as underivable as a missing key.
     let window_underivable = watch
         .window_needs(conn, gap_limits)?
         .iter()
         .zip(watch.derivable)
-        .any(|(needed, derivable)| needed.is_some() && !derivable);
+        .zip(watch.candidate_end)
+        .any(|((needed, derivable), end)| {
+            (needed.is_some() && !derivable) || end == WINDOW_LIMIT || *needed == Some(WINDOW_LIMIT)
+        });
 
     let mut blockers = vec![];
     match target {
@@ -295,10 +301,12 @@ fn has_unqualified_revisions(
 /// Whether legacy public evidence of `account_ref` disagrees with its complete candidate
 /// ledger at `target`.
 ///
-/// A discrepancy is a legacy output whose candidate receive has other content, account, or
-/// placement; a legacy output mined at or below `target` with no placed candidate receive; or a
-/// legacy spend mined at or below `target` of an output no placed candidate spend consumes.
-/// Candidate-only events are explained: legacy history was incomplete.
+/// A discrepancy is an output the wallet holds, from any origin, whose candidate receive has
+/// other content, account, or placement; an output the wallet holds, from any origin, mined at
+/// or below `target` with no placed candidate receive, including one whose receive a rewind
+/// unplaced; or a legacy spend mined at or below `target` that no placed candidate spend by the
+/// same transaction confirms. Candidate-only events are explained: legacy history was
+/// incomplete.
 #[cfg(feature = "transparent-inputs")]
 fn has_legacy_discrepancy(
     conn: &rusqlite::Connection,
@@ -312,9 +320,6 @@ fn has_legacy_discrepancy(
              JOIN tpir_receive_events r
                  ON r.txid = t.txid AND r.output_index = o.output_index
              WHERE o.account_id = :account_id
-             AND EXISTS (
-                 SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin = 0
-             )
              AND (
                  r.account_id != o.account_id OR r.script != o.script
                  OR r.value_zat != o.value_zat
@@ -325,9 +330,6 @@ fn has_legacy_discrepancy(
              SELECT 1 FROM transparent_received_outputs o
              JOIN transactions t ON t.id_tx = o.transaction_id
              WHERE o.account_id = :account_id AND t.mined_height <= :target
-             AND EXISTS (
-                 SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin = 0
-             )
              AND NOT EXISTS (
                  SELECT 1 FROM tpir_receive_events r
                  WHERE r.txid = t.txid AND r.output_index = o.output_index
@@ -348,7 +350,8 @@ fn has_legacy_discrepancy(
              )
              AND NOT EXISTS (
                  SELECT 1 FROM tpir_spend_events e
-                 WHERE e.prevout_txid = prevout_tx.txid
+                 WHERE e.spending_txid = spending_tx.txid
+                 AND e.prevout_txid = prevout_tx.txid
                  AND e.prevout_output_index = o.output_index
                  AND e.mined_height IS NOT NULL
              )
@@ -372,43 +375,8 @@ pub(crate) fn candidate_recovery<P: consensus::Parameters>(
     let account_ref = watch.account.internal_id();
     let status = recovery_status(conn, gap_limits, &watch)?;
 
-    let mut stmt = conn.prepare_cached(
-        "SELECT txid, output_index, script, value_zat, coinbase, mined_height
-         FROM tpir_receive_events
-         WHERE account_id = :account_id AND mined_height IS NOT NULL
-         ORDER BY txid, output_index",
-    )?;
-    let receives = stmt
-        .query_and_then(named_params![":account_id": account_ref.0], |row| {
-            Ok::<_, SqliteClientError>(ReceiveEvent {
-                outpoint: OutPoint::new(row.get(0)?, row.get(1)?),
-                address: address_from_script(row.get(2)?)?,
-                value: Zatoshis::from_nonnegative_i64(row.get(3)?).map_err(|_| {
-                    SqliteClientError::CorruptedData("invalid receive value".into())
-                })?,
-                coinbase: row.get(4)?,
-                mined_height: height(row.get(5)?),
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut stmt = conn.prepare_cached(
-        "SELECT spending_txid, input_index, prevout_txid, prevout_output_index, prevout_script,
-                mined_height
-         FROM tpir_spend_events
-         WHERE account_id = :account_id AND mined_height IS NOT NULL
-         ORDER BY spending_txid, input_index",
-    )?;
-    let spends = stmt
-        .query_and_then(named_params![":account_id": account_ref.0], |row| {
-            Ok::<_, SqliteClientError>(SpendEvent {
-                spending_txid: TxId::from_bytes(row.get(0)?),
-                input_index: row.get(1)?,
-                prevout: OutPoint::new(row.get(2)?, row.get(3)?),
-                prevout_address: address_from_script(row.get(4)?)?,
-                mined_height: height(row.get(5)?),
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    let receives = placed_receives(conn, account_ref)?;
+    let spends = placed_spends(conn, account_ref)?;
 
     let spent: BTreeSet<_> = spends
         .iter()
@@ -433,4 +401,54 @@ pub(crate) fn candidate_recovery<P: consensus::Parameters>(
         receives,
         spends,
     })
+}
+
+/// `account_ref`'s placed receives, ordered by outpoint.
+#[cfg(feature = "transparent-inputs")]
+pub(super) fn placed_receives(
+    conn: &rusqlite::Connection,
+    account_ref: AccountRef,
+) -> Result<Vec<ReceiveEvent>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT txid, output_index, script, value_zat, coinbase, mined_height
+         FROM tpir_receive_events
+         WHERE account_id = :account_id AND mined_height IS NOT NULL
+         ORDER BY txid, output_index",
+    )?;
+    stmt.query_and_then(named_params![":account_id": account_ref.0], |row| {
+        Ok::<_, SqliteClientError>(ReceiveEvent {
+            outpoint: OutPoint::new(row.get(0)?, row.get(1)?),
+            address: address_from_script(row.get(2)?)?,
+            value: Zatoshis::from_nonnegative_i64(row.get(3)?)
+                .map_err(|_| SqliteClientError::CorruptedData("invalid receive value".into()))?,
+            coinbase: row.get(4)?,
+            mined_height: height(row.get(5)?),
+        })
+    })?
+    .collect()
+}
+
+/// `account_ref`'s placed spends, ordered by spending txid and input index.
+#[cfg(feature = "transparent-inputs")]
+pub(super) fn placed_spends(
+    conn: &rusqlite::Connection,
+    account_ref: AccountRef,
+) -> Result<Vec<SpendEvent>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT spending_txid, input_index, prevout_txid, prevout_output_index, prevout_script,
+                mined_height
+         FROM tpir_spend_events
+         WHERE account_id = :account_id AND mined_height IS NOT NULL
+         ORDER BY spending_txid, input_index",
+    )?;
+    stmt.query_and_then(named_params![":account_id": account_ref.0], |row| {
+        Ok::<_, SqliteClientError>(SpendEvent {
+            spending_txid: TxId::from_bytes(row.get(0)?),
+            input_index: row.get(1)?,
+            prevout: OutPoint::new(row.get(2)?, row.get(3)?),
+            prevout_address: address_from_script(row.get(4)?)?,
+            mined_height: height(row.get(5)?),
+        })
+    })?
+    .collect()
 }

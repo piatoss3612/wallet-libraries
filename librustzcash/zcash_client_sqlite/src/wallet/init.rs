@@ -188,8 +188,9 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
             unreachable!("migrations neither use ledger APIs nor select transparent inputs")
         }
         #[cfg(feature = "transparent-inputs")]
-        SqliteClientError::TransparentLedgerCommitRejected(_) => {
-            unreachable!("migrations do not commit candidate recovery")
+        SqliteClientError::TransparentLedgerCommitRejected(_)
+        | SqliteClientError::TransparentPromotionBlocked(_) => {
+            unreachable!("migrations do not recover or promote transparent ledgers")
         }
         SqliteClientError::CorruptedData(e) => WalletMigrationError::CorruptedData(e),
         SqliteClientError::Protobuf(e) => WalletMigrationError::CorruptedData(e.to_string()),

@@ -9,6 +9,8 @@
 //! authority is never available: `PrivateRequired` handles cannot authorize transparent inputs.
 
 mod policy;
+#[cfg(feature = "transparent-inputs")]
+mod projection;
 mod recovery;
 
 use rusqlite::OptionalExtension as _;
@@ -48,7 +50,8 @@ pub(crate) use policy::{
 };
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use recovery::{
-    apply_commit, candidate_recovery, forget_reattributed_script, qualify_revision, watch_set,
+    apply_commit, candidate_recovery, forget_reattributed_script, promote, qualify_revision,
+    watch_set,
 };
 pub(crate) use recovery::{clear_pending_pages, truncate as truncate_recovery};
 
@@ -584,6 +587,8 @@ pub(crate) enum ProjectionOrigin {
     LegacyPublic,
     /// Written by local transaction construction.
     LocalConstruction,
+    /// Projected from an active account's private ledger.
+    LedgerEvent,
 }
 
 impl ProjectionOrigin {
@@ -592,6 +597,7 @@ impl ProjectionOrigin {
         match self {
             Self::LegacyPublic => 0,
             Self::LocalConstruction => 1,
+            Self::LedgerEvent => 2,
         }
     }
 }

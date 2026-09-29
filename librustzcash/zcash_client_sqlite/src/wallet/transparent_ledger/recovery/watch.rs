@@ -10,7 +10,7 @@ pub(super) const WINDOW_SCOPES: [TransparentKeyScope; 3] = [
 
 /// One past the highest non-hardened child index.
 #[cfg(feature = "transparent-inputs")]
-const WINDOW_LIMIT: u32 = 1 << 31;
+pub(super) const WINDOW_LIMIT: u32 = 1 << 31;
 
 #[cfg(feature = "transparent-inputs")]
 fn scope_slot(scope: TransparentKeyScope) -> Option<usize> {

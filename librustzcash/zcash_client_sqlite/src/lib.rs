@@ -1858,6 +1858,17 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             commit,
         )
     }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn promote_transparent_account(&mut self, account: Self::AccountId) -> Result<(), Self::Error> {
+        wallet::transparent_ledger::promote(
+            self.conn.borrow(),
+            &self.params,
+            &self.gap_limits,
+            self.transparent_ledger_mode,
+            account,
+        )
+    }
 }
 
 /// Without Orchard support, only public payload work exists: no transaction can be privately
