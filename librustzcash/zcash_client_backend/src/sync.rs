@@ -116,15 +116,24 @@ where
     // fully-scanned height and the current chain tip.
     //
     // UTXO refresh discloses every transparent receiver to the server, so it runs only when
-    // the configured transparent ledger mode permits public discovery. The mode is resolved
-    // before any request; an unconfigured handle fails rather than defaulting to public.
+    // the configured transparent ledger mode permits public discovery. Capture the durable
+    // generation with that decision and recheck it immediately before each network request.
+    // A stricter transition must cancel and join a request that has already begun; see
+    // `TransparentLedgerWrite::apply_transparent_policy`.
     #[cfg(feature = "transparent-inputs")]
     if db_data
         .transparent_ledger_mode()
         .map_err(Error::Wallet)?
         .retains_public_authority()
     {
+        let public_discovery_generation = db_data
+            .applied_transparent_policy()
+            .map_err(Error::Wallet)?
+            .generation;
         for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
+            db_data
+                .check_transparent_policy_generation(public_discovery_generation)
+                .map_err(Error::Wallet)?;
             let start_height = db_data
                 .utxo_query_height(account_id)
                 .map_err(Error::Wallet)?;
@@ -132,7 +141,15 @@ where
                 "Refreshing UTXOs for {:?} from height {}",
                 account_id, start_height,
             );
-            refresh_utxos(params, client, db_data, account_id, start_height).await?;
+            refresh_utxos(
+                params,
+                client,
+                db_data,
+                account_id,
+                start_height,
+                public_discovery_generation,
+            )
+            .await?;
         }
     }
 
@@ -509,6 +526,7 @@ async fn refresh_utxos<P, ChT, DbT, CaErr, TrErr>(
     db_data: &mut DbT,
     account_id: <DbT as WalletRead>::AccountId,
     start_height: BlockHeight,
+    public_discovery_generation: u64,
 ) -> Result<(), Error<CaErr, <DbT as WalletRead>::Error, TrErr>>
 where
     P: Parameters + Send + 'static,
@@ -516,7 +534,7 @@ where
     ChT::Error: Into<StdError>,
     ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
     <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
-    DbT: WalletWrite,
+    DbT: WalletWrite + TransparentLedgerRead,
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
 {
     let request = service::GetAddressUtxosArg {
@@ -533,6 +551,11 @@ where
     if request.addresses.is_empty() {
         info!("{:?} has no transparent receivers", account_id);
     } else {
+        // Receiver enumeration can perform database work. Revalidate after it and immediately
+        // before dispatch so a completed policy transition cannot start another public request.
+        db_data
+            .check_transparent_policy_generation(public_discovery_generation)
+            .map_err(Error::Wallet)?;
         client
             .get_address_utxos_stream(request)
             .await?

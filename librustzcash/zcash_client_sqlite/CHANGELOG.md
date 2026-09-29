@@ -88,6 +88,9 @@ workspace.
 - Retrieval-queue inserts stamp the current policy generation and do not
   refresh it on conflict. Internal commit paths check the captured generation
   before inserting a public request.
+- Transparent address-history request enumeration reads public authority, the
+  chain tip, and request rows from one SQLite snapshot, so a concurrent policy
+  transition cannot expose private-era rows under stale public authority.
 
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`

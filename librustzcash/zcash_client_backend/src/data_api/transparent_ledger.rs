@@ -218,11 +218,15 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// Durably applies `mode` as the wallet's transparent policy.
     ///
     /// A mode change increments `policy_generation` by one in the same SQLite transaction.
-    /// Re-applying the current mode does not increment it and does not revoke work. Applying
-    /// [`TransparentLedgerMode::PrivateRequired`] also raises the minimum reader version so
-    /// older readers fail closed. An explicit later transition back to `Public` or
-    /// `PrivateShadow` is allowed; reads still never weaken a stored `PrivateRequired` policy
-    /// via a weaker handle configuration.
+    /// Re-applying the current mode does not increment it and does not revoke work. An explicit
+    /// later transition back to `Public` or `PrivateShadow` is allowed; reads still never weaken
+    /// a stored `PrivateRequired` policy via a weaker handle configuration.
+    ///
+    /// Before applying [`TransparentLedgerMode::PrivateRequired`], callers must cancel and join
+    /// every outstanding public transparent-discovery operation. A generation check immediately
+    /// before dispatch prevents new public work from starting after a concurrent transition, but
+    /// it cannot recall a network request that has already begun. Arbitrary older readers that do
+    /// not implement this contract are not supported rollback targets.
     ///
     /// The handle must already be configured. Returns the policy after the write.
     fn apply_transparent_policy(
