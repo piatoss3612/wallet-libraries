@@ -1,14 +1,14 @@
 //! Storage-neutral contract for transparent ledger configuration and financial authority.
 //!
-//! This is the preparatory surface of the private transparent ledger: explicit handle modes
-//! and an honest balance-and-authority snapshot. Recovery commits, promotion, and their
-//! supporting types are added with the recovery and activation work that implements them;
-//! see `docs/transparent-pir-ledger-architecture.md` and
+//! This is the preparatory surface of the private transparent ledger: explicit handle modes,
+//! durable policy transitions, and an honest balance-and-authority snapshot. Recovery commits,
+//! promotion, and their supporting types are added with the recovery and activation work that
+//! implements them; see `docs/transparent-pir-ledger-architecture.md` and
 //! `docs/transparent-pir-ledger-design-notes.md`.
 
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;
-use zcash_primitives::block::BlockHash;
+use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::BlockHeight;
 
 use super::{Balance, WalletRead, wallet::ConfirmationsPolicy};
@@ -49,6 +49,38 @@ impl TransparentLedgerMode {
             Self::PrivateRequired => false,
         }
     }
+}
+
+/// The durable transparent policy as last applied to the wallet.
+///
+/// `generation` increments by one on each mode change. Outstanding public follow-on work is
+/// stamped with the generation that produced it; a mismatched generation is stale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AppliedTransparentPolicy {
+    /// The mode durably applied to the wallet.
+    pub mode: TransparentLedgerMode,
+    /// Monotonic counter of mode transitions; unchanged by same-mode reapplication.
+    pub generation: u64,
+}
+
+/// A transparent follow-on detail that cannot be recovered over a public request under the
+/// current policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PrivateTransparentDetail {
+    /// A parent-transaction retrieval queued for a transparent input, withheld from public
+    /// enhancement dispatch.
+    ParentTransaction {
+        /// The parent transaction to retrieve.
+        txid: TxId,
+    },
+    /// A mixed transaction whose Enhance response indicated transparent data; public LWD
+    /// enhancement is forbidden while the transaction remains unresolved (no stored raw).
+    /// The sticky route-2 marker is not itself completion; storing full data, or restoring
+    /// public authority for newly stamped work, ends the pending private detail.
+    MixedTransaction {
+        /// The mixed transaction.
+        txid: TxId,
+    },
 }
 
 /// The source of current transparent financial authority for one account.
@@ -147,6 +179,24 @@ pub trait TransparentLedgerRead: WalletRead {
     /// durably applied to the wallet. A stored stricter policy is never weakened by reading.
     fn transparent_ledger_mode(&self) -> Result<TransparentLedgerMode, Self::Error>;
 
+    /// Returns the durable policy applied to the wallet, including its generation.
+    ///
+    /// The handle must already be configured. A stored `PrivateRequired` policy is never
+    /// weakened by this read.
+    fn applied_transparent_policy(&self) -> Result<AppliedTransparentPolicy, Self::Error>;
+
+    /// Confirms that the durable policy generation still equals `expected`.
+    ///
+    /// Used as the commit check for an operation that captured the generation at the start of
+    /// its SQLite transaction. Fails when another connection has since applied a transition.
+    fn check_transparent_policy_generation(&self, expected: u64) -> Result<(), Self::Error>;
+
+    /// Returns transparent follow-on details withheld from public dispatch under the current
+    /// policy, such as parent-transaction retrieval and mixed-transaction markers.
+    fn pending_private_transparent_details(
+        &self,
+    ) -> Result<Vec<PrivateTransparentDetail>, Self::Error>;
+
     /// Returns the transparent balance-and-authority snapshot for `account`, from one read.
     ///
     /// `confirmations_policy` applies the existing confirmation rules to any authorized or
@@ -156,6 +206,33 @@ pub trait TransparentLedgerRead: WalletRead {
         account: Self::AccountId,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<TransparentLedgerSnapshot<Self::AccountId>, Self::Error>;
+}
+
+/// Writes transparent ledger policy transitions.
+///
+/// Recovery commits and promotion are added with the work that implements them. Implementations
+/// typically also implement [`WalletWrite`](super::WalletWrite); the write trait itself only
+/// requires the read contract so associated `Error` types stay unambiguous.
+#[cfg_attr(feature = "test-dependencies", delegatable_trait)]
+pub trait TransparentLedgerWrite: TransparentLedgerRead {
+    /// Durably applies `mode` as the wallet's transparent policy.
+    ///
+    /// A mode change increments `policy_generation` by one in the same SQLite transaction.
+    /// Re-applying the current mode does not increment it and does not revoke work. An explicit
+    /// later transition back to `Public` or `PrivateShadow` is allowed; reads still never weaken
+    /// a stored `PrivateRequired` policy via a weaker handle configuration.
+    ///
+    /// Before applying [`TransparentLedgerMode::PrivateRequired`], callers must cancel and join
+    /// every outstanding public transparent-discovery operation. A generation check immediately
+    /// before dispatch prevents new public work from starting after a concurrent transition, but
+    /// it cannot recall a network request that has already begun. Arbitrary older readers that do
+    /// not implement this contract are not supported rollback targets.
+    ///
+    /// The handle must already be configured. Returns the policy after the write.
+    fn apply_transparent_policy(
+        &mut self,
+        mode: TransparentLedgerMode,
+    ) -> Result<AppliedTransparentPolicy, Self::Error>;
 }
 
 #[cfg(test)]

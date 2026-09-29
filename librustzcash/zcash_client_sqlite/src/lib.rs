@@ -42,7 +42,8 @@ use zcash_client_backend::data_api::status::{
     TransactionStatusMode, TransactionStatusRead, TransactionStatusWork, TransactionStatusWrite,
 };
 use zcash_client_backend::data_api::transparent_ledger::{
-    TransparentLedgerMode, TransparentLedgerRead, TransparentLedgerSnapshot,
+    AppliedTransparentPolicy, PrivateTransparentDetail, TransparentLedgerMode,
+    TransparentLedgerRead, TransparentLedgerSnapshot, TransparentLedgerWrite,
 };
 
 use std::{
@@ -480,9 +481,12 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// Transparent discovery and transparent input selection likewise require
-    /// `set_transparent_ledger_mode`; see that method. Modes are not persisted; reopened handles
-    /// must be configured again.
+    /// The same call also requires `set_transparent_ledger_mode` (or
+    /// `with_transparent_ledger_mode`): an unconfigured ledger mode fails closed rather than
+    /// assuming public authority, including for shielded-only wallets. Transparent discovery
+    /// and transparent input selection likewise require that ledger mode; see
+    /// `set_transparent_ledger_mode`. Modes are not persisted; reopened handles must be
+    /// configured again.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
         params: P,
@@ -511,6 +515,10 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Selects status disclosure policy. Discard outstanding work snapshots when changing it.
     /// This is not persisted; each reopened handle must select a mode explicitly.
+    /// SQLite status dispatch also requires [`Self::set_transparent_ledger_mode`]: an
+    /// unconfigured ledger mode fails closed rather than assuming public authority, including
+    /// for shielded-only wallets. Under a required-private ledger policy every status
+    /// obligation is private regardless of this status mode.
     pub fn set_status_mode(&mut self, mode: TransactionStatusMode) {
         self.status_mode = Some(mode);
     }
@@ -567,6 +575,12 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Discard outstanding in-memory request batches when changing mode. Already dispatched
     /// network requests cannot be recalled. New handles must choose their mode before
     /// enumerating enhancement work.
+    ///
+    /// SQLite enhancement dispatch also requires [`Self::set_transparent_ledger_mode`] (or
+    /// [`Self::with_transparent_ledger_mode`]) on the same handle. An unconfigured ledger mode
+    /// returns [`SqliteClientError::TransparentLedgerModeNotConfigured`], including for
+    /// shielded-only wallets and wallets without a chain tip. Under a required-private ledger
+    /// policy, public enhancement work is withheld regardless of this enhancement mode.
     pub fn set_enhancement_mode(&mut self, mode: EnhancementMode) {
         self.enhancement_mode = Some(mode);
     }
@@ -574,7 +588,8 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Chooses the enhancement mode before enumerating enhancement work on this handle.
     ///
     /// This preference is not persisted. See [`Self::set_enhancement_mode`] for
-    /// the requirements when changing mode after requests have been obtained.
+    /// the requirements when changing mode after requests have been obtained, including the
+    /// transparent-ledger mode prerequisite.
     pub fn with_enhancement_mode(mut self, mode: EnhancementMode) -> Self {
         self.set_enhancement_mode(mode);
         self
@@ -615,9 +630,12 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// Transparent discovery and transparent input selection likewise require
-    /// `set_transparent_ledger_mode`; see that method. Modes are not persisted; reopened handles
-    /// must be configured again.
+    /// The same call also requires `set_transparent_ledger_mode` (or
+    /// `with_transparent_ledger_mode`): an unconfigured ledger mode fails closed rather than
+    /// assuming public authority, including for shielded-only wallets. Transparent discovery
+    /// and transparent input selection likewise require that ledger mode; see
+    /// `set_transparent_ledger_mode`. Modes are not persisted; reopened handles must be
+    /// configured again.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
             conn,
@@ -1577,36 +1595,40 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
-        // Transparent spend-detection and address-history requests are public discovery. The
-        // mode is resolved first, so an unconfigured handle fails even before a chain tip exists.
-        #[cfg(feature = "transparent-inputs")]
-        let public_discovery = wallet::transparent_ledger::public_discovery_permitted(
-            self.conn.borrow(),
-            self.transparent_ledger_mode,
-        )?;
-        if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
-            let iter = std::iter::empty();
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            // Transparent spend-detection and address-history requests are public discovery.
+            // Resolve their authority, chain tip, and rows from one snapshot so a concurrent
+            // private-required transition cannot pair stale public authority with private-era
+            // wallet state.
             #[cfg(feature = "transparent-inputs")]
-            let iter = iter.chain(
-                public_discovery
-                    .then(|| {
-                        wallet::transparent::transaction_data_requests(
-                            self.conn.borrow(),
-                            &self.params,
-                            _chain_tip_height,
-                        )
-                    })
-                    .transpose()?
-                    .into_iter()
-                    .flatten(),
-            );
+            let public_discovery = wallet::transparent_ledger::public_discovery_permitted(
+                conn,
+                self.transparent_ledger_mode,
+            )?;
+            if let Some(_chain_tip_height) = wallet::chain_tip_height(conn)? {
+                let iter = std::iter::empty();
+                #[cfg(feature = "transparent-inputs")]
+                let iter = iter.chain(
+                    public_discovery
+                        .then(|| {
+                            wallet::transparent::transaction_data_requests(
+                                conn,
+                                &self.params,
+                                _chain_tip_height,
+                            )
+                        })
+                        .transpose()?
+                        .into_iter()
+                        .flatten(),
+                );
 
-            Ok(iter.collect())
-        } else {
-            // If the chain tip height is unknown, we're not in a state where it makes sense to process
-            // transaction data requests anyway so we just return the empty vector of requests.
-            Ok(vec![])
-        }
+                Ok(iter.collect())
+            } else {
+                // If the chain tip height is unknown, we're not in a state where it makes sense to process
+                // transaction data requests anyway so we just return the empty vector of requests.
+                Ok(vec![])
+            }
+        })
     }
 
     fn get_received_outputs(
@@ -1655,10 +1677,16 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         let mode = self
             .status_mode
             .ok_or(SqliteClientError::StatusModeNotConfigured)?;
+        // Fail closed on an unconfigured ledger mode before the no-tip empty batch, so
+        // startup misconfiguration is not hidden until a tip is recorded.
+        let _ = wallet::transparent_ledger::resolve_mode(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);
         }
-        wallet::transaction_status_work(self.conn.borrow(), mode)
+        wallet::transaction_status_work(self.conn.borrow(), mode, self.transparent_ledger_mode)
     }
     fn transaction_status_work_for(
         &self,
@@ -1667,7 +1695,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         let mode = self
             .status_mode
             .ok_or(SqliteClientError::StatusModeNotConfigured)?;
-        wallet::transaction_status_work_for(self.conn.borrow(), mode, txid)
+        wallet::transaction_status_work_for(
+            self.conn.borrow(),
+            mode,
+            self.transparent_ledger_mode,
+            txid,
+        )
     }
 }
 
@@ -1688,6 +1721,29 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
 {
     fn transparent_ledger_mode(&self) -> Result<TransparentLedgerMode, Self::Error> {
         wallet::transparent_ledger::resolve_mode(self.conn.borrow(), self.transparent_ledger_mode)
+    }
+
+    fn applied_transparent_policy(&self) -> Result<AppliedTransparentPolicy, Self::Error> {
+        wallet::transparent_ledger::applied_transparent_policy(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )
+    }
+
+    fn check_transparent_policy_generation(&self, expected: u64) -> Result<(), Self::Error> {
+        wallet::transparent_ledger::check_transparent_policy_generation(
+            self.conn.borrow(),
+            expected,
+        )
+    }
+
+    fn pending_private_transparent_details(
+        &self,
+    ) -> Result<Vec<PrivateTransparentDetail>, Self::Error> {
+        wallet::transparent_ledger::pending_private_transparent_details(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )
     }
 
     fn transparent_ledger_snapshot(
@@ -1713,6 +1769,21 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
     }
 }
 
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentLedgerWrite
+    for WalletDb<C, P, CL, R>
+{
+    fn apply_transparent_policy(
+        &mut self,
+        mode: TransparentLedgerMode,
+    ) -> Result<AppliedTransparentPolicy, Self::Error> {
+        wallet::transparent_ledger::apply_transparent_policy(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+            mode,
+        )
+    }
+}
+
 /// Without Orchard support, only public payload work exists: no transaction can be privately
 /// protected, and no Enhance PIR snapshot can be accepted.
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePirRead
@@ -1721,14 +1792,24 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
     fn transaction_enhancement_work(&self) -> Result<Vec<TransactionEnhancementWork>, Self::Error> {
         #[cfg(feature = "orchard")]
         let mode = self.configured_enhancement_mode()?;
+        // Fail closed on an unconfigured ledger mode before the no-tip empty batch, matching
+        // status dispatch: startup misconfiguration must not wait for a tip.
+        let _ = wallet::transparent_ledger::resolve_mode(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         // Like `transaction_data_requests`, there is no actionable work before a chain tip.
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);
         }
         #[cfg(feature = "orchard")]
-        return wallet::enhance_pir::transaction_enhancement_work(self.conn.borrow(), mode);
+        return wallet::enhance_pir::transaction_enhancement_work(
+            self.conn.borrow(),
+            mode,
+            self.transparent_ledger_mode,
+        );
         #[cfg(not(feature = "orchard"))]
-        return wallet::public_enhancement_work(self.conn.borrow());
+        return wallet::public_enhancement_work(self.conn.borrow(), self.transparent_ledger_mode);
     }
 
     fn enhance_pir_snapshot_status(
@@ -1782,7 +1863,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         block: &CompactBlock,
     ) -> Result<IronwoodEnhanceDiscoveryResult, Self::Error> {
         self.transactionally(|wdb| {
-            wallet::enhance_pir::discovery::rebuild(wdb.conn.0, request, block)
+            wallet::enhance_pir::discovery::rebuild(
+                wdb.conn.0,
+                wdb.transparent_ledger_mode,
+                request,
+                block,
+            )
         })
     }
 
@@ -1793,7 +1879,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     {
         use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult;
         let tx = self.conn.borrow_mut().transaction()?;
-        let result = wallet::enhance_pir::apply_records(&tx, &self.params, records)?;
+        let result = wallet::enhance_pir::apply_records(
+            &tx,
+            &self.params,
+            self.transparent_ledger_mode,
+            records,
+        )?;
         if matches!(result, EnhancePirBatchResult::Committed(_)) {
             tx.commit()?;
         } else {
@@ -3179,7 +3270,12 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         tx_ref: Self::TxRef,
         tx: &zcash_client_backend::wallet::WalletTx<Self::AccountId>,
     ) -> Result<(), Self::Error> {
-        wallet::enhance_pir::queue_scanned(self.conn.borrow(), tx_ref, tx)
+        wallet::enhance_pir::queue_scanned(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+            tx_ref,
+            tx,
+        )
     }
 
     #[cfg(feature = "orchard")]

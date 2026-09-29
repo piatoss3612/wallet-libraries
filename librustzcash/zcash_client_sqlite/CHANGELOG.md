@@ -17,24 +17,40 @@ workspace.
   transparent output and spend as legacy evidence, and marks records whose
   transaction has local creation evidence as local construction too. Neither
   origin is coverage. Existing wallet tables are unchanged.
+- The additive `transparent_policy_generation` migration. It adds
+  `tx_retrieval_queue.policy_generation` (default 0) and extends
+  `ironwood_enhance_routing.route` to allow `2` (`PRIVATE_DETAILS_UNSUPPORTED`).
 - Projection origins for new transparent records. Public discovery records a
   legacy-public origin, and local construction, including creation evidence
   recorded by an outbox, records a local origin. Each is written in the same
   transaction as the record it describes.
 - `WalletDb::set_transparent_ledger_mode` and `with_transparent_ledger_mode`,
-  and an implementation of `TransparentLedgerRead`. The mode is not persisted,
-  and transactional handles inherit it. The snapshot reports `Unavailable`
-  authority, never a fabricated or public balance, when:
+  and implementations of `TransparentLedgerRead` and `TransparentLedgerWrite`.
+  The mode is not persisted, and transactional handles inherit it. The snapshot
+  reports `Unavailable` authority, never a fabricated or public balance, when:
   - private authority is required;
   - the chain tip is unknown; or
   - the build cannot read transparent state.
+- Durable policy transitions via `apply_transparent_policy`. A mode change
+  increments `policy_generation` by one in the same SQLite transaction and
+  restamps outstanding `tx_retrieval_queue` rows to that generation so
+  still-required work remains dispatchable under modes that retain public
+  authority; same-mode reapplication does not. Restoring public authority also converts unresolved
+  sticky `route = 2` (mixed) markers to the public LWD route so those
+  transactions become ordinary enhancement work again.
+  `check_transparent_policy_generation` is the commit check an older open handle
+  must fail. Pending withheld follow-on details are exposed by
+  `pending_private_transparent_details`. Mixed (`route = 2`) details are reported
+  only while the transaction has no stored raw payload.
 - `SqliteClientError` variants:
   - `TransparentLedgerModeNotConfigured`;
   - `TransparentLedgerPolicyConflict`: the handle's mode is weaker than a
     durably applied `PrivateRequired` policy, which is never weakened;
   - `TransparentAuthorityUnavailable`;
   - `PublicTransparentDiscoveryForbidden`;
-  - `TransparentLedgerIncompatible`: the wallet requires a newer ledger reader.
+  - `TransparentLedgerIncompatible`: the wallet requires a newer ledger reader;
+  - `StaleTransparentPolicy`: a captured generation no longer matches the
+    wallet after a concurrent transition.
 
   A `tpir_meta` table without its policy row, or a missing `tpir_meta` after the
   migration has run, is reported as corrupted data.
@@ -46,9 +62,16 @@ workspace.
   - storing any transaction with transparent inputs, in every build;
   - `put_received_transparent_utxo`;
   - the transparent spend-detection and address-history requests of
-    `transaction_data_requests`.
+    `transaction_data_requests`;
+  - `transaction_status_work` and `transaction_status_work_for`.
 - Under `PrivateRequired`, set on the handle or durably applied, public
-  transparent discovery stops.
+  transparent discovery stops. Public enhancement and status dispatch require
+  a matching `policy_generation` and a mode that retains public authority.
+  Parent-transaction retrieval and mixed Enhance results are withheld from
+  public requests and reported as pending private details while they remain
+  unresolved (mixed `route = 2` rows with stored raw are omitted; public LWD
+  `route = 1` rows are included); financial rows are not deleted. Status
+  obligations become `TransactionStatusWork::Private`.
 - Transparent authority is unavailable under `PrivateRequired`, while the chain
   tip is unknown, and in builds without `transparent-inputs`. While it is
   unavailable:
@@ -62,6 +85,12 @@ workspace.
   Shielded-funded spends, including unshielding, are unaffected.
 - A transparent output report whose script or value conflicts with the stored
   output is refused.
+- Retrieval-queue inserts stamp the current policy generation and do not
+  refresh it on conflict. Internal commit paths check the captured generation
+  before inserting a public request.
+- Transparent address-history request enumeration reads public authority, the
+  chain tip, and request rows from one SQLite snapshot, so a concurrent policy
+  transition cannot expose private-era rows under stale public authority.
 
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`
@@ -74,6 +103,7 @@ workspace.
   `anchor_computable` and `WalletRead::anchor_retention_interval`).
   `WalletDb` reports its configured grid through
   `InputSource::anchor_retention_interval` instead.
+- `set_durable_policy_for_testing`; tests use `apply_transparent_policy`.
 
 ## [0.1.0-rc7] - 2026-09-27
 

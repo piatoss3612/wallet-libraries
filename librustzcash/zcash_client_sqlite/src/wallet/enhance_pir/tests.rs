@@ -12,6 +12,7 @@ use zcash_client_backend::data_api::{
         AddressType, IronwoodFvk, TestBuilder, TestState, orchard::OrchardPoolTester,
         pool::ShieldedPoolTester,
     },
+    transparent_ledger::TransparentLedgerMode,
 };
 use zcash_client_backend::wallet::IronwoodEnhanceCandidate;
 use zcash_primitives::block::BlockHash;
@@ -93,6 +94,7 @@ mod discovery;
 fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> EnhancePirRequest {
     queue_transaction(
         st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
         tx_ref,
         &IronwoodEnhancementPlan::Eligible {
             outgoing: vec![IronwoodEnhanceCandidate::from_parts(
@@ -222,6 +224,7 @@ fn either_transparent_flag_routes_the_entire_transaction_and_is_sticky() {
         );
         queue_transaction(
             st.wallet().conn(),
+            Some(TransparentLedgerMode::Public),
             tx_ref,
             &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
         )
@@ -411,6 +414,7 @@ fn completion_retires_only_enhancement_and_survives_replay() {
     assert_eq!(statuses, 1);
     queue_transaction(
         st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
         tx_ref,
         &IronwoodEnhancementPlan::Eligible {
             outgoing: vec![IronwoodEnhanceCandidate::from_parts(
@@ -518,6 +522,7 @@ fn explicit_mixed_scan_discards_all_work_but_keeps_recovered_data() {
     finish_incoming(&mut st, request);
     queue_transaction(
         st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
         tx_ref,
         &IronwoodEnhancementPlan::Ineligible,
     )
@@ -536,6 +541,7 @@ fn explicit_mixed_scan_discards_all_work_but_keeps_recovered_data() {
     assert_eq!(memo, vec![0xf6]);
     queue_transaction(
         st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
         tx_ref,
         &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
     )
@@ -549,7 +555,7 @@ fn reorg_prunes_positions_but_retains_protection_and_lwd_decisions() {
     for mixed in [false, true] {
         let (mut st, tx_ref, request) = fixture_with_factory(TestDbFactory::file_backed());
         if mixed {
-            require_lwd(st.wallet().conn(), tx_ref).unwrap();
+            require_lwd_for_test(st.wallet().conn(), tx_ref).unwrap();
         }
         let height: u32 = st
             .wallet()
@@ -605,7 +611,8 @@ fn reorg_prunes_positions_but_retains_protection_and_lwd_decisions() {
                 test_rng(),
             )
             .unwrap()
-            .with_enhancement_mode(mode);
+            .with_enhancement_mode(mode)
+            .with_transparent_ledger_mode(TransparentLedgerMode::Public);
             assert_eq!(
                 reopened
                     .transaction_enhancement_work()
@@ -643,7 +650,8 @@ fn reopening_uses_explicit_mode_and_preserves_routes() {
         test_rng(),
     )
     .unwrap()
-    .with_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard);
+    .with_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard)
+    .with_transparent_ledger_mode(TransparentLedgerMode::Public);
     assert_eq!(reopened.query_requests().unwrap(), vec![request]);
     assert!(
         reopened
@@ -658,7 +666,7 @@ fn reopening_uses_explicit_mode_and_preserves_routes() {
             .unwrap()
             .contains(&crate::testing::public_work(request.request_id().txid()))
     );
-    require_lwd(st.wallet().conn(), tx_ref).unwrap();
+    require_lwd_for_test(st.wallet().conn(), tx_ref).unwrap();
     assert!(reopened.query_requests().unwrap().is_empty());
     assert!(
         reopened
@@ -690,7 +698,7 @@ fn status_response_preserves_lwd_fallback_enhancement() {
                 ],
             )
             .unwrap();
-        require_lwd(st.wallet().conn(), tx_ref).unwrap();
+        require_lwd_for_test(st.wallet().conn(), tx_ref).unwrap();
         assert!(
             visible(&st, request),
             "LWD fallback restores Enhancement before the status response"
@@ -830,6 +838,7 @@ fn rescanning_removes_outgoing_jobs_now_covered_by_incoming_decryption() {
     );
     queue_transaction(
         st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
         tx_ref,
         &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
     )
@@ -881,10 +890,22 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
         vec![],
     )
     .with_ironwood_enhancement_plan(IronwoodEnhancementPlan::Ineligible);
-    queue_scanned(st.wallet().conn(), tx_ref, &scanned).unwrap();
+    queue_scanned(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
+        tx_ref,
+        &scanned,
+    )
+    .unwrap();
     let provisional = scanned
         .with_ironwood_enhancement_plan(IronwoodEnhancementPlan::Eligible { outgoing: vec![] });
-    queue_scanned(st.wallet().conn(), tx_ref, &provisional).unwrap();
+    queue_scanned(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
+        tx_ref,
+        &provisional,
+    )
+    .unwrap();
     let route: i64 = st
         .wallet()
         .conn()
@@ -979,7 +1000,17 @@ impl<C: std::borrow::BorrowMut<Connection>, P: Parameters, CL: crate::util::Cloc
         &mut self,
         enhancement: ValidatedIronwoodEnhancement<AccountUuid>,
     ) -> Result<EnhancePirStoreResult, SqliteClientError> {
-        self.transactionally(|wdb| apply(wdb.conn.0, wdb.params, enhancement))
+        self.transactionally(|wdb| {
+            let expected =
+                crate::wallet::transparent_ledger::capture_policy_generation(wdb.conn.0)?;
+            apply(
+                wdb.conn.0,
+                wdb.params,
+                wdb.transparent_ledger_mode,
+                expected,
+                enhancement,
+            )
+        })
     }
 }
 
@@ -997,7 +1028,12 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
         EnhancePirStoreResult::NotRecoverable,
     );
     // This incoming-only fixture has no durable spending associations.
-    super::discovery::queue(st.wallet().conn(), tx_ref).unwrap();
+    super::discovery::queue(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
+        tx_ref,
+    )
+    .unwrap();
     let suspended = vec![
         EnhancePirWork::Suspended(EnhancePirSuspension::Discovery(
             IronwoodEnhanceDiscoveryFailure {
@@ -1021,7 +1057,8 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
             test_rng(),
         )
         .unwrap()
-        .with_enhancement_mode(mode);
+        .with_enhancement_mode(mode)
+        .with_transparent_ledger_mode(TransparentLedgerMode::Public);
         assert_eq!(reopened.private_work().unwrap(), suspended);
         let exposes = |db: &crate::WalletDb<_, _, _, _>| {
             db.transaction_enhancement_work()
@@ -1068,20 +1105,29 @@ fn payload_enumeration_requires_mode_even_without_a_chain_tip() {
             db.transaction_data_requests(),
             Err(SqliteClientError::TransparentLedgerModeNotConfigured)
         ));
-        db.set_transparent_ledger_mode(
-            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
-        );
-        assert!(db.transaction_data_requests().unwrap().is_empty());
+        #[cfg(feature = "orchard")]
         assert!(matches!(
             db.transaction_enhancement_work(),
             Err(SqliteClientError::EnhancementModeNotConfigured)
         ));
+        #[cfg(feature = "orchard")]
+        db.set_enhancement_mode(EnhancementMode::Standard);
+        // Payload dispatch requires a ledger mode before the no-tip empty batch.
+        assert!(matches!(
+            db.transaction_enhancement_work(),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        db.set_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+        );
+        assert!(db.transaction_data_requests().unwrap().is_empty());
+        #[cfg(feature = "orchard")]
+        assert!(db.transaction_enhancement_work().unwrap().is_empty());
+        #[cfg(not(feature = "orchard"))]
+        assert!(db.transaction_enhancement_work().unwrap().is_empty());
         db.transactionally(|tx| {
             assert!(tx.transaction_data_requests()?.is_empty());
-            assert!(matches!(
-                tx.transaction_enhancement_work(),
-                Err(SqliteClientError::EnhancementModeNotConfigured)
-            ));
+            assert!(tx.transaction_enhancement_work()?.is_empty());
             Ok::<_, SqliteClientError>(())
         })
         .unwrap();
@@ -1226,6 +1272,7 @@ fn pir_recovers_history_and_backfills_without_losing_a_stored_memo() {
         .unwrap();
     queue_transaction(
         st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
         tx_ref,
         &IronwoodEnhancementPlan::Eligible { outgoing: vec![] },
     )
@@ -1781,6 +1828,7 @@ fn batch_transparent_routing_is_order_independent_and_sticky() {
             .set_enhancement_mode(EnhancementMode::PrivateIronwood);
         queue_transaction(
             st.wallet().conn(),
+            Some(TransparentLedgerMode::Public),
             tx_ref,
             &IronwoodEnhancementPlan::Eligible {
                 outgoing: [(98, 3), (99, 4)]
@@ -1826,6 +1874,144 @@ fn batch_transparent_routing_is_order_independent_and_sticky() {
         );
         assert!(visible(&st, incoming));
     }
+}
+
+#[test]
+fn has_transparent_under_private_required_keeps_financial_facts() {
+    use zcash_client_backend::data_api::{
+        enhance_pir::{EnhancePirRead, EnhancePirStoreResult, TransactionEnhancementWork},
+        status::{TransactionStatusMode, TransactionStatusRead, TransactionStatusWork},
+        transparent_ledger::{
+            PrivateTransparentDetail, TransparentLedgerRead, TransparentLedgerWrite,
+        },
+    };
+
+    let (mut st, tx_ref, incoming) = fixture();
+    let outgoing = outgoing(&st, tx_ref, 99, 4);
+    let txid = incoming.request_id().txid();
+    // Seed a known fee so we can assert it survives the private-details route.
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET fee = 1000 WHERE id_tx = ?1",
+            [tx_ref.0],
+        )
+        .unwrap();
+    let note_count: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM ironwood_received_notes WHERE transaction_id = ?1",
+            [tx_ref.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(note_count > 0);
+
+    st.wallet_mut()
+        .db_mut()
+        .set_transparent_ledger_mode(TransparentLedgerMode::PrivateRequired);
+    st.wallet_mut()
+        .db_mut()
+        .apply_transparent_policy(TransparentLedgerMode::PrivateRequired)
+        .unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+
+    assert_eq!(
+        apply_record(
+            st.wallet_mut().db_mut(),
+            outgoing,
+            &wire_record(true, false)
+        )
+        .unwrap(),
+        EnhancePirStoreResult::PrivateDetailsUnsupported
+    );
+    // No public LWD request is inserted; any pre-existing enhancement intent is not
+    // dispatched while public authority is absent.
+    let route: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = ?1",
+            [tx_ref.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(route, 2);
+    let fee: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT fee FROM transactions WHERE id_tx = ?1",
+            [tx_ref.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fee, 1000);
+    let notes_after: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM ironwood_received_notes WHERE transaction_id = ?1",
+            [tx_ref.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(notes_after, note_count);
+    assert!(
+        st.wallet()
+            .db()
+            .pending_private_transparent_details()
+            .unwrap()
+            .contains(&PrivateTransparentDetail::MixedTransaction { txid })
+    );
+    // Public enhancement work never returns the mixed transaction.
+    assert!(
+        !st.wallet()
+            .transaction_enhancement_work()
+            .unwrap()
+            .iter()
+            .any(|w| matches!(w, TransactionEnhancementWork::Public(r) if r.txid() == txid))
+    );
+
+    // Stored full data ends the pending mixed detail; the sticky route remains.
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET raw = x'00' WHERE id_tx = ?1",
+            [tx_ref.0],
+        )
+        .unwrap();
+    assert!(
+        !st.wallet()
+            .db()
+            .pending_private_transparent_details()
+            .unwrap()
+            .contains(&PrivateTransparentDetail::MixedTransaction { txid })
+    );
+
+    // A later status observation does not clear the marker.
+    st.wallet_mut()
+        .db_mut()
+        .set_status_mode(TransactionStatusMode::Public);
+    st.wallet_mut()
+        .set_transaction_status(txid, TransactionStatus::TxidNotRecognized)
+        .unwrap();
+    let route_after: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = ?1",
+            [tx_ref.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(route_after, 2);
+    // Status under PrivateRequired is always private, even with a public status mode.
+    let status = st.wallet().transaction_status_work_for(txid).unwrap();
+    assert!(matches!(status, TransactionStatusWork::Private(_)));
 }
 
 #[test]
@@ -2114,7 +2300,12 @@ fn private_suspensions_are_never_routed_publicly() {
     );
     finish_incoming(&mut st, incoming);
     // This incoming-only fixture has no durable spending associations.
-    super::discovery::queue(st.wallet().conn(), tx_ref).unwrap();
+    super::discovery::queue(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::Public),
+        tx_ref,
+    )
+    .unwrap();
 
     assert_eq!(
         routed(&st),

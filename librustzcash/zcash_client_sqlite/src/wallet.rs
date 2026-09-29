@@ -5262,15 +5262,20 @@ pub(crate) fn queue_tx_retrieval(
     txids: impl Iterator<Item = TxId>,
     dependent_tx_ref: Option<TxRef>,
 ) -> Result<(), SqliteClientError> {
+    // Capture the generation at the start of this SQLite transaction; a concurrent
+    // policy transition makes the insert fail and leaves the queue unchanged.
+    let expected = transparent_ledger::capture_policy_generation(conn)?;
     // This operation represents enhancement intent only. If complete transaction data is already
     // present, no request is needed. In particular, the presence of raw data must not implicitly
-    // turn an enhancement request into a status request.
+    // turn an enhancement request into a status request. Generation is stamped on insert and
+    // never refreshed on conflict, so a later touch cannot revive a stale row.
     let mut stmt_insert_tx = conn.prepare_cached(
-        "INSERT INTO tx_retrieval_queue (txid, query_type, dependent_transaction_id)
+        "INSERT INTO tx_retrieval_queue (txid, query_type, dependent_transaction_id, policy_generation)
          SELECT
             :txid,
             :enhancement_type,
-            :dependent_transaction_id
+            :dependent_transaction_id,
+            :policy_generation
          WHERE NOT EXISTS (
             SELECT 1 FROM transactions WHERE txid = :txid AND raw IS NOT NULL
          )
@@ -5280,10 +5285,14 @@ pub(crate) fn queue_tx_retrieval(
     )?;
 
     for txid in txids {
+        transparent_ledger::ensure_policy_generation(conn, expected)?;
         stmt_insert_tx.execute(named_params! {
             ":txid": txid.as_ref(),
             ":enhancement_type": TxQueryType::Enhancement.code(),
             ":dependent_transaction_id": dependent_tx_ref.map(|r| r.0),
+            ":policy_generation": i64::try_from(expected).map_err(|_| {
+                SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+            })?,
         })?;
     }
 
@@ -5297,13 +5306,18 @@ pub(crate) fn queue_tx_status(
     conn: &rusqlite::Transaction<'_>,
     txid: TxId,
 ) -> Result<(), SqliteClientError> {
+    let expected = transparent_ledger::capture_policy_generation(conn)?;
+    transparent_ledger::ensure_policy_generation(conn, expected)?;
     conn.execute(
-        "INSERT INTO tx_retrieval_queue (txid, query_type)
-         VALUES (:txid, :status_type)
+        "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
+         VALUES (:txid, :status_type, :policy_generation)
          ON CONFLICT (txid, query_type) DO NOTHING",
         named_params![
             ":txid": txid.as_ref(),
             ":status_type": TxQueryType::Status.code(),
+            ":policy_generation": i64::try_from(expected).map_err(|_| {
+                SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+            })?,
         ],
     )?;
 
@@ -5318,12 +5332,27 @@ pub(crate) fn queue_tx_status(
 pub(crate) fn transaction_status_work(
     conn: &rusqlite::Connection,
     mode: TransactionStatusMode,
+    configured: Option<zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode>,
 ) -> Result<Vec<TransactionStatusWork>, SqliteClientError> {
-    // Expiry dormancy is scheduling only, not evidence of absence. Use contiguous local
-    // scanning so an advertised tip or an isolated scanned range cannot suppress work.
-    let scanned_height = fully_scanned_height(conn)?.map(u32::from);
-    let mut tx_retrieval_stmt = conn.prepare_cached(
-        "SELECT q.txid, CASE WHEN t.target_height IS NOT NULL THEN MIN(t.target_height, t.min_observed_height) END
+    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
+
+    transparent_ledger::with_read_snapshot(conn, |conn| {
+        // Under PrivateRequired every status obligation is private: a public status mode cannot
+        // yield a public txid lookup. Creation bounds and expiry dormancy stay as they are.
+        let transparent_mode = transparent_ledger::resolve_mode(conn, configured)?;
+        let force_private = transparent_mode == TransparentLedgerMode::PrivateRequired;
+        let public_authority = transparent_mode.retains_public_authority();
+        let current_generation = transparent_ledger::durable_policy(conn)?
+            .map(|p| p.generation)
+            .unwrap_or(0);
+
+        // Expiry dormancy is scheduling only, not evidence of absence. Use contiguous local
+        // scanning so an advertised tip or an isolated scanned range cannot suppress work.
+        let scanned_height = fully_scanned_height(conn)?.map(u32::from);
+        let mut tx_retrieval_stmt = conn.prepare_cached(
+            "SELECT q.txid,
+                CASE WHEN t.target_height IS NOT NULL THEN MIN(t.target_height, t.min_observed_height) END,
+                q.policy_generation
          FROM tx_retrieval_queue q
          LEFT JOIN transactions t ON t.txid = q.txid
          WHERE q.query_type = :status_type
@@ -5347,27 +5376,42 @@ pub(crate) fn transaction_status_work(
                     < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
             )
          )",
-    )?;
+        )?;
 
-    let result = tx_retrieval_stmt
-        .query_and_then(
-            named_params![
-                ":status_type": TxQueryType::Status.code(),
-                ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
-                ":scanned_height": scanned_height,
-                ":reorg_depth": PRUNING_DEPTH
-            ],
-            |row| {
-                Ok::<_, rusqlite::Error>(route_status_work(
-                    mode,
-                    TxId::from_bytes(row.get(0)?),
-                    row.get::<_, Option<u32>>(1)?.map(BlockHeight::from),
-                ))
-            },
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+        let rows = tx_retrieval_stmt
+            .query_and_then(
+                named_params![
+                    ":status_type": TxQueryType::Status.code(),
+                    ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
+                    ":scanned_height": scanned_height,
+                    ":reorg_depth": PRUNING_DEPTH
+                ],
+                |row| -> Result<Option<TransactionStatusWork>, rusqlite::Error> {
+                    let txid = TxId::from_bytes(row.get(0)?);
+                    let earliest = row.get::<_, Option<u32>>(1)?.map(BlockHeight::from);
+                    let row_generation = u64::try_from(row.get::<_, i64>(2)?)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, i64::MIN))?;
+                    // Stale generations are omitted from the public batch, left queued, and not
+                    // treated as absence.
+                    if public_authority
+                        && !force_private
+                        && mode == TransactionStatusMode::Public
+                        && row_generation != current_generation
+                    {
+                        return Ok(None);
+                    }
+                    let effective = if force_private {
+                        TransactionStatusMode::Private
+                    } else {
+                        mode
+                    };
+                    Ok(Some(route_status_work(effective, txid, earliest)))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(result)
+        Ok(rows.into_iter().flatten().collect())
+    })
 }
 
 // Creation context cannot exclude inclusion on a replacement branch. Widen evidence
@@ -5445,10 +5489,21 @@ fn route_status_work(
 pub(crate) fn transaction_status_work_for(
     conn: &rusqlite::Connection,
     mode: TransactionStatusMode,
+    configured: Option<zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode>,
     txid: TxId,
 ) -> Result<TransactionStatusWork, SqliteClientError> {
-    let earliest = conn.query_row("SELECT CASE WHEN target_height IS NOT NULL THEN MIN(target_height, min_observed_height) END FROM transactions WHERE txid = ?1", [txid.as_ref()], |row| row.get::<_, Option<u32>>(0)).optional()?.flatten().map(BlockHeight::from);
-    Ok(route_status_work(mode, txid, earliest))
+    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
+
+    transparent_ledger::with_read_snapshot(conn, |conn| {
+        let transparent_mode = transparent_ledger::resolve_mode(conn, configured)?;
+        let effective = if transparent_mode == TransparentLedgerMode::PrivateRequired {
+            TransactionStatusMode::Private
+        } else {
+            mode
+        };
+        let earliest = conn.query_row("SELECT CASE WHEN target_height IS NOT NULL THEN MIN(target_height, min_observed_height) END FROM transactions WHERE txid = ?1", [txid.as_ref()], |row| row.get::<_, Option<u32>>(0)).optional()?.flatten().map(BlockHeight::from);
+        Ok(route_status_work(effective, txid, earliest))
+    })
 }
 
 /// Returns every pending payload-retrieval request as public work. Without Orchard support no
@@ -5456,24 +5511,40 @@ pub(crate) fn transaction_status_work_for(
 #[cfg(not(feature = "orchard"))]
 pub(crate) fn public_enhancement_work(
     conn: &rusqlite::Connection,
+    configured: Option<zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode>,
 ) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT txid FROM tx_retrieval_queue
-         WHERE query_type = :enhancement_type
-         ORDER BY txid",
-    )?;
-    stmt.query_and_then(
-        named_params![":enhancement_type": TxQueryType::Enhancement.code()],
-        |row| {
-            row.get(0).map(|txid| {
-                TransactionEnhancementWork::Public(PublicTransactionEnhancementRequest::new(
-                    TxId::from_bytes(txid),
-                ))
-            })
-        },
-    )?
-    .collect::<Result<_, _>>()
-    .map_err(Into::into)
+    transparent_ledger::with_read_snapshot(conn, |conn| {
+        if !transparent_ledger::retains_public_authority(conn, configured)? {
+            return Ok(vec![]);
+        }
+        let current_generation = transparent_ledger::durable_policy(conn)?
+            .map(|p| p.generation)
+            .unwrap_or(0);
+        let mut stmt = conn.prepare_cached(
+            "SELECT q.txid FROM tx_retrieval_queue q
+             LEFT JOIN transactions t ON t.txid = q.txid
+             WHERE q.query_type = :enhancement_type
+               AND q.policy_generation = :generation
+             ORDER BY q.txid",
+        )?;
+        stmt.query_and_then(
+            named_params![
+                ":enhancement_type": TxQueryType::Enhancement.code(),
+                ":generation": i64::try_from(current_generation).map_err(|_| {
+                    SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+                })?,
+            ],
+            |row| {
+                row.get(0).map(|txid| {
+                    TransactionEnhancementWork::Public(PublicTransactionEnhancementRequest::new(
+                        TxId::from_bytes(txid),
+                    ))
+                })
+            },
+        )?
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
+    })
 }
 
 pub(crate) fn delete_retrieval_queue_entries(
@@ -6432,7 +6503,7 @@ mod tests {
                 [txid.as_ref()], |row| row.get(0).map(TxRef))?;
             queue_tx_retrieval(db.conn.0, std::iter::once(txid), None)?;
             db.queue_ironwood_enhancement(tx_ref, &scanned)?;
-            assert_eq!(super::public_enhancement_work(db.conn.0)?,
+            assert_eq!(super::public_enhancement_work(db.conn.0, db.transparent_ledger_mode)?,
                 vec![crate::testing::public_work(txid)]);
             assert!(!db.conn.0.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_routing)",

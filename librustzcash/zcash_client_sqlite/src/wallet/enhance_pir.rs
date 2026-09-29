@@ -28,7 +28,10 @@ use zip32::Scope;
 
 use crate::{AccountUuid, error::SqliteClientError};
 
+use super::transparent_ledger;
 use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
+
+use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 
 // SQL fragments are macros so that `concat!` can assemble constant statements.
 // Defined before the submodules so that they can use them too.
@@ -67,11 +70,14 @@ mod metadata;
 
 // A route is transaction-wide. LwdRequired is sticky, including across rescans.
 // PrivateProtected survives completion and rewinds; only an explicit LWD decision or
-// transaction deletion with retrieval-intent cleanup ends protection. No row retains
-// ordinary enhancement semantics for unclassified and legacy transactions. Its
+// transaction deletion with retrieval-intent cleanup ends protection. Route 2
+// (PrivateDetailsUnsupported) is sticky under PrivateRequired; once public authority is
+// current again it is ordinary public LWD work.
+// No row retains ordinary enhancement semantics for unclassified and legacy transactions. Its
 // history expiry is display-only and never controls spendability.
 const PRIVATE_PROTECTED: i64 = private_protected!();
 const LWD_REQUIRED: i64 = 1;
+const PRIVATE_DETAILS_UNSUPPORTED: i64 = 2;
 
 type PendingOutgoingRow = ([u8; 32], u32, [u8; 32], [u8; 32], [u8; 32], [u8; 52]);
 
@@ -104,7 +110,10 @@ fn retire_enhancement_if_complete(
            AND NOT EXISTS (
                SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)"
         ),
-        named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()],
+        named_params![
+            ":tx": tx_ref.0,
+            ":enhancement": TxQueryType::Enhancement.code(),
+        ],
     )?;
     Ok(())
 }
@@ -252,21 +261,90 @@ fn route(conn: &Connection, tx_ref: crate::TxRef) -> Result<Option<i64>, SqliteC
     .map_err(Into::into)
 }
 
-fn require_lwd(conn: &Connection, tx_ref: crate::TxRef) -> Result<(), SqliteClientError> {
+/// Writes the public LWD route and restores an ordinary enhancement request.
+///
+/// Callers that lack public authority must use [`require_private_details_unsupported`] instead.
+fn require_lwd(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+    expected_generation: u64,
+) -> Result<(), SqliteClientError> {
+    transparent_ledger::ensure_policy_generation(conn, expected_generation)?;
     conn.execute(
         "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:tx, :route)
          ON CONFLICT(transaction_id) DO UPDATE SET route = excluded.route",
         named_params![":tx": tx_ref.0, ":route": LWD_REQUIRED],
     )?;
     clear_work(conn, tx_ref)?;
-    // Keep (or restore after earlier partial completion) the normal request.
+    // Keep (or restore after earlier partial completion) the normal request. Stamp the
+    // current generation; do not refresh it on conflict.
     conn.execute(
-        "INSERT INTO tx_retrieval_queue (txid, query_type)
-         SELECT txid, :enhancement FROM transactions WHERE id_tx = :tx AND raw IS NULL
+        "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
+         SELECT txid, :enhancement, :generation FROM transactions WHERE id_tx = :tx AND raw IS NULL
          ON CONFLICT(txid, query_type) DO NOTHING",
-        named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()],
+        named_params![
+            ":tx": tx_ref.0,
+            ":enhancement": TxQueryType::Enhancement.code(),
+            ":generation": i64::try_from(expected_generation).map_err(|_| {
+                SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+            })?,
+        ],
     )?;
     Ok(())
+}
+
+/// Marks a mixed or otherwise publicly unrecoverable transaction under PrivateRequired.
+/// Clears retryable PIR jobs without deleting financial facts or inserting a public request.
+fn require_private_details_unsupported(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (:tx, :route)
+         ON CONFLICT(transaction_id) DO UPDATE SET route = excluded.route",
+        named_params![":tx": tx_ref.0, ":route": PRIVATE_DETAILS_UNSUPPORTED],
+    )?;
+    clear_work(conn, tx_ref)?;
+    Ok(())
+}
+
+/// Routes a transaction that needs ordinary transparent enhancement: public LWD when
+/// authority is current, otherwise a private-details marker with no public request.
+fn require_transparent_details(
+    conn: &Connection,
+    configured: Option<TransparentLedgerMode>,
+    tx_ref: crate::TxRef,
+    expected_generation: u64,
+) -> Result<EnhancePirStoreResult, SqliteClientError> {
+    transparent_ledger::ensure_policy_generation(conn, expected_generation)?;
+    if transparent_ledger::retains_public_authority(conn, configured)? {
+        require_lwd(conn, tx_ref, expected_generation)?;
+        Ok(EnhancePirStoreResult::LwdRequired)
+    } else {
+        require_private_details_unsupported(conn, tx_ref)?;
+        Ok(EnhancePirStoreResult::PrivateDetailsUnsupported)
+    }
+}
+
+/// Like [`require_transparent_details`], for scan-time paths that do not return a store result.
+pub(super) fn route_transparent_details(
+    conn: &Connection,
+    configured: Option<TransparentLedgerMode>,
+    tx_ref: crate::TxRef,
+) -> Result<(), SqliteClientError> {
+    let expected = transparent_ledger::capture_policy_generation(conn)?;
+    let _ = require_transparent_details(conn, configured, tx_ref, expected)?;
+    Ok(())
+}
+
+/// Test helper: writes the public LWD route under the current generation.
+#[cfg(test)]
+pub(crate) fn require_lwd_for_test(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+) -> Result<(), SqliteClientError> {
+    let expected = transparent_ledger::capture_policy_generation(conn)?;
+    require_lwd(conn, tx_ref, expected)
 }
 
 pub(crate) fn is_protected(conn: &Connection, txid: TxId) -> Result<bool, SqliteClientError> {
@@ -291,14 +369,21 @@ const OUTGOING_SUSPENDED: u8 = 4;
 
 /// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
 /// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
-/// (`ironwood_enhance_routing.route = 0`) are excluded. Private rows use the complementary
-/// `route = 0` predicate, so the two transports partition payload work.
+/// (`ironwood_enhance_routing.route = 0`) are excluded. Sticky route 2 (mixed details under a
+/// non-public handle) is ordinary public LWD work once public authority is current, so it is not
+/// excluded here; under `PrivateRequired` `:public_authority` is false and no public rows appear.
+/// Private rows use the complementary `route = 0` predicate, so the two transports partition
+/// payload work. Public rows also require a matching `policy_generation`.
 const PUBLIC_ENHANCEMENT_ROUTE: &str = "(
-    NOT :protect_ironwood
-    OR NOT EXISTS (
-        SELECT 1
-        FROM ironwood_enhance_routing p
-        WHERE p.transaction_id = t.id_tx AND p.route = 0
+    :public_authority
+    AND q.policy_generation = :current_generation
+    AND (
+        NOT :protect_ironwood
+        OR NOT EXISTS (
+            SELECT 1
+            FROM ironwood_enhance_routing p
+            WHERE p.transaction_id = t.id_tx AND p.route = 0
+        )
     )
 )";
 
@@ -429,29 +514,46 @@ pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClien
         .collect())
 }
 
-/// Routes public and private payload work from one statement, and therefore one snapshot.
+/// Routes public and private payload work from one snapshot: resolved mode, generation, and
+/// queued rows are read together so a concurrent `PrivateRequired` transition cannot pair stale
+/// public authority with a newer generation.
 ///
 /// `Standard` exposes every ordinary enhancement request and no private work. `PrivateIronwood`
 /// exposes private work for protected transactions and ordinary requests for all others.
+/// Public rows require a resolved mode that retains public authority and a matching generation;
+/// route 2 never appears as public work.
 pub(crate) fn transaction_enhancement_work(
     conn: &Connection,
     mode: EnhancementMode,
+    configured: Option<TransparentLedgerMode>,
 ) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
-    let private = mode == EnhancementMode::PrivateIronwood;
-    let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(private, true))?;
-    read_work(
-        &mut stmt,
-        named_params![
-            ":enhancement_type": TxQueryType::Enhancement.code(),
-            ":protect_ironwood": private,
-        ],
-    )
+    transparent_ledger::with_read_snapshot(conn, |conn| {
+        let private = mode == EnhancementMode::PrivateIronwood;
+        let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
+        let current_generation = transparent_ledger::durable_policy(conn)?
+            .map(|p| p.generation)
+            .unwrap_or(0);
+        let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(private, true))?;
+        read_work(
+            &mut stmt,
+            named_params![
+                ":enhancement_type": TxQueryType::Enhancement.code(),
+                ":protect_ironwood": private,
+                ":public_authority": public_authority,
+                ":current_generation": i64::try_from(current_generation).map_err(|_| {
+                    SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+                })?,
+            ],
+        )
+    })
 }
 
 /// Authentication context and writes share the transaction owned by the public operation.
 struct Storage<'a, 'conn, P> {
     tx: &'a Transaction<'conn>,
     params: &'a P,
+    configured: Option<TransparentLedgerMode>,
+    expected_generation: u64,
 }
 
 impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
@@ -507,17 +609,30 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
         &mut self,
         enhancement: ValidatedIronwoodEnhancement<AccountUuid>,
     ) -> Result<EnhancePirStoreResult, Self::Error> {
-        apply(self.tx, self.params, enhancement)
+        apply(
+            self.tx,
+            self.params,
+            self.configured,
+            self.expected_generation,
+            enhancement,
+        )
     }
 }
 
 pub(crate) fn apply_records<P: Parameters>(
     tx: &Transaction<'_>,
     params: &P,
+    configured: Option<TransparentLedgerMode>,
     records: &[(EnhancePirRequest, EnhanceRecord)],
 ) -> Result<zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult, SqliteClientError> {
+    let expected_generation = transparent_ledger::capture_policy_generation(tx)?;
     zcash_client_backend::data_api::enhance_pir::storage::validate_and_apply_records(
-        &mut Storage { tx, params },
+        &mut Storage {
+            tx,
+            params,
+            configured,
+            expected_generation,
+        },
         records,
     )
 }
@@ -577,6 +692,7 @@ pub(crate) fn pending_outgoing(
 /// Runs exactly once per scanned wallet transaction, after its notes are stored.
 pub(crate) fn queue_scanned(
     conn: &Connection,
+    configured: Option<TransparentLedgerMode>,
     tx_ref: crate::TxRef,
     tx: &WalletTx<AccountUuid>,
 ) -> Result<(), SqliteClientError> {
@@ -588,7 +704,7 @@ pub(crate) fn queue_scanned(
         IronwoodEnhancementPlan::Ineligible
     ) && (!tx.ironwood_spends().is_empty() || !tx.ironwood_outputs().is_empty())
     {
-        return require_lwd(conn, tx_ref);
+        return route_transparent_details(conn, configured, tx_ref);
     }
     // Ordinary rescans load only unspent nullifiers. They must not erase outgoing work
     // merely because an already-linked spend is absent from this scan's account set.
@@ -601,13 +717,14 @@ pub(crate) fn queue_scanned(
         .iter()
         .any(|(account, _)| !scanned_accounts.contains(account))
     {
-        discovery::queue(conn, tx_ref)?;
+        discovery::queue(conn, configured, tx_ref)?;
     }
-    queue_transaction(conn, tx_ref, tx.ironwood_enhancement_plan())
+    queue_transaction(conn, configured, tx_ref, tx.ironwood_enhancement_plan())
 }
 
 fn queue_transaction(
     conn: &Connection,
+    configured: Option<TransparentLedgerMode>,
     tx_ref: crate::TxRef,
     plan: &IronwoodEnhancementPlan<AccountUuid>,
 ) -> Result<(), SqliteClientError> {
@@ -620,8 +737,8 @@ fn queue_transaction(
         return clear_work(conn, tx_ref);
     }
     let route = route(conn, tx_ref)?;
-    if route == Some(LWD_REQUIRED) {
-        return require_lwd(conn, tx_ref);
+    if route == Some(LWD_REQUIRED) || route == Some(PRIVATE_DETAILS_UNSUPPORTED) {
+        return route_transparent_details(conn, configured, tx_ref);
     }
     let candidates = match plan {
         IronwoodEnhancementPlan::Eligible { outgoing } => outgoing,
@@ -632,7 +749,7 @@ fn queue_transaction(
                 |row| row.get(0),
             )?;
             if route.is_some() || has_notes {
-                require_lwd(conn, tx_ref)?;
+                route_transparent_details(conn, configured, tx_ref)?;
             }
             return Ok(());
         }
@@ -921,6 +1038,8 @@ fn pending_note<P: Parameters>(
 pub(crate) fn apply<P: Parameters>(
     tx: &Transaction<'_>,
     params: &P,
+    configured: Option<TransparentLedgerMode>,
+    expected_generation: u64,
     enhancement: ValidatedIronwoodEnhancement<AccountUuid>,
 ) -> Result<EnhancePirStoreResult, SqliteClientError> {
     let zcash_client_backend::data_api::enhance_pir::storage::IronwoodEnhancementData {
@@ -987,8 +1106,7 @@ pub(crate) fn apply<P: Parameters>(
     }
     // Crucially, no routing mutation happens before the identity rechecks.
     if has_transparent {
-        require_lwd(tx, tx_ref)?;
-        return Ok(EnhancePirStoreResult::LwdRequired);
+        return require_transparent_details(tx, configured, tx_ref, expected_generation);
     }
     let Some(expected) = expected_metadata else {
         return Ok(EnhancePirStoreResult::Rejected);

@@ -3,14 +3,23 @@
 Status and payload retrieval are independent durable obligations. Status work is
 returned only by `TransactionStatusRead::transaction_status_work()`. The batch
 contains each actionable txid once, routed to `Public` or `Private` according to
-the explicitly configured `TransactionStatusMode`. Payload routing has no effect
-on status routing.
+the explicitly configured `TransactionStatusMode`, except that a required-private
+transparent ledger policy forces private status work.
 
 Configure every SQLite handle with `set_status_mode` or `with_status_mode` before
-obtaining status work, including individual lookups. Transactional handles inherit
-this configuration; reopened handles do not. An unconfigured handle returns
-`StatusModeNotConfigured`, even for an empty wallet. The application must authorize
-its selected disclosure policy. Discard snapshots when changing that policy.
+obtaining status work, including individual lookups. SQLite also requires
+`set_transparent_ledger_mode` or `with_transparent_ledger_mode` on the same handle.
+An unconfigured status mode returns `StatusModeNotConfigured`; an unconfigured
+ledger mode returns `TransparentLedgerModeNotConfigured`, even for an empty or
+shielded-only wallet. Under a durably applied or handle-configured
+`PrivateRequired` policy every status obligation is `TransactionStatusWork::Private`.
+Transactional handles inherit both settings; reopened handles do not. The
+application must authorize its selected disclosure policy. Discard snapshots when
+changing that policy.
+
+Payload routing has no effect on the configured `TransactionStatusMode` itself.
+The ledger policy can only withhold public status transport (by forcing private
+work), not invent a public route.
 
 `transaction_status_work_for(txid)` uses the same evidence and routing rules,
 without requiring a queued obligation, enqueueing one, or changing wallet state.

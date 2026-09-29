@@ -232,6 +232,10 @@ pub enum EnhancePirStoreResult {
     NotRecoverable,
     /// The whole transaction requires ordinary LWD enhancement.
     LwdRequired,
+    /// The transaction has transparent details that cannot be recovered over a public
+    /// request under the current private-required policy. Financial facts already stored
+    /// for the transaction are retained; a private-details marker replaces public LWD.
+    PrivateDetailsUnsupported,
     /// Authentication or action binding failed; nothing was changed.
     Rejected,
 }
@@ -273,6 +277,10 @@ pub trait EnhancePirRead: WalletRead {
     ///   transparent-address history are not enhancement and are not returned; obtain status from
     ///   [`super::status::TransactionStatusRead`] and transparent history from
     ///   [`WalletRead::transaction_data_requests`]. Neither returns payload work.
+    /// - SQLite callers must also configure a transparent ledger mode before invoking this
+    ///   method. An unconfigured ledger mode fails closed
+    ///   (`TransparentLedgerModeNotConfigured`), even for shielded-only wallets or when no
+    ///   chain tip is known; see the SQLite `WalletDb::set_transparent_ledger_mode` docs.
     ///
     /// Rediscovery is grouped by block and ordered by height, followed by private queries by
     /// position, public requests, discovery suspensions by transaction location/identity, and

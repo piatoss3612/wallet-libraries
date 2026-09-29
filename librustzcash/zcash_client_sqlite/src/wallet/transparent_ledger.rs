@@ -8,11 +8,13 @@
 //! implemented, private authority is never available, so `PrivateRequired` handles cannot
 //! authorize transparent inputs.
 
+mod policy;
+
 use rusqlite::OptionalExtension as _;
 use zcash_client_backend::data_api::{
     transparent_ledger::{
-        LastKnownBalance, LastKnownSource, RecoveryBlocker, RecoveryCompletion,
-        TransparentAuthority, TransparentLedgerBalance, TransparentLedgerMode,
+        AppliedTransparentPolicy, LastKnownBalance, LastKnownSource, RecoveryBlocker,
+        RecoveryCompletion, TransparentAuthority, TransparentLedgerBalance, TransparentLedgerMode,
         TransparentLedgerSnapshot,
     },
     wallet::{ConfirmationsPolicy, TargetHeight},
@@ -28,6 +30,12 @@ use {
     zcash_client_backend::data_api::AccountBalance,
 };
 
+pub(crate) use policy::{
+    applied_transparent_policy, apply_transparent_policy, capture_policy_generation,
+    check_transparent_policy_generation, ensure_policy_generation,
+    pending_private_transparent_details, retains_public_authority,
+};
+
 fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError> {
     match code {
         0 => Ok(TransparentLedgerMode::Public),
@@ -39,8 +47,7 @@ fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError>
     }
 }
 
-#[cfg(all(test, feature = "transparent-inputs"))]
-fn mode_code(mode: TransparentLedgerMode) -> i64 {
+pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
     match mode {
         TransparentLedgerMode::Public => 0,
         TransparentLedgerMode::PrivateShadow => 1,
@@ -50,12 +57,45 @@ fn mode_code(mode: TransparentLedgerMode) -> i64 {
 
 /// The highest `tpir_meta.min_reader_version` this build can interpret. A wallet requiring a
 /// newer reader is refused rather than operated on with semantics this build lacks.
-pub(crate) const TPIR_READER_VERSION: i64 = 1;
+pub(crate) const TPIR_READER_VERSION: i64 = 2;
 
 /// The policy durably applied to the wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DurablePolicy {
     pub(crate) mode: TransparentLedgerMode,
+    pub(crate) generation: u64,
+}
+
+impl From<DurablePolicy> for AppliedTransparentPolicy {
+    fn from(policy: DurablePolicy) -> Self {
+        AppliedTransparentPolicy {
+            mode: policy.mode,
+            generation: policy.generation,
+        }
+    }
+}
+
+/// Runs `f` against one SQLite snapshot.
+///
+/// Public follow-on dispatch reads the resolved mode, the durable generation, and queued work.
+/// Those must not be mixed across a concurrent `Public` → `PrivateRequired` transition: a stale
+/// public-authority result combined with the new generation would emit newly queued txids as
+/// public work. Callers already inside a transaction reuse that snapshot.
+pub(crate) fn with_read_snapshot<T, F>(
+    conn: &rusqlite::Connection,
+    f: F,
+) -> Result<T, SqliteClientError>
+where
+    F: FnOnce(&rusqlite::Connection) -> Result<T, SqliteClientError>,
+{
+    if conn.is_autocommit() {
+        let tx = conn.unchecked_transaction()?;
+        let value = f(&tx)?;
+        tx.commit()?;
+        Ok(value)
+    } else {
+        f(conn)
+    }
 }
 
 /// Reads the durable policy. A wallet that predates the ledger schema has none, and so cannot
@@ -86,11 +126,17 @@ pub(crate) fn durable_policy(
             Ok(None)
         };
     }
-    let (mode, min_reader_version) = conn
+    let (mode, generation, min_reader_version) = conn
         .query_row(
-            "SELECT applied_mode, min_reader_version FROM tpir_meta WHERE id = 0",
+            "SELECT applied_mode, policy_generation, min_reader_version FROM tpir_meta WHERE id = 0",
             [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()?
         // Once the table exists, a missing singleton is damage, not the absence of a policy.
@@ -104,6 +150,9 @@ pub(crate) fn durable_policy(
     }
     Ok(Some(DurablePolicy {
         mode: mode_from_code(mode)?,
+        generation: u64::try_from(generation).map_err(|_| {
+            SqliteClientError::CorruptedData("negative policy_generation in tpir_meta".into())
+        })?,
     }))
 }
 
@@ -355,21 +404,6 @@ fn last_known_source(
     _: ConfirmationsPolicy,
 ) -> Result<LastKnownSource, SqliteClientError> {
     Ok(LastKnownSource::LegacyPublic)
-}
-
-/// Durably applies `mode` for test fixtures. Production policy transitions are not yet
-/// implemented; this exists so tests can model a wallet written by a privacy-aware release.
-#[cfg(all(test, feature = "transparent-inputs"))]
-pub(crate) fn set_durable_policy_for_testing(
-    conn: &rusqlite::Connection,
-    mode: TransparentLedgerMode,
-    generation: u64,
-) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "UPDATE tpir_meta SET applied_mode = ?1, policy_generation = ?2 WHERE id = 0",
-        rusqlite::params![mode_code(mode), i64::try_from(generation).unwrap()],
-    )?;
-    Ok(())
 }
 
 /// Why a transparent output or spend exists in the wallet's projection.

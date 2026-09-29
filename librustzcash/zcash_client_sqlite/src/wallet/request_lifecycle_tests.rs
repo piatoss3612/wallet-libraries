@@ -474,7 +474,11 @@ fn status_policy_is_explicit_and_unknown_evidence_stays_private() {
         db.transaction_status_work_for(imported),
         Err(SqliteClientError::StatusModeNotConfigured)
     ));
-    let db = db.with_status_mode(TransactionStatusMode::Private);
+    let db = db
+        .with_status_mode(TransactionStatusMode::Private)
+        .with_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+        );
     assert_eq!(
         db.transaction_status_work().unwrap(),
         st.wallet().transaction_status_work().unwrap()
@@ -551,7 +555,10 @@ fn local_creation_evidence_survives_existing_rows_ingestion_reopen_and_rewind() 
     assert_eq!(private_bound(&st, txid), Some(prior));
     let reopened = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();
     let db = crate::WalletDb::from_connection(reopened, params, (), ())
-        .with_status_mode(TransactionStatusMode::Private);
+        .with_status_mode(TransactionStatusMode::Private)
+        .with_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+        );
     assert_eq!(
         db.transaction_status_work_for(txid).unwrap(),
         st.wallet().transaction_status_work_for(txid).unwrap()
@@ -796,7 +803,10 @@ fn expiry_dormancy_preserves_obligations_and_reactivates_after_rewind() {
         }
         let reopened = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();
         let db = crate::WalletDb::from_connection(reopened, *st.network(), (), ())
-            .with_status_mode(mode);
+            .with_status_mode(mode)
+            .with_transparent_ledger_mode(
+                zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+            );
         assert_eq!(
             db.transaction_status_work().unwrap(),
             st.wallet().transaction_status_work().unwrap()

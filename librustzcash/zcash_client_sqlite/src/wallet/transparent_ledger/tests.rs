@@ -385,18 +385,25 @@ fn conflicting_output_content_is_refused() {
 }
 
 mod handles {
-    use std::convert::Infallible;
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
+    use rusqlite::hooks::{AuthAction, Authorization};
     use tempfile::NamedTempFile;
     use transparent::{address::TransparentAddress, bundle::OutPoint};
     use zcash_client_backend::{
         data_api::{
             Account as _, CoinbaseFilter, InputSource as _, TargetValue, WalletRead as _,
             WalletWrite as _,
-            testing::{AddressType, single_output_change_strategy},
+            testing::{AddressType, TestBuilder, single_output_change_strategy},
             transparent_ledger::{
                 LastKnownSource, RecoveryBlocker, RecoveryCompletion, TransparentAuthority,
-                TransparentLedgerMode, TransparentLedgerRead as _,
+                TransparentLedgerMode, TransparentLedgerRead as _, TransparentLedgerWrite as _,
             },
             wallet::{
                 ConfirmationsPolicy, TargetHeight,
@@ -418,12 +425,13 @@ mod handles {
     use crate::{
         AccountUuid, WalletDb,
         error::SqliteClientError,
-        testing::db::{test_clock, test_rng},
+        testing::{
+            BlockCache,
+            db::{TestDbFactory, test_clock, test_rng},
+        },
         wallet::{
             init::WalletMigrator,
-            transparent_ledger::{
-                check_public_discovery, check_transparent_authority, set_durable_policy_for_testing,
-            },
+            transparent_ledger::{check_public_discovery, check_transparent_authority},
         },
     };
 
@@ -749,7 +757,10 @@ mod handles {
     fn durable_private_policy_is_never_weakened() {
         let (mut st, _, funded) = funded_wallet();
         let (account, _) = account_taddr(&st);
-        set_durable_policy_for_testing(conn(&st), PrivateRequired, 1).unwrap();
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateRequired)
+            .unwrap();
 
         for mode in [Public, PrivateShadow] {
             set_mode(&mut st, mode);
@@ -797,12 +808,12 @@ mod handles {
     fn newer_reader_requirement_fails_closed() {
         let (st, _, funded) = funded_wallet();
         conn(&st)
-            .execute("UPDATE tpir_meta SET min_reader_version = 2", [])
+            .execute("UPDATE tpir_meta SET min_reader_version = 3", [])
             .unwrap();
         let incompatible = |e: &SqliteClientError| {
             matches!(
                 e,
-                SqliteClientError::TransparentLedgerIncompatible { required: 2 }
+                SqliteClientError::TransparentLedgerIncompatible { required: 3 }
             )
         };
         assert!(incompatible(
@@ -825,6 +836,63 @@ mod handles {
             db.transaction_data_requests(),
             Err(SqliteClientError::TransparentLedgerModeNotConfigured)
         ));
+    }
+
+    #[test]
+    fn transaction_data_requests_use_one_policy_snapshot() {
+        let st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::file_backed())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let tip = st.test_account().unwrap().birthday().height();
+        assert_eq!(st.wallet().chain_height().unwrap(), None);
+
+        st.wallet()
+            .conn()
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        let mut writer = WalletDb::for_path(
+            st.wallet().data_file_path(),
+            *st.network(),
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap()
+        .with_transparent_ledger_mode(Public);
+
+        let transition_started = Arc::new(AtomicBool::new(false));
+        let transition_error = Arc::new(Mutex::new(None));
+        let callback_started = Arc::clone(&transition_started);
+        let callback_error = Arc::clone(&transition_error);
+        st.wallet()
+            .conn()
+            .authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "scan_queue",
+                        ..
+                    }
+                ) && !callback_started.swap(true, Ordering::SeqCst)
+                {
+                    let result = writer
+                        .apply_transparent_policy(PrivateRequired)
+                        .and_then(|_| writer.update_chain_tip(tip));
+                    if let Err(error) = result {
+                        *callback_error.lock().unwrap() = Some(error.to_string());
+                    }
+                }
+                Authorization::Allow
+            }));
+
+        let requests = st.wallet().transaction_data_requests().unwrap();
+        assert!(transition_started.load(Ordering::SeqCst));
+        assert_eq!(transition_error.lock().unwrap().take(), None);
+        assert!(
+            requests.is_empty(),
+            "the read must not combine pre-transition public authority with the new chain tip"
+        );
     }
 
     #[test]
@@ -887,7 +955,10 @@ mod handles {
 
         // A durable private policy has the same effect on a weaker handle's summary.
         set_mode(&mut st, Public);
-        set_durable_policy_for_testing(conn(&st), PrivateRequired, 1).unwrap();
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateRequired)
+            .unwrap();
         assert_eq!(transparent_total(&st), Zatoshis::ZERO);
     }
 
@@ -955,5 +1026,598 @@ mod handles {
             ),
             Err(SqliteClientError::TransparentAuthorityUnavailable)
         ));
+    }
+
+    #[test]
+    fn policy_transition_increments_generation_once_per_mode_change() {
+        let (mut st, _, _) = funded_wallet();
+        let first = st
+            .wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateShadow)
+            .unwrap();
+        assert_eq!(
+            first,
+            zcash_client_backend::data_api::transparent_ledger::AppliedTransparentPolicy {
+                mode: PrivateShadow,
+                generation: 1,
+            }
+        );
+        let same = st
+            .wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateShadow)
+            .unwrap();
+        assert_eq!(same.generation, 1);
+        let private = st
+            .wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateRequired)
+            .unwrap();
+        assert_eq!(private.generation, 2);
+        let back = st
+            .wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(Public)
+            .unwrap();
+        assert_eq!(back.generation, 3);
+    }
+
+    #[test]
+    fn policy_transition_failure_rolls_the_row_back() {
+        let (mut st, _, _) = funded_wallet();
+        assert_eq!(meta(&st), (0, 0));
+        conn(&st)
+            .execute_batch(
+                "CREATE TRIGGER fail_policy_write BEFORE UPDATE ON tpir_meta
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .apply_transparent_policy(PrivateRequired)
+                .is_err()
+        );
+        assert_eq!(meta(&st), (0, 0));
+    }
+
+    #[test]
+    fn second_connection_fails_generation_check_without_changing_memory_mode() {
+        use crate::testing::db::{test_clock, test_rng};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut writer =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(Public);
+        WalletMigrator::new().init_or_migrate(&mut writer).unwrap();
+        let captured = writer.applied_transparent_policy().unwrap();
+        assert_eq!(captured.generation, 0);
+
+        let reader =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(Public);
+        assert_eq!(reader.transparent_ledger_mode().unwrap(), Public);
+
+        writer.apply_transparent_policy(PrivateRequired).unwrap();
+        assert!(matches!(
+            reader.check_transparent_policy_generation(captured.generation),
+            Err(SqliteClientError::StaleTransparentPolicy {
+                expected: 0,
+                applied: 1,
+            })
+        ));
+        // The open handle's in-memory configuration is unchanged; resolving against the
+        // durable policy fails closed.
+        assert!(matches!(
+            reader.transparent_ledger_mode(),
+            Err(SqliteClientError::TransparentLedgerPolicyConflict {
+                configured: Some(Public),
+                applied: PrivateRequired,
+            })
+        ));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn parent_retrieval_is_withheld_under_private_required() {
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
+            transparent_ledger::PrivateTransparentDetail,
+        };
+        let (mut st, _taddr, funded) = funded_wallet();
+        let account = st.test_account().unwrap().id();
+        let parent = zcash_primitives::transaction::TxId::from_bytes([0x11; 32]);
+        let child = zcash_primitives::transaction::TxId::from_bytes(*funded.hash());
+        let child_ref: i64 = conn(&st)
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [child.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Queue a parent-transaction retrieval under public authority.
+        let tx = conn(&st).unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(
+            &tx,
+            std::iter::once(parent),
+            Some(crate::TxRef(child_ref)),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
+        let public =
+            TransactionEnhancementWork::Public(PublicTransactionEnhancementRequest::new(parent));
+        assert!(
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&public)
+        );
+
+        set_mode(&mut st, PrivateRequired);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateRequired)
+            .unwrap();
+        assert!(
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            st.wallet()
+                .db()
+                .pending_private_transparent_details()
+                .unwrap(),
+            vec![PrivateTransparentDetail::ParentTransaction { txid: parent }]
+        );
+        // The obligation stays queued under its stable identity while current policy controls
+        // whether it may be dispatched publicly.
+        let still_queued: bool = conn(&st)
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1 AND query_type = 1)",
+                [parent.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(still_queued);
+        let notes: i64 = conn(&st)
+            .query_row(
+                "SELECT COUNT(*) FROM transparent_received_outputs WHERE account_id = (
+                     SELECT id FROM accounts WHERE uuid = ?1)",
+                [account.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(notes > 0);
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn stale_generation_is_restamped_after_public_to_private_shadow() {
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
+        };
+        let (mut st, _, _) = funded_wallet();
+        let stale = zcash_primitives::transaction::TxId::from_bytes([0x22; 32]);
+        let fresh = zcash_primitives::transaction::TxId::from_bytes([0x33; 32]);
+        let tx = conn(&st).unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(stale), None).unwrap();
+        tx.commit().unwrap();
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateShadow)
+            .unwrap();
+        set_mode(&mut st, PrivateShadow);
+        let tx = conn(&st).unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(fresh), None).unwrap();
+        tx.commit().unwrap();
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
+        let work = st.wallet().transaction_enhancement_work().unwrap();
+        assert!(work.contains(&TransactionEnhancementWork::Public(
+            PublicTransactionEnhancementRequest::new(stale)
+        )));
+        assert!(work.contains(&TransactionEnhancementWork::Public(
+            PublicTransactionEnhancementRequest::new(fresh)
+        )));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn private_required_withholds_queue_rows_and_reports_lwd() {
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
+            transparent_ledger::PrivateTransparentDetail,
+        };
+        let (mut st, _, _) = funded_wallet();
+        let lwd = zcash_primitives::transaction::TxId::from_bytes([0x61; 32]);
+        conn(&st)
+            .execute(
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
+                [lwd.as_ref()],
+            )
+            .unwrap();
+        let tx_ref: i64 = conn(&st)
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [lwd.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn(&st)
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 1)",
+                [tx_ref],
+            )
+            .unwrap();
+        let tx = conn(&st).unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(lwd), None).unwrap();
+        tx.commit().unwrap();
+
+        set_mode(&mut st, PrivateRequired);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateRequired)
+            .unwrap();
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
+
+        let queued: i64 = conn(&st)
+            .query_row(
+                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 1);
+        let route: i64 = conn(&st)
+            .query_row(
+                "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = ?1",
+                [tx_ref],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(route, 2);
+        assert!(
+            st.wallet()
+                .db()
+                .pending_private_transparent_details()
+                .unwrap()
+                .contains(&PrivateTransparentDetail::MixedTransaction { txid: lwd })
+        );
+
+        set_mode(&mut st, Public);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(Public)
+            .unwrap();
+        assert!(
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(lwd)
+                ))
+        );
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn handle_only_private_required_route_two_is_public_again_after_handle_switch() {
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
+        };
+        let (mut st, _, _) = funded_wallet();
+        let mixed = zcash_primitives::transaction::TxId::from_bytes([0x62; 32]);
+        conn(&st)
+            .execute(
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
+                [mixed.as_ref()],
+            )
+            .unwrap();
+        let tx_ref: i64 = conn(&st)
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [mixed.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Durable policy stays Public; only the handle is PrivateRequired when routing.
+        set_mode(&mut st, PrivateRequired);
+        conn(&st)
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 2)",
+                [tx_ref],
+            )
+            .unwrap();
+        let tx = conn(&st).unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(mixed), None).unwrap();
+        tx.commit().unwrap();
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
+        assert!(
+            !st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(mixed)
+                ))
+        );
+
+        // Switching the handle back to Public (no durable mode change) must expose LWD work.
+        set_mode(&mut st, Public);
+        assert!(
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(mixed)
+                ))
+        );
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn restoring_public_authority_requeues_unresolved_mixed_details() {
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
+        };
+        let (mut st, _, _) = funded_wallet();
+        let mixed = zcash_primitives::transaction::TxId::from_bytes([0x52; 32]);
+        conn(&st)
+            .execute(
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
+                [mixed.as_ref()],
+            )
+            .unwrap();
+        let tx_ref: i64 = conn(&st)
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [mixed.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Sticky route 2 under PrivateRequired; no raw means details remain pending.
+        conn(&st)
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 2)",
+                [tx_ref],
+            )
+            .unwrap();
+        set_mode(&mut st, PrivateRequired);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateRequired)
+            .unwrap();
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
+        assert!(
+            st.wallet()
+                .db()
+                .pending_private_transparent_details()
+                .unwrap()
+                .contains(
+                    &zcash_client_backend::data_api::transparent_ledger::PrivateTransparentDetail::MixedTransaction {
+                        txid: mixed,
+                    }
+                )
+        );
+        assert!(
+            !st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(mixed)
+                ))
+        );
+
+        set_mode(&mut st, Public);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(Public)
+            .unwrap();
+        let route: i64 = conn(&st)
+            .query_row(
+                "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = ?1",
+                [tx_ref],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(route, 1);
+        assert!(
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(mixed)
+                ))
+        );
+        assert!(
+            st.wallet()
+                .db()
+                .pending_private_transparent_details()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn status_work_requires_ledger_mode_even_without_a_chain_tip() {
+        use zcash_client_backend::data_api::status::{
+            TransactionStatusMode, TransactionStatusRead,
+        };
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        db.set_status_mode(TransactionStatusMode::Public);
+        assert!(matches!(
+            db.transaction_status_work(),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        db.set_transparent_ledger_mode(Public);
+        assert!(db.transaction_status_work().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn public_dispatch_does_not_mix_stale_authority_with_new_generation() {
+        use std::time::Duration;
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancementMode, TransactionEnhancementWork},
+            status::{
+                PublicTransactionStatusRequest, TransactionStatusMode, TransactionStatusWork,
+            },
+        };
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut writer =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(Public);
+        WalletMigrator::new().init_or_migrate(&mut writer).unwrap();
+        writer.conn.busy_timeout(Duration::from_secs(2)).unwrap();
+        let journal: String = writer
+            .conn
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal.to_lowercase(), "wal");
+
+        let stale = zcash_primitives::transaction::TxId::from_bytes([0x41; 32]);
+        let fresh = zcash_primitives::transaction::TxId::from_bytes([0x42; 32]);
+        let tx = writer.conn.unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(stale), None).unwrap();
+        crate::wallet::queue_tx_status(&tx, stale).unwrap();
+        tx.commit().unwrap();
+
+        let reader =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(Public);
+        reader.conn.busy_timeout(Duration::from_secs(2)).unwrap();
+
+        // Pin a snapshot after public authority is observed, then transition on another
+        // connection. Dispatch on the snapshot must not emit work stamped at the new
+        // generation as public.
+        let snapshot = reader.conn.unchecked_transaction().unwrap();
+        assert!(
+            crate::wallet::transparent_ledger::retains_public_authority(&snapshot, Some(Public))
+                .unwrap()
+        );
+
+        writer.apply_transparent_policy(PrivateRequired).unwrap();
+        let tx = writer.conn.unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(fresh), None).unwrap();
+        crate::wallet::queue_tx_status(&tx, fresh).unwrap();
+        tx.commit().unwrap();
+
+        let enhancement = crate::wallet::enhance_pir::transaction_enhancement_work(
+            &snapshot,
+            EnhancementMode::Standard,
+            Some(Public),
+        )
+        .unwrap();
+        assert!(enhancement.contains(&TransactionEnhancementWork::Public(
+            PublicTransactionEnhancementRequest::new(stale)
+        )));
+        assert!(!enhancement.contains(&TransactionEnhancementWork::Public(
+            PublicTransactionEnhancementRequest::new(fresh)
+        )));
+
+        let status = crate::wallet::transaction_status_work(
+            &snapshot,
+            TransactionStatusMode::Public,
+            Some(Public),
+        )
+        .unwrap();
+        assert!(status.contains(&TransactionStatusWork::Public(
+            PublicTransactionStatusRequest::new(stale)
+        )));
+        assert!(!status.contains(&TransactionStatusWork::Public(
+            PublicTransactionStatusRequest::new(fresh)
+        )));
+
+        snapshot.commit().unwrap();
+
+        assert!(matches!(
+            crate::wallet::enhance_pir::transaction_enhancement_work(
+                &reader.conn,
+                EnhancementMode::Standard,
+                Some(Public),
+            ),
+            Err(SqliteClientError::TransparentLedgerPolicyConflict { .. })
+        ));
+        assert!(matches!(
+            crate::wallet::transaction_status_work(
+                &reader.conn,
+                TransactionStatusMode::Public,
+                Some(Public),
+            ),
+            Err(SqliteClientError::TransparentLedgerPolicyConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn commit_with_old_generation_inserts_nothing() {
+        use crate::testing::db::{test_clock, test_rng};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut writer =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap()
+                .with_transparent_ledger_mode(Public);
+        WalletMigrator::new().init_or_migrate(&mut writer).unwrap();
+        let old_generation = writer.applied_transparent_policy().unwrap().generation;
+        writer.apply_transparent_policy(PrivateShadow).unwrap();
+
+        // Simulate a commit path that captured the old generation before the transition.
+        assert!(matches!(
+            writer.check_transparent_policy_generation(old_generation),
+            Err(SqliteClientError::StaleTransparentPolicy { .. })
+        ));
+        let before: i64 = writer
+            .conn
+            .query_row("SELECT COUNT(*) FROM tx_retrieval_queue", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let tx = writer.conn.unchecked_transaction().unwrap();
+        // Direct insert attempt after a concurrent transition: ensure_policy_generation fails.
+        let result = (|| {
+            crate::wallet::transparent_ledger::ensure_policy_generation(&tx, old_generation)?;
+            crate::wallet::queue_tx_retrieval(
+                &tx,
+                std::iter::once(zcash_primitives::transaction::TxId::from_bytes([9; 32])),
+                None,
+            )
+        })();
+        assert!(matches!(
+            result,
+            Err(SqliteClientError::StaleTransparentPolicy { .. })
+        ));
+        tx.rollback().unwrap();
+        let after: i64 = writer
+            .conn
+            .query_row("SELECT COUNT(*) FROM tx_retrieval_queue", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(before, after);
     }
 }
