@@ -1,9 +1,9 @@
 //! Adds the `tpir_*` transparent ledger schema and classifies existing transparent records.
 //!
-//! The migration is seedless and purely additive: it creates the ledger tables, records the
-//! durable policy as public, and backfills projection origins for every existing transparent
-//! output and spend. Existing rows are legacy evidence and never private coverage, so no
-//! coverage, event, script, or pending-work row is created.
+//! The migration is seedless and purely additive: it records the durable policy as public and
+//! backfills projection origins for every existing transparent output and spend. Existing rows
+//! are legacy evidence and never private coverage. Recovery tables (scripts, events, coverage,
+//! pending work) are added by the migration that introduces candidate recovery.
 use std::collections::HashSet;
 
 use schemerz_rusqlite::RusqliteMigration;
@@ -59,168 +59,6 @@ impl RusqliteMigration for Migration {
             );
             INSERT INTO tpir_meta (id, applied_mode, policy_generation, min_reader_version)
             VALUES (0, 0, 0, 1);
-
-            CREATE TABLE tpir_account_state (
-                account_id INTEGER PRIMARY KEY
-                    REFERENCES accounts(id) ON DELETE CASCADE,
-                lifecycle INTEGER NOT NULL CHECK (lifecycle IN (0, 1)),
-                lifecycle_generation INTEGER NOT NULL,
-                watch_generation INTEGER NOT NULL,
-                activated_height INTEGER,
-                activated_hash BLOB,
-                quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
-                quarantine_epoch INTEGER NOT NULL DEFAULT 0,
-                CHECK ((activated_height IS NULL) = (activated_hash IS NULL)),
-                CHECK (lifecycle = 0 OR activated_height IS NOT NULL)
-            );
-
-            CREATE TABLE tpir_sources (
-                source_id BLOB PRIMARY KEY,
-                accepted_lineage INTEGER NOT NULL,
-                accepted_revision_id BLOB NOT NULL,
-                accepted_sealed INTEGER NOT NULL CHECK (accepted_sealed IN (0, 1)),
-                accepted_anchor_height INTEGER NOT NULL,
-                accepted_anchor_hash BLOB NOT NULL,
-                quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
-                trust_epoch INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE tpir_qualified_revisions (
-                source_id BLOB NOT NULL
-                    REFERENCES tpir_sources(source_id) ON DELETE CASCADE,
-                revision_id BLOB NOT NULL,
-                lineage INTEGER NOT NULL,
-                UNIQUE (source_id, revision_id)
-            );
-
-            CREATE TABLE tpir_scripts (
-                id INTEGER PRIMARY KEY,
-                account_id INTEGER NOT NULL
-                    REFERENCES accounts(id) ON DELETE CASCADE,
-                script BLOB NOT NULL UNIQUE,
-                key_scope INTEGER NOT NULL,
-                child_index INTEGER,
-                address_id INTEGER
-                    REFERENCES addresses(id) ON DELETE SET NULL,
-                required_from INTEGER,
-                watch_generation INTEGER NOT NULL
-            );
-            CREATE INDEX idx_tpir_scripts_account ON tpir_scripts (account_id);
-
-            CREATE TABLE tpir_receive_events (
-                id INTEGER PRIMARY KEY,
-                txid BLOB NOT NULL,
-                output_index INTEGER NOT NULL,
-                script BLOB NOT NULL,
-                value_zat INTEGER NOT NULL CHECK (value_zat >= 0),
-                is_coinbase INTEGER NOT NULL CHECK (is_coinbase IN (0, 1)),
-                UNIQUE (txid, output_index)
-            );
-            CREATE INDEX idx_tpir_receive_events_script ON tpir_receive_events (script);
-
-            CREATE TABLE tpir_spend_events (
-                id INTEGER PRIMARY KEY,
-                spending_txid BLOB NOT NULL,
-                input_index INTEGER NOT NULL,
-                prevout_txid BLOB NOT NULL,
-                prevout_output_index INTEGER NOT NULL,
-                spent_script BLOB NOT NULL,
-                UNIQUE (spending_txid, input_index)
-            );
-            CREATE INDEX idx_tpir_spend_events_prevout ON tpir_spend_events (
-                prevout_txid, prevout_output_index
-            );
-
-            CREATE TABLE tpir_event_placements (
-                txid BLOB PRIMARY KEY,
-                mined_height INTEGER NOT NULL,
-                block_hash BLOB NOT NULL
-            );
-
-            CREATE TABLE tpir_event_observations (
-                id INTEGER PRIMARY KEY,
-                receive_event_id INTEGER
-                    REFERENCES tpir_receive_events(id) ON DELETE CASCADE,
-                spend_event_id INTEGER
-                    REFERENCES tpir_spend_events(id) ON DELETE CASCADE,
-                source_id BLOB NOT NULL,
-                revision_id BLOB NOT NULL,
-                anchor_height INTEGER NOT NULL,
-                anchor_hash BLOB NOT NULL,
-                record_digest BLOB,
-                CHECK ((receive_event_id IS NULL) != (spend_event_id IS NULL))
-            );
-            CREATE UNIQUE INDEX idx_tpir_event_observations_receive
-                ON tpir_event_observations (receive_event_id, source_id, revision_id)
-                WHERE receive_event_id IS NOT NULL;
-            CREATE UNIQUE INDEX idx_tpir_event_observations_spend
-                ON tpir_event_observations (spend_event_id, source_id, revision_id)
-                WHERE spend_event_id IS NOT NULL;
-
-            CREATE TABLE tpir_coverage (
-                id INTEGER PRIMARY KEY,
-                script_id INTEGER NOT NULL
-                    REFERENCES tpir_scripts(id) ON DELETE CASCADE,
-                from_height INTEGER NOT NULL,
-                through_height INTEGER NOT NULL,
-                through_hash BLOB NOT NULL,
-                source_id BLOB NOT NULL,
-                revision_id BLOB NOT NULL,
-                lineage INTEGER NOT NULL,
-                sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
-                anchor_height INTEGER NOT NULL,
-                anchor_hash BLOB NOT NULL,
-                CHECK (from_height <= through_height)
-            );
-            CREATE INDEX idx_tpir_coverage_script ON tpir_coverage (script_id, from_height);
-
-            CREATE TABLE tpir_unsupported_coverage (
-                id INTEGER PRIMARY KEY,
-                script_id INTEGER NOT NULL
-                    REFERENCES tpir_scripts(id) ON DELETE CASCADE,
-                from_height INTEGER NOT NULL,
-                to_height INTEGER,
-                reason INTEGER NOT NULL CHECK (reason IN (0, 1)),
-                source_id BLOB NOT NULL,
-                revision_id BLOB NOT NULL,
-                lineage INTEGER NOT NULL,
-                target_height INTEGER NOT NULL,
-                target_hash BLOB NOT NULL,
-                CHECK (to_height IS NULL OR from_height <= to_height),
-                CHECK (from_height <= target_height)
-            );
-            CREATE INDEX idx_tpir_unsupported_coverage_script
-                ON tpir_unsupported_coverage (script_id);
-
-            CREATE TABLE tpir_pending_pages (
-                id INTEGER PRIMARY KEY,
-                source_id BLOB NOT NULL,
-                revision_id BLOB NOT NULL,
-                lineage INTEGER NOT NULL,
-                sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
-                anchor_height INTEGER NOT NULL,
-                anchor_hash BLOB NOT NULL,
-                source_trust_epoch INTEGER NOT NULL,
-                page_id BLOB NOT NULL,
-                from_height INTEGER NOT NULL,
-                to_height INTEGER NOT NULL,
-                lifecycle INTEGER NOT NULL CHECK (lifecycle IN (0, 1)),
-                policy_generation INTEGER NOT NULL,
-                target_height INTEGER NOT NULL,
-                target_hash BLOB NOT NULL,
-                UNIQUE (source_id, revision_id, page_id),
-                CHECK (from_height <= to_height)
-            );
-
-            CREATE TABLE tpir_pending_page_scripts (
-                pending_page_id INTEGER NOT NULL
-                    REFERENCES tpir_pending_pages(id) ON DELETE CASCADE,
-                script_id INTEGER NOT NULL
-                    REFERENCES tpir_scripts(id) ON DELETE CASCADE,
-                UNIQUE (pending_page_id, script_id)
-            );
-            CREATE INDEX idx_tpir_pending_page_scripts_script
-                ON tpir_pending_page_scripts (script_id);
 
             CREATE TABLE tpir_output_origins (
                 output_id INTEGER NOT NULL
@@ -487,22 +325,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(meta, (0, 0, 1));
-        for table in [
-            "tpir_account_state",
-            "tpir_scripts",
-            "tpir_receive_events",
-            "tpir_spend_events",
-            "tpir_event_placements",
-            "tpir_event_observations",
-            "tpir_coverage",
-            "tpir_pending_pages",
-            "tpir_pending_page_scripts",
-            "tpir_sources",
-            "tpir_unsupported_coverage",
-            "tpir_qualified_revisions",
-        ] {
-            assert_eq!(count(&db.conn, table), 0, "{table} must start empty");
-        }
+        assert_eq!(
+            ledger_table_names(&db.conn),
+            BTreeSet::from([
+                "tpir_meta".to_string(),
+                "tpir_output_origins".to_string(),
+                "tpir_spend_origins".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -536,6 +366,5 @@ mod tests {
         WalletMigrator::new().init_or_migrate(&mut db).unwrap();
         assert_eq!(wallet_tables(&db.conn), before);
         assert_eq!(count(&db.conn, "tpir_output_origins"), 4);
-        assert_eq!(count(&db.conn, "tpir_coverage"), 0);
     }
 }

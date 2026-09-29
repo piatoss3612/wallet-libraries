@@ -274,10 +274,6 @@ fn origin_write_failure_rolls_back_the_output() {
         .unwrap();
     assert_eq!(stored, 0, "no output may be stored without its origin");
     assert_eq!(records_without_origin(conn(&st)), 0);
-    let coverage: i64 = conn(&st)
-        .query_row("SELECT COUNT(*) FROM tpir_coverage", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(coverage, 0);
 }
 
 #[test]
