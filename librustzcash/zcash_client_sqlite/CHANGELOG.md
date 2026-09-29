@@ -10,6 +10,18 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- The seedless `transparent_ledger_schema` migration, which adds `tpir_meta`
+  (the durable transparent policy, recorded as public) and the
+  `tpir_output_origins` and `tpir_spend_origins` provenance tables. It
+  classifies every existing transparent output and spend as legacy evidence,
+  and marks records whose transaction has local creation evidence as local
+  construction too. Neither origin is coverage. Existing wallet tables are
+  unchanged.
+- Projection origins for new transparent records: public discovery writes
+  record a legacy-public origin, and local construction records a local
+  origin, in the same transaction as the record.
+
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`
   migration drops the `orchard_ironwood_migration*` tables and their indexes,

@@ -204,6 +204,7 @@ pub(crate) mod sapling;
 pub(crate) mod scanning;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) mod transparent;
+pub(crate) mod transparent_ledger;
 
 pub(crate) const BLOCK_SAPLING_FRONTIER_ABSENT: &[u8] = &[0x0];
 
@@ -3601,7 +3602,12 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
 
     #[cfg(feature = "transparent-inputs")]
     for utxo_outpoint in sent_tx.utxos_spent() {
-        transparent::mark_transparent_utxo_spent(conn, tx_ref, utxo_outpoint)?;
+        transparent::mark_transparent_utxo_spent(
+            conn,
+            tx_ref,
+            utxo_outpoint,
+            Some(transparent_ledger::ProjectionOrigin::LocalConstruction),
+        )?;
     }
 
     // Unlock any notes that were locked for this transaction, since the spend records
@@ -3653,6 +3659,7 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                             ),
                             sent_tx.target_height().into(),
                             true,
+                            transparent_ledger::ProjectionOrigin::LocalConstruction,
                         )?;
                     }
                 }
@@ -3749,6 +3756,7 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                     .expect("can extract a recipient address from an ephemeral address script"),
                     sent_tx.target_height().into(),
                     true,
+                    transparent_ledger::ProjectionOrigin::LocalConstruction,
                 )?;
             }
             #[cfg(feature = "transparent-inputs")]
@@ -3775,6 +3783,7 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
                     .expect("can extract a recipient address from a transparent recipient_address"),
                     sent_tx.target_height().into(),
                     true,
+                    transparent_ledger::ProjectionOrigin::LocalConstruction,
                 )?;
             }
         }
@@ -5375,6 +5384,23 @@ pub(crate) fn record_transaction_created(
     txid: TxId,
     earliest: BlockHeight,
 ) -> Result<(), SqliteClientError> {
+    // Creation evidence and the local provenance it implies are recorded atomically: on a
+    // handle outside a transaction, run both in one; inside one, the caller's scope applies.
+    if conn.is_autocommit() {
+        let tx = conn.unchecked_transaction()?;
+        record_transaction_created_in(&tx, txid, earliest)?;
+        tx.commit()?;
+        Ok(())
+    } else {
+        record_transaction_created_in(conn, txid, earliest)
+    }
+}
+
+fn record_transaction_created_in(
+    conn: &rusqlite::Connection,
+    txid: TxId,
+    earliest: BlockHeight,
+) -> Result<(), SqliteClientError> {
     // Read chain context and write evidence in one statement, so a concurrent rewind cannot
     // interleave between reading the tip and inserting an outbox's transaction metadata.
     let updated = conn.execute(
@@ -5390,6 +5416,8 @@ pub(crate) fn record_transaction_created(
     if updated == 0 {
         return Err(SqliteClientError::ChainHeightUnknown);
     }
+    #[cfg(feature = "transparent-inputs")]
+    transparent_ledger::record_local_origins_for_tx(conn, txid.as_ref())?;
     Ok(())
 }
 

@@ -80,6 +80,7 @@ use crate::{
             is_locked_at, output_eligible_condition, overridable_owners_rarray, push_lock_params,
         },
         mempool_height,
+        transparent_ledger::{ProjectionOrigin, record_output_origin, record_spend_origin},
     },
 };
 #[cfg(feature = "transparent-inputs")]
@@ -1983,7 +1984,11 @@ pub(crate) fn mark_transparent_utxo_spent(
     conn: &rusqlite::Transaction,
     spent_in_tx: TxRef,
     outpoint: &OutPoint,
+    origin: Option<ProjectionOrigin>,
 ) -> Result<bool, SqliteClientError> {
+    if let Some(origin) = origin {
+        record_spend_origin(conn, spent_in_tx, outpoint, origin)?;
+    }
     let spend_params = named_params![
         ":spent_in_tx": spent_in_tx.0,
         ":prevout_txid": outpoint.hash(),
@@ -2126,7 +2131,15 @@ pub(crate) fn put_received_transparent_utxo<P: consensus::Parameters>(
     output: &WalletTransparentOutput<AccountUuid>,
 ) -> Result<(AccountRef, AccountUuid, KeyScope, UtxoId), SqliteClientError> {
     let observed_height = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
-    put_transparent_output(conn, params, gap_limits, output, observed_height, true)
+    put_transparent_output(
+        conn,
+        params,
+        gap_limits,
+        output,
+        observed_height,
+        true,
+        ProjectionOrigin::LegacyPublic,
+    )
 }
 
 /// An enumeration of the types of errors that can occur when scheduling an event to happen at a
@@ -2676,6 +2689,7 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
     output: &WalletTransparentOutput<AccountUuid>,
     observation_height: BlockHeight,
     known_unspent: bool,
+    origin: ProjectionOrigin,
 ) -> Result<(AccountRef, AccountUuid, KeyScope, UtxoId), SqliteClientError> {
     let addr_str = output.recipient_address().encode(params);
 
@@ -2782,6 +2796,30 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
         }
     };
 
+    // An output's script and value are immutable content of its identity. A conflicting
+    // report is rejected rather than overwriting the stored content while its existing
+    // origins, possibly local, continue to vouch for it.
+    let stored_content = conn
+        .query_row(
+            "SELECT script, value_zat FROM transparent_received_outputs
+             WHERE transaction_id = :transaction_id AND output_index = :output_index",
+            named_params![
+                ":transaction_id": id_tx,
+                ":output_index": output.outpoint().n(),
+            ],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    if let Some((script, value)) = stored_content
+        && (script != output.txout().script_pubkey().0.0
+            || value != i64::from(ZatBalance::from(output.txout().value())))
+    {
+        return Err(SqliteClientError::CorruptedData(format!(
+            "conflicting content reported for transparent output {:?}",
+            output.outpoint()
+        )));
+    }
+
     let mut stmt_upsert_transparent_output = conn.prepare_cached(
         "INSERT INTO transparent_received_outputs (
             transaction_id, output_index,
@@ -2817,6 +2855,7 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
 
     let utxo_id = stmt_upsert_transparent_output
         .query_row(sql_args, |row| row.get::<_, i64>(0).map(UtxoId))?;
+    record_output_origin(conn, utxo_id, origin)?;
 
     // If we have a record of the output already having been spent, then mark it as spent using the
     // stored reference to the spending transaction.
@@ -2837,7 +2876,8 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
         .optional()?;
 
     if let Some(spending_transaction_id) = spending_tx_ref {
-        mark_transparent_utxo_spent(conn, spending_transaction_id, output.outpoint())?;
+        // The spend's origins were recorded with its spend-map entry.
+        mark_transparent_utxo_spent(conn, spending_transaction_id, output.outpoint(), None)?;
     }
 
     #[cfg(feature = "transparent-inputs")]
