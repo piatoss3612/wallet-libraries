@@ -960,7 +960,10 @@ fn deleting_a_funder_does_not_block_another_transaction_in_the_block() {
         test_rng(),
     )
     .unwrap()
-    .with_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard);
+    .with_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard)
+    .with_transparent_ledger_mode(
+        zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+    );
     assert_eq!(reopened.discovery_suspensions().unwrap(), suspended);
     assert!(
         reopened
@@ -1923,6 +1926,9 @@ fn retro_link_reopens_retired_enhancement_and_recovers_recipient_privately() {
         .unwrap()
         .with_enhancement_mode(
             zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        )
+        .with_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
         );
         assert_eq!(
             reopened.discovery_requests().unwrap(),

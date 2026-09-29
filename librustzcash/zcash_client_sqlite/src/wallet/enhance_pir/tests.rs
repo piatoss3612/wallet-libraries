@@ -611,7 +611,8 @@ fn reorg_prunes_positions_but_retains_protection_and_lwd_decisions() {
                 test_rng(),
             )
             .unwrap()
-            .with_enhancement_mode(mode);
+            .with_enhancement_mode(mode)
+            .with_transparent_ledger_mode(TransparentLedgerMode::Public);
             assert_eq!(
                 reopened
                     .transaction_enhancement_work()
@@ -649,7 +650,8 @@ fn reopening_uses_explicit_mode_and_preserves_routes() {
         test_rng(),
     )
     .unwrap()
-    .with_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard);
+    .with_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard)
+    .with_transparent_ledger_mode(TransparentLedgerMode::Public);
     assert_eq!(reopened.query_requests().unwrap(), vec![request]);
     assert!(
         reopened
@@ -1038,7 +1040,8 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
             test_rng(),
         )
         .unwrap()
-        .with_enhancement_mode(mode);
+        .with_enhancement_mode(mode)
+        .with_transparent_ledger_mode(TransparentLedgerMode::Public);
         assert_eq!(reopened.private_work().unwrap(), suspended);
         let exposes = |db: &crate::WalletDb<_, _, _, _>| {
             db.transaction_enhancement_work()
