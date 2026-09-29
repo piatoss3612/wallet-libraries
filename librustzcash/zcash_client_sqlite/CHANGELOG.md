@@ -10,10 +10,9 @@ workspace.
 
 ## [Unreleased]
 
-### Added
-- Bounded local recovery for swap receiving keys when private queries are disabled.
-  Completed local restore coverage can satisfy discovery without a directory lookup.
-  Known swap operations retain their final directory-check obligation.
+### Changed
+- Removed the temporary local replay alternative for swap recovery. Restored
+  receiving keys use private discovery with fixed recovery targets.
 
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`

@@ -1,4 +1,4 @@
-//! Durable discovery coverage shared by private lookups and explicit local recovery.
+//! Durable opt-in for private historical discovery. No targeted replay fallback.
 use super::{Error, KeyId, account_key, corrupt, payments::key_ref};
 use crate::{AccountUuid, WalletDb, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -8,31 +8,6 @@ use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Whether this fixed target still needs a directory lookup. Local operations
-    /// require their final directory check even when scanning found a receipt.
-    /// Restored keys can instead finish with complete local scan coverage.
-    pub fn swap_recovery_needs_directory(
-        &self,
-        account: AccountUuid,
-        key: KeyId,
-        through: BlockHeight,
-    ) -> Result<bool, Error> {
-        if self.swap_receiving_needs_discovery(account, key, through)? {
-            return Ok(true);
-        }
-        let conn = self.conn.borrow();
-        let id = key_ref(conn, account, key)?;
-        let local: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_swap_scan_uses WHERE receiving_key_id=?1)",
-            [id],
-            |r| r.get(0),
-        )?;
-        Ok(local
-            && self
-                .swap_directory_check(account, key)?
-                .is_none_or(|a| a.height < through))
-    }
-
     /// Whether historical discovery still has a gap through the requested height.
     /// Canonical directory coverage and ranges scanned with this key are combined;
     /// a newer directory publication alone does not invalidate completed recovery.
@@ -84,54 +59,6 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 }
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Explicitly queue missing compact blocks when the caller selects local recovery.
-    /// This makes no network requests and never runs as a failed-PIR fallback.
-    /// Restored keys stop at their first accepted tip. Known operations retain their
-    /// pending watch or terminal deadline. Repeating this after scanning is a no-op.
-    pub fn queue_swap_recovery_scan(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        through: ChainAnchor,
-    ) -> Result<(), Error> {
-        if wallet::get_block_hash(self.conn.borrow(), through.height)?
-            != Some(BlockHash(through.hash))
-        {
-            return Err(corrupt("local recovery anchor is not canonical"));
-        }
-        let target = self
-            .prepare_swap_recovery_target(account, key, through)?
-            .unwrap_or(through);
-        self.transactionally(|db| {
-            if wallet::get_block_hash(db.conn.0, through.height)? != Some(BlockHash(through.hash))
-                || wallet::get_block_hash(db.conn.0, target.height)? != Some(BlockHash(target.hash))
-            {
-                return Err(corrupt("local recovery anchor is not canonical"));
-            }
-            let id = key_ref(db.conn.0, account, key)?;
-            let start: u32 = db.conn.0.query_row(
-                "SELECT scan_from FROM ironwood_receiving_keys WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )?;
-            // A verified directory prefix does not need to be downloaded again.
-            let start = u64::from(start).max(
-                db.swap_directory_check(account, key)?
-                    .map_or(0, |a| u64::from(u32::from(a.height)) + 1),
-            );
-            if start <= u64::from(u32::from(target.height)) {
-                super::coverage::queue_key(
-                    db.conn.0,
-                    account,
-                    key,
-                    BlockHeight::from(start as u32),
-                    target.height,
-                )?;
-            }
-            Ok(())
-        })
-    }
-
     /// Opt in before the first scan. Historical key gaps then use the directory,
     /// while ordinary scanning retains spend evidence for late note insertion.
     /// Enabling later cannot recreate already pruned evidence or remove queued scans.

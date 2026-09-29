@@ -319,8 +319,6 @@ mod apply;
 
 mod private;
 
-mod local_recovery;
-
 mod reservations;
 
 mod verification;

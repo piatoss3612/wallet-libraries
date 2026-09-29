@@ -225,9 +225,8 @@ trial decryption when the height budget is exhausted even if PIR is unavailable.
 It does not delete registry entries, received notes, witnesses, or spend metadata.
 
 `prepare_swap_recovery_target` selects a durable canonical target after grace. With
-no local operation, restored and lookahead keys use the first accepted restore tip.
-They can scan historical blocks through that target without remaining active at
-later tips. Wait until a publication covers the saved target before doing
+no local operation, restored and lookahead keys are PIR-only and use the first
+accepted restore tip. Wait until a publication covers the saved target before doing
 receiver queries, resolve all returned payments, then mark directory completion.
 New tips do not extend completed targets. Rewinds invalidate affected target and
 publication anchors. Scan deadlines are height budgets rather than block identity
@@ -235,10 +234,10 @@ claims, so replay below the deadline uses the original bounded watch again.
 Payments sent after this one-time closeout require a later explicit recovery; these
 addresses are intended for individual swaps, not indefinite address reuse.
 
-Address issuance settings must not disable recovery. Always process funding memos
-and the incoming lookahead for software accounts. When the user selects ordinary
-retrieval, `queue_swap_recovery_scan` queues missing local coverage to the same
-fixed target. This is an explicit transport choice, never a fallback on PIR failure.
-`swap_recovery_needs_directory` accepts completed local coverage for restored keys
-while preserving known operations' final directory-check obligation. Finish an
-extended lookahead window before reporting restore complete.
+
+Address issuance preferences must not disable discovery. Recover funding memos
+and incoming lookahead for software accounts independently of those preferences.
+The application can always use PIR for receiver recovery, including the encrypted
+note data needed for matching payments, while ordinary transaction retrieval
+follows its general privacy setting. Finish any extended lookahead window before
+reporting restore complete. Completed targets do not require ongoing polling.
