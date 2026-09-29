@@ -1063,6 +1063,15 @@ fn payload_enumeration_requires_mode_even_without_a_chain_tip() {
         crate::wallet::init::WalletMigrator::new()
             .init_or_migrate(&mut db)
             .unwrap();
+        // Transparent discovery has its own mode, required even without a chain tip.
+        #[cfg(feature = "transparent-inputs")]
+        assert!(matches!(
+            db.transaction_data_requests(),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        db.set_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+        );
         assert!(db.transaction_data_requests().unwrap().is_empty());
         assert!(matches!(
             db.transaction_enhancement_work(),
@@ -1112,7 +1121,15 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
         test_rng(),
     )
     .unwrap();
-    // Status and transparent-history work does not depend on payload routing.
+    // Transparent-history work depends on the transparent ledger mode, not payload routing.
+    #[cfg(feature = "transparent-inputs")]
+    assert!(matches!(
+        db.transaction_data_requests(),
+        Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+    ));
+    let db = db.with_transparent_ledger_mode(
+        zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+    );
     assert!(db.transaction_data_requests().is_ok());
     assert!(matches!(
         db.transaction_enhancement_work(),

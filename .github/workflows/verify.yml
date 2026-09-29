@@ -58,6 +58,10 @@ jobs:
         run: |
           cargo test -p zakura-client-sqlite --features experimental-swap-receiving --locked swap
           cargo test -p zakura-client-sqlite --features orchard --locked swap
+      # Transparent inputs, including the transparent ledger handles and schema.
+      - name: Transparent wallet integration
+        run: cargo test -p zakura-client-backend -p zakura-client-sqlite --features orchard,transparent-inputs,test-dependencies,unstable --locked
+
       # Without Orchard, the SQLite store routes every payload request to public work.
       - name: SQLite wallet without Orchard
         run: cargo test -p zakura-client-sqlite --features test-dependencies --locked

@@ -60,6 +60,7 @@ mod swap_receiving_keys;
 mod swap_receiving_notes;
 mod swap_scan_lifecycle;
 mod transparent_gap_limit_handling;
+mod transparent_ledger_schema;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
@@ -170,6 +171,7 @@ pub mod ids {
         swap_receiving_keys::MIGRATION_ID as SWAP_RECEIVING_KEYS,
         swap_receiving_notes::MIGRATION_ID as SWAP_RECEIVING_NOTES,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
+        transparent_ledger_schema::MIGRATION_ID as TRANSPARENT_LEDGER_SCHEMA,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
         tx_retrieval_queue::MIGRATION_ID as TX_RETRIEVAL_QUEUE,
@@ -412,6 +414,7 @@ pub(super) fn all_migrations<
         Box::new(v_tx_outputs_transparent_addresses::Migration),
         Box::new(orchard_ironwood_migration_unsatisfiability::Migration),
         Box::new(drop_zip318_pool_migration::Migration),
+        Box::new(transparent_ledger_schema::Migration),
     ]
 }
 
@@ -616,13 +619,12 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
     v_transactions_zip318_kind::MIGRATION_ID,
 ];
 
+/// The migration that creates the transparent ledger schema.
+pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
+
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    drop_zip318_pool_migration::MIGRATION_ID,
-    v_tx_outputs_transparent_addresses::MIGRATION_ID,
-    ivk_item_cache::MIGRATION_ID,
-    add_transparent_receiver_address_index::MIGRATION_ID,
-    add_transparent_value_index::MIGRATION_ID,
+    transparent_ledger_schema::MIGRATION_ID,
     swap_nullifier_retention::MIGRATION_ID,
 ];
 
@@ -766,6 +768,7 @@ pub(crate) mod tests {
             ids::SWAP_RECEIVING_KEYS,
             ids::SWAP_RECEIVING_NOTES,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
+            ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TREE_RETAINED_CHECKPOINTS,
             ids::TX_OBSERVATION_HEIGHT,
             ids::TX_RETRIEVAL_QUEUE,

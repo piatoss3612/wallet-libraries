@@ -113,6 +113,7 @@ use crate::{
 
 pub mod enhance_pir;
 pub mod status;
+pub mod transparent_ledger;
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -3193,7 +3194,9 @@ impl ReceivedTransactionOutput {
 
     /// Returns the number of confirmations required for the output to be treated as spendable,
     /// given a [`ConfirmationsPolicy`] that was specified at the time of the request for this
-    /// data.
+    /// data. `u32::MAX` means the output is not spendable under the current transparent
+    /// authority, however many confirmations it gains, such as a transparent output while
+    /// private transparent authority is required but unavailable.
     pub fn confirmations_until_spendable(&self) -> u32 {
         self.confirmations_until_spendable
     }

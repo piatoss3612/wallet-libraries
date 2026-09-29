@@ -105,7 +105,11 @@ impl TestDb {
         data_file: Option<NamedTempFile>,
     ) -> Self {
         Self {
-            wallet_db: wallet_db.with_status_mode(TransactionStatusMode::Public),
+            wallet_db: wallet_db
+                .with_status_mode(TransactionStatusMode::Public)
+                .with_transparent_ledger_mode(
+                zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+            ),
             data_file,
         }
     }
@@ -264,6 +268,9 @@ impl DataStoreFactory for TestDbFactory {
         #[cfg(feature = "orchard")]
         db_data.set_enhancement_mode(
             zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
+        db_data.set_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
         );
         if let Some(interval) = anchor_retention_interval {
             db_data = db_data.with_anchor_retention_interval(interval);

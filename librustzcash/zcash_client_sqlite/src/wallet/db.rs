@@ -786,6 +786,57 @@ CREATE INDEX idx_transparent_spend_map_transaction_id ON transparent_spend_map (
     spending_transaction_id ASC
 )"#;
 
+// Transparent ledger (`tpir_*`) tables. See `docs/transparent-pir-ledger-architecture.md`.
+
+/// The durable transparent ledger policy, as a single row.
+///
+/// ### Columns
+/// - `applied_mode`: the transparent ledger mode durably applied to this wallet: 0 public,
+///   1 private shadow, 2 private required. A handle configured with a weaker mode than a
+///   durably applied private-required policy is rejected; the stored policy is never weakened
+///   by a handle's configuration.
+/// - `policy_generation`: incremented by each policy transition, so that operations captured
+///   under an earlier policy can be rejected.
+/// - `min_reader_version`: the lowest ledger reader version permitted to operate on this
+///   wallet's ledger state.
+pub(super) const TABLE_TPIR_META: &str = r#"
+CREATE TABLE tpir_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 0),
+    applied_mode INTEGER NOT NULL CHECK (applied_mode IN (0, 1, 2)),
+    policy_generation INTEGER NOT NULL CHECK (policy_generation >= 0),
+    min_reader_version INTEGER NOT NULL CHECK (min_reader_version >= 1)
+)"#;
+/// The provenance of each [`TABLE_TRANSPARENT_RECEIVED_OUTPUTS`] row.
+///
+/// Every transparent output has at least one origin; origins are removed with their output.
+///
+/// ### Columns
+/// - `origin`: 0 legacy public (public discovery, or a record that existed before this table),
+///   1 local construction, 2 ledger event, 3 independently authorized payload. Legacy and local
+///   origins never constitute ledger coverage.
+pub(super) const TABLE_TPIR_OUTPUT_ORIGINS: &str = r#"
+CREATE TABLE tpir_output_origins (
+    output_id INTEGER NOT NULL
+        REFERENCES transparent_received_outputs(id) ON DELETE CASCADE,
+    origin INTEGER NOT NULL CHECK (origin IN (0, 1, 2, 3)),
+    UNIQUE (output_id, origin)
+)"#;
+/// The provenance of each transparent spend, keyed by its natural identity.
+///
+/// A spend is recorded either in [`TABLE_TRANSPARENT_RECEIVED_OUTPUT_SPENDS`] or, before its
+/// output is known, in [`TABLE_TRANSPARENT_SPEND_MAP`]. Every such spend has at least one origin
+/// row with the same spending transaction and prevout; origins are removed with the spending
+/// transaction. `origin` codes match [`TABLE_TPIR_OUTPUT_ORIGINS`].
+pub(super) const TABLE_TPIR_SPEND_ORIGINS: &str = r#"
+CREATE TABLE tpir_spend_origins (
+    spending_transaction_id INTEGER NOT NULL
+        REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    prevout_txid BLOB NOT NULL,
+    prevout_output_index INTEGER NOT NULL,
+    origin INTEGER NOT NULL CHECK (origin IN (0, 1, 2, 3)),
+    UNIQUE (spending_transaction_id, prevout_txid, prevout_output_index, origin)
+)"#;
+
 /// Stores the outputs of transactions created by the wallet.
 ///
 /// Unlike with outputs received by the wallet, we store sent outputs for all pools in

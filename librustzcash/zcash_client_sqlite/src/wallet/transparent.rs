@@ -80,6 +80,7 @@ use crate::{
             is_locked_at, output_eligible_condition, overridable_owners_rarray, push_lock_params,
         },
         mempool_height,
+        transparent_ledger::{ProjectionOrigin, record_output_origin, record_spend_origin},
     },
 };
 #[cfg(feature = "transparent-inputs")]
@@ -1828,6 +1829,112 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
     Ok(result)
 }
 
+/// The confirmations required of transparent outputs counted in account balances.
+///
+/// We treat all transparent UTXOs as untrusted; however, if zero-conf shielding is enabled, the
+/// minimum number of confirmations is zero.
+fn balance_min_confirmations(confirmations_policy: ConfirmationsPolicy) -> u32 {
+    if confirmations_policy.allow_zero_conf_shielding() {
+        0u32
+    } else {
+        u32::from(confirmations_policy.untrusted())
+    }
+}
+
+/// Generates a SQL condition that the transaction creating an output is mined with fewer than
+/// the required confirmations, or is unmined and definitely unexpired.
+///
+/// # Usage requirements
+/// - `tx` must be set to the SQL variable name for the transaction in the parent.
+/// - The parent must provide `:target_height` and `:min_confirmations` as named arguments.
+fn tx_unconfirmed_condition(tx: &str) -> String {
+    format!(
+        r#"
+        -- the transaction that created the output is mined with not enough confirmations
+        (
+            {tx}.mined_height < :target_height
+            AND :target_height - {tx}.mined_height < :min_confirmations
+        )
+        -- or the tx is unmined but definitely not expired
+        OR (
+            {tx}.mined_height IS NULL
+            AND ({tx}.expiry_height = 0 OR {tx}.expiry_height >= :target_height)
+        )
+        "#
+    )
+}
+
+/// Whether an account's balance-counted transparent outputs include locally constructed value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BalanceProvenance {
+    /// Every counted output has a legacy-public origin.
+    LegacyPublic,
+    /// Some counted output has only a local-construction origin.
+    IncludesLocalOnly,
+}
+
+/// Classifies the provenance of exactly the outputs that [`add_transparent_account_balances`]
+/// counts for `account`. An output with no recorded origin is reported as corrupted data rather
+/// than guessed.
+pub(crate) fn transparent_balance_provenance(
+    conn: &rusqlite::Connection,
+    account: AccountUuid,
+    target_height: TargetHeight,
+    confirmations_policy: ConfirmationsPolicy,
+) -> Result<BalanceProvenance, SqliteClientError> {
+    let (missing, local_only): (bool, bool) = conn.query_row(
+        &format!(
+            "WITH counted AS (
+                 SELECT u.id
+                 FROM transparent_received_outputs u
+                 JOIN accounts ON accounts.id = u.account_id
+                 JOIN transactions t ON t.id_tx = u.transaction_id
+                 JOIN addresses ON addresses.id = u.address_id
+                 WHERE accounts.uuid = :account_uuid
+                 AND (({}) OR (:min_confirmations > 0 AND ({})))
+                 AND u.id NOT IN ({})
+                 AND ({})
+             )
+             SELECT
+                 EXISTS (
+                     SELECT 1 FROM counted c
+                     WHERE NOT EXISTS (SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = c.id)
+                 ),
+                 EXISTS (
+                     SELECT 1 FROM counted c
+                     WHERE EXISTS (
+                         SELECT 1 FROM tpir_output_origins oo
+                         WHERE oo.output_id = c.id AND oo.origin = 1
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM tpir_output_origins oo
+                         WHERE oo.output_id = c.id AND oo.origin = 0
+                     )
+                 )",
+            tx_unexpired_condition_minconf_0("t"),
+            tx_unconfirmed_condition("t"),
+            spent_utxos_clause(),
+            excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        ),
+        named_params![
+            ":account_uuid": account.0,
+            ":target_height": u32::from(target_height),
+            ":min_confirmations": balance_min_confirmations(confirmations_policy),
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if missing {
+        return Err(SqliteClientError::CorruptedData(
+            "a counted transparent output has no recorded provenance".into(),
+        ));
+    }
+    Ok(if local_only {
+        BalanceProvenance::IncludesLocalOnly
+    } else {
+        BalanceProvenance::LegacyPublic
+    })
+}
+
 #[tracing::instrument(skip(conn, account_balances))]
 pub(crate) fn add_transparent_account_balances(
     conn: &rusqlite::Connection,
@@ -1835,13 +1942,7 @@ pub(crate) fn add_transparent_account_balances(
     confirmations_policy: ConfirmationsPolicy,
     account_balances: &mut HashMap<AccountUuid, AccountBalance>,
 ) -> Result<(), SqliteClientError> {
-    // We treat all transparent UTXOs as untrusted; however, if zero-conf shielding
-    // is enabled, we set the minimum number of confirmations to zero.
-    let min_confirmations = if confirmations_policy.allow_zero_conf_shielding() {
-        0u32
-    } else {
-        u32::from(confirmations_policy.untrusted())
-    };
+    let min_confirmations = balance_min_confirmations(confirmations_policy);
 
     let mut stmt_account_spendable_balances = conn.prepare(&format!(
         "SELECT accounts.uuid, u.lock_expiry_height, SUM(u.value_zat),
@@ -1921,21 +2022,11 @@ pub(crate) fn add_transparent_account_balances(
              JOIN accounts ON accounts.id = u.account_id
              JOIN transactions t ON t.id_tx = u.transaction_id
              JOIN addresses ON addresses.id = u.address_id
-             WHERE (
-                 -- the transaction that created the output is mined with not enough confirmations
-                (
-                    t.mined_height < :target_height
-                    AND :target_height - t.mined_height < :min_confirmations
-                )
-                -- or the tx is unmined but definitely not expired
-                OR (
-                    t.mined_height IS NULL
-                    AND (t.expiry_height = 0 OR t.expiry_height >= :target_height)
-                )
-             )
+             WHERE ({})
              AND u.id NOT IN ({}) -- and the received txo is unspent
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
              GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
+            tx_unconfirmed_condition("t"),
             spent_utxos_clause(),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         ))?;
@@ -1983,7 +2074,11 @@ pub(crate) fn mark_transparent_utxo_spent(
     conn: &rusqlite::Transaction,
     spent_in_tx: TxRef,
     outpoint: &OutPoint,
+    origin: Option<ProjectionOrigin>,
 ) -> Result<bool, SqliteClientError> {
+    if let Some(origin) = origin {
+        record_spend_origin(conn, spent_in_tx, outpoint, origin)?;
+    }
     let spend_params = named_params![
         ":spent_in_tx": spent_in_tx.0,
         ":prevout_txid": outpoint.hash(),
@@ -2126,7 +2221,15 @@ pub(crate) fn put_received_transparent_utxo<P: consensus::Parameters>(
     output: &WalletTransparentOutput<AccountUuid>,
 ) -> Result<(AccountRef, AccountUuid, KeyScope, UtxoId), SqliteClientError> {
     let observed_height = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
-    put_transparent_output(conn, params, gap_limits, output, observed_height, true)
+    put_transparent_output(
+        conn,
+        params,
+        gap_limits,
+        output,
+        observed_height,
+        true,
+        ProjectionOrigin::LegacyPublic,
+    )
 }
 
 /// An enumeration of the types of errors that can occur when scheduling an event to happen at a
@@ -2676,6 +2779,7 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
     output: &WalletTransparentOutput<AccountUuid>,
     observation_height: BlockHeight,
     known_unspent: bool,
+    origin: ProjectionOrigin,
 ) -> Result<(AccountRef, AccountUuid, KeyScope, UtxoId), SqliteClientError> {
     let addr_str = output.recipient_address().encode(params);
 
@@ -2782,6 +2886,30 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
         }
     };
 
+    // An output's script and value are immutable content of its identity. A conflicting
+    // report is rejected rather than overwriting the stored content while its existing
+    // origins, possibly local, continue to vouch for it.
+    let stored_content = conn
+        .query_row(
+            "SELECT script, value_zat FROM transparent_received_outputs
+             WHERE transaction_id = :transaction_id AND output_index = :output_index",
+            named_params![
+                ":transaction_id": id_tx,
+                ":output_index": output.outpoint().n(),
+            ],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    if let Some((script, value)) = stored_content
+        && (script != output.txout().script_pubkey().0.0
+            || value != i64::from(ZatBalance::from(output.txout().value())))
+    {
+        return Err(SqliteClientError::CorruptedData(format!(
+            "conflicting content reported for transparent output {:?}",
+            output.outpoint()
+        )));
+    }
+
     let mut stmt_upsert_transparent_output = conn.prepare_cached(
         "INSERT INTO transparent_received_outputs (
             transaction_id, output_index,
@@ -2817,6 +2945,7 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
 
     let utxo_id = stmt_upsert_transparent_output
         .query_row(sql_args, |row| row.get::<_, i64>(0).map(UtxoId))?;
+    record_output_origin(conn, utxo_id, origin)?;
 
     // If we have a record of the output already having been spent, then mark it as spent using the
     // stored reference to the spending transaction.
@@ -2837,7 +2966,8 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
         .optional()?;
 
     if let Some(spending_transaction_id) = spending_tx_ref {
-        mark_transparent_utxo_spent(conn, spending_transaction_id, output.outpoint())?;
+        // The spend's origins were recorded with its spend-map entry.
+        mark_transparent_utxo_spent(conn, spending_transaction_id, output.outpoint(), None)?;
     }
 
     #[cfg(feature = "transparent-inputs")]

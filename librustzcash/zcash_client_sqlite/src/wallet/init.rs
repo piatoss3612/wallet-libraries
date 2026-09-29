@@ -178,6 +178,13 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::EnhancementModeNotConfigured | SqliteClientError::SwapReceivingNotEnabled => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
+        SqliteClientError::TransparentLedgerModeNotConfigured
+        | SqliteClientError::TransparentLedgerPolicyConflict { .. }
+        | SqliteClientError::TransparentAuthorityUnavailable
+        | SqliteClientError::TransparentLedgerIncompatible { .. }
+        | SqliteClientError::PublicTransparentDiscoveryForbidden => {
+            unreachable!("migrations neither use ledger APIs nor select transparent inputs")
+        }
         SqliteClientError::CorruptedData(e) => WalletMigrationError::CorruptedData(e),
         SqliteClientError::Protobuf(e) => WalletMigrationError::CorruptedData(e.to_string()),
         SqliteClientError::InvalidNote => {
@@ -861,6 +868,9 @@ mod tests {
             db::TABLE_SCHEMERZ_MIGRATIONS,
             db::TABLE_SENT_NOTES,
             db::TABLE_SQLITE_SEQUENCE,
+            db::TABLE_TPIR_META,
+            db::TABLE_TPIR_OUTPUT_ORIGINS,
+            db::TABLE_TPIR_SPEND_ORIGINS,
             db::TABLE_TRANSACTIONS,
             db::TABLE_TRANSPARENT_RECEIVED_OUTPUT_SPENDS,
             db::TABLE_TRANSPARENT_RECEIVED_OUTPUTS,

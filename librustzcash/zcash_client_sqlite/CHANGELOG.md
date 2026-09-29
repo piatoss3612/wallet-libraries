@@ -10,12 +10,63 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- The seedless `transparent_ledger_schema` migration. It adds `tpir_meta`, the
+  durable transparent policy recorded as public, and the `tpir_output_origins`
+  and `tpir_spend_origins` provenance tables. It classifies every existing
+  transparent output and spend as legacy evidence, and marks records whose
+  transaction has local creation evidence as local construction too. Neither
+  origin is coverage. Existing wallet tables are unchanged.
+- Projection origins for new transparent records. Public discovery records a
+  legacy-public origin, and local construction, including creation evidence
+  recorded by an outbox, records a local origin. Each is written in the same
+  transaction as the record it describes.
+- `WalletDb::set_transparent_ledger_mode` and `with_transparent_ledger_mode`,
+  and an implementation of `TransparentLedgerRead`. The mode is not persisted,
+  and transactional handles inherit it. The snapshot reports `Unavailable`
+  authority, never a fabricated or public balance, when:
+  - private authority is required;
+  - the chain tip is unknown; or
+  - the build cannot read transparent state.
+- `SqliteClientError` variants:
+  - `TransparentLedgerModeNotConfigured`;
+  - `TransparentLedgerPolicyConflict`: the handle's mode is weaker than a
+    durably applied `PrivateRequired` policy, which is never weakened;
+  - `TransparentAuthorityUnavailable`;
+  - `PublicTransparentDiscoveryForbidden`;
+  - `TransparentLedgerIncompatible`: the wallet requires a newer ledger reader.
+
+  A `tpir_meta` table without its policy row, or a missing `tpir_meta` after the
+  migration has run, is reported as corrupted data.
+
 ### Changed
 - Restored swap keys use private discovery with fixed recovery targets. Temporary
   Ironwood spend history is released after memo, lookahead and payment recovery
   completes. Other pools keep ordinary pruning. Missing spend history queues
   the account's public compact-block recovery interval after note inclusion is
   verified, without substituting public address discovery for PIR.
+- The following now require an explicitly configured transparent ledger mode;
+  they never default to public authority:
+  - transparent input selection;
+  - storing any transaction with transparent inputs, in every build;
+  - `put_received_transparent_utxo`;
+  - the transparent spend-detection and address-history requests of
+    `transaction_data_requests`.
+- Under `PrivateRequired`, set on the handle or durably applied, public
+  transparent discovery stops.
+- Transparent authority is unavailable under `PrivateRequired`, while the chain
+  tip is unknown, and in builds without `transparent-inputs`. While it is
+  unavailable:
+  - transparent input selection and storing transactions with transparent
+    inputs fail;
+  - `get_wallet_summary` omits transparent funds;
+  - `get_transparent_balances` fails;
+  - `get_received_outputs` reports transparent outputs as not spendable
+    (`u32::MAX`).
+
+  Shielded-funded spends, including unshielding, are unaffected.
+- A transparent output report whose script or value conflicts with the stored
+  output is refused.
 
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`
