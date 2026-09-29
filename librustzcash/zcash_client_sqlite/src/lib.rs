@@ -1660,6 +1660,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         let mode = self
             .status_mode
             .ok_or(SqliteClientError::StatusModeNotConfigured)?;
+        // Fail closed on an unconfigured ledger mode before the no-tip empty batch, so
+        // startup misconfiguration is not hidden until a tip is recorded.
+        let _ = wallet::transparent_ledger::resolve_mode(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);
         }
@@ -1773,6 +1779,12 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> EnhancePi
     fn transaction_enhancement_work(&self) -> Result<Vec<TransactionEnhancementWork>, Self::Error> {
         #[cfg(feature = "orchard")]
         let mode = self.configured_enhancement_mode()?;
+        // Fail closed on an unconfigured ledger mode before the no-tip empty batch, matching
+        // status dispatch: startup misconfiguration must not wait for a tip.
+        let _ = wallet::transparent_ledger::resolve_mode(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         // Like `transaction_data_requests`, there is no actionable work before a chain tip.
         if wallet::chain_tip_height(self.conn.borrow())?.is_none() {
             return Ok(vec![]);

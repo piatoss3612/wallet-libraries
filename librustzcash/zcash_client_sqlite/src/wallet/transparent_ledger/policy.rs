@@ -92,14 +92,39 @@ pub(crate) fn apply_transparent_policy(
         // stamp would hide them from public dispatch after a transition that still retains
         // public authority (Public → PrivateShadow). Under PrivateRequired, matching
         // generation does not restore public follow-on: authority is absent.
+        let generation_i64 = i64::try_from(generation).map_err(|_| {
+            SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+        })?;
         conn.execute(
             "UPDATE tx_retrieval_queue SET policy_generation = :generation",
-            rusqlite::named_params![
-                ":generation": i64::try_from(generation).map_err(|_| {
-                    SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
-                })?,
-            ],
+            rusqlite::named_params![":generation": generation_i64],
         )?;
+        if mode.retains_public_authority() {
+            // Sticky route 2 was assigned while public enhancement was forbidden. With
+            // public authority restored, unresolved mixed rows become ordinary LWD work
+            // (route 1); public dispatch still excludes route 2. Route codes match
+            // enhance_pir::{LWD_REQUIRED, PRIVATE_DETAILS_UNSUPPORTED}.
+            conn.execute(
+                "UPDATE ironwood_enhance_routing
+                 SET route = 1
+                 WHERE route = 2
+                   AND EXISTS (
+                       SELECT 1 FROM transactions t
+                       WHERE t.id_tx = ironwood_enhance_routing.transaction_id
+                         AND t.raw IS NULL
+                   )",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
+                 SELECT t.txid, 1, :generation
+                 FROM ironwood_enhance_routing r
+                 JOIN transactions t ON t.id_tx = r.transaction_id
+                 WHERE r.route = 1 AND t.raw IS NULL
+                 ON CONFLICT (txid, query_type) DO NOTHING",
+                rusqlite::named_params![":generation": generation_i64],
+            )?;
+        }
         Ok(AppliedTransparentPolicy { mode, generation })
     };
 

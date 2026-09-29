@@ -6507,7 +6507,7 @@ mod tests {
                 [txid.as_ref()], |row| row.get(0).map(TxRef))?;
             queue_tx_retrieval(db.conn.0, std::iter::once(txid), None)?;
             db.queue_ironwood_enhancement(tx_ref, &scanned)?;
-            assert_eq!(super::public_enhancement_work(db.conn.0)?,
+            assert_eq!(super::public_enhancement_work(db.conn.0, db.transparent_ledger_mode)?,
                 vec![crate::testing::public_work(txid)]);
             assert!(!db.conn.0.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ironwood_enhance_routing)",

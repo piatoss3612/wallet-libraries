@@ -1076,6 +1076,7 @@ mod handles {
         ));
     }
 
+    #[cfg(feature = "orchard")]
     #[test]
     fn parent_retrieval_is_withheld_under_private_required() {
         use zcash_client_backend::data_api::{
@@ -1150,6 +1151,7 @@ mod handles {
         assert!(notes > 0);
     }
 
+    #[cfg(feature = "orchard")]
     #[test]
     fn stale_generation_is_restamped_after_public_to_private_shadow() {
         use zcash_client_backend::data_api::{
@@ -1182,6 +1184,113 @@ mod handles {
         )));
     }
 
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn restoring_public_authority_requeues_unresolved_mixed_details() {
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
+        };
+        let (mut st, _, _) = funded_wallet();
+        let mixed = zcash_primitives::transaction::TxId::from_bytes([0x52; 32]);
+        conn(&st)
+            .execute(
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
+                [mixed.as_ref()],
+            )
+            .unwrap();
+        let tx_ref: i64 = conn(&st)
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [mixed.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Sticky route 2 under PrivateRequired; no raw means details remain pending.
+        conn(&st)
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 2)",
+                [tx_ref],
+            )
+            .unwrap();
+        set_mode(&mut st, PrivateRequired);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateRequired)
+            .unwrap();
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(
+                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+            );
+        assert!(
+            st.wallet()
+                .db()
+                .pending_private_transparent_details()
+                .unwrap()
+                .contains(
+                    &zcash_client_backend::data_api::transparent_ledger::PrivateTransparentDetail::MixedTransaction {
+                        txid: mixed,
+                    }
+                )
+        );
+        assert!(
+            !st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(mixed)
+                ))
+        );
+
+        set_mode(&mut st, Public);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(Public)
+            .unwrap();
+        let route: i64 = conn(&st)
+            .query_row(
+                "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = ?1",
+                [tx_ref],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(route, 1);
+        assert!(
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(mixed)
+                ))
+        );
+        assert!(
+            st.wallet()
+                .db()
+                .pending_private_transparent_details()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn status_work_requires_ledger_mode_even_without_a_chain_tip() {
+        use zcash_client_backend::data_api::status::{TransactionStatusMode, TransactionStatusRead};
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db =
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        db.set_status_mode(TransactionStatusMode::Public);
+        assert!(matches!(
+            db.transaction_status_work(),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        db.set_transparent_ledger_mode(Public);
+        assert!(db.transaction_status_work().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "orchard")]
     #[test]
     fn public_dispatch_does_not_mix_stale_authority_with_new_generation() {
         use std::time::Duration;

@@ -36,11 +36,13 @@ workspace.
   restamps outstanding `tx_retrieval_queue` rows to that generation so
   still-required work remains dispatchable under modes that retain public
   authority; same-mode reapplication does not. Applying `PrivateRequired` raises
-  `min_reader_version` to 2. `check_transparent_policy_generation` is the
-  commit check an older open handle must fail. Pending withheld follow-on
-  details are exposed by `pending_private_transparent_details`. Mixed
-  (`route = 2`) details are reported only while the transaction has no stored
-  raw payload.
+  `min_reader_version` to 2. Restoring public authority also converts unresolved
+  sticky `route = 2` (mixed) markers to the public LWD route so those
+  transactions become ordinary enhancement work again.
+  `check_transparent_policy_generation` is the commit check an older open handle
+  must fail. Pending withheld follow-on details are exposed by
+  `pending_private_transparent_details`. Mixed (`route = 2`) details are reported
+  only while the transaction has no stored raw payload.
 - `SqliteClientError` variants:
   - `TransparentLedgerModeNotConfigured`;
   - `TransparentLedgerPolicyConflict`: the handle's mode is weaker than a

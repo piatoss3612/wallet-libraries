@@ -1085,20 +1085,29 @@ fn payload_enumeration_requires_mode_even_without_a_chain_tip() {
             db.transaction_data_requests(),
             Err(SqliteClientError::TransparentLedgerModeNotConfigured)
         ));
-        db.set_transparent_ledger_mode(
-            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
-        );
-        assert!(db.transaction_data_requests().unwrap().is_empty());
+        #[cfg(feature = "orchard")]
         assert!(matches!(
             db.transaction_enhancement_work(),
             Err(SqliteClientError::EnhancementModeNotConfigured)
         ));
+        #[cfg(feature = "orchard")]
+        db.set_enhancement_mode(EnhancementMode::Standard);
+        // Payload dispatch requires a ledger mode before the no-tip empty batch.
+        assert!(matches!(
+            db.transaction_enhancement_work(),
+            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
+        ));
+        db.set_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+        );
+        assert!(db.transaction_data_requests().unwrap().is_empty());
+        #[cfg(feature = "orchard")]
+        assert!(db.transaction_enhancement_work().unwrap().is_empty());
+        #[cfg(not(feature = "orchard"))]
+        assert!(db.transaction_enhancement_work().unwrap().is_empty());
         db.transactionally(|tx| {
             assert!(tx.transaction_data_requests()?.is_empty());
-            assert!(matches!(
-                tx.transaction_enhancement_work(),
-                Err(SqliteClientError::EnhancementModeNotConfigured)
-            ));
+            assert!(tx.transaction_enhancement_work()?.is_empty());
             Ok::<_, SqliteClientError>(())
         })
         .unwrap();
