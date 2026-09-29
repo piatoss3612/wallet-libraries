@@ -54,6 +54,33 @@ workspace.
   - Deleting an account removes its candidate state.
 - `SqliteClientError::TransparentRecoveryNotEnabled` and, behind
   `transparent-inputs`, `SqliteClientError::TransparentLedgerCommitRejected`.
+- The seedless, additive `transparent_activation_schema` migration. It adds
+  empty `tpir_active_accounts`, `tpir_qualified_revisions`,
+  `tpir_quarantined_sources`, and `tpir_quarantined_accounts` tables.
+- Private transparent activation, behind `transparent-inputs`:
+  - `promote_transparent_account` requires `PrivateRequired` on the handle and
+    durably. In one transaction it rechecks quarantine, the candidate blockers
+    at a local target equal to the chain tip, qualification of every
+    contributing revision, and agreement with the wallet's legacy evidence;
+    adds the candidate window's addresses; projects every placed event with a
+    new ledger-event origin (2); and records the account as active.
+  - Projection joins the shared transaction row and keeps raw data, fees, local
+    creation evidence, notes, locks, and other origins. A projected coinbase
+    receive records `tx_index = 0`. A placement, coinbase, or content conflict
+    with the wallet is an integrity failure.
+  - An active account's commits require a qualified revision and project their
+    events in the same transaction. Window growth then uses the wallet's own
+    gap-limit address generation.
+  - An integrity rejection applies none of the commit's facts but quarantines
+    the source, the account, and every account holding the source's evidence,
+    and removes their pending pages. Quarantined sources and accounts refuse
+    later commits. Quarantine survives rewinds; nothing clears it yet.
+  - Leaving `PrivateRequired` demotes every active account.
+  - Activation, qualification, and quarantine writes raise
+    `tpir_meta.min_reader_version` to 4.
+  - `WalletDb::qualify_transparent_revision`, a test and development hook
+    behind `test-dependencies`. Production builds cannot qualify a revision.
+- `SqliteClientError::TransparentPromotionBlocked`, behind `transparent-inputs`.
 - Projection origins for new transparent records. Public discovery records a
   legacy-public origin, and local construction, including creation evidence
   recorded by an outbox, records a local origin. Each is written in the same
@@ -117,6 +144,20 @@ workspace.
     (`u32::MAX`).
 
   Shielded-funded spends, including unshielding, are unaffected.
+- Under `PrivateRequired`, transparent authority is per account. An account is
+  eligible for a transaction targeting `T` when it is active and not
+  quarantined, its ledger has no blockers, and its covered local target and the
+  chain tip are both `T - 1`. Then:
+  - every transparent selector admits only ledger-projected outputs of eligible
+    accounts, within one read snapshot. The account selector and the outpoint
+    lookup fail for an ineligible account; the address selectors filter out
+    ineligible accounts and fail only when no owning account is eligible;
+  - storing a transaction rechecks each transparent input at its target height,
+    except inputs created by an earlier transaction of the same batch;
+  - the snapshot reports `Private` authority and the ledger-projected balance.
+    Otherwise its blockers explain why authority is unavailable.
+  `get_wallet_summary` and `get_transparent_balances` still omit transparent
+  funds under `PrivateRequired`.
 - A transparent output report whose script or value conflicts with the stored
   output is refused.
 - Retrieval-queue inserts stamp the current policy generation and do not

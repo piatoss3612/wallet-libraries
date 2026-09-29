@@ -34,11 +34,43 @@ Phase 3 implements candidate recovery and settles these notes as follows.
     captured.
   - **Commit destination.** Every Phase 3 commit is a candidate commit. Account
     lifecycle arrives with promotion.
-- **Still open, for Phase 4:**
-  - integrity quarantine and trust epochs;
-  - qualification and privileged verification;
-  - promotion blockers beyond the candidate blockers;
-  - history completeness.
+- **Left open for Phase 4**, settled below: integrity quarantine and trust
+  epochs; qualification and privileged verification; promotion blockers beyond
+  the candidate blockers; history completeness.
+
+## Phase 4 outcome
+
+Phase 4 implements activation for the library and settles these notes as
+follows.
+
+- **Implemented:**
+  - integrity quarantine of the source and every account holding its evidence,
+    in the rejecting transaction, removing their pending pages;
+  - store-held qualification bound to exact revisions (a test and development
+    hook only, so production can never promote);
+  - promotion requiring every revision that contributed coverage or events to be
+    qualified, and active commits refusing unqualified revisions;
+  - the commit destination by account lifecycle (candidate or active), captured
+    in the watch set and checked at commit;
+  - promotion blockers for pending pages, unresolved spends, unsupported
+    ranges, incomplete coverage including window growth, an underivable window,
+    quarantine, unqualified revisions, legacy discrepancies, and a scanned
+    chain behind the tip.
+- **Revised:**
+  - **Epochs.** Not implemented. With no way to clear a quarantine or requalify
+    a source, the per-account quarantine epoch and per-source trust epoch would
+    guard nothing. They arrive with privileged verification.
+  - **Pending-page context.** Pages still record only their target and
+    scripts. A transition deletes them, and a lifecycle change makes a commit
+    stale, so the extra context has nothing left to protect.
+  - **Publication lag.** No separate blocker: a revision's publication bounds
+    its anchor, and coverage short of the local target is `IncompleteCoverage`.
+- **Still open:**
+  - privileged verification: clearing quarantine, requalifying, and explaining
+    legacy discrepancies (Phase 6 or later);
+  - history completeness (Phase 5);
+  - the Vizor transition fence: stopping and draining in-flight public lookups
+    before a transition to `PrivateRequired` commits.
 
 ## Recovery sources and revisions
 

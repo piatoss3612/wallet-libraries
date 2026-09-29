@@ -4,9 +4,10 @@
 //! that invalidating one source never removes a record another source still supports. Legacy
 //! and local origins are provenance only; they never constitute ledger coverage.
 //!
-//! Handle configuration and the durable policy are enforced here. Candidate recovery
-//! (`recovery`) is isolated from the projection, and promotion is not implemented, so private
-//! authority is never available: `PrivateRequired` handles cannot authorize transparent inputs.
+//! Handle configuration and the durable policy are enforced here. A candidate account's recovery
+//! (`recovery`) is isolated from the projection. Promotion projects a complete, qualified ledger
+//! (`projection`) and makes the account active; under `PrivateRequired`, only active accounts
+//! whose ledger is complete through the chain tip can authorize transparent inputs.
 
 mod policy;
 #[cfg(feature = "transparent-inputs")]
@@ -238,8 +239,8 @@ pub(crate) fn resolve_mode(
 /// Public authority is retained only by explicitly configured `Public` and `PrivateShadow`
 /// handles; financial authorization never defaults to public. Even then it requires the same
 /// conditions under which the snapshot reports public authority: a known chain tip, and a build
-/// that can read transparent state. Private authority is not yet available, so
-/// `PrivateRequired` handles are rejected.
+/// that can read transparent state. `PrivateRequired` handles are rejected: private authority is
+/// per account, and [`input_authority`] resolves it where transparent support exists.
 pub(crate) fn check_transparent_authority(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,

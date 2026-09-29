@@ -1,8 +1,10 @@
-//! Candidate recovery storage: watched addresses, events, coverage, and pending pages.
+//! Recovery storage: watched addresses, events, coverage, pending pages, quarantine,
+//! qualification, and promotion.
 //!
-//! Candidate writes touch only `tpir_*` recovery tables. They never change the LRZ outputs,
-//! spends, locks, addresses, or transactions that balances, input selection, receiving-address
-//! allocation, and history read, and the candidate ledger never reads those back as evidence.
+//! A candidate account's writes touch only `tpir_*` recovery tables. They never change the LRZ
+//! outputs, spends, locks, addresses, or transactions that balances, input selection,
+//! receiving-address allocation, and history read, and the ledger never reads those back as
+//! evidence. Promotion and an active account's commits also project events into those tables.
 //!
 //! Rewinds and policy transitions maintain recovery state in every build, because another
 //! build may have written it.
