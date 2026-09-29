@@ -341,8 +341,7 @@ pub fn validate_and_apply_records<DbT: EnhancePirStorage>(
         }
         if matches!(
             result,
-            EnhancePirStoreResult::LwdRequired
-                | EnhancePirStoreResult::PrivateDetailsUnsupported
+            EnhancePirStoreResult::LwdRequired | EnhancePirStoreResult::PrivateDetailsUnsupported
         ) {
             sticky_route = Some(result);
         }

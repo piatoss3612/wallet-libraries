@@ -126,7 +126,7 @@ pub(crate) fn tx_unexpired_condition(tx: &str) -> String {
         OR {tx}.expiry_height >= :target_height  -- the tx is unexpired
         OR (
             {tx}.expiry_height IS NULL -- the expiry height is unknown
-            AND COALESCE({tx}.target_height, {tx}.observed_height) + {DEFAULT_TX_EXPIRY_DELTA} >= :target_height
+            AND COALESCE({tx}.target_height, {tx}.min_observed_height) + {DEFAULT_TX_EXPIRY_DELTA} >= :target_height
         )
         "#
     )

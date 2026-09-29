@@ -60,12 +60,11 @@ write, not an import-metadata ingestion API.
 
 No new column is needed. `target_height` has an existing contract: it is present
 only for transactions created by this wallet. For those transactions the bound is
-`MIN(target_height, observed_height)`; other transactions have unknown evidence.
+`MIN(target_height, min_observed_height)`; other transactions have unknown evidence.
 Local creation upserts preserve this provenance even when discovery inserted the
 row first. Generic payload ingestion cannot supply a construction target.
 
-A data-only migration lowers the observation-height column (historically
-`min_observed_height`, now `observed_height`) to zero for legacy local
+A data-only migration lowers `min_observed_height` to zero for legacy local
 transactions, because historical rewinds did not preserve the necessary bound.
 Imported rows remain unchanged. A recent snapshot may therefore be unable to prove
 absence for a legacy local transaction. This loss of precision is deliberate.

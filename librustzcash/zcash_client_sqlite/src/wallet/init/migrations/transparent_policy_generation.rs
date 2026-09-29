@@ -99,7 +99,8 @@ mod tests {
 
         let file = NamedTempFile::new().unwrap();
         let mut db =
-            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng()).unwrap();
+            WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                .unwrap();
         WalletMigrator::new()
             .init_or_migrate_to(&mut db, DEPENDENCIES)
             .unwrap();

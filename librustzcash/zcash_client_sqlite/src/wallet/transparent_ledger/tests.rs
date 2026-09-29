@@ -421,9 +421,7 @@ mod handles {
         testing::db::{test_clock, test_rng},
         wallet::{
             init::WalletMigrator,
-            transparent_ledger::{
-                check_public_discovery, check_transparent_authority,
-            },
+            transparent_ledger::{check_public_discovery, check_transparent_authority},
         },
     };
 
@@ -692,7 +690,7 @@ mod handles {
         // so it still counts toward provenance.
         conn(&st)
             .execute_batch(
-                "INSERT INTO transactions (id_tx, txid, expiry_height, observed_height)
+                "INSERT INTO transactions (id_tx, txid, expiry_height, min_observed_height)
                  VALUES (9999, X'77', 1, 1);
                  INSERT INTO transparent_received_output_spends
                      (transparent_received_output_id, transaction_id)
@@ -990,33 +988,12 @@ mod handles {
             .apply_transparent_policy(PrivateRequired)
             .unwrap();
         assert_eq!(private.generation, 2);
-        assert_eq!(
-            conn(&st)
-                .query_row(
-                    "SELECT min_reader_version FROM tpir_meta WHERE id = 0",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            2
-        );
         let back = st
             .wallet_mut()
             .db_mut()
             .apply_transparent_policy(Public)
             .unwrap();
         assert_eq!(back.generation, 3);
-        // Reader version is never lowered.
-        assert_eq!(
-            conn(&st)
-                .query_row(
-                    "SELECT min_reader_version FROM tpir_meta WHERE id = 0",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            2
-        );
     }
 
     #[test]
@@ -1029,11 +1006,12 @@ mod handles {
                  BEGIN SELECT RAISE(ABORT, 'injected'); END;",
             )
             .unwrap();
-        assert!(st
-            .wallet_mut()
-            .db_mut()
-            .apply_transparent_policy(PrivateRequired)
-            .is_err());
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .apply_transparent_policy(PrivateRequired)
+                .is_err()
+        );
         assert_eq!(meta(&st), (0, 0));
     }
 
@@ -1055,9 +1033,7 @@ mod handles {
                 .with_transparent_ledger_mode(Public);
         assert_eq!(reader.transparent_ledger_mode().unwrap(), Public);
 
-        writer
-            .apply_transparent_policy(PrivateRequired)
-            .unwrap();
+        writer.apply_transparent_policy(PrivateRequired).unwrap();
         assert!(matches!(
             reader.check_transparent_policy_generation(captured.generation),
             Err(SqliteClientError::StaleTransparentPolicy {
@@ -1097,15 +1073,18 @@ mod handles {
             .unwrap();
         // Queue a parent-transaction retrieval under public authority.
         let tx = conn(&st).unchecked_transaction().unwrap();
-        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(parent), Some(crate::TxRef(child_ref)))
-            .unwrap();
+        crate::wallet::queue_tx_retrieval(
+            &tx,
+            std::iter::once(parent),
+            Some(crate::TxRef(child_ref)),
+        )
+        .unwrap();
         tx.commit().unwrap();
-        st.wallet_mut()
-            .db_mut()
-            .set_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard);
-        let public = TransactionEnhancementWork::Public(PublicTransactionEnhancementRequest::new(
-            parent,
-        ));
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
+        let public =
+            TransactionEnhancementWork::Public(PublicTransactionEnhancementRequest::new(parent));
         assert!(
             st.wallet()
                 .transaction_enhancement_work()
@@ -1131,10 +1110,11 @@ mod handles {
                 .unwrap(),
             vec![PrivateTransparentDetail::ParentTransaction { txid: parent }]
         );
-        // Queue row remains under the withheld enhancement code so Phase 1 cannot see it.
+        // The obligation stays queued under its stable identity while current policy controls
+        // whether it may be dispatched publicly.
         let still_queued: bool = conn(&st)
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1 AND query_type = 11)",
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1 AND query_type = 1)",
                 [parent.as_ref()],
                 |row| row.get(0),
             )
@@ -1172,9 +1152,9 @@ mod handles {
         let tx = conn(&st).unchecked_transaction().unwrap();
         crate::wallet::queue_tx_retrieval(&tx, std::iter::once(fresh), None).unwrap();
         tx.commit().unwrap();
-        st.wallet_mut()
-            .db_mut()
-            .set_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard);
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
         let work = st.wallet().transaction_enhancement_work().unwrap();
         assert!(work.contains(&TransactionEnhancementWork::Public(
             PublicTransactionEnhancementRequest::new(stale)
@@ -1186,7 +1166,7 @@ mod handles {
 
     #[cfg(feature = "orchard")]
     #[test]
-    fn private_required_hides_queue_rows_from_legacy_codes_and_reports_lwd() {
+    fn private_required_withholds_queue_rows_and_reports_lwd() {
         use zcash_client_backend::data_api::{
             PublicTransactionEnhancementRequest,
             enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
@@ -1196,7 +1176,7 @@ mod handles {
         let lwd = zcash_primitives::transaction::TxId::from_bytes([0x61; 32]);
         conn(&st)
             .execute(
-                "INSERT INTO transactions (txid, observed_height) VALUES (?1, 1)",
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
                 [lwd.as_ref()],
             )
             .unwrap();
@@ -1222,20 +1202,18 @@ mod handles {
             .db_mut()
             .apply_transparent_policy(PrivateRequired)
             .unwrap();
-        st.wallet_mut()
-            .db_mut()
-            .set_enhancement_mode(
-                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-            );
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
 
-        let legacy_visible: i64 = conn(&st)
+        let queued: i64 = conn(&st)
             .query_row(
-                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type IN (0, 1)",
+                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type = 1",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(legacy_visible, 0);
+        assert_eq!(queued, 1);
         let route: i64 = conn(&st)
             .query_row(
                 "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = ?1",
@@ -1269,98 +1247,6 @@ mod handles {
 
     #[cfg(feature = "orchard")]
     #[test]
-    fn private_required_rejects_legacy_queue_inserts() {
-        let (mut st, _, _) = funded_wallet();
-        set_mode(&mut st, PrivateRequired);
-        st.wallet_mut()
-            .db_mut()
-            .apply_transparent_policy(PrivateRequired)
-            .unwrap();
-
-        let txid = [0x63u8; 32];
-        let err = conn(&st)
-            .execute(
-                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 1)",
-                [&txid[..]],
-            )
-            .expect_err("Phase 1 enhancement insert must fail under PrivateRequired");
-        assert!(
-            err.to_string().contains("newer reader") || err.to_string().contains("ABORT"),
-            "unexpected error: {err}"
-        );
-        let err = conn(&st)
-            .execute(
-                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 0)",
-                [&txid[..]],
-            )
-            .expect_err("Phase 1 status insert must fail under PrivateRequired");
-        assert!(
-            err.to_string().contains("newer reader") || err.to_string().contains("ABORT"),
-            "unexpected error: {err}"
-        );
-
-        // Current writers use withheld codes and must still succeed.
-        conn(&st)
-            .execute(
-                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 11)",
-                [&txid[..]],
-            )
-            .unwrap();
-
-        // Public and PrivateShadow keep ordinary inserts.
-        set_mode(&mut st, Public);
-        st.wallet_mut()
-            .db_mut()
-            .apply_transparent_policy(Public)
-            .unwrap();
-        let other = [0x64u8; 32];
-        conn(&st)
-            .execute(
-                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 1)",
-                [&other[..]],
-            )
-            .unwrap();
-    }
-
-    #[cfg(feature = "orchard")]
-    #[test]
-    fn phase1_status_lookup_sql_fails_after_observed_height_rename() {
-        let (st, _, _) = funded_wallet();
-        let txid = [0x65u8; 32];
-        conn(&st)
-            .execute(
-                "INSERT INTO transactions (txid, observed_height) VALUES (?1, 1)",
-                [&txid[..]],
-            )
-            .unwrap();
-
-        // Phase 1 transaction_status_work_for prepares this exact statement.
-        let err = conn(&st)
-            .query_row(
-                "SELECT CASE WHEN target_height IS NOT NULL THEN MIN(target_height, min_observed_height) END FROM transactions WHERE txid = ?1",
-                [&txid[..]],
-                |row| row.get::<_, Option<u32>>(0),
-            )
-            .expect_err("Phase 1 status lookup must fail without min_observed_height");
-        assert!(
-            err.to_string().contains("min_observed_height")
-                || err.to_string().contains("no such column"),
-            "unexpected error: {err}"
-        );
-
-        // This build's column name still works.
-        let height: Option<u32> = conn(&st)
-            .query_row(
-                "SELECT CASE WHEN target_height IS NOT NULL THEN MIN(target_height, observed_height) END FROM transactions WHERE txid = ?1",
-                [&txid[..]],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(height.is_none());
-    }
-
-    #[cfg(feature = "orchard")]
-    #[test]
     fn handle_only_private_required_route_two_is_public_again_after_handle_switch() {
         use zcash_client_backend::data_api::{
             PublicTransactionEnhancementRequest,
@@ -1370,7 +1256,7 @@ mod handles {
         let mixed = zcash_primitives::transaction::TxId::from_bytes([0x62; 32]);
         conn(&st)
             .execute(
-                "INSERT INTO transactions (txid, observed_height) VALUES (?1, 1)",
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
                 [mixed.as_ref()],
             )
             .unwrap();
@@ -1392,11 +1278,9 @@ mod handles {
         let tx = conn(&st).unchecked_transaction().unwrap();
         crate::wallet::queue_tx_retrieval(&tx, std::iter::once(mixed), None).unwrap();
         tx.commit().unwrap();
-        st.wallet_mut()
-            .db_mut()
-            .set_enhancement_mode(
-                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-            );
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
         assert!(
             !st.wallet()
                 .transaction_enhancement_work()
@@ -1429,7 +1313,7 @@ mod handles {
         let mixed = zcash_primitives::transaction::TxId::from_bytes([0x52; 32]);
         conn(&st)
             .execute(
-                "INSERT INTO transactions (txid, observed_height) VALUES (?1, 1)",
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
                 [mixed.as_ref()],
             )
             .unwrap();
@@ -1452,11 +1336,9 @@ mod handles {
             .db_mut()
             .apply_transparent_policy(PrivateRequired)
             .unwrap();
-        st.wallet_mut()
-            .db_mut()
-            .set_enhancement_mode(
-                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
-            );
+        st.wallet_mut().db_mut().set_enhancement_mode(
+            zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+        );
         assert!(
             st.wallet()
                 .db()
@@ -1509,7 +1391,9 @@ mod handles {
 
     #[test]
     fn status_work_requires_ledger_mode_even_without_a_chain_tip() {
-        use zcash_client_backend::data_api::status::{TransactionStatusMode, TransactionStatusRead};
+        use zcash_client_backend::data_api::status::{
+            TransactionStatusMode, TransactionStatusRead,
+        };
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut db =
             WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
@@ -1531,7 +1415,9 @@ mod handles {
         use zcash_client_backend::data_api::{
             PublicTransactionEnhancementRequest,
             enhance_pir::{EnhancementMode, TransactionEnhancementWork},
-            status::{PublicTransactionStatusRequest, TransactionStatusMode, TransactionStatusWork},
+            status::{
+                PublicTransactionStatusRequest, TransactionStatusMode, TransactionStatusWork,
+            },
         };
 
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -1631,9 +1517,7 @@ mod handles {
                 .with_transparent_ledger_mode(Public);
         WalletMigrator::new().init_or_migrate(&mut writer).unwrap();
         let old_generation = writer.applied_transparent_policy().unwrap().generation;
-        writer
-            .apply_transparent_policy(PrivateShadow)
-            .unwrap();
+        writer.apply_transparent_policy(PrivateShadow).unwrap();
 
         // Simulate a commit path that captured the old generation before the transition.
         assert!(matches!(
@@ -1642,7 +1526,9 @@ mod handles {
         ));
         let before: i64 = writer
             .conn
-            .query_row("SELECT COUNT(*) FROM tx_retrieval_queue", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM tx_retrieval_queue", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let tx = writer.conn.unchecked_transaction().unwrap();
         // Direct insert attempt after a concurrent transition: ensure_policy_generation fails.
@@ -1661,7 +1547,9 @@ mod handles {
         tx.rollback().unwrap();
         let after: i64 = writer
             .conn
-            .query_row("SELECT COUNT(*) FROM tx_retrieval_queue", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM tx_retrieval_queue", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(before, after);
     }
