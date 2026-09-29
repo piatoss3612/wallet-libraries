@@ -961,6 +961,33 @@ CREATE TABLE tpir_pending_page_scripts (
     script BLOB NOT NULL,
     PRIMARY KEY (page_id, script)
 )"#;
+/// Accounts whose transparent authority is private. An account without a row is a candidate:
+/// its recovery is isolated from the projection. Promotion inserts the row, projecting the
+/// account's candidate events in the same transaction; leaving `PrivateRequired` deletes every
+/// row.
+pub(super) const TABLE_TPIR_ACTIVE_ACCOUNTS: &str = r#"
+CREATE TABLE tpir_active_accounts (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
+)"#;
+/// Revisions qualified to support private authority. Promotion requires every revision that
+/// contributed an account's coverage or events to be qualified, and an active account accepts
+/// commits only from qualified revisions. Only a test/development hook writes this table.
+pub(super) const TABLE_TPIR_QUALIFIED_REVISIONS: &str = r#"
+CREATE TABLE tpir_qualified_revisions (
+    revision_id INTEGER PRIMARY KEY REFERENCES tpir_revisions(id)
+)"#;
+/// Sources quarantined by an integrity rejection. Their commits are refused, and they can
+/// support no authority. Nothing clears a quarantine yet.
+pub(super) const TABLE_TPIR_QUARANTINED_SOURCES: &str = r#"
+CREATE TABLE tpir_quarantined_sources (
+    source BLOB PRIMARY KEY
+)"#;
+/// Accounts quarantined by an integrity rejection involving their evidence. They accept no
+/// commits and hold no private authority.
+pub(super) const TABLE_TPIR_QUARANTINED_ACCOUNTS: &str = r#"
+CREATE TABLE tpir_quarantined_accounts (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
+)"#;
 /// Candidate coverage by account and script, for coverage deduplication and diagnostics.
 pub(super) const INDEX_TPIR_COVERAGE_SCRIPT: &str =
     r#"CREATE INDEX idx_tpir_coverage_script ON tpir_coverage (account_id, script)"#;

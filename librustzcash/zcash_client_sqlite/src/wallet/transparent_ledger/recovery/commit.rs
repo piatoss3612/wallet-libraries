@@ -298,12 +298,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
 
         // Builds without the recovery lifecycle would leave this state stale across rewinds;
         // once any exists, they must fail closed.
-        conn.execute(
-            "UPDATE tpir_meta
-             SET min_reader_version = MAX(min_reader_version, :version)
-             WHERE id = 0",
-            named_params![":version": super::super::TPIR_READER_VERSION],
-        )?;
+        super::super::require_reader_version(conn, super::super::RECOVERY_READER_VERSION)?;
 
         Ok(CommitOutcome { window_grew })
     })

@@ -65,8 +65,32 @@ pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
 /// newer reader is refused rather than operated on with semantics this build lacks.
 ///
 /// Version 3 maintains candidate recovery state through rewinds, policy transitions, and
-/// account changes. The first candidate commit requires it.
-pub(crate) const TPIR_READER_VERSION: i64 = 3;
+/// account changes; the first candidate commit requires it. Version 4 honors activation,
+/// qualification, and quarantine; the first write of any of them requires it.
+pub(crate) const TPIR_READER_VERSION: i64 = ACTIVATION_READER_VERSION;
+
+/// The reader version candidate recovery state requires.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) const RECOVERY_READER_VERSION: i64 = 3;
+
+/// The reader version activation, qualification, and quarantine state requires.
+pub(crate) const ACTIVATION_READER_VERSION: i64 = 4;
+
+/// Raises `tpir_meta.min_reader_version` to at least `version`, so that builds that cannot
+/// interpret the state about to be written fail closed rather than ignore it.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn require_reader_version(
+    conn: &rusqlite::Connection,
+    version: i64,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE tpir_meta
+         SET min_reader_version = MAX(min_reader_version, :version)
+         WHERE id = 0",
+        rusqlite::named_params![":version": version],
+    )?;
+    Ok(())
+}
 
 /// The policy durably applied to the wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
