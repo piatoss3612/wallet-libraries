@@ -1630,7 +1630,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
             Ok(outputs
                 .into_iter()
                 .map(|output| {
-                    if output.pool_type() == PoolType::Transparent {
+                    if output.pool_type() == zcash_protocol::PoolType::Transparent {
                         ReceivedTransactionOutput::from_parts(
                             output.pool_type(),
                             output.output_index(),
