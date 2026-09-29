@@ -1112,15 +1112,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         outpoint: &OutPoint,
         target_height: TargetHeight,
     ) -> Result<Option<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
-        wallet::transparent_ledger::check_transparent_authority(
-            self.conn.borrow(),
-            self.transparent_ledger_mode,
-        )?;
-        wallet::transparent::get_wallet_transparent_output(
-            self.conn.borrow(),
-            outpoint,
-            Some(target_height),
-        )
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            let authority = self.input_authority(conn, target_height)?;
+            admitted_transparent_output(conn, outpoint, target_height, &authority)
+        })
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -1132,19 +1127,25 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         output_filter: CoinbaseFilter,
         lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
-        wallet::transparent_ledger::check_transparent_authority(
-            self.conn.borrow(),
-            self.transparent_ledger_mode,
-        )?;
-        wallet::transparent::get_spendable_transparent_outputs(
-            self.conn.borrow(),
-            &self.params,
-            address,
-            target_height,
-            confirmations_policy,
-            output_filter,
-            lock_filter,
-        )
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            let authority = self.input_authority(conn, target_height)?;
+            wallet::transparent_ledger::check_address_owners(
+                conn,
+                &self.params,
+                &authority,
+                core::slice::from_ref(address),
+            )?;
+            wallet::transparent::get_spendable_transparent_outputs(
+                conn,
+                &self.params,
+                address,
+                target_height,
+                confirmations_policy,
+                output_filter,
+                lock_filter,
+                &authority,
+            )
+        })
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -1156,19 +1157,25 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         output_filter: CoinbaseFilter,
         lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
-        wallet::transparent_ledger::check_transparent_authority(
-            self.conn.borrow(),
-            self.transparent_ledger_mode,
-        )?;
-        wallet::transparent::get_spendable_transparent_outputs_for_addresses(
-            self.conn.borrow(),
-            &self.params,
-            addresses,
-            target_height,
-            confirmations_policy,
-            output_filter,
-            lock_filter,
-        )
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            let authority = self.input_authority(conn, target_height)?;
+            wallet::transparent_ledger::check_address_owners(
+                conn,
+                &self.params,
+                &authority,
+                addresses,
+            )?;
+            wallet::transparent::get_spendable_transparent_outputs_for_addresses(
+                conn,
+                &self.params,
+                addresses,
+                target_height,
+                confirmations_policy,
+                output_filter,
+                lock_filter,
+                &authority,
+            )
+        })
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -1184,23 +1191,27 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         fee_rule: &StandardFeeRule,
         lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
-        wallet::transparent_ledger::check_transparent_authority(
-            self.conn.borrow(),
-            self.transparent_ledger_mode,
-        )?;
-        wallet::transparent::select_spendable_transparent_outputs(
-            self.conn.borrow(),
-            &self.params,
-            account,
-            target_height,
-            confirmations_policy,
-            output_filter,
-            address_allow_list,
-            target_value,
-            max_inputs,
-            fee_rule,
-            lock_filter,
-        )
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            let authority = self.input_authority(conn, target_height)?;
+            let account_ref = wallet::get_account_ref(conn, account)?;
+            if !authority.admits(account_ref) {
+                return Err(SqliteClientError::TransparentAuthorityUnavailable);
+            }
+            wallet::transparent::select_spendable_transparent_outputs(
+                conn,
+                &self.params,
+                account,
+                target_height,
+                confirmations_policy,
+                output_filter,
+                address_allow_list,
+                target_value,
+                max_inputs,
+                fee_rule,
+                lock_filter,
+                &authority,
+            )
+        })
     }
 
     /// Returns metadata for the spendable notes in the wallet.
@@ -1739,6 +1750,92 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     }
 }
 
+#[cfg(feature = "transparent-inputs")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<C, P, CL, R> {
+    /// Resolves which transparent outputs may fund a transaction targeting `target`, within
+    /// the caller's read snapshot.
+    fn input_authority(
+        &self,
+        conn: &rusqlite::Connection,
+        target: TargetHeight,
+    ) -> Result<wallet::transparent_ledger::InputAuthority, SqliteClientError> {
+        wallet::transparent_ledger::input_authority(
+            conn,
+            &self.params,
+            &self.gap_limits,
+            self.transparent_ledger_mode,
+            target,
+        )
+    }
+
+    /// Checks that every transparent input of `sent_tx` is admitted by the transparent
+    /// authority at its target height. An input created by one of the `earlier` transactions of
+    /// the same batch is local chained evidence, such as the second step of a TEX transfer.
+    fn check_transparent_inputs(
+        &self,
+        earlier: &[SentTransaction<AccountUuid>],
+        sent_tx: &SentTransaction<AccountUuid>,
+    ) -> Result<(), SqliteClientError> {
+        let conn = self.conn.borrow();
+        let target = sent_tx.target_height();
+        let authority = self.input_authority(conn, target)?;
+        if authority == wallet::transparent_ledger::InputAuthority::Public {
+            return Ok(());
+        }
+        let chained: HashSet<TxId> = earlier.iter().map(|t| t.tx().txid()).collect();
+        for txin in sent_tx
+            .tx()
+            .transparent_bundle()
+            .map_or(&[][..], |bundle| &bundle.vin[..])
+        {
+            let prevout = txin.prevout();
+            if chained.contains(prevout.txid()) {
+                continue;
+            }
+            if wallet::transparent::get_wallet_transparent_output(
+                conn,
+                prevout,
+                Some(target),
+                &authority,
+            )?
+            .is_none()
+            {
+                return Err(SqliteClientError::TransparentAuthorityUnavailable);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Looks up an unspent wallet output for a transaction targeting `target`. An output the wallet
+/// holds but the transparent authority does not admit is an error, not an absent output.
+#[cfg(feature = "transparent-inputs")]
+fn admitted_transparent_output(
+    conn: &rusqlite::Connection,
+    outpoint: &OutPoint,
+    target: TargetHeight,
+    authority: &wallet::transparent_ledger::InputAuthority,
+) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
+    let output = wallet::transparent::get_wallet_transparent_output(
+        conn,
+        outpoint,
+        Some(target),
+        &wallet::transparent_ledger::InputAuthority::Public,
+    )?;
+    if output.is_some()
+        && wallet::transparent::get_wallet_transparent_output(
+            conn,
+            outpoint,
+            Some(target),
+            authority,
+        )?
+        .is_none()
+    {
+        return Err(SqliteClientError::TransparentAuthorityUnavailable);
+    }
+    Ok(output)
+}
+
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentLedgerRead
     for WalletDb<C, P, CL, R>
 {
@@ -2122,6 +2219,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
             self.conn.borrow(),
             outpoint,
             target_height,
+            &wallet::transparent_ledger::InputAuthority::Public,
         )
     }
 
@@ -2870,12 +2968,18 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         // read from the transaction itself rather than from caller-supplied metadata, and this
         // applies in every build: a database may hold transparent outputs recorded by a build
         // with transparent support.
-        for sent_tx in transactions {
+        for (i, sent_tx) in transactions.iter().enumerate() {
             if wallet::transparent_ledger::has_transparent_inputs(sent_tx.tx()) {
-                wallet::transparent_ledger::check_transparent_authority(
-                    self.conn.0,
-                    self.transparent_ledger_mode,
-                )?;
+                #[cfg(feature = "transparent-inputs")]
+                self.check_transparent_inputs(&transactions[..i], sent_tx)?;
+                #[cfg(not(feature = "transparent-inputs"))]
+                {
+                    let _ = i;
+                    wallet::transparent_ledger::check_transparent_authority(
+                        self.conn.0,
+                        self.transparent_ledger_mode,
+                    )?;
+                }
             }
             wallet::store_transaction_to_be_sent(
                 self.conn.0,
@@ -3150,6 +3254,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             self.conn.borrow(),
             outpoint,
             target_height,
+            &wallet::transparent_ledger::InputAuthority::Public,
         )
     }
 

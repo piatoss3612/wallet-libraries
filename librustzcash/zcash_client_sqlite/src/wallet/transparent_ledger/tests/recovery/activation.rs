@@ -1435,3 +1435,533 @@ fn leaving_private_required_demotes_every_account() {
         TransparentAuthority::Unavailable
     );
 }
+
+mod gating {
+    use std::convert::Infallible;
+
+    use zcash_client_backend::{
+        data_api::{
+            CoinbaseFilter, InputSource as _, TargetValue,
+            testing::single_output_change_strategy,
+            wallet::{
+                TargetHeight,
+                input_selection::{
+                    GreedyInputSelector, LockFilter, LockedInputPolicy, SpendPolicy,
+                    TransparentSpendPolicy,
+                },
+            },
+        },
+        fees::{StandardFeeRule, TransparentChangePolicy},
+        wallet::OvkPolicy,
+    };
+    use zcash_keys::address::Address;
+    use zcash_protocol::ShieldedPool;
+    use zip321::{Payment, TransactionRequest};
+
+    use super::*;
+
+    type Selections = Vec<Result<Vec<OutPoint>, SqliteClientError>>;
+
+    /// Runs every transparent selector for `account` at `target`, returning the outpoints each
+    /// admits.
+    fn selections(
+        st: &State,
+        account: AccountUuid,
+        addresses: &[TransparentAddress],
+        outpoint: &OutPoint,
+        target: TargetHeight,
+    ) -> Selections {
+        let db = st.wallet().db();
+        let lock = || LockFilter::Policy(&LockedInputPolicy::Exclude);
+        let outpoints = |outputs: Vec<zcash_client_backend::wallet::WalletTransparentOutput<_>>| {
+            let mut outpoints: Vec<_> = outputs.iter().map(|o| o.outpoint().clone()).collect();
+            outpoints.sort_by_key(|o| (*o.hash(), o.n()));
+            outpoints
+        };
+        vec![
+            db.get_unspent_transparent_output(outpoint, target)
+                .map(|o| o.into_iter().map(|o| o.outpoint().clone()).collect()),
+            db.get_spendable_transparent_outputs(
+                &addresses[0],
+                target,
+                ConfirmationsPolicy::MIN,
+                CoinbaseFilter::AllTransparentOutputs,
+                lock(),
+            )
+            .map(outpoints),
+            db.get_spendable_transparent_outputs_for_addresses(
+                addresses,
+                target,
+                ConfirmationsPolicy::MIN,
+                CoinbaseFilter::AllTransparentOutputs,
+                lock(),
+            )
+            .map(outpoints),
+            db.select_spendable_transparent_outputs(
+                account,
+                target,
+                ConfirmationsPolicy::MIN,
+                CoinbaseFilter::AllTransparentOutputs,
+                None,
+                TargetValue::AtLeast(Zatoshis::const_from_u64(1)),
+                10,
+                &StandardFeeRule::Zip317,
+                lock(),
+            )
+            .map(outpoints),
+        ]
+    }
+
+    fn all_unavailable(selections: Selections) {
+        for selection in selections {
+            assert!(
+                matches!(
+                    selection,
+                    Err(SqliteClientError::TransparentAuthorityUnavailable)
+                ),
+                "{selection:?}"
+            );
+        }
+    }
+
+    fn next_target(st: &State) -> TargetHeight {
+        TargetHeight::from(st.wallet().chain_height().unwrap().unwrap() + 1)
+    }
+
+    /// An active, fully covered account holding one ledger output at `taddr`.
+    fn eligible_wallet() -> (State, AccountUuid, TransparentAddress, ReceiveEvent) {
+        let (mut st, account, unspent) = active_wallet();
+        cover(&mut st, account, &revision(1, true), vec![]);
+        assert_eq!(
+            snapshot(&st, account).authority,
+            TransparentAuthority::Private
+        );
+        let taddr = unspent.address;
+        (st, account, taddr, unspent)
+    }
+
+    #[test]
+    fn eligibility_requires_coverage_through_the_block_before_the_target() {
+        let (mut st, account, taddr, unspent) = eligible_wallet();
+        let target = next_target(&st);
+        for selection in selections(&st, account, &[taddr], &unspent.outpoint, target) {
+            assert_eq!(selection.unwrap(), vec![unspent.outpoint.clone()]);
+        }
+        // Coverage through H supports only target H + 1.
+        for other in [BlockHeight::from(target) - 1, BlockHeight::from(target) + 1] {
+            all_unavailable(selections(
+                &st,
+                account,
+                &[taddr],
+                &unspent.outpoint,
+                TargetHeight::from(other),
+            ));
+        }
+
+        // A new block the ledger has not covered pauses authority.
+        scan_new_blocks(&mut st, 1);
+        let target = next_target(&st);
+        all_unavailable(selections(
+            &st,
+            account,
+            &[taddr],
+            &unspent.outpoint,
+            target,
+        ));
+        cover(&mut st, account, &revision(1, true), vec![]);
+        for selection in selections(&st, account, &[taddr], &unspent.outpoint, target) {
+            assert_eq!(selection.unwrap(), vec![unspent.outpoint.clone()]);
+        }
+
+        // Quarantine revokes it.
+        conn(&st)
+            .execute(
+                "INSERT INTO tpir_quarantined_accounts SELECT id FROM accounts",
+                [],
+            )
+            .unwrap();
+        all_unavailable(selections(
+            &st,
+            account,
+            &[taddr],
+            &unspent.outpoint,
+            target,
+        ));
+    }
+
+    #[test]
+    fn a_blocked_ledger_is_anchored_only_when_covered_through_the_tip() {
+        let (mut st, account, _, unspent) = eligible_wallet();
+        conn(&st)
+            .execute(
+                "INSERT INTO tpir_quarantined_accounts SELECT id FROM accounts",
+                [],
+            )
+            .unwrap();
+        let tip = st.wallet().chain_height().unwrap().unwrap();
+        let s = snapshot(&st, account);
+        assert_eq!(s.authority, TransparentAuthority::Unavailable);
+        let last_known = s.last_known.unwrap();
+        assert_eq!(last_known.source, LastKnownSource::PrivateLedger);
+        assert_eq!(last_known.at, Some(chain_point(&st, tip)));
+        assert_eq!(last_known.balance.regular.total(), unspent.value);
+
+        // Once coverage lags the tip, the amount is no longer established at the covered point.
+        scan_new_blocks(&mut st, 1);
+        let s = snapshot(&st, account);
+        assert_eq!(s.covered_through, Some(chain_point(&st, tip)));
+        assert_eq!(s.last_known.unwrap().at, None);
+    }
+
+    #[test]
+    fn only_ledger_outputs_authorize_private_spends() {
+        let (st, account, taddr, unspent) = eligible_wallet();
+        // Strip the ledger origin: the output is now legacy evidence only.
+        conn(&st)
+            .execute_batch("UPDATE tpir_output_origins SET origin = 0 WHERE origin = 2")
+            .unwrap();
+        let target = next_target(&st);
+        let [by_outpoint, by_address, by_addresses, by_account] = <[_; 4]>::try_from(selections(
+            &st,
+            account,
+            &[taddr],
+            &unspent.outpoint,
+            target,
+        ))
+        .unwrap();
+        assert!(matches!(
+            by_outpoint,
+            Err(SqliteClientError::TransparentAuthorityUnavailable)
+        ));
+        assert_eq!(by_address.unwrap(), vec![]);
+        assert_eq!(by_addresses.unwrap(), vec![]);
+        assert_eq!(by_account.unwrap(), vec![]);
+    }
+
+    #[test]
+    fn a_rewound_receive_authorizes_nothing_until_placed_again() {
+        let (mut st, account, taddr, unspent) = eligible_wallet();
+        st.truncate_to_height(unspent.mined_height - 2);
+        // The replacement chain never mines the receive, and the ledger covers it without it.
+        scan_new_blocks(&mut st, 4);
+        cover(&mut st, account, &revision(1, true), vec![]);
+        let s = snapshot(&st, account);
+        assert_eq!(s.authority, TransparentAuthority::Private);
+        assert_eq!(s.authorized.unwrap().regular.total(), Zatoshis::ZERO);
+        // Its projection survives the rewind, but no selector admits it: the unmined transaction
+        // is still within its default expiry, so only the ledger placement keeps it out.
+        let target = next_target(&st);
+        let [by_outpoint, by_address, by_addresses, by_account] = <[_; 4]>::try_from(selections(
+            &st,
+            account,
+            &[taddr],
+            &unspent.outpoint,
+            target,
+        ))
+        .unwrap();
+        assert!(
+            !matches!(&by_outpoint, Ok(found) if !found.is_empty()),
+            "{by_outpoint:?}"
+        );
+        assert_eq!(by_address.unwrap(), vec![]);
+        assert_eq!(by_addresses.unwrap(), vec![]);
+        assert_eq!(by_account.unwrap(), vec![]);
+    }
+
+    #[test]
+    fn a_legacy_receiver_without_a_row_has_an_ineligible_owner() {
+        let (mut st, accounts) = shadow_wallet_with(0);
+        let account = accounts[0];
+        let (legacy, _) = crate::wallet::transparent::get_legacy_transparent_address(
+            st.network(),
+            conn(&st),
+            account,
+        )
+        .unwrap()
+        .unwrap();
+        let encoded = zcash_keys::encoding::AddressCodec::encode(&legacy, st.network());
+        conn(&st)
+            .execute(
+                "DELETE FROM addresses WHERE cached_transparent_receiver_address = ?1",
+                [&encoded],
+            )
+            .unwrap();
+        set_policy(&mut st, PrivateRequired);
+        // The account owns the receiver but is not active, so selection is unavailable rather
+        // than an empty success for an unknown address.
+        let target = next_target(&st);
+        let lock = LockFilter::Policy(&LockedInputPolicy::Exclude);
+        for result in [
+            st.wallet().db().get_spendable_transparent_outputs(
+                &legacy,
+                target,
+                ConfirmationsPolicy::MIN,
+                CoinbaseFilter::AllTransparentOutputs,
+                lock,
+            ),
+            st.wallet()
+                .db()
+                .get_spendable_transparent_outputs_for_addresses(
+                    &[legacy],
+                    target,
+                    ConfirmationsPolicy::MIN,
+                    CoinbaseFilter::AllTransparentOutputs,
+                    LockFilter::Policy(&LockedInputPolicy::Exclude),
+                ),
+        ] {
+            assert!(
+                matches!(
+                    result,
+                    Err(SqliteClientError::TransparentAuthorityUnavailable)
+                ),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn address_selection_filters_ineligible_accounts() {
+        let (mut st, accounts) = shadow_wallet_with(1);
+        let fixture = revision(1, true);
+        let mut funded = vec![];
+        for (tag, account) in accounts.iter().enumerate() {
+            let ws = watch(&st, *account);
+            let received = receive(tag as u8 + 1, external(&ws), 40_000, below_target(&ws, 3));
+            cover(&mut st, *account, &fixture, vec![received.clone()]);
+            funded.push(received);
+        }
+        qualify(&mut st, &fixture);
+        set_policy(&mut st, PrivateRequired);
+        // Only the first account is promoted.
+        promote(&mut st, accounts[0]).unwrap();
+        let target = next_target(&st);
+        let both = [funded[0].address, funded[1].address];
+
+        let db = st.wallet().db();
+        let lock = || LockFilter::Policy(&LockedInputPolicy::Exclude);
+        let select = |addresses: &[TransparentAddress]| {
+            db.get_spendable_transparent_outputs_for_addresses(
+                addresses,
+                target,
+                ConfirmationsPolicy::MIN,
+                CoinbaseFilter::AllTransparentOutputs,
+                lock(),
+            )
+            .map(|outputs| {
+                outputs
+                    .iter()
+                    .map(|o| o.outpoint().clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(select(&both).unwrap(), vec![funded[0].outpoint.clone()]);
+        assert!(matches!(
+            select(&both[1..]),
+            Err(SqliteClientError::TransparentAuthorityUnavailable)
+        ));
+    }
+
+    fn t2t_request(st: &State, value: u64) -> TransactionRequest {
+        TransactionRequest::new(vec![Payment::without_memo(
+            Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]))
+                .to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(value),
+        )])
+        .unwrap()
+    }
+
+    fn transactions(st: &State) -> i64 {
+        count(st, "transactions")
+    }
+
+    #[test]
+    fn stored_transactions_recheck_every_transparent_input() {
+        let (mut st, account, _, unspent) = eligible_wallet();
+        let usk = st.test_account().unwrap().usk().clone();
+        let change_strategy =
+            single_output_change_strategy(StandardFeeRule::Zip317, None, ShieldedPool::Sapling)
+                .with_transparent_change_policy(TransparentChangePolicy::TransparentChangeAllowed);
+        let policy =
+            SpendPolicy::default().with_transparent(TransparentSpendPolicy::any_account_addr());
+        let propose = |st: &mut State| {
+            st.propose_transfer_with_policy(
+                account,
+                &GreedyInputSelector::new(),
+                &change_strategy,
+                t2t_request(st, 20_000),
+                ConfirmationsPolicy::MIN,
+                &policy,
+            )
+            .unwrap()
+        };
+        let stale = propose(&mut st);
+
+        // The chain advances; the stale proposal's target no longer follows covered coverage,
+        // even once recovery catches up.
+        scan_new_blocks(&mut st, 1);
+        cover(&mut st, account, &revision(1, true), vec![]);
+        let before = transactions(&st);
+        assert!(matches!(
+            st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+                &usk,
+                OvkPolicy::Sender,
+                &stale,
+            ),
+            Err(zcash_client_backend::data_api::error::Error::DataSource(
+                SqliteClientError::TransparentAuthorityUnavailable
+            ))
+        ));
+        assert_eq!(transactions(&st), before);
+
+        // A fresh proposal spends the ledger output.
+        let fresh = propose(&mut st);
+        let txids = st
+            .create_proposed_transactions::<Infallible, _, Infallible, _>(
+                &usk,
+                OvkPolicy::Sender,
+                &fresh,
+            )
+            .unwrap();
+        let tx = st.wallet().get_transaction(txids[0]).unwrap().unwrap();
+        assert_eq!(
+            tx.transparent_bundle().unwrap().vin[0].prevout(),
+            &unspent.outpoint
+        );
+    }
+
+    #[test]
+    fn a_tex_transfer_spends_its_own_ephemeral_output() {
+        let (mut st, account, _, unspent) = eligible_wallet();
+        let usk = st.test_account().unwrap().usk().clone();
+        let change_strategy =
+            single_output_change_strategy(StandardFeeRule::Zip317, None, ShieldedPool::Sapling)
+                .with_transparent_change_policy(TransparentChangePolicy::TransparentChangeAllowed);
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            Address::Tex([4; 20]).to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10_000),
+        )])
+        .unwrap();
+        let proposal = st
+            .propose_transfer_with_policy(
+                account,
+                &GreedyInputSelector::new(),
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+                &SpendPolicy::default()
+                    .with_transparent(TransparentSpendPolicy::any_account_addr()),
+            )
+            .unwrap();
+        assert_eq!(proposal.steps().len(), 2);
+        // The second step spends the first step's ephemeral output, which no ledger commit can
+        // have covered yet: same-batch local evidence authorizes it.
+        let txids = st
+            .create_proposed_transactions::<Infallible, _, Infallible, _>(
+                &usk,
+                OvkPolicy::Sender,
+                &proposal,
+            )
+            .unwrap();
+        assert_eq!(txids.len(), 2);
+        let first = st.wallet().get_transaction(txids[0]).unwrap().unwrap();
+        assert_eq!(
+            first.transparent_bundle().unwrap().vin[0].prevout(),
+            &unspent.outpoint
+        );
+    }
+
+    #[test]
+    fn immature_coinbase_is_not_selectable() {
+        let (mut st, accounts) = shadow_wallet_with(0);
+        let account = accounts[0];
+        let fixture = revision(1, true);
+        let ws = watch(&st, account);
+        let coinbase = ReceiveEvent {
+            coinbase: true,
+            ..receive(1, external(&ws), 90_000, below_target(&ws, 3))
+        };
+        cover(&mut st, account, &fixture, vec![coinbase.clone()]);
+        qualify(&mut st, &fixture);
+        set_policy(&mut st, PrivateRequired);
+        promote(&mut st, account).unwrap();
+        let target = next_target(&st);
+        let [_, by_address, by_addresses, by_account] = <[_; 4]>::try_from(selections(
+            &st,
+            account,
+            &[coinbase.address],
+            &coinbase.outpoint,
+            target,
+        ))
+        .unwrap();
+        for selection in [by_address, by_addresses, by_account] {
+            assert_eq!(selection.unwrap(), vec![]);
+        }
+    }
+
+    #[test]
+    fn shielded_funded_unshielding_needs_no_transparent_authority() {
+        let (mut st, account, taddr, _) = eligible_wallet();
+        let test_account = st.test_account().cloned().unwrap();
+        let dfvk = test_account
+            .usk()
+            .sapling()
+            .to_diversifiable_full_viewing_key();
+        let (height, _, _) = st.generate_next_block(
+            &dfvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(200_000),
+        );
+        st.scan_cached_blocks(height, 1);
+        // The ledger now lags the tip, so transparent authority is unavailable.
+        assert_eq!(
+            snapshot(&st, account).authority,
+            TransparentAuthority::Unavailable
+        );
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            Address::Transparent(taddr).to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(50_000),
+        )])
+        .unwrap();
+        let proposal = st
+            .propose_transfer_with_policy(
+                account,
+                &GreedyInputSelector::new(),
+                &single_output_change_strategy(
+                    StandardFeeRule::Zip317,
+                    None,
+                    ShieldedPool::Sapling,
+                ),
+                request,
+                ConfirmationsPolicy::MIN,
+                &SpendPolicy::default(),
+            )
+            .unwrap();
+        let txid = st
+            .create_proposed_transactions::<Infallible, _, Infallible, _>(
+                test_account.usk(),
+                OvkPolicy::Sender,
+                &proposal,
+            )
+            .unwrap()[0];
+        // Its own transparent output is local evidence only: not a private input until a ledger
+        // commit covers it.
+        cover(&mut st, account, &revision(1, true), vec![]);
+        let output = st
+            .wallet()
+            .get_transaction(txid)
+            .unwrap()
+            .unwrap()
+            .transparent_bundle()
+            .unwrap()
+            .vout
+            .iter()
+            .position(|out| out.script_pubkey() == &taddr.script().into())
+            .unwrap() as u32;
+        let local = OutPoint::new(*txid.as_ref(), output);
+        let db = st.wallet().db();
+        assert!(matches!(
+            db.get_unspent_transparent_output(&local, next_target(&st)),
+            Err(SqliteClientError::TransparentAuthorityUnavailable)
+        ));
+    }
+}

@@ -31,7 +31,7 @@ use crate::{AccountUuid, error::SqliteClientError, wallet::chain_tip_height};
 
 #[cfg(feature = "transparent-inputs")]
 use {
-    zcash_client_backend::data_api::transparent_ledger::AccountLifecycle,
+    crate::AccountRef, zcash_client_backend::data_api::transparent_ledger::AccountLifecycle,
     zcash_keys::keys::transparent::gap_limits::GapLimits,
 };
 
@@ -256,6 +256,112 @@ pub(crate) fn check_transparent_authority(
             }
         }
     }
+}
+
+/// Which transparent outputs the handle's transparent authority admits as inputs.
+#[cfg(feature = "transparent-inputs")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InputAuthority {
+    /// Public authority admits every output.
+    Public,
+    /// Private authority admits only ledger-projected outputs of these accounts.
+    Private(Vec<AccountRef>),
+}
+
+#[cfg(feature = "transparent-inputs")]
+impl InputAuthority {
+    /// The `:private_authority` and `:eligible_accounts` parameters of the input-authority SQL
+    /// condition.
+    pub(crate) fn sql_params(&self) -> (bool, std::rc::Rc<Vec<rusqlite::types::Value>>) {
+        match self {
+            Self::Public => (false, std::rc::Rc::new(vec![])),
+            Self::Private(accounts) => (
+                true,
+                std::rc::Rc::new(
+                    accounts
+                        .iter()
+                        .map(|a| rusqlite::types::Value::Integer(a.0))
+                        .collect(),
+                ),
+            ),
+        }
+    }
+
+    /// Whether private authority admits `account`'s outputs; public authority admits all.
+    pub(crate) fn admits(&self, account: AccountRef) -> bool {
+        match self {
+            Self::Public => true,
+            Self::Private(accounts) => accounts.contains(&account),
+        }
+    }
+}
+
+/// Resolves which outputs may fund a transaction targeting `target`.
+///
+/// Public authority follows [`check_transparent_authority`]. Under `PrivateRequired`, an
+/// account is eligible when it is active and not quarantined, its ledger has no blockers, and
+/// both its covered local target and the chain tip are `target - 1`: coverage through `H`
+/// supports a transaction targeting `H + 1`, with no freshness tolerance. The caller provides
+/// the read snapshot.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn input_authority<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+    gap_limits: &GapLimits,
+    configured: Option<TransparentLedgerMode>,
+    target: TargetHeight,
+) -> Result<InputAuthority, SqliteClientError> {
+    if resolve_mode(conn, configured)?.retains_public_authority() {
+        check_transparent_authority(conn, configured)?;
+        return Ok(InputAuthority::Public);
+    }
+    let Some(tip) = chain_tip_height(conn)? else {
+        return Err(SqliteClientError::TransparentAuthorityUnavailable);
+    };
+    if BlockHeight::from(target) != tip + 1 {
+        return Ok(InputAuthority::Private(vec![]));
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT a.uuid FROM tpir_active_accounts t JOIN accounts a ON a.id = t.account_id",
+    )?;
+    let active = stmt
+        .query_map([], |row| row.get(0).map(AccountUuid))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut eligible = vec![];
+    for account in active {
+        let ledger = recovery::account_ledger(conn, params, gap_limits, account)?;
+        if ledger.authorizes_after(tip) {
+            eligible.push(ledger.account_ref);
+        }
+    }
+    Ok(InputAuthority::Private(eligible))
+}
+
+/// Fails when private authority admits none of the accounts owning `addresses`. Selection over
+/// several accounts' addresses otherwise proceeds with the eligible ones only.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn check_address_owners<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+    authority: &InputAuthority,
+    addresses: &[transparent::address::TransparentAddress],
+) -> Result<(), SqliteClientError> {
+    let InputAuthority::Private(_) = authority else {
+        return Ok(());
+    };
+    // Resolve owners as receiving does, including a legacy external receiver without a row.
+    let mut owners = vec![];
+    for address in addresses {
+        if let Some((account, _)) =
+            super::transparent::find_account_uuid_for_transparent_address(conn, params, address)?
+        {
+            owners.push(super::get_account_ref(conn, account)?);
+        }
+    }
+    if !owners.is_empty() && !owners.iter().any(|owner| authority.admits(*owner)) {
+        return Err(SqliteClientError::TransparentAuthorityUnavailable);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "transparent-inputs")]
