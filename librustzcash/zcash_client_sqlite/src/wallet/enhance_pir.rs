@@ -71,7 +71,8 @@ mod metadata;
 // A route is transaction-wide. LwdRequired is sticky, including across rescans.
 // PrivateProtected survives completion and rewinds; only an explicit LWD decision or
 // transaction deletion with retrieval-intent cleanup ends protection. Route 2
-// (PrivateDetailsUnsupported) is sticky under PrivateRequired and never yields public work.
+// (PrivateDetailsUnsupported) is sticky under PrivateRequired; once public authority is
+// current again it is ordinary public LWD work.
 // No row retains ordinary enhancement semantics for unclassified and legacy transactions. Its
 // history expiry is display-only and never controls spendability.
 const PRIVATE_PROTECTED: i64 = private_protected!();
@@ -98,7 +99,7 @@ fn retire_enhancement_if_complete(
         concat!(
             "DELETE FROM tx_retrieval_queue
          WHERE txid = (SELECT txid FROM transactions WHERE id_tx = :tx)
-           AND query_type = :enhancement
+           AND query_type IN (:enhancement, :withheld_enhancement)
            AND EXISTS (SELECT 1 FROM ironwood_enhance_routing
                        WHERE transaction_id = :tx AND route = ",
             private_protected!(),
@@ -109,7 +110,11 @@ fn retire_enhancement_if_complete(
            AND NOT EXISTS (
                SELECT 1 FROM ironwood_enhance_discovery_queue WHERE transaction_id = :tx)"
         ),
-        named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()],
+        named_params![
+            ":tx": tx_ref.0,
+            ":enhancement": TxQueryType::Enhancement.code(),
+            ":withheld_enhancement": TxQueryType::Enhancement.withheld_code(),
+        ],
     )?;
     Ok(())
 }
@@ -280,7 +285,7 @@ fn require_lwd(
          ON CONFLICT(txid, query_type) DO NOTHING",
         named_params![
             ":tx": tx_ref.0,
-            ":enhancement": TxQueryType::Enhancement.code(),
+            ":enhancement": TxQueryType::Enhancement.durable_code(conn)?,
             ":generation": i64::try_from(expected_generation).map_err(|_| {
                 SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
             })?,
@@ -365,9 +370,11 @@ const OUTGOING_SUSPENDED: u8 = 4;
 
 /// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
 /// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
-/// (`ironwood_enhance_routing.route = 0`) are excluded. Route 2 never yields public work. Private
-/// rows use the complementary `route = 0` predicate, so the two transports partition payload work.
-/// Public rows also require a matching `policy_generation` and that public authority is current.
+/// (`ironwood_enhance_routing.route = 0`) are excluded. Sticky route 2 (mixed details under a
+/// non-public handle) is ordinary public LWD work once public authority is current, so it is not
+/// excluded here; under `PrivateRequired` `:public_authority` is false and no public rows appear.
+/// Private rows use the complementary `route = 0` predicate, so the two transports partition
+/// payload work. Public rows also require a matching `policy_generation`.
 const PUBLIC_ENHANCEMENT_ROUTE: &str = "(
     :public_authority
     AND q.policy_generation = :current_generation
@@ -378,11 +385,6 @@ const PUBLIC_ENHANCEMENT_ROUTE: &str = "(
             FROM ironwood_enhance_routing p
             WHERE p.transaction_id = t.id_tx AND p.route = 0
         )
-    )
-    AND NOT EXISTS (
-        SELECT 1
-        FROM ironwood_enhance_routing p
-        WHERE p.transaction_id = t.id_tx AND p.route = 2
     )
 )";
 

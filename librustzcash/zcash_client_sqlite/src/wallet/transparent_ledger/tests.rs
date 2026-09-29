@@ -1186,6 +1186,148 @@ mod handles {
 
     #[cfg(feature = "orchard")]
     #[test]
+    fn private_required_hides_queue_rows_from_legacy_codes_and_reports_lwd() {
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
+            transparent_ledger::PrivateTransparentDetail,
+        };
+        let (mut st, _, _) = funded_wallet();
+        let lwd = zcash_primitives::transaction::TxId::from_bytes([0x61; 32]);
+        conn(&st)
+            .execute(
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
+                [lwd.as_ref()],
+            )
+            .unwrap();
+        let tx_ref: i64 = conn(&st)
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [lwd.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn(&st)
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 1)",
+                [tx_ref],
+            )
+            .unwrap();
+        let tx = conn(&st).unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(lwd), None).unwrap();
+        tx.commit().unwrap();
+
+        set_mode(&mut st, PrivateRequired);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateRequired)
+            .unwrap();
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(
+                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+            );
+
+        let legacy_visible: i64 = conn(&st)
+            .query_row(
+                "SELECT COUNT(*) FROM tx_retrieval_queue WHERE query_type IN (0, 1)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_visible, 0);
+        let route: i64 = conn(&st)
+            .query_row(
+                "SELECT route FROM ironwood_enhance_routing WHERE transaction_id = ?1",
+                [tx_ref],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(route, 2);
+        assert!(
+            st.wallet()
+                .db()
+                .pending_private_transparent_details()
+                .unwrap()
+                .contains(&PrivateTransparentDetail::MixedTransaction { txid: lwd })
+        );
+
+        set_mode(&mut st, Public);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(Public)
+            .unwrap();
+        assert!(
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(lwd)
+                ))
+        );
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn handle_only_private_required_route_two_is_public_again_after_handle_switch() {
+        use zcash_client_backend::data_api::{
+            PublicTransactionEnhancementRequest,
+            enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
+        };
+        let (mut st, _, _) = funded_wallet();
+        let mixed = zcash_primitives::transaction::TxId::from_bytes([0x62; 32]);
+        conn(&st)
+            .execute(
+                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
+                [mixed.as_ref()],
+            )
+            .unwrap();
+        let tx_ref: i64 = conn(&st)
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE txid = ?1",
+                [mixed.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Durable policy stays Public; only the handle is PrivateRequired when routing.
+        set_mode(&mut st, PrivateRequired);
+        conn(&st)
+            .execute(
+                "INSERT INTO ironwood_enhance_routing (transaction_id, route) VALUES (?1, 2)",
+                [tx_ref],
+            )
+            .unwrap();
+        let tx = conn(&st).unchecked_transaction().unwrap();
+        crate::wallet::queue_tx_retrieval(&tx, std::iter::once(mixed), None).unwrap();
+        tx.commit().unwrap();
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(
+                zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard,
+            );
+        assert!(
+            !st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(mixed)
+                ))
+        );
+
+        // Switching the handle back to Public (no durable mode change) must expose LWD work.
+        set_mode(&mut st, Public);
+        assert!(
+            st.wallet()
+                .transaction_enhancement_work()
+                .unwrap()
+                .contains(&TransactionEnhancementWork::Public(
+                    PublicTransactionEnhancementRequest::new(mixed)
+                ))
+        );
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
     fn restoring_public_authority_requeues_unresolved_mixed_details() {
         use zcash_client_backend::data_api::{
             PublicTransactionEnhancementRequest,

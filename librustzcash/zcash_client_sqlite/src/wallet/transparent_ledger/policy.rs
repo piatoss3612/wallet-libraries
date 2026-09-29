@@ -99,11 +99,46 @@ pub(crate) fn apply_transparent_policy(
             "UPDATE tx_retrieval_queue SET policy_generation = :generation",
             rusqlite::named_params![":generation": generation_i64],
         )?;
-        if mode.retains_public_authority() {
+        if mode == TransparentLedgerMode::PrivateRequired {
+            // Unresolved public LWD markers become sticky private-details rows so pending
+            // private recovery can observe them after the transition.
+            conn.execute(
+                "UPDATE ironwood_enhance_routing
+                 SET route = 2
+                 WHERE route = 1
+                   AND EXISTS (
+                       SELECT 1 FROM transactions t
+                       WHERE t.id_tx = ironwood_enhance_routing.transaction_id
+                         AND t.raw IS NULL
+                   )",
+                [],
+            )?;
+            // Relocate ordinary status/enhancement obligations out of the Phase 1 enumerator
+            // codes. Older readers never check min_reader_version and would otherwise dispatch
+            // these txids publicly despite the raised gate.
+            conn.execute(
+                "UPDATE tx_retrieval_queue
+                 SET query_type = query_type + :offset
+                 WHERE query_type IN (0, 1)",
+                rusqlite::named_params![
+                    ":offset": super::TxQueryType::WITHHELD_OFFSET,
+                ],
+            )?;
+        } else if mode.retains_public_authority() {
+            // Restore Phase 1-visible codes before converting sticky private-details markers.
+            conn.execute(
+                "UPDATE tx_retrieval_queue
+                 SET query_type = query_type - :offset
+                 WHERE query_type IN (:withheld_status, :withheld_enhancement)",
+                rusqlite::named_params![
+                    ":offset": super::TxQueryType::WITHHELD_OFFSET,
+                    ":withheld_status": super::TxQueryType::Status.withheld_code(),
+                    ":withheld_enhancement": super::TxQueryType::Enhancement.withheld_code(),
+                ],
+            )?;
             // Sticky route 2 was assigned while public enhancement was forbidden. With
             // public authority restored, unresolved mixed rows become ordinary LWD work
-            // (route 1); public dispatch still excludes route 2. Route codes match
-            // enhance_pir::{LWD_REQUIRED, PRIVATE_DETAILS_UNSUPPORTED}.
+            // (route 1). Route codes match enhance_pir::{LWD_REQUIRED, PRIVATE_DETAILS_UNSUPPORTED}.
             conn.execute(
                 "UPDATE ironwood_enhance_routing
                  SET route = 1
@@ -153,20 +188,25 @@ pub(crate) fn pending_private_transparent_details(
     let mut details = Vec::new();
     let mut parents = conn.prepare_cached(
         "SELECT q.txid FROM tx_retrieval_queue q
-         WHERE q.query_type = 1
+         WHERE q.query_type IN (1, 1 + :offset)
            AND q.dependent_transaction_id IS NOT NULL
          ORDER BY q.txid",
     )?;
-    for txid in parents.query_map([], |row| row.get::<_, [u8; 32]>(0))? {
+    for txid in parents.query_map(
+        rusqlite::named_params![":offset": super::TxQueryType::WITHHELD_OFFSET],
+        |row| row.get::<_, [u8; 32]>(0),
+    )? {
         details.push(PrivateTransparentDetail::ParentTransaction {
             txid: TxId::from_bytes(txid?),
         });
     }
 
+    // Unresolved mixed/LWD follow-on: sticky route 2, and any remaining public LWD route
+    // that a concurrent transition has not yet relocated.
     let mut mixed = conn.prepare_cached(
         "SELECT t.txid FROM ironwood_enhance_routing r
          JOIN transactions t ON t.id_tx = r.transaction_id
-         WHERE r.route = 2 AND t.raw IS NULL
+         WHERE r.route IN (1, 2) AND t.raw IS NULL
          ORDER BY t.txid",
     )?;
     for txid in mixed.query_map([], |row| row.get::<_, [u8; 32]>(0))? {

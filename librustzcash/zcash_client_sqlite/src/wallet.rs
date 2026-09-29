@@ -3830,7 +3830,7 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
             conn.execute(
                 "DELETE FROM tx_retrieval_queue
                  WHERE txid = :txid
-                 AND query_type = :status_type
+                 AND query_type IN (:status_type, :withheld_status_type)
                  AND NOT EXISTS (
                     SELECT 1
                     FROM transactions t
@@ -3852,6 +3852,7 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
                 named_params![
                     ":txid": txid.as_ref(),
                     ":status_type": TxQueryType::Status.code(),
+                    ":withheld_status_type": TxQueryType::Status.withheld_code(),
                     ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
                 ],
             )?;
@@ -3905,7 +3906,7 @@ pub(crate) fn notify_transaction_enhancement_not_found(
 ) -> Result<(), SqliteClientError> {
     conn.execute(
         "DELETE FROM tx_retrieval_queue
-         WHERE txid = :txid AND query_type = :enhancement
+         WHERE txid = :txid AND query_type IN (:enhancement, :withheld_enhancement)
            AND NOT EXISTS (
                SELECT 1 FROM transactions t
                JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
@@ -3914,6 +3915,7 @@ pub(crate) fn notify_transaction_enhancement_not_found(
         named_params![
             ":txid": txid.as_ref(),
             ":enhancement": TxQueryType::Enhancement.code(),
+            ":withheld_enhancement": TxQueryType::Enhancement.withheld_code(),
         ],
     )?;
     Ok(())
@@ -5229,11 +5231,41 @@ pub(crate) enum TxQueryType {
 }
 
 impl TxQueryType {
+    /// Codes Phase 1 and earlier readers enumerate. Under a durable `PrivateRequired`
+    /// policy, obligations use [`Self::withheld_code`] so those readers cannot see them.
     pub(crate) fn code(&self) -> i64 {
         match self {
             TxQueryType::Status => 0,
             TxQueryType::Enhancement => 1,
         }
+    }
+
+    /// Offset applied to [`Self::code`] while public follow-on is withheld from legacy
+    /// enumerators. Must stay outside the Phase 1 `{0, 1}` set.
+    pub(crate) const WITHHELD_OFFSET: i64 = 10;
+
+    pub(crate) fn withheld_code(&self) -> i64 {
+        self.code() + Self::WITHHELD_OFFSET
+    }
+
+    /// Insert/lookup code for the durable policy: withheld while `PrivateRequired` is
+    /// applied so Phase 1 status/enhancement queries cannot dispatch private-era txids.
+    pub(crate) fn durable_code(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> Result<i64, SqliteClientError> {
+        let private_required = matches!(
+            transparent_ledger::durable_policy(conn)?,
+            Some(transparent_ledger::DurablePolicy {
+                mode: zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::PrivateRequired,
+                ..
+            })
+        );
+        Ok(if private_required {
+            self.withheld_code()
+        } else {
+            self.code()
+        })
     }
 }
 
@@ -5288,7 +5320,7 @@ pub(crate) fn queue_tx_retrieval(
         transparent_ledger::ensure_policy_generation(conn, expected)?;
         stmt_insert_tx.execute(named_params! {
             ":txid": txid.as_ref(),
-            ":enhancement_type": TxQueryType::Enhancement.code(),
+            ":enhancement_type": TxQueryType::Enhancement.durable_code(conn)?,
             ":dependent_transaction_id": dependent_tx_ref.map(|r| r.0),
             ":policy_generation": i64::try_from(expected).map_err(|_| {
                 SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
@@ -5314,7 +5346,7 @@ pub(crate) fn queue_tx_status(
          ON CONFLICT (txid, query_type) DO NOTHING",
         named_params![
             ":txid": txid.as_ref(),
-            ":status_type": TxQueryType::Status.code(),
+            ":status_type": TxQueryType::Status.durable_code(conn)?,
             ":policy_generation": i64::try_from(expected).map_err(|_| {
                 SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
             })?,
@@ -5355,7 +5387,7 @@ pub(crate) fn transaction_status_work(
                 q.policy_generation
          FROM tx_retrieval_queue q
          LEFT JOIN transactions t ON t.txid = q.txid
-         WHERE q.query_type = :status_type
+         WHERE q.query_type IN (:status_type, :withheld_status_type)
          AND t.mined_height IS NULL
          AND (
             t.expiry_height IS NULL
@@ -5376,12 +5408,13 @@ pub(crate) fn transaction_status_work(
                     < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
             )
          )",
-    )?;
+        )?;
 
         let rows = tx_retrieval_stmt
             .query_and_then(
                 named_params![
                     ":status_type": TxQueryType::Status.code(),
+                    ":withheld_status_type": TxQueryType::Status.withheld_code(),
                     ":certainty_depth": PRUNING_DEPTH + DEFAULT_TX_EXPIRY_DELTA,
                     ":scanned_height": scanned_height,
                     ":reorg_depth": PRUNING_DEPTH
@@ -5525,10 +5558,6 @@ pub(crate) fn public_enhancement_work(
              LEFT JOIN transactions t ON t.txid = q.txid
              WHERE q.query_type = :enhancement_type
                AND q.policy_generation = :generation
-               AND NOT EXISTS (
-                   SELECT 1 FROM ironwood_enhance_routing r
-                   WHERE r.transaction_id = t.id_tx AND r.route = 2
-               )
              ORDER BY q.txid",
         )?;
         stmt.query_and_then(
@@ -5563,13 +5592,16 @@ fn delete_retrieval_queue_entry(
     txid: TxId,
     query_type: TxQueryType,
 ) -> Result<(), SqliteClientError> {
+    // Clear both the public and withheld encodings; obligations may have been relocated
+    // under PrivateRequired so Phase 1 readers cannot see them.
     conn.execute(
         "DELETE FROM tx_retrieval_queue
          WHERE txid = :txid
-         AND query_type = :query_type",
+         AND query_type IN (:query_type, :withheld_type)",
         named_params![
             ":txid": txid.as_ref(),
             ":query_type": query_type.code(),
+            ":withheld_type": query_type.withheld_code(),
         ],
     )?;
 

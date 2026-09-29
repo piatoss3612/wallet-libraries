@@ -70,8 +70,13 @@ workspace.
   a matching `policy_generation` and a mode that retains public authority.
   Parent-transaction retrieval and mixed Enhance results are withheld from
   public requests and reported as pending private details while they remain
-  unresolved (mixed `route = 2` rows with stored raw are omitted); financial
-  rows are not deleted. Status obligations become `TransactionStatusWork::Private`.
+  unresolved (mixed `route = 2` rows with stored raw are omitted; pre-transition
+  public LWD `route = 1` rows are included until relocated); financial rows are
+  not deleted. Status obligations become `TransactionStatusWork::Private`.
+  Applying durable `PrivateRequired` also relocates ordinary retrieval-queue
+  rows to withheld query-type codes Phase 1 readers do not enumerate, so the
+  raised `min_reader_version` is effective against legacy status/enhancement
+  dispatch even though those builds never call `durable_policy`.
 - Transparent authority is unavailable under `PrivateRequired`, while the chain
   tip is unknown, and in builds without `transparent-inputs`. While it is
   unavailable:
