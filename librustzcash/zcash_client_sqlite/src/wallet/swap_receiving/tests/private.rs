@@ -418,3 +418,54 @@ fn private_recovery_keeps_early_spends_and_empty_coverage_in_large_batches() {
         }
     }
 }
+
+#[test]
+fn restored_refund_status_batches_prioritize_unchecked_operations() {
+    let (mut st, _, _, through, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    let key = st
+        .wallet_mut()
+        .db_mut()
+        .reserve_swap_receiving_key(account, Purpose::Refund, through.height)
+        .unwrap();
+    for operation in ["a", "b"] {
+        st.wallet_mut()
+            .db_mut()
+            .observe_swap_operation(account, key.key_id(), operation, false, through.height)
+            .unwrap();
+        let id =
+            super::super::payments::key_ref(st.wallet().conn(), account, key.key_id()).unwrap();
+        st.wallet().conn().execute("INSERT INTO ironwood_swap_refund_watches(receiving_key_id,operation_id) VALUES(?1,?2)",
+            rusqlite::params![id,operation]).unwrap();
+    }
+    let one = std::num::NonZeroU32::new(1).unwrap();
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .take_swap_refund_status_checks(account, 100, one)
+            .unwrap(),
+        vec![(key.key_id(), "a".into())]
+    );
+    // The first request's failure cannot prevent trying the next restored swap.
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .take_swap_refund_status_checks(account, 101, one)
+            .unwrap(),
+        vec![(key.key_id(), "b".into())]
+    );
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .take_swap_refund_status_checks(account, 159, one)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .take_swap_refund_status_checks(account, 160, one)
+            .unwrap(),
+        vec![(key.key_id(), "a".into())]
+    );
+}

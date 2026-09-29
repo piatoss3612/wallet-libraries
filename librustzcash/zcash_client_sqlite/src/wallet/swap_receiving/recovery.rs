@@ -41,10 +41,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// time, including when no new blocks arrive. The persisted retry time also
     /// bounds failed requests across restarts. Unknown responses leave watches active.
     /// Applications pass a Unix timestamp and perform network I/O after this returns.
+    /// Unchecked records are returned first, up to `limit`, so old failed requests
+    /// cannot starve newly restored records.
     pub fn take_swap_refund_status_checks(
         &mut self,
         account: AccountUuid,
         now: i64,
+        limit: std::num::NonZeroU32,
     ) -> Result<Vec<(KeyId, String)>, Error> {
         if now < 0 {
             return Err(super::corrupt("invalid provider-check time"));
@@ -56,10 +59,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                  JOIN ironwood_receiving_keys k ON k.id=w.receiving_key_id
                  JOIN ironwood_swap_scan_uses s ON s.receiving_key_id=w.receiving_key_id
                     AND s.operation_id=w.operation_id
-                 WHERE k.account_id=?1 AND s.scan_through IS NULL AND w.next_check_at<=?2",
+                 WHERE k.account_id=?1 AND s.scan_through IS NULL AND w.next_check_at<=?2
+                 ORDER BY w.next_check_at,w.receiving_key_id,w.operation_id LIMIT ?3",
             )?;
             let rows = stmt
-                .query_map(params![id.0, now], |r| {
+                .query_map(params![id.0, now, limit.get()], |r| {
                     Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;

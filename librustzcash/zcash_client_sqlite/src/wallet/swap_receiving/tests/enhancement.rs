@@ -324,7 +324,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .take_swap_refund_status_checks(restored, 1_000)
+            .take_swap_refund_status_checks(restored, 1_000, std::num::NonZeroU32::new(8).unwrap())
             .unwrap(),
         vec![(key, memo.deposit_address().to_owned())]
     );
@@ -343,14 +343,14 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert!(
         st.wallet_mut()
             .db_mut()
-            .take_swap_refund_status_checks(restored, 1_059)
+            .take_swap_refund_status_checks(restored, 1_059, std::num::NonZeroU32::new(8).unwrap())
             .unwrap()
             .is_empty()
     );
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .take_swap_refund_status_checks(restored, 1_060)
+            .take_swap_refund_status_checks(restored, 1_060, std::num::NonZeroU32::new(8).unwrap())
             .unwrap()
             .len(),
         1
@@ -395,7 +395,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert!(
         st.wallet_mut()
             .db_mut()
-            .take_swap_refund_status_checks(restored, 2_000)
+            .take_swap_refund_status_checks(restored, 2_000, std::num::NonZeroU32::new(8).unwrap())
             .unwrap()
             .is_empty()
     );
