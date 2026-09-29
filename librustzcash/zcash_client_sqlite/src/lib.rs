@@ -804,6 +804,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
     type NoteRef = ReceivedNoteId;
     type AccountId = AccountUuid;
 
+    fn anchor_retention_interval(&self) -> AnchorRetentionInterval {
+        self.anchor_retention_interval
+    }
+
     fn get_spendable_note(
         &self,
         txid: &TxId,

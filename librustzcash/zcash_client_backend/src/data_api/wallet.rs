@@ -761,6 +761,26 @@ where
     Ok(proposal.with_proposed_version(proposed_version))
 }
 
+/// Returns whether `step` must be built as a canonical ZIP 318 crossing: its Ironwood bundle was
+/// costed unpadded (see [`Step::is_built_as_canonical_crossing`]) and it pays the canonical fee
+/// at `target_height`.
+///
+/// Shared by both build paths, so that each asks the same question of the same data.
+/// `create_pczt_from_proposal` applies its expiry override after the builder has run, and so
+/// cannot rely on the check inside `build_proposed_transaction`.
+#[cfg(feature = "orchard")]
+fn step_is_canonical_crossing<ParamsT, N>(
+    params: &ParamsT,
+    step: &Step<N>,
+    target_height: TargetHeight,
+) -> bool
+where
+    ParamsT: consensus::Parameters,
+{
+    crate::fees::canonical_crossing_fee(params, target_height.into())
+        .is_ok_and(|fee| step.is_built_as_canonical_crossing(fee))
+}
+
 /// Proposes making a payment to the specified address from the given account.
 ///
 /// Returns the proposal, which may then be executed using [`create_proposed_transactions`].
@@ -1678,6 +1698,28 @@ where
             ironwood_padding,
         },
     );
+    // A canonical crossing takes the ZIP 318 rolling expiry, which every crossing in the same
+    // modulus period shares. The builder's ordinary per-transaction expiry (target height plus a
+    // small delta) would single it out immediately, undoing the shape the unpadded bundle and the
+    // grid anchor produce. A caller-supplied expiry is refused rather than silently overridden:
+    // the padding and anchor are already fixed by this point, so honouring it would emit a
+    // transaction that is canonical in every respect but one.
+    #[cfg(feature = "orchard")]
+    let expiry_height = {
+        if step_is_canonical_crossing(params, proposal_step, min_target_height) {
+            match expiry_height {
+                Some(requested) => {
+                    return Err(Error::ExpiryHeightConflictsWithCanonicalCrossing { requested });
+                }
+                None => Some(zcash_protocol::zip318::expiry_height(
+                    min_target_height.into(),
+                )),
+            }
+        } else {
+            expiry_height
+        }
+    };
+
     if let Some(expiry_height) = expiry_height {
         builder = builder.with_expiry_height(expiry_height);
     }
@@ -2648,6 +2690,17 @@ where
         // since overriding it via the builder would be redundant with that existing mechanism.
         None,
     )?;
+
+    // This path applies its expiry AFTER the builder has run, so the refusal inside
+    // `build_proposed_transaction`, which saw `None` above, cannot see the caller's argument.
+    // Without this, an override would silently overwrite the ZIP 318 rolling expiry that
+    // `build_proposed_transaction` set.
+    #[cfg(feature = "orchard")]
+    if let Some(requested) = expiry_height
+        && step_is_canonical_crossing(params, proposal_step, min_target_height)
+    {
+        return Err(Error::ExpiryHeightConflictsWithCanonicalCrossing { requested });
+    }
 
     // Build the transaction with the specified fee rule
     let mut build_result = build_state

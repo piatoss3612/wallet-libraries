@@ -71,7 +71,9 @@ workspace.
   existing databases still migrate.
 - The implementations of the removed backend APIs
   (`put_zip318_classification`, `select_single_spendable_note`,
-  `anchor_computable` and `anchor_retention_interval`).
+  `anchor_computable` and `WalletRead::anchor_retention_interval`).
+  `WalletDb` reports its configured grid through
+  `InputSource::anchor_retention_interval` instead.
 
 ## [0.1.0-rc7] - 2026-09-27
 
