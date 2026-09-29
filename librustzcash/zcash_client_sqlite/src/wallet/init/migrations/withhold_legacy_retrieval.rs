@@ -77,7 +77,7 @@ impl RusqliteMigration for Migration {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEPENDENCIES, MIGRATION_ID};
+    use super::MIGRATION_ID;
     use crate::wallet::init::migrations::tests::test_migrate;
 
     #[test]
