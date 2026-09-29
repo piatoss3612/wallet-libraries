@@ -4345,6 +4345,184 @@ pub fn anchor_checkpoints_retained_across_deep_scan<
     }
 }
 
+/// An ordinary payment whose whole shape matches a ZIP 318 migration transfer is built as one: a
+/// single unpadded Ironwood action and the ZIP 318 rolling expiry. Here the anchor reaches the
+/// grid only because the chain tip sits on a boundary, as for any wallet that proposes against the
+/// ordinary anchor; one block earlier the same payment is padded with an ordinary expiry.
+#[cfg(feature = "orchard")]
+pub fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry<Dsf: DataStoreFactory>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) {
+    use crate::{
+        data_api::{
+            anchor_retention::PoolMigrationParams,
+            wallet::{SpendingKeys, create_proposed_transactions},
+        },
+        fees::canonical_crossing_fee,
+    };
+    use ::sapling::prover::mock::{MockOutputProver, MockSpendProver};
+    use zcash_primitives::transaction::builder::BundlePadding;
+    use zcash_protocol::zip318::{self, MAX_RESIDUAL_VALUE};
+
+    // A short grid, so the test need not mine 144 blocks to reach a boundary.
+    let interval = AnchorRetentionInterval::custom(NonZeroU32::new(12).expect("nonzero"));
+    let activation = BlockHeight::from_u32(100_000);
+    let ironwood_active_network = LocalNetwork {
+        nu6: Some(activation),
+        nu6_1: Some(activation),
+        nu6_2: Some(activation),
+        nu6_3: Some(activation),
+        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+    };
+
+    let mut st = TestDsl::from(
+        TestBuilder::new()
+            .with_network(ironwood_active_network)
+            .with_data_store_factory(ds_factory)
+            .with_block_cache(cache)
+            .with_anchor_retention_interval(interval)
+            .with_account_from_sapling_activation(BlockHash([0; 32])),
+    )
+    .build::<OrchardPoolTester>();
+
+    let account = st.test_account().cloned().unwrap();
+    let fvk = OrchardPoolTester::test_account_fvk(&st);
+    let recipient = OrchardPoolTester::fvk_default_address(&fvk).to_zcash_address(st.network());
+    let zip318_params = PoolMigrationParams::new(interval);
+
+    // One Orchard note, comfortably larger than a canonical denomination plus fees.
+    let (received_height, _, _) =
+        st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(10_000_000));
+
+    // Fillers pay a non-wallet key, so each block adds a checkpoint without changing the
+    // wallet's spendable set.
+    let not_our_fvk = OrchardPoolTester::sk_to_fvk(&OrchardPoolTester::sk(&[0xf5; 32]));
+    let boundary = interval.boundary_at_or_above(received_height + 2);
+    let mut next_height = received_height + 1;
+    let mut mine_to = |st: &mut TestState<_, _, _>, tip: BlockHeight| {
+        let from = next_height;
+        let count = u32::from(tip) - u32::from(from) + 1;
+        next_height = tip + 1;
+        for _ in 0..count {
+            st.generate_next_block(
+                &not_our_fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(10_000),
+            );
+        }
+        st.scan_cached_blocks(from, count as usize);
+    };
+
+    let input_selector = GreedyInputSelector::new();
+    let change_strategy =
+        single_output_change_strategy(StandardFeeRule::Zip317, None, ShieldedPool::Orchard);
+    let propose = |st: &mut TestState<_, _, _>, amount: Zatoshis| {
+        let request =
+            TransactionRequest::new(vec![Payment::without_memo(recipient.clone(), amount)])
+                .unwrap();
+        // `ConfirmationsPolicy::MIN` anchors at the chain tip.
+        st.propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .expect("the wallet can fund this")
+    };
+    let ironwood_actions = |step: &crate::proposal::Step<_>| {
+        step.ironwood_action_count(
+            step.ironwood_bundle_padding(),
+            ::orchard::bundle::BundleVersion::ironwood_v3(),
+        )
+    };
+
+    // (1) One block below the boundary, the ordinary anchor is off the grid: padded.
+    mine_to(&mut st, boundary - 1);
+    let off_grid = propose(&mut st, MAX_RESIDUAL_VALUE);
+    let canonical_fee = canonical_crossing_fee(
+        st.network(),
+        BlockHeight::from(off_grid.min_target_height()),
+    )
+    .expect("the canonical shape is a valid input to the ZIP 317 rule");
+    let step = off_grid.steps().first();
+    assert!(!interval.is_boundary(step.anchor_height().unwrap()));
+    assert!(!step.is_canonical_crossing(&zip318_params, canonical_fee));
+    assert_eq!(ironwood_actions(step), Ok(2));
+
+    // (2) With the tip on the boundary, the same payment is a canonical crossing.
+    mine_to(&mut st, boundary);
+    let canonical = propose(&mut st, MAX_RESIDUAL_VALUE);
+    assert_eq!(canonical.steps().len(), 1);
+    let step = canonical.steps().first();
+    assert_eq!(step.anchor_height(), Some(boundary));
+    assert!(step.is_canonical_crossing(&zip318_params, canonical_fee));
+    assert_eq!(step.ironwood_bundle_padding(), BundlePadding::UNPADDED);
+    assert_eq!(ironwood_actions(step), Ok(1));
+    assert_eq!(step.balance().fee_required(), canonical_fee);
+
+    // (3) One zatoshi off the denomination on the same anchor: padded.
+    let off_by_one = propose(
+        &mut st,
+        (MAX_RESIDUAL_VALUE + Zatoshis::const_from_u64(1)).unwrap(),
+    );
+    let step = off_by_one.steps().first();
+    assert!(!step.is_canonical_crossing(&zip318_params, canonical_fee));
+    assert_eq!(ironwood_actions(step), Ok(2));
+
+    // (4) The recorded padding survives the proposal's serialization, which is how a proposal
+    // reaches a PCZT or a signer.
+    let canonical = crate::proto::proposal::Proposal::from_standard_proposal(&canonical)
+        .try_into_standard_proposal(st.network(), st.wallet())
+        .expect("the canonical proposal must deserialize");
+    assert_eq!(
+        canonical.steps().first().ironwood_bundle_padding(),
+        BundlePadding::UNPADDED
+    );
+
+    // (5) A caller-chosen expiry would single the crossing out, so it is refused.
+    let network = st.network().clone();
+    let usk = account.usk().clone();
+    assert_matches!(
+        create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
+            st.wallet_mut(),
+            &network,
+            &MockSpendProver,
+            &MockOutputProver,
+            &SpendingKeys::from_unified_spending_key(usk),
+            OvkPolicy::Sender,
+            &canonical,
+            Some(boundary + 40),
+        ),
+        Err(Error::ExpiryHeightConflictsWithCanonicalCrossing { .. })
+    );
+
+    // (6) The built transaction has the single Ironwood action the fee was charged for, and the
+    // ZIP 318 rolling expiry, which every crossing in the same period shares.
+    let txids = st.create_proposed_expecting(&canonical, 1);
+    let tx = st.get_tx_from_history(txids[0]).unwrap().unwrap();
+    assert_eq!(
+        tx.expiry_height(),
+        Some(zip318::expiry_height(BlockHeight::from(
+            canonical.min_target_height()
+        )))
+    );
+    let built = st
+        .wallet()
+        .get_transaction(txids[0])
+        .unwrap()
+        .expect("the transaction was stored");
+    assert_eq!(
+        built
+            .ironwood_bundle()
+            .expect("a crossing carries an Ironwood bundle")
+            .actions()
+            .len(),
+        1
+    );
+}
+
 /// A grid boundary that lands on a block containing no note commitments in ANY pool must still be
 /// checkpointed and retained. Scanning checkpoints a block only at its last note commitment, so
 /// such a block produces no checkpoint of its own in any tree and the cross-pool ensure step has

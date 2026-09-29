@@ -41,7 +41,7 @@ use zip321::TransactionRequest;
 use crate::{
     data_api::{
         InputSource, MaxSpendMode, ReceivedNotes, SimpleNoteRetention, TargetValue,
-        wallet::TargetHeight,
+        anchor_retention::PoolMigrationParams, wallet::TargetHeight,
     },
     fees::{ChangeError, ChangeStrategy, EphemeralBalance, TransactionBalance, sapling},
     proposal::{Proposal, ProposalError, ShieldedInputs},
@@ -888,6 +888,10 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
         Self::InputSource: InputSource,
         ChangeT: ChangeStrategy<MetaSource = DbT>,
     {
+        // Whether a payment is a canonical ZIP 318 crossing depends on the grid the wallet
+        // retains its anchors on.
+        let zip318 = PoolMigrationParams::new(wallet_db.anchor_retention_interval());
+        let zip318 = &zip318;
         let (sapling_supported, orchard_supported) =
             proposed_version.map_or(Ok((true, true)), |v| {
                 let branch_id =
@@ -1232,6 +1236,8 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                         .compute_balance::<_, DbT::NoteRef>(
                             params,
                             target_height,
+                            anchor_height,
+                            zip318,
                             &[] as &[WalletTransparentOutput<<DbT as InputSource>::AccountId>],
                             &tr1_transparent_outputs,
                             &sapling::EmptyBundleView,
@@ -1255,6 +1261,8 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                     let tr1_balance = change_strategy.compute_balance::<_, DbT::NoteRef>(
                         params,
                         target_height,
+                        anchor_height,
+                        zip318,
                         &[] as &[WalletTransparentOutput<<DbT as InputSource>::AccountId>],
                         &tr1_transparent_outputs,
                         &sapling::EmptyBundleView,
@@ -1319,6 +1327,8 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
             let tr0_balance = change_strategy.compute_balance(
                 params,
                 target_height,
+                anchor_height,
+                zip318,
                 &transparent_inputs,
                 &transparent_outputs,
                 &(
@@ -1457,6 +1467,8 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                                 let candidate_balance = change_strategy.compute_balance(
                                     params,
                                     target_height,
+                                    anchor_height,
+                                    zip318,
                                     &transparent_inputs,
                                     &transparent_outputs,
                                     &(
@@ -2348,6 +2360,8 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
         ParamsT: consensus::Parameters,
         ChangeT: ChangeStrategy<MetaSource = Self::InputSource>,
     {
+        let zip318 = PoolMigrationParams::new(wallet_db.anchor_retention_interval());
+        let zip318 = &zip318;
         let mut transparent_inputs = gather_shielding_inputs::<DbT, ChangeT::Error>(
             wallet_db,
             source_addrs,
@@ -2366,6 +2380,8 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
             change_strategy,
             params,
             target_height,
+            anchor_height,
+            zip318,
             &mut transparent_inputs,
             &wallet_meta,
         )?;
@@ -2723,6 +2739,8 @@ fn compute_shielding_balance_with_dust_retry<DbT, ChangeT, ParamsT>(
     change_strategy: &ChangeT,
     params: &ParamsT,
     target_height: TargetHeight,
+    anchor_height: BlockHeight,
+    zip318: &PoolMigrationParams,
     transparent_inputs: &mut Vec<WalletTransparentOutput<()>>,
     wallet_meta: &<ChangeT as ChangeStrategy>::AccountMetaT,
 ) -> Result<
@@ -2743,6 +2761,8 @@ where
         change_strategy,
         params,
         target_height,
+        anchor_height,
+        zip318,
         transparent_inputs,
         wallet_meta,
     );
@@ -2757,6 +2777,8 @@ where
                 change_strategy,
                 params,
                 target_height,
+                anchor_height,
+                zip318,
                 transparent_inputs,
                 wallet_meta,
             )
@@ -2781,6 +2803,8 @@ fn compute_shielding_balance<DbT, ChangeT, ParamsT>(
     change_strategy: &ChangeT,
     params: &ParamsT,
     target_height: TargetHeight,
+    anchor_height: BlockHeight,
+    zip318: &PoolMigrationParams,
     transparent_inputs: &[WalletTransparentOutput<()>],
     wallet_meta: &<ChangeT as ChangeStrategy>::AccountMetaT,
 ) -> Result<TransactionBalance, ChangeError<ChangeT::Error, Infallible>>
@@ -2805,6 +2829,8 @@ where
     change_strategy.compute_balance(
         params,
         target_height,
+        anchor_height,
+        zip318,
         transparent_inputs,
         &[] as &[TxOut],
         &sapling::EmptyBundleView,

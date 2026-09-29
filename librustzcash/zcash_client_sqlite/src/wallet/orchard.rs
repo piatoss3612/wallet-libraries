@@ -967,6 +967,11 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry() {
+        testing::pool::ordinary_canonical_crossing_is_unpadded_with_rolling_expiry()
+    }
+
+    #[test]
     fn empty_boundary_blocks_are_checkpointed_and_retained() {
         testing::pool::empty_boundary_blocks_are_checkpointed_and_retained::<OrchardPoolTester>()
     }

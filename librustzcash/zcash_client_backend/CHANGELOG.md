@@ -24,28 +24,35 @@ workspace.
   resolved before any request, so an unconfigured store fails instead of
   disclosing its transparent receivers.
 
+- `InputSource::anchor_retention_interval`, the grid on which the wallet
+  retains durable anchors. It defaults to `AnchorRetentionInterval::ZIP_318`;
+  wrappers around another `InputSource` should forward it.
+
 ### Removed
-- ZIP 318 transaction classification and the canonical-crossing send policy.
-  Vizor schedules its own Orchard -> Ironwood migration transfers, so the
-  library no longer classifies transactions or reshapes ordinary sends to look
-  like migration transfers:
+- ZIP 318 transaction classification and the pool-migration policy of
+  `propose_transfer`. Vizor schedules its own Orchard -> Ironwood migration
+  transfers, so the library no longer classifies transactions or steers sends
+  toward the migration shape:
   - `data_api::zip318` and `LowLevelWalletWrite::put_zip318_classification`.
-  - `anchor_retention::PoolMigrationParams`,
-    `WalletRead::anchor_retention_interval` and
+  - `WalletRead::anchor_retention_interval` and
     `WalletRead::pool_migration_params`.
-  - `fees::canonical_crossing_fee`, `proposal::Step::is_canonical_crossing`,
-    `ConfirmationsPolicy::bucketed` and
-    `data_api::error::Error::ExpiryHeightConflictsWithCanonicalCrossing`.
+  - `ConfirmationsPolicy::bucketed`.
   - `NoteSelection::PreferSingle`, `InputSource::select_single_spendable_note`,
     `InputSource::anchor_computable` and `ReceivedNotes::into_single_covering`.
-  Ironwood bundles are now always padded to the default floor, and
   `propose_transfer` always proposes against the ordinary anchor. Anchor
   retention in `put_blocks` is unchanged.
 
+  An ordinary send that already has the canonical-crossing shape is still
+  built as one: an unpadded Ironwood bundle with the ZIP 318 rolling expiry.
+  `anchor_retention::PoolMigrationParams`, `fees::canonical_crossing_fee`,
+  `proposal::Step::is_canonical_crossing` and
+  `data_api::error::Error::ExpiryHeightConflictsWithCanonicalCrossing` remain
+  for that. See `docs/zip318_removal.md`.
+
 ### Changed
-- `ChangeStrategy::compute_balance` no longer takes `anchor_height` or ZIP 318
-  parameters, and `InputSelector::propose_transaction` and
-  `InputSelector::propose_shielding` no longer take ZIP 318 parameters.
+- `InputSelector::propose_transaction` and `InputSelector::propose_shielding`
+  no longer take ZIP 318 parameters; they read the grid from
+  `InputSource::anchor_retention_interval`.
 
 ## [0.1.0-rc7] - 2026-09-27
 
