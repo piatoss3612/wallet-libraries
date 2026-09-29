@@ -45,6 +45,10 @@ use zcash_client_backend::data_api::transparent_ledger::{
     AppliedTransparentPolicy, PrivateTransparentDetail, TransparentLedgerMode,
     TransparentLedgerRead, TransparentLedgerSnapshot, TransparentLedgerWrite,
 };
+#[cfg(feature = "transparent-inputs")]
+use zcash_client_backend::data_api::transparent_ledger::{
+    CandidateRecovery, CommitOutcome, TransparentLedgerCommit, TransparentWatchSet,
+};
 
 use std::{
     borrow::{Borrow, BorrowMut},
@@ -1767,6 +1771,37 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             read(conn)
         }
     }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn transparent_watch_set(
+        &self,
+        account: Self::AccountId,
+    ) -> Result<TransparentWatchSet<Self::AccountId>, Self::Error> {
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            wallet::transparent_ledger::watch_set(
+                conn,
+                &self.params,
+                self.transparent_ledger_mode,
+                account,
+            )
+        })
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn transparent_candidate_recovery(
+        &self,
+        account: Self::AccountId,
+    ) -> Result<CandidateRecovery<Self::AccountId>, Self::Error> {
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            wallet::transparent_ledger::candidate_recovery(
+                conn,
+                &self.params,
+                &self.gap_limits,
+                self.transparent_ledger_mode,
+                account,
+            )
+        })
+    }
 }
 
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentLedgerWrite
@@ -1780,6 +1815,20 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             self.conn.borrow(),
             self.transparent_ledger_mode,
             mode,
+        )
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn apply_transparent_ledger_commit(
+        &mut self,
+        commit: TransparentLedgerCommit<Self::AccountId>,
+    ) -> Result<CommitOutcome, Self::Error> {
+        wallet::transparent_ledger::apply_commit(
+            self.conn.borrow(),
+            &self.params,
+            &self.gap_limits,
+            self.transparent_ledger_mode,
+            commit,
         )
     }
 }

@@ -26,6 +26,25 @@ workspace.
 - `EnhancePirStoreResult::PrivateDetailsUnsupported` for mixed transactions
   whose transparent details cannot be recovered over a public request under
   `PrivateRequired`.
+- Candidate transparent recovery, behind `transparent-inputs`:
+  - `TransparentLedgerRead::transparent_watch_set` returns an account's watched
+    addresses (`WatchedAddress`, `WatchOrigin`), each required from the account
+    birthday. It also returns the capture context
+    (`TransparentRecoveryContext`: policy generation and the highest
+    contiguously scanned block) and any open `PendingPage`s.
+  - `TransparentLedgerWrite::apply_transparent_ledger_commit` atomically applies
+    one `TransparentLedgerCommit`, which can carry:
+    - receive and spend events (`ReceiveEvent`, `SpendEvent`);
+    - checked and unsupported `AddressRange`s;
+    - opened and completed pages (`PageRequest`), all attributed to a
+      `RecoveryRevision` and a locally accepted anchor.
+
+    It returns `CommitOutcome`. A refused commit applies nothing and reports a
+    `CommitRejection`: `Stale`, `Integrity`, or `Invalid`.
+  - `TransparentLedgerRead::transparent_candidate_recovery` returns unverified
+    development diagnostics (`CandidateRecovery`, `CandidateBlocker`).
+  - Candidate state never changes balances, spend links, locks, address use,
+    receiving-address selection, or history.
 
 ### Changed
 - `sync::run` requires `TransparentLedgerRead` and refreshes UTXOs only when the

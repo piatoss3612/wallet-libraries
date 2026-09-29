@@ -820,6 +820,158 @@ CREATE TABLE tpir_spend_origins (
     origin INTEGER NOT NULL CHECK (origin IN (0, 1, 2, 3)),
     UNIQUE (spending_transaction_id, prevout_txid, prevout_output_index, origin)
 )"#;
+/// How far candidate recovery watches each derived scope of an account, beyond the addresses in
+/// [`TABLE_ADDRESSES`].
+///
+/// Candidate-window addresses are derived on read and never stored as wallet addresses, so they
+/// cannot be marked used or offered for receiving. A window never shrinks.
+///
+/// ### Columns
+/// - `key_scope`: 0 external, 1 internal, 2 ephemeral.
+/// - `end_index`: one past the highest child index watched in the scope.
+pub(super) const TABLE_TPIR_CANDIDATE_WINDOWS: &str = r#"
+CREATE TABLE tpir_candidate_windows (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    key_scope INTEGER NOT NULL CHECK (key_scope IN (0, 1, 2)),
+    end_index INTEGER NOT NULL CHECK (end_index >= 0 AND end_index <= 2147483648),
+    PRIMARY KEY (account_id, key_scope)
+)"#;
+/// Source revisions that supplied candidate evidence.
+///
+/// Identifiers are opaque. Within a source, a higher `lineage` replaces a lower one; the
+/// accepted lineage is the highest stored. Superseding a provisional revision removes its
+/// coverage; a sealed revision is never superseded.
+///
+/// ### Columns
+/// - `publication_height`, `publication_hash`: the publisher's asserted position. They are not
+///   local chain evidence.
+pub(super) const TABLE_TPIR_REVISIONS: &str = r#"
+CREATE TABLE tpir_revisions (
+    id INTEGER PRIMARY KEY,
+    source BLOB NOT NULL,
+    revision BLOB NOT NULL,
+    lineage INTEGER NOT NULL CHECK (lineage >= 0),
+    sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
+    publication_height INTEGER NOT NULL CHECK (publication_height >= 0),
+    publication_hash BLOB NOT NULL,
+    UNIQUE (source, revision),
+    UNIQUE (source, lineage)
+)"#;
+/// Candidate receives, identified by outpoint.
+///
+/// Content columns are immutable once stored; a contradiction is refused. `mined_height` is the
+/// canonical placement on the local chain: a rewind below it clears it, and a later commit can
+/// place the receive again.
+///
+/// ### Columns
+/// - `script`: the scriptPubKey of the watched address the output pays.
+/// - `coinbase`: whether a coinbase transaction created the output.
+pub(super) const TABLE_TPIR_RECEIVE_EVENTS: &str = r#"
+CREATE TABLE tpir_receive_events (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    txid BLOB NOT NULL,
+    output_index INTEGER NOT NULL CHECK (output_index >= 0),
+    script BLOB NOT NULL,
+    value_zat INTEGER NOT NULL CHECK (value_zat >= 0),
+    coinbase INTEGER NOT NULL CHECK (coinbase IN (0, 1)),
+    mined_height INTEGER CHECK (mined_height >= 0),
+    UNIQUE (txid, output_index)
+)"#;
+/// The revisions that reported each candidate receive. Reports from several revisions are not a
+/// contradiction.
+pub(super) const TABLE_TPIR_RECEIVE_OBSERVATIONS: &str = r#"
+CREATE TABLE tpir_receive_observations (
+    receive_id INTEGER NOT NULL REFERENCES tpir_receive_events(id) ON DELETE CASCADE,
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id),
+    PRIMARY KEY (receive_id, revision_id)
+)"#;
+/// Candidate spends, identified by spending txid and input index.
+///
+/// The spent outpoint and its script are checked content. A spend whose output has no
+/// [`TABLE_TPIR_RECEIVE_EVENTS`] row is unresolved. `mined_height` behaves as for receives.
+///
+/// ### Columns
+/// - `prevout_script`: the scriptPubKey of the watched address whose output is spent; it
+///   attributes the spend to the account before the output is recovered.
+pub(super) const TABLE_TPIR_SPEND_EVENTS: &str = r#"
+CREATE TABLE tpir_spend_events (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    spending_txid BLOB NOT NULL,
+    input_index INTEGER NOT NULL CHECK (input_index >= 0),
+    prevout_txid BLOB NOT NULL,
+    prevout_output_index INTEGER NOT NULL CHECK (prevout_output_index >= 0),
+    prevout_script BLOB NOT NULL,
+    mined_height INTEGER CHECK (mined_height >= 0),
+    UNIQUE (spending_txid, input_index)
+)"#;
+/// The revisions that reported each candidate spend.
+pub(super) const TABLE_TPIR_SPEND_OBSERVATIONS: &str = r#"
+CREATE TABLE tpir_spend_observations (
+    spend_id INTEGER NOT NULL REFERENCES tpir_spend_events(id) ON DELETE CASCADE,
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id),
+    PRIMARY KEY (spend_id, revision_id)
+)"#;
+/// Checked height ranges per watched script.
+///
+/// A supported range means the revision reported every receive and spend of the script in the
+/// range, including none. An unsupported range means the revision cannot check it. Absent rows
+/// never imply coverage.
+///
+/// ### Columns
+/// - `anchor_height`, `anchor_hash`: the local block the revision was verified to agree with.
+///   A rewind whose rescan floor is below the anchor clips the range to the floor and
+///   re-anchors it there, or deletes it when the floor block is unknown.
+pub(super) const TABLE_TPIR_COVERAGE: &str = r#"
+CREATE TABLE tpir_coverage (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    script BLOB NOT NULL,
+    from_height INTEGER NOT NULL CHECK (from_height >= 0),
+    through_height INTEGER NOT NULL,
+    anchor_height INTEGER NOT NULL,
+    anchor_hash BLOB NOT NULL,
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id),
+    supported INTEGER NOT NULL CHECK (supported IN (0, 1)),
+    CHECK (from_height <= through_height AND through_height <= anchor_height)
+)"#;
+/// Retrieval pages opened and not yet completed. A page blocks coverage of its scripts over its
+/// range. A rewind below its target or a policy transition removes it.
+///
+/// ### Columns
+/// - `target_height`, `target_hash`: the target of the run that opened the page.
+pub(super) const TABLE_TPIR_PENDING_PAGES: &str = r#"
+CREATE TABLE tpir_pending_pages (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id),
+    page BLOB NOT NULL,
+    from_height INTEGER NOT NULL CHECK (from_height >= 0),
+    through_height INTEGER NOT NULL,
+    target_height INTEGER NOT NULL,
+    target_hash BLOB NOT NULL,
+    UNIQUE (account_id, revision_id, page),
+    CHECK (from_height <= through_height AND through_height <= target_height)
+)"#;
+/// The watched scripts each pending page answers for.
+pub(super) const TABLE_TPIR_PENDING_PAGE_SCRIPTS: &str = r#"
+CREATE TABLE tpir_pending_page_scripts (
+    page_id INTEGER NOT NULL REFERENCES tpir_pending_pages(id) ON DELETE CASCADE,
+    script BLOB NOT NULL,
+    PRIMARY KEY (page_id, script)
+)"#;
+/// Candidate coverage by account and script, for coverage deduplication and diagnostics.
+pub(super) const INDEX_TPIR_COVERAGE_SCRIPT: &str =
+    r#"CREATE INDEX idx_tpir_coverage_script ON tpir_coverage (account_id, script)"#;
+/// Candidate receives by account, for window growth, diagnostics, and account deletion.
+pub(super) const INDEX_TPIR_RECEIVE_EVENTS_ACCOUNT: &str =
+    r#"CREATE INDEX idx_tpir_receive_events_account ON tpir_receive_events (account_id)"#;
+/// Candidate spends by account, for window growth, diagnostics, and account deletion.
+pub(super) const INDEX_TPIR_SPEND_EVENTS_ACCOUNT: &str =
+    r#"CREATE INDEX idx_tpir_spend_events_account ON tpir_spend_events (account_id)"#;
+/// Candidate spends by the outpoint they consume, for the per-event consistency checks.
+pub(super) const INDEX_TPIR_SPEND_EVENTS_PREVOUT: &str = r#"CREATE INDEX idx_tpir_spend_events_prevout ON tpir_spend_events (prevout_txid, prevout_output_index)"#;
 
 /// Stores the outputs of transactions created by the wallet.
 ///

@@ -837,6 +837,12 @@ pub(crate) fn store_address_range<P: consensus::Parameters>(
             // whereas these statements cost nothing on a path that only runs when an import is
             // upgraded across accounts.
             if foreign_account != account_id.0 {
+                // The previous account's candidate evidence for this script no longer applies.
+                super::transparent_ledger::forget_reattributed_script(
+                    conn,
+                    AccountRef(foreign_account),
+                    &transparent_address,
+                )?;
                 for table in [
                     "transparent_received_outputs",
                     "sapling_received_notes",

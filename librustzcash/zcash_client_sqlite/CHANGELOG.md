@@ -20,6 +20,38 @@ workspace.
 - The additive `transparent_policy_generation` migration. It adds
   `tx_retrieval_queue.policy_generation` (default 0) and extends
   `ironwood_enhance_routing.route` to allow `2` (`PRIVATE_DETAILS_UNSUPPORTED`).
+- The seedless, additive `transparent_recovery_schema` migration. It adds empty
+  candidate recovery tables: `tpir_candidate_windows`, `tpir_revisions`,
+  `tpir_receive_events`, `tpir_receive_observations`, `tpir_spend_events`,
+  `tpir_spend_observations`, `tpir_coverage`, `tpir_pending_pages`, and
+  `tpir_pending_page_scripts`, with indexes for coverage by script, events by
+  account, and spends by prevout.
+- Candidate recovery: `WalletDb` implements `transparent_watch_set`,
+  `apply_transparent_ledger_commit`, and `transparent_candidate_recovery`.
+  - A commit requires a `PrivateShadow` or `PrivateRequired` policy, both on the
+    handle and durably applied, at the captured generation. The account must
+    still exist, the target and anchor must still be local blocks, and every
+    named address must still be watched by the account.
+  - Events are idempotent: contradictory content or placement is refused.
+    Within one revision, supported coverage and an open page cannot overlap,
+    and no range can be reported both checked and unsupported.
+  - The first candidate commit raises `tpir_meta.min_reader_version` to 3, the
+    version this build reads, so builds without the recovery lifecycle fail
+    closed on that wallet.
+  - A commit extends the candidate window of a derived scope when mined
+    activity reaches within a gap limit of its end. Window addresses are
+    derived on read and are never written to `addresses`.
+  - Truncation clips candidate coverage to the rescan floor and re-anchors it
+    there, clears event placements above it, and removes pages opened for a
+    later target. This runs in every build.
+  - A spend mined below the output it consumes is refused, as are events of one
+    transaction that disagree on its placement or coinbase classification.
+  - A policy transition removes open pages.
+  - Re-attributing an imported receiver to another account forgets the previous
+    account's candidate evidence for it.
+  - Deleting an account removes its candidate state.
+- `SqliteClientError::TransparentRecoveryNotEnabled` and, behind
+  `transparent-inputs`, `SqliteClientError::TransparentLedgerCommitRejected`.
 - Projection origins for new transparent records. Public discovery records a
   legacy-public origin, and local construction, including creation evidence
   recorded by an outbox, records a local origin. Each is written in the same

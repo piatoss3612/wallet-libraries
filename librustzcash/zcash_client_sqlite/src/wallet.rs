@@ -4475,6 +4475,11 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         )?;
     }
 
+    // Candidate recovery evidence must never stay anchored above the rescan floor. Blocks
+    // between the floor and a higher retained checkpoint are requeued for rescanning, so they
+    // may yet be replaced.
+    transparent_ledger::truncate_recovery(conn, rescan_floor)?;
+
     // Upstream rolls every stored pool migration back here, in the same transaction and at the
     // height actually ACHIEVED. This fork does not carry the pool-migration engine, so there are
     // no migration rows to roll back; the tables still exist, because their schema migrations are
