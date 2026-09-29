@@ -1325,7 +1325,7 @@ mod handles {
     #[cfg(feature = "orchard")]
     #[test]
     fn phase1_status_lookup_sql_fails_after_observed_height_rename() {
-        let (mut st, _, _) = funded_wallet();
+        let (st, _, _) = funded_wallet();
         let txid = [0x65u8; 32];
         conn(&st)
             .execute(
