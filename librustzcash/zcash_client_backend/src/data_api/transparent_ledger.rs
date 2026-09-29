@@ -1,15 +1,14 @@
 //! Storage-neutral contract for transparent ledger configuration and financial authority.
 //!
 //! This is the preparatory surface of the private transparent ledger: explicit handle modes,
-//! durable policy transitions, an honest balance-and-authority snapshot, and isolated candidate
-//! recovery. Promotion and its supporting types are added with the activation work that
-//! implements them; see `docs/transparent-pir-ledger-architecture.md` and
+//! durable policy transitions, an honest balance-and-authority snapshot, candidate recovery, and
+//! per-account activation; see `docs/transparent-pir-ledger-architecture.md` and
 //! `docs/transparent-pir-ledger-design-notes.md`.
 
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;
 use zcash_primitives::{block::BlockHash, transaction::TxId};
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
 use super::{Balance, WalletRead, wallet::ConfirmationsPolicy};
 
@@ -93,6 +92,9 @@ pub enum PrivateTransparentDetail {
 pub enum TransparentAuthority {
     /// Balances and inputs derive from public discovery.
     Public,
+    /// Balances and inputs derive from the account's private ledger, which is active and
+    /// complete through the chain tip.
+    Private,
     /// No current authority can be established; transparent inputs are unavailable.
     Unavailable,
 }
@@ -116,6 +118,10 @@ pub enum LastKnownSource {
     /// private authority applied, such as a shielded-funded payment to an own transparent
     /// receiver.
     LegacyPublicAndLocal,
+    /// The account's active private ledger, which is blocked or covered short of the chain tip,
+    /// so it does not authorize a current spend. It is anchored at the covered point only when
+    /// that point is the tip; while coverage lags, it may count placed events above it.
+    PrivateLedger,
 }
 
 /// A prior amount that is informational only; it never authorizes a spend.
@@ -134,11 +140,31 @@ pub struct LastKnownBalance {
 pub enum RecoveryCompletion {
     /// Public authority applies; private recovery completion is not required.
     NotApplicable,
+    /// Private authority is established through the chain tip.
+    Complete,
     /// Authority cannot be established until the listed blockers clear.
     Blocked,
 }
 
-/// A reason transparent financial authority is unavailable.
+/// Why candidate recovery for an account is not yet complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CandidateBlocker {
+    /// No local target exists.
+    ChainUnknown,
+    /// Some watched address lacks continuous coverage from its required start to the target.
+    IncompleteCoverage,
+    /// Pages remain open.
+    PendingPages,
+    /// A mined spend consumes an output that has not been recovered.
+    UnresolvedSpends,
+    /// A range recorded as unsupported is not covered by any source.
+    UnsupportedRanges,
+    /// Activity near the end of a derived window needs addresses that this account's keys
+    /// cannot derive.
+    WindowUnderivable,
+}
+
+/// A reason transparent financial authority is unavailable, or an account cannot be promoted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecoveryBlocker {
     /// This build or configuration cannot perform private recovery.
@@ -147,6 +173,19 @@ pub enum RecoveryBlocker {
     ChainUnknown,
     /// This build cannot read the wallet's transparent state.
     TransparentSupportUnavailable,
+    /// The account's recovered ledger is incomplete at the local target.
+    Recovery(CandidateBlocker),
+    /// The account has not been promoted to private authority.
+    NotActivated,
+    /// An integrity failure quarantined the account or a source of its evidence.
+    Quarantined,
+    /// A revision that contributed the account's coverage or events is not qualified.
+    UnqualifiedRevision,
+    /// Legacy public evidence disagrees with the complete candidate ledger: an output the
+    /// candidate ledger lacks or holds with other content, or a spend it does not confirm.
+    LegacyDiscrepancy,
+    /// The contiguously scanned local chain is behind the known chain tip.
+    ChainBehindTip,
 }
 
 /// The single atomic balance-and-authority result for one account's transparent funds.
@@ -170,6 +209,13 @@ pub struct TransparentLedgerSnapshot<AccountId> {
     pub completion: RecoveryCompletion,
     /// Reasons authority is unavailable.
     pub blockers: Vec<RecoveryBlocker>,
+    /// Under a private mode, the local block through which every watched address is
+    /// continuously covered from its required start.
+    pub covered_through: Option<ChainPoint>,
+    /// Under a private mode, the sum of recovered unspent outputs. It is unverified until
+    /// recovery is complete, is neither authoritative nor a lower bound, and is absent when it
+    /// exceeds `MAX_MONEY`.
+    pub recovered_unverified: Option<Zatoshis>,
 }
 
 /// Reads transparent ledger configuration and financial authority.

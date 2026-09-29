@@ -224,6 +224,9 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
                 RefusedCommit::AccountQuarantined,
             )));
         }
+        if lifecycle(conn, account_ref)? != commit.context.lifecycle {
+            return Err(stale(StaleCommit::LifecycleChanged));
+        }
 
         let target = commit.context.target;
         if fully_scanned_height(conn)?.is_none_or(|scanned| target.height > scanned)
@@ -343,6 +346,24 @@ fn apply_facts(
     Ok(CommitOutcome { window_grew })
 }
 
+/// Returns `account_ref`'s lifecycle.
+#[cfg(feature = "transparent-inputs")]
+pub(super) fn lifecycle(
+    conn: &rusqlite::Connection,
+    account_ref: AccountRef,
+) -> Result<AccountLifecycle, SqliteClientError> {
+    let active: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM tpir_active_accounts WHERE account_id = :account_id)",
+        named_params![":account_id": account_ref.0],
+        |row| row.get(0),
+    )?;
+    Ok(if active {
+        AccountLifecycle::Active
+    } else {
+        AccountLifecycle::Candidate
+    })
+}
+
 /// Whether `source` is quarantined.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn source_quarantined(
@@ -404,4 +425,46 @@ fn quarantine(
         [],
     )?;
     super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)
+}
+
+/// Qualifies the stored revision equal to `revision`, returning whether one exists.
+///
+/// Qualification binds to the exact stored revision: identifiers, lineage, sealing, and
+/// publication must all match.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn qualify_revision(
+    conn: &rusqlite::Connection,
+    revision: &RecoveryRevision,
+) -> Result<bool, SqliteClientError> {
+    atomically(conn, |conn| {
+        let Ok(lineage) = i64::try_from(revision.lineage) else {
+            return Ok(false);
+        };
+        let Some(revision_id) = conn
+            .query_row(
+                "SELECT id FROM tpir_revisions
+                 WHERE source = :source AND revision = :revision AND lineage = :lineage
+                 AND sealed = :sealed AND publication_height = :publication_height
+                 AND publication_hash = :publication_hash",
+                named_params![
+                    ":source": revision.source,
+                    ":revision": revision.revision,
+                    ":lineage": lineage,
+                    ":sealed": revision.sealed,
+                    ":publication_height": u32::from(revision.publication.height),
+                    ":publication_hash": revision.publication.hash.0.to_vec(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO tpir_qualified_revisions (revision_id) VALUES (:revision_id)",
+            named_params![":revision_id": revision_id],
+        )?;
+        super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)?;
+        Ok(true)
+    })
 }

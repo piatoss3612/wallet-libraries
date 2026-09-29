@@ -1879,6 +1879,12 @@ pub(crate) enum BalanceProvenance {
     IncludesLocalOnly,
 }
 
+/// A SQL condition restricting `u` to outputs projected from the private ledger when
+/// `:ledger_only` is true.
+const LEDGER_ORIGIN_CONDITION: &str = "NOT :ledger_only OR EXISTS (
+     SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = u.id AND oo.origin = 2
+ )";
+
 /// Classifies the provenance of exactly the outputs that [`add_transparent_account_balances`]
 /// counts for `account`. An output with no recorded origin is reported as corrupted data rather
 /// than guessed.
@@ -1941,11 +1947,16 @@ pub(crate) fn transparent_balance_provenance(
     })
 }
 
+/// Adds each account's unspent transparent outputs to `account_balances`.
+///
+/// With `ledger_only`, only outputs projected from the private ledger count: legacy public and
+/// local-only outputs are excluded, as they are from private input selection.
 #[tracing::instrument(skip(conn, account_balances))]
 pub(crate) fn add_transparent_account_balances(
     conn: &rusqlite::Connection,
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
+    ledger_only: bool,
     account_balances: &mut HashMap<AccountUuid, AccountBalance>,
 ) -> Result<(), SqliteClientError> {
     let min_confirmations = balance_min_confirmations(confirmations_policy);
@@ -1962,15 +1973,18 @@ pub(crate) fn add_transparent_account_balances(
          WHERE ({}) -- the transaction is mined or unexpired with minconf 0
          AND u.id NOT IN ({}) -- and the received txo is unspent
          AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+         AND ({}) -- the output has the required origin
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase, is_mature",
         tx_unexpired_condition_minconf_0("t"),
         spent_utxos_clause(),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        LEDGER_ORIGIN_CONDITION,
     ))?;
 
     let mut rows = stmt_account_spendable_balances.query(named_params![
         ":target_height": u32::from(target_height),
         ":min_confirmations": min_confirmations,
+        ":ledger_only": ledger_only,
     ])?;
 
     while let Some(row) = rows.next()? {
@@ -2031,15 +2045,18 @@ pub(crate) fn add_transparent_account_balances(
              WHERE ({})
              AND u.id NOT IN ({}) -- and the received txo is unspent
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+             AND ({}) -- the output has the required origin
              GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
             tx_unconfirmed_condition("t"),
             spent_utxos_clause(),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+            LEDGER_ORIGIN_CONDITION,
         ))?;
 
         let mut rows = stmt_account_unconfirmed_balances.query(named_params![
             ":target_height": u32::from(target_height),
             ":min_confirmations": min_confirmations,
+            ":ledger_only": ledger_only,
         ])?;
 
         while let Some(row) = rows.next()? {

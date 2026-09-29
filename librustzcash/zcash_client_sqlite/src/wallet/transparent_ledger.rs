@@ -14,14 +14,24 @@ mod recovery;
 use rusqlite::OptionalExtension as _;
 use zcash_client_backend::data_api::{
     transparent_ledger::{
-        AppliedTransparentPolicy, LastKnownBalance, LastKnownSource, RecoveryBlocker,
+        AppliedTransparentPolicy, ChainPoint, LastKnownBalance, LastKnownSource, RecoveryBlocker,
         RecoveryCompletion, TransparentAuthority, TransparentLedgerBalance, TransparentLedgerMode,
         TransparentLedgerSnapshot,
     },
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
+use zcash_protocol::{
+    consensus::{self, BlockHeight},
+    value::Zatoshis,
+};
 
 use crate::{AccountUuid, error::SqliteClientError, wallet::chain_tip_height};
+
+#[cfg(feature = "transparent-inputs")]
+use {
+    zcash_client_backend::data_api::transparent_ledger::AccountLifecycle,
+    zcash_keys::keys::transparent::gap_limits::GapLimits,
+};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -38,7 +48,7 @@ pub(crate) use policy::{
 };
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use recovery::{
-    apply_commit, candidate_recovery, forget_reattributed_script, watch_set,
+    apply_commit, candidate_recovery, forget_reattributed_script, qualify_revision, watch_set,
 };
 pub(crate) use recovery::{clear_pending_pages, truncate as truncate_recovery};
 
@@ -292,21 +302,23 @@ pub(crate) fn transparent_funds_current(
         && chain_tip_height(conn)?.is_some())
 }
 
-/// Reads the account's transparent balance. Without transparent support this build cannot
-/// read transparent state that another build may have written, so it reports none rather
-/// than a zero balance.
+/// Reads the account's transparent balance, counting only ledger-projected outputs when
+/// `ledger_only`. Without transparent support this build cannot read transparent state that
+/// another build may have written, so it reports none rather than a zero balance.
 #[cfg(feature = "transparent-inputs")]
 fn transparent_balance(
     conn: &rusqlite::Connection,
     account: AccountUuid,
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
+    ledger_only: bool,
 ) -> Result<Option<TransparentLedgerBalance>, SqliteClientError> {
     let mut balances = std::collections::HashMap::<AccountUuid, AccountBalance>::new();
     super::transparent::add_transparent_account_balances(
         conn,
         target_height,
         confirmations_policy,
+        ledger_only,
         &mut balances,
     )?;
     let balance = balances.remove(&account).unwrap_or(AccountBalance::ZERO);
@@ -322,14 +334,127 @@ fn transparent_balance(
     _: AccountUuid,
     _: TargetHeight,
     _: ConfirmationsPolicy,
+    _: bool,
 ) -> Result<Option<TransparentLedgerBalance>, SqliteClientError> {
     Ok(None)
 }
 
+/// The private ledger's part of a snapshot.
+struct PrivateView {
+    authority: Option<TransparentLedgerBalance>,
+    last_known: Option<LastKnownBalance>,
+    blockers: Vec<RecoveryBlocker>,
+    covered_through: Option<ChainPoint>,
+    recovered_unverified: Option<Zatoshis>,
+}
+
+/// Reads `account`'s private ledger for a snapshot targeting the block after `tip`.
+#[cfg(feature = "transparent-inputs")]
+fn private_view<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+    gap_limits: &GapLimits,
+    account: AccountUuid,
+    tip: BlockHeight,
+    confirmations_policy: ConfirmationsPolicy,
+) -> Result<PrivateView, SqliteClientError> {
+    let ledger = recovery::account_ledger(conn, params, gap_limits, account)?;
+    let target = TargetHeight::from(tip + 1);
+    let covered_through = match ledger.status.covered_through {
+        Some(height) => {
+            super::get_block_hash(conn, height)?.map(|hash| ChainPoint { height, hash })
+        }
+        None => None,
+    };
+    let (authority, last_known, blockers) = if ledger.authorizes_after(tip) {
+        (
+            transparent_balance(conn, account, target, confirmations_policy, true)?,
+            None,
+            vec![],
+        )
+    } else {
+        let last_known = match ledger.lifecycle {
+            // An active account's own ledger is the best prior amount. It is evaluated after
+            // the tip, so it is established at the covered point only when coverage reaches the
+            // tip; while coverage lags, placed events above it may already count.
+            AccountLifecycle::Active => {
+                let at = covered_through.filter(|point| point.height == tip);
+                transparent_balance(conn, account, target, confirmations_policy, true)?.map(
+                    |balance| LastKnownBalance {
+                        balance,
+                        source: LastKnownSource::PrivateLedger,
+                        at,
+                    },
+                )
+            }
+            AccountLifecycle::Candidate => {
+                legacy_last_known(conn, account, target, confirmations_policy)?
+            }
+        };
+        (
+            None,
+            last_known,
+            recovery::ledger_blockers(conn, &ledger, Some(tip))?,
+        )
+    };
+    Ok(PrivateView {
+        authority,
+        last_known,
+        blockers,
+        covered_through,
+        recovered_unverified: ledger.status.recovered_unverified,
+    })
+}
+
+/// Without transparent support there is no private ledger to read.
+#[cfg(not(feature = "transparent-inputs"))]
+fn private_view(
+    conn: &rusqlite::Connection,
+    account: AccountUuid,
+    tip: BlockHeight,
+    confirmations_policy: ConfirmationsPolicy,
+) -> Result<PrivateView, SqliteClientError> {
+    Ok(PrivateView {
+        authority: None,
+        last_known: legacy_last_known(
+            conn,
+            account,
+            TargetHeight::from(tip + 1),
+            confirmations_policy,
+        )?,
+        blockers: vec![
+            RecoveryBlocker::TransparentSupportUnavailable,
+            RecoveryBlocker::PrivateRecoveryUnavailable,
+        ],
+        covered_through: None,
+        recovered_unverified: None,
+    })
+}
+
+/// The account's whole transparent balance as last-known evidence, classified by provenance.
+fn legacy_last_known(
+    conn: &rusqlite::Connection,
+    account: AccountUuid,
+    target: TargetHeight,
+    confirmations_policy: ConfirmationsPolicy,
+) -> Result<Option<LastKnownBalance>, SqliteClientError> {
+    transparent_balance(conn, account, target, confirmations_policy, false)?
+        .map(|balance| {
+            Ok(LastKnownBalance {
+                balance,
+                source: last_known_source(conn, account, target, confirmations_policy)?,
+                at: None,
+            })
+        })
+        .transpose()
+}
+
 /// Builds the snapshot for `account` from the connection's current state. The caller provides
 /// the read transaction.
-pub(crate) fn snapshot(
+pub(crate) fn snapshot<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
+    #[cfg_attr(not(feature = "transparent-inputs"), allow(unused_variables))] params: &P,
+    #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
     account: AccountUuid,
     mode: TransparentLedgerMode,
     confirmations_policy: ConfirmationsPolicy,
@@ -343,71 +468,83 @@ pub(crate) fn snapshot(
         return Err(SqliteClientError::AccountUnknown);
     }
 
-    // No account can hold private ledger state yet, so authority follows the mode alone.
-    let mut blockers = vec![];
-    let target = chain_tip_height(conn)?.map(|tip| TargetHeight::from(tip + 1));
-    let chain_known = target.is_some();
-    let balance = match target {
-        None => {
-            blockers.push(RecoveryBlocker::ChainUnknown);
-            None
-        }
-        Some(target) => {
-            let balance = transparent_balance(conn, account, target, confirmations_policy)?;
-            if balance.is_none() {
-                blockers.push(RecoveryBlocker::TransparentSupportUnavailable);
-            }
-            balance
-        }
-    };
-    let (authority, authorized, last_known, completion) =
-        if !chain_known || (mode.retains_public_authority() && balance.is_none()) {
-            // Authority cannot be established before the chain is known, or when this build cannot
-            // read transparent state. Unavailable is never reported as public authority.
-            (
-                TransparentAuthority::Unavailable,
-                None,
-                None,
-                RecoveryCompletion::Blocked,
-            )
-        } else if mode.retains_public_authority() {
-            (
-                TransparentAuthority::Public,
-                balance,
-                None,
-                RecoveryCompletion::NotApplicable,
-            )
-        } else {
-            blockers.push(RecoveryBlocker::PrivateRecoveryUnavailable);
-            (
-                TransparentAuthority::Unavailable,
-                None,
-                balance
-                    .map(|balance| {
-                        Ok::<_, SqliteClientError>(LastKnownBalance {
-                            balance,
-                            source: last_known_source(
-                                conn,
-                                account,
-                                target.expect("a balance implies a known chain tip"),
-                                confirmations_policy,
-                            )?,
-                            at: None,
-                        })
-                    })
-                    .transpose()?,
-                RecoveryCompletion::Blocked,
-            )
-        };
-
-    Ok(TransparentLedgerSnapshot {
+    let blocked = |blockers| TransparentLedgerSnapshot {
         account,
         mode,
-        authority,
-        authorized,
-        last_known,
-        completion,
+        authority: TransparentAuthority::Unavailable,
+        authorized: None,
+        last_known: None,
+        completion: RecoveryCompletion::Blocked,
         blockers,
+        covered_through: None,
+        recovered_unverified: None,
+    };
+    // Authority cannot be established before the chain is known.
+    let Some(tip) = chain_tip_height(conn)? else {
+        return Ok(blocked(vec![RecoveryBlocker::ChainUnknown]));
+    };
+    let target = TargetHeight::from(tip + 1);
+
+    let private = match mode {
+        TransparentLedgerMode::Public => None,
+        TransparentLedgerMode::PrivateShadow | TransparentLedgerMode::PrivateRequired => {
+            #[cfg(feature = "transparent-inputs")]
+            let view = private_view(conn, params, gap_limits, account, tip, confirmations_policy)?;
+            #[cfg(not(feature = "transparent-inputs"))]
+            let view = private_view(conn, account, tip, confirmations_policy)?;
+            Some(view)
+        }
+    };
+    let (covered_through, recovered_unverified) = private.as_ref().map_or((None, None), |p| {
+        (p.covered_through, p.recovered_unverified)
+    });
+
+    if mode.retains_public_authority() {
+        // A build that cannot read transparent state never reports public authority.
+        let Some(balance) =
+            transparent_balance(conn, account, target, confirmations_policy, false)?
+        else {
+            return Ok(blocked(vec![
+                RecoveryBlocker::TransparentSupportUnavailable,
+            ]));
+        };
+        return Ok(TransparentLedgerSnapshot {
+            account,
+            mode,
+            authority: TransparentAuthority::Public,
+            authorized: Some(balance),
+            last_known: None,
+            completion: RecoveryCompletion::NotApplicable,
+            blockers: vec![],
+            covered_through,
+            recovered_unverified,
+        });
+    }
+
+    let private = private.expect("PrivateRequired reads the private ledger");
+    Ok(match private.authority {
+        Some(balance) => TransparentLedgerSnapshot {
+            account,
+            mode,
+            authority: TransparentAuthority::Private,
+            authorized: Some(balance),
+            last_known: None,
+            completion: RecoveryCompletion::Complete,
+            blockers: vec![],
+            covered_through,
+            recovered_unverified,
+        },
+        None => TransparentLedgerSnapshot {
+            account,
+            mode,
+            authority: TransparentAuthority::Unavailable,
+            authorized: None,
+            last_known: private.last_known,
+            completion: RecoveryCompletion::Blocked,
+            blockers: private.blockers,
+            covered_through,
+            recovered_unverified,
+        },
     })
 }
 

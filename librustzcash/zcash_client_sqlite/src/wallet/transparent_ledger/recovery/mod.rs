@@ -31,11 +31,12 @@ use {
     zcash_client_backend::data_api::{
         Account as _,
         transparent_ledger::{
-            AddressRange, CandidateBlocker, CandidateRecovery, ChainPoint, CommitOutcome,
-            CommitRejection, IntegrityFailure, InvalidCommit, MAX_RECOVERY_IDENTIFIER_LEN,
-            PageRequest, PendingPage, PublicationAnchor, ReceiveEvent, RecoveryRevision,
-            RefusedCommit, SpendEvent, StaleCommit, TransparentLedgerCommit, TransparentLedgerMode,
-            TransparentWatchSet, WatchOrigin, WatchedAddress,
+            AccountLifecycle, AddressRange, CandidateBlocker, CandidateRecovery, ChainPoint,
+            CommitOutcome, CommitRejection, IntegrityFailure, InvalidCommit,
+            MAX_RECOVERY_IDENTIFIER_LEN, PageRequest, PendingPage, PublicationAnchor, ReceiveEvent,
+            RecoveryBlocker, RecoveryRevision, RefusedCommit, SpendEvent, StaleCommit,
+            TransparentLedgerCommit, TransparentLedgerMode, TransparentWatchSet, WatchOrigin,
+            WatchedAddress,
         },
     },
     zcash_keys::{address::Address, keys::transparent::gap_limits::GapLimits},
@@ -55,15 +56,19 @@ mod lifecycle;
 mod watch;
 
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use commit::apply_commit;
+pub(crate) use commit::{apply_commit, qualify_revision};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use diagnostics::candidate_recovery;
+#[cfg(feature = "transparent-inputs")]
+pub(crate) use diagnostics::{account_ledger, ledger_blockers};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use lifecycle::forget_reattributed_script;
 pub(crate) use lifecycle::{clear_pending_pages, truncate};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use watch::watch_set;
 
+#[cfg(feature = "transparent-inputs")]
+use commit::{account_quarantined, lifecycle};
 #[cfg(feature = "transparent-inputs")]
 use events::{apply_receive, apply_spend, open_page, record_range};
 #[cfg(feature = "transparent-inputs")]

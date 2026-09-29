@@ -1720,6 +1720,25 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
     }
 }
 
+#[cfg(all(
+    feature = "transparent-inputs",
+    any(test, feature = "test-dependencies")
+))]
+impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Qualifies the stored recovery revision equal to `revision`, so that it can support
+    /// promotion and an active account's commits. Returns whether such a revision is stored.
+    ///
+    /// This is a test and development hook only: production builds cannot qualify a revision,
+    /// and so can never promote an account. Qualification of real sources arrives with source
+    /// verification.
+    pub fn qualify_transparent_revision(
+        &mut self,
+        revision: &zcash_client_backend::data_api::transparent_ledger::RecoveryRevision,
+    ) -> Result<bool, SqliteClientError> {
+        wallet::transparent_ledger::qualify_revision(self.conn.borrow(), revision)
+    }
+}
+
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentLedgerRead
     for WalletDb<C, P, CL, R>
 {
@@ -1759,7 +1778,15 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         let read = |conn: &rusqlite::Connection| {
             let mode =
                 wallet::transparent_ledger::resolve_mode(conn, self.transparent_ledger_mode)?;
-            wallet::transparent_ledger::snapshot(conn, account, mode, confirmations_policy)
+            wallet::transparent_ledger::snapshot(
+                conn,
+                &self.params,
+                #[cfg(feature = "transparent-inputs")]
+                &self.gap_limits,
+                account,
+                mode,
+                confirmations_policy,
+            )
         };
         // Every field must come from one consistent read.
         if conn.is_autocommit() {

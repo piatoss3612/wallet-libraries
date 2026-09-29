@@ -2,7 +2,11 @@
 
 use zcash_client_backend::data_api::{
     AccountPurpose,
-    transparent_ledger::{CommitRejection, IntegrityFailure, RefusedCommit},
+    transparent_ledger::{
+        AccountLifecycle, ChainPoint, CommitRejection, IntegrityFailure, LastKnownSource,
+        RecoveryBlocker, RefusedCommit, TransparentAuthority, TransparentLedgerSnapshot,
+    },
+    wallet::ConfirmationsPolicy,
 };
 
 use super::*;
@@ -198,4 +202,178 @@ fn a_failed_quarantine_write_aborts_the_commit() {
     assert_eq!(count(&st, "tpir_quarantined_accounts"), 0);
     assert_eq!(reader_version(&st), 3);
     assert_eq!(production_dump(conn(&st)), before);
+}
+
+fn snapshot(st: &State, account: AccountUuid) -> TransparentLedgerSnapshot<AccountUuid> {
+    st.wallet()
+        .db()
+        .transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN)
+        .unwrap()
+}
+
+fn qualify(st: &mut State, revision: &RecoveryRevision) -> bool {
+    st.wallet_mut()
+        .db_mut()
+        .qualify_transparent_revision(revision)
+        .unwrap()
+}
+
+/// Recovers `account` completely through the target from `revision`, with one receive, and
+/// covers any addresses its window growth adds.
+fn recover_completely(
+    st: &mut State,
+    account: AccountUuid,
+    revision: &RecoveryRevision,
+    tag: u8,
+) -> ReceiveEvent {
+    let received = recover_one(st, account, revision.clone(), tag);
+    let ws = watch(st, account);
+    let mut c = commit(&ws);
+    c.revision = revision.clone();
+    c.coverage = full_coverage(&ws);
+    apply(st, c).unwrap();
+    assert_eq!(recovery(st, account).blockers, vec![]);
+    received
+}
+
+fn chain_point(st: &State, height: BlockHeight) -> ChainPoint {
+    ChainPoint {
+        height,
+        hash: crate::wallet::get_block_hash(conn(st), height)
+            .unwrap()
+            .unwrap(),
+    }
+}
+
+#[test]
+fn private_snapshots_report_candidate_coverage_and_an_unverified_total() {
+    let (mut st, account) = shadow_wallet();
+    let fixture = revision(1, true);
+    recover_completely(&mut st, account, &fixture, 1);
+    let target = watch(&st, account).target.unwrap();
+
+    // Shadow keeps public authority and reports the candidate ledger alongside it.
+    let s = snapshot(&st, account);
+    assert_eq!(s.authority, TransparentAuthority::Public);
+    assert_eq!(s.covered_through, Some(target));
+    assert_eq!(
+        s.recovered_unverified,
+        Some(Zatoshis::const_from_u64(40_000))
+    );
+    assert!(s.blockers.is_empty());
+
+    // Under PrivateRequired the complete but unpromoted candidate is still no authority.
+    set_policy(&mut st, PrivateRequired);
+    let s = snapshot(&st, account);
+    assert_eq!(s.authority, TransparentAuthority::Unavailable);
+    assert_eq!(s.authorized, None);
+    assert_eq!(s.covered_through, Some(chain_point(&st, target.height)));
+    assert_eq!(
+        s.blockers,
+        vec![
+            RecoveryBlocker::NotActivated,
+            RecoveryBlocker::UnqualifiedRevision
+        ]
+    );
+    assert!(qualify(&mut st, &fixture));
+    assert_eq!(
+        snapshot(&st, account).blockers,
+        vec![RecoveryBlocker::NotActivated]
+    );
+
+    // Public reports no candidate state.
+    set_policy(&mut st, Public);
+    let s = snapshot(&st, account);
+    assert_eq!((s.covered_through, s.recovered_unverified), (None, None));
+}
+
+#[test]
+fn a_legacy_output_the_candidate_lacks_is_a_discrepancy() {
+    let (mut st, account) = shadow_wallet();
+    let fixture = revision(1, true);
+    let ws = watch(&st, account);
+    // Legacy public discovery recorded an output the private source never reports.
+    let height = ws.target.unwrap().height;
+    let utxo = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+        OutPoint::new([0xaa; 32], 0),
+        transparent::bundle::TxOut::new(
+            Zatoshis::const_from_u64(70_000),
+            external(&ws).script().into(),
+        ),
+        Some(height),
+        Some(account),
+        Some(TransparentKeyScope::EXTERNAL),
+        None,
+    )
+    .unwrap();
+    st.wallet_mut()
+        .db_mut()
+        .put_received_transparent_utxo(&utxo)
+        .unwrap();
+    recover_completely(&mut st, account, &fixture, 1);
+    assert!(qualify(&mut st, &fixture));
+    set_policy(&mut st, PrivateRequired);
+    let s = snapshot(&st, account);
+    assert_eq!(
+        s.blockers,
+        vec![
+            RecoveryBlocker::NotActivated,
+            RecoveryBlocker::LegacyDiscrepancy
+        ]
+    );
+    // The legacy amount is still shown as last-known evidence.
+    let last_known = s.last_known.unwrap();
+    assert_eq!(last_known.source, LastKnownSource::LegacyPublic);
+    assert_eq!(
+        last_known.balance.regular.total(),
+        Zatoshis::const_from_u64(70_000)
+    );
+}
+
+#[test]
+fn commits_capture_the_account_lifecycle() {
+    let (mut st, account) = shadow_wallet();
+    let ws = watch(&st, account);
+    assert_eq!(ws.lifecycle, AccountLifecycle::Candidate);
+    let mut c = commit(&ws);
+    c.context.lifecycle = AccountLifecycle::Active;
+    c.coverage = full_coverage(&ws);
+    assert_eq!(
+        rejection(apply(&mut st, c)),
+        CommitRejection::Stale(StaleCommit::LifecycleChanged)
+    );
+    assert_eq!(count(&st, "tpir_coverage"), 0);
+}
+
+#[test]
+fn qualification_binds_to_the_exact_stored_revision() {
+    let (mut st, account) = shadow_wallet();
+    let fixture = revision(1, true);
+    assert!(!qualify(&mut st, &fixture), "an unknown revision");
+    recover_one(&mut st, account, fixture.clone(), 1);
+    assert_eq!(reader_version(&st), 3);
+    for other in [
+        RecoveryRevision {
+            sealed: false,
+            ..fixture.clone()
+        },
+        RecoveryRevision {
+            lineage: 2,
+            ..fixture.clone()
+        },
+        RecoveryRevision {
+            publication: PublicationAnchor {
+                hash: BlockHash([8; 32]),
+                ..fixture.publication
+            },
+            ..fixture.clone()
+        },
+    ] {
+        assert!(!qualify(&mut st, &other));
+    }
+    assert_eq!(count(&st, "tpir_qualified_revisions"), 0);
+    assert!(qualify(&mut st, &fixture));
+    assert!(qualify(&mut st, &fixture), "qualification is idempotent");
+    assert_eq!(count(&st, "tpir_qualified_revisions"), 1);
+    assert_eq!(reader_version(&st), 4);
 }

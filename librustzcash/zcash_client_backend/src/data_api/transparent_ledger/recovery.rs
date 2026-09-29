@@ -2,14 +2,15 @@
 //!
 //! A recovery run captures a [`TransparentWatchSet`], asks its source about the watched
 //! addresses, and submits what it learned as one [`TransparentLedgerCommit`] per account.
-//! Candidate state is isolated: it never changes balances, spend links, locks, address use, or
-//! transaction history. Promotion and projection are later work.
+//! A candidate account's state is isolated: it never changes balances, spend links, locks,
+//! address use, or transaction history. Promoting the account projects its recovered events
+//! into the wallet, and an active account's later commits project in the same transaction.
 
 use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use super::ChainPoint;
+use super::{CandidateBlocker, ChainPoint};
 use transparent::keys::NonHardenedChildIndex;
 
 /// The longest source, revision, or page identifier a store accepts, in bytes.
@@ -50,12 +51,23 @@ pub struct WatchedAddress {
     pub required_from: BlockHeight,
 }
 
+/// Whether an account's ledger is isolated or authoritative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AccountLifecycle {
+    /// Recovery is isolated from the wallet's projection.
+    Candidate,
+    /// Promoted: commits also project into the wallet's outputs and spends.
+    Active,
+}
+
 /// The context a recovery run captures before any source I/O, and that its commit must still
 /// satisfy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransparentRecoveryContext<AccountId> {
     /// The account the run recovers.
     pub account: AccountId,
+    /// The account's lifecycle when the run started.
+    pub lifecycle: AccountLifecycle,
     /// The durable policy generation when the run started.
     pub policy_generation: u64,
     /// The highest contiguously scanned local block when the run started. Events and coverage
@@ -68,6 +80,8 @@ pub struct TransparentRecoveryContext<AccountId> {
 pub struct TransparentWatchSet<AccountId> {
     /// The account.
     pub account: AccountId,
+    /// The account's lifecycle at the time of the read.
+    pub lifecycle: AccountLifecycle,
     /// The durable policy generation at the time of the read.
     pub policy_generation: u64,
     /// The highest contiguously scanned local block; absent before any contiguous scan.
@@ -83,6 +97,7 @@ impl<AccountId: Copy> TransparentWatchSet<AccountId> {
     pub fn context(&self) -> Option<TransparentRecoveryContext<AccountId>> {
         self.target.map(|target| TransparentRecoveryContext {
             account: self.account,
+            lifecycle: self.lifecycle,
             policy_generation: self.policy_generation,
             target,
         })
@@ -252,6 +267,8 @@ pub enum RefusedCommit {
     SourceQuarantined,
     /// The account is quarantined by an earlier integrity rejection.
     AccountQuarantined,
+    /// The account is active and the revision is not qualified to support its authority.
+    UnqualifiedRevision,
 }
 
 /// A context mismatch that a fresh watch set resolves.
@@ -269,6 +286,8 @@ pub enum StaleCommit {
     UnknownPage(Vec<u8>),
     /// The provisional revision was superseded by a newer revision of its source.
     SupersededRevision,
+    /// The account was promoted or demoted since the run started.
+    LifecycleChanged,
 }
 
 /// Facts that contradict stored evidence.
@@ -308,6 +327,8 @@ pub enum IntegrityFailure {
     /// A spend of this outpoint is mined below the output it consumes. A spend in the same
     /// block as its output is valid.
     SpendBeforeOutput(OutPoint),
+    /// The wallet already holds this output with different content.
+    ProjectionContent(OutPoint),
 }
 
 /// A malformed commit.
@@ -336,24 +357,6 @@ pub enum InvalidCommit {
     /// One revision reports an overlapping range of this address as both checked and
     /// unsupported, in this commit or across its commits.
     SupportContradiction(TransparentAddress),
-}
-
-/// Why candidate recovery for an account is not yet complete.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CandidateBlocker {
-    /// No local target exists.
-    ChainUnknown,
-    /// Some watched address lacks continuous coverage from its required start to the target.
-    IncompleteCoverage,
-    /// Pages remain open.
-    PendingPages,
-    /// A mined spend consumes an output that has not been recovered.
-    UnresolvedSpends,
-    /// A range recorded as unsupported is not covered by any source.
-    UnsupportedRanges,
-    /// Activity near the end of a derived window needs addresses that this account's keys
-    /// cannot derive.
-    WindowUnderivable,
 }
 
 /// Development diagnostics for one account's candidate ledger.
