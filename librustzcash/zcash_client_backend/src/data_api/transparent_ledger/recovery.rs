@@ -228,7 +228,11 @@ pub struct CommitOutcome {
     pub window_grew: bool,
 }
 
-/// Why a store refused a commit. Nothing in a refused commit is applied.
+/// Why a store refused a commit. None of a refused commit's facts are applied.
+///
+/// An integrity rejection additionally quarantines, in the same transaction, the commit's
+/// source, its account, and every other account holding evidence from that source. Quarantined
+/// sources and accounts accept no further commits and hold no private authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommitRejection {
     /// The captured context no longer holds; retry from a fresh watch set.
@@ -237,6 +241,17 @@ pub enum CommitRejection {
     Integrity(IntegrityFailure),
     /// The commit is malformed.
     Invalid(InvalidCommit),
+    /// The store will not accept this commit; retrying cannot succeed.
+    Refused(RefusedCommit),
+}
+
+/// A commit the store will not accept whatever its content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefusedCommit {
+    /// The source is quarantined by an earlier integrity rejection.
+    SourceQuarantined,
+    /// The account is quarantined by an earlier integrity rejection.
+    AccountQuarantined,
 }
 
 /// A context mismatch that a fresh watch set resolves.

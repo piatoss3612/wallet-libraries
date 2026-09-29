@@ -34,7 +34,7 @@ use {
             AddressRange, CandidateBlocker, CandidateRecovery, ChainPoint, CommitOutcome,
             CommitRejection, IntegrityFailure, InvalidCommit, MAX_RECOVERY_IDENTIFIER_LEN,
             PageRequest, PendingPage, PublicationAnchor, ReceiveEvent, RecoveryRevision,
-            SpendEvent, StaleCommit, TransparentLedgerCommit, TransparentLedgerMode,
+            RefusedCommit, SpendEvent, StaleCommit, TransparentLedgerCommit, TransparentLedgerMode,
             TransparentWatchSet, WatchOrigin, WatchedAddress,
         },
     },

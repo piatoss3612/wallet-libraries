@@ -77,11 +77,30 @@ fn apply(
         .apply_transparent_ledger_commit(commit)
 }
 
-fn rejection(result: Result<CommitOutcome, SqliteClientError>) -> CommitRejection {
-    match result {
+/// Applies `commit` and returns why it was rejected.
+///
+/// An integrity rejection quarantines its source and account; this asserts that it did, then
+/// lifts the quarantine, so that one wallet can probe several contradictions in turn.
+fn rejected(st: &mut State, commit: TransparentLedgerCommit<AccountUuid>) -> CommitRejection {
+    let rejection = match apply(st, commit) {
         Err(SqliteClientError::TransparentLedgerCommitRejected(rejection)) => rejection,
         other => panic!("expected a rejected commit, got {other:?}"),
+    };
+    if matches!(rejection, CommitRejection::Integrity(_)) {
+        assert!(count(st, "tpir_quarantined_sources") > 0);
+        assert!(count(st, "tpir_quarantined_accounts") > 0);
+        lift_quarantine(st);
     }
+    rejection
+}
+
+/// Clears every quarantine, standing in for the verification that is not implemented yet.
+pub(super) fn lift_quarantine(st: &State) {
+    conn(st)
+        .execute_batch(
+            "DELETE FROM tpir_quarantined_sources; DELETE FROM tpir_quarantined_accounts;",
+        )
+        .unwrap();
 }
 
 fn revision(lineage: u64, sealed: bool) -> RecoveryRevision {
@@ -443,7 +462,7 @@ fn contradictions_are_refused_without_partial_writes() {
         ..received.clone()
     }];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::ReceiveContent(received.outpoint.clone()))
     );
     assert_eq!(count(&st, "tpir_coverage"), coverage_before);
@@ -455,7 +474,7 @@ fn contradictions_are_refused_without_partial_writes() {
         ..received.clone()
     }];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::ReceivePlacement(
             received.outpoint.clone()
         ))
@@ -474,7 +493,7 @@ fn contradictions_are_refused_without_partial_writes() {
         ..spend(2, &received, below_target(&ws, 1))
     }];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::SpendAddress(received.outpoint.clone()))
     );
 
@@ -485,7 +504,7 @@ fn contradictions_are_refused_without_partial_writes() {
         spend(3, &received, below_target(&ws, 1)),
     ];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::ConflictingSpends(
             received.outpoint.clone()
         ))
@@ -500,7 +519,7 @@ fn contradictions_are_refused_without_partial_writes() {
     let mut c = commit(&ws);
     c.spends = vec![spend(2, &elsewhere, below_target(&ws, 1))];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::SpendContent {
             spending_txid: TxId::from_bytes([2; 32]),
             input_index: 0,
@@ -518,7 +537,7 @@ fn malformed_commits_are_invalid() {
     let mut c = commit(&ws);
     c.receives = vec![receive(1, taddr, 1, target + 1)];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Invalid(InvalidCommit::AboveAnchor)
     );
 
@@ -529,21 +548,21 @@ fn malformed_commits_are_invalid() {
         through: target - 1,
     }];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Invalid(InvalidCommit::EmptyRange)
     );
 
     let mut c = commit(&ws);
     c.revision.source = vec![];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Invalid(InvalidCommit::Identifier)
     );
 
     let mut c = commit(&ws);
     c.revision.lineage = u64::MAX;
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Invalid(InvalidCommit::Lineage)
     );
 }
@@ -562,7 +581,7 @@ fn stale_context_is_refused() {
         through: ws.target.unwrap().height,
     }];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Stale(StaleCommit::AddressNotWatched(stranger))
     );
 
@@ -570,13 +589,13 @@ fn stale_context_is_refused() {
     let mut c = commit(&ws);
     c.context.target.hash = BlockHash([0xEE; 32]);
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Stale(StaleCommit::TargetNotAccepted)
     );
     let mut c = commit(&ws);
     c.anchor.hash = BlockHash([0xEE; 32]);
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Stale(StaleCommit::AnchorNotAccepted)
     );
 
@@ -584,7 +603,7 @@ fn stale_context_is_refused() {
     let mut c = commit(&ws);
     c.completed_pages = vec![b"missing".to_vec()];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Stale(StaleCommit::UnknownPage(b"missing".to_vec()))
     );
 
@@ -601,7 +620,7 @@ fn stale_context_is_refused() {
     let ws = watch(&st, account);
     st.wallet_mut().delete_account(account).unwrap();
     assert_eq!(
-        rejection(apply(&mut st, commit(&ws))),
+        rejected(&mut st, commit(&ws)),
         CommitRejection::Stale(StaleCommit::AccountUnknown)
     );
     assert_eq!(count(&st, "tpir_revisions"), 0);
@@ -628,7 +647,7 @@ fn provisional_revisions_are_superseded_and_sealed_ones_are_not() {
     let mut c = commit(&ws);
     c.revision = revision(1, false);
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Stale(StaleCommit::SupersededRevision)
     );
 
@@ -646,7 +665,7 @@ fn provisional_revisions_are_superseded_and_sealed_ones_are_not() {
         ..revision(2, false)
     };
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::RevisionMismatch)
     );
     let mut c = commit(&ws);
@@ -655,7 +674,7 @@ fn provisional_revisions_are_superseded_and_sealed_ones_are_not() {
         ..revision(2, false)
     };
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::RevisionMismatch)
     );
 }
@@ -743,7 +762,7 @@ fn pending_pages_block_their_addresses_and_resume() {
             ..page.clone()
         }];
         assert_eq!(
-            rejection(apply(&mut st, c)),
+            rejected(&mut st, c),
             CommitRejection::Invalid(InvalidCommit::Page)
         );
     }
@@ -760,7 +779,7 @@ fn pending_pages_block_their_addresses_and_resume() {
     let mut c = commit(&ws);
     c.coverage = full_coverage(&ws);
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Invalid(InvalidCommit::PendingPageOverlap(taddr))
     );
 
@@ -830,7 +849,7 @@ fn spends_cannot_precede_their_outputs() {
     let mut c = commit(&ws);
     c.spends = vec![spend(2, &earlier, below_target(&ws, 4))];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::SpendBeforeOutput(
             earlier.outpoint.clone()
         ))
@@ -844,7 +863,7 @@ fn spends_cannot_precede_their_outputs() {
     let mut c = commit(&ws);
     c.receives = vec![later.clone()];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::SpendBeforeOutput(later.outpoint.clone()))
     );
 
@@ -1144,7 +1163,7 @@ fn pages_and_coverage_of_one_revision_never_overlap() {
     let mut c = commit(&ws);
     c.opened_pages = vec![page.clone()];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Invalid(InvalidCommit::PendingPageOverlap(taddr))
     );
 
@@ -1158,7 +1177,7 @@ fn pages_and_coverage_of_one_revision_never_overlap() {
     c.revision = other_source;
     c.coverage = full_coverage(&ws);
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Invalid(InvalidCommit::PendingPageOverlap(taddr))
     );
     let mut c = commit(&ws);
@@ -1190,7 +1209,7 @@ fn one_transaction_has_one_placement() {
         ..first.clone()
     }];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::TransactionPlacement(TxId::from_bytes(
             [1; 32]
         )))
@@ -1202,7 +1221,7 @@ fn one_transaction_has_one_placement() {
     c.receives = vec![earlier.clone()];
     c.spends = vec![spend(1, &earlier, below_target(&ws, 4))];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::TransactionPlacement(TxId::from_bytes(
             [1; 32]
         )))
@@ -1233,7 +1252,7 @@ fn anchors_stay_within_the_publication() {
         hash: BlockHash([7; 32]),
     };
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Invalid(InvalidCommit::AnchorOutsidePublication)
     );
 
@@ -1243,7 +1262,7 @@ fn anchors_stay_within_the_publication() {
         hash: BlockHash([7; 32]),
     };
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Invalid(InvalidCommit::AnchorOutsidePublication)
     );
 
@@ -1306,7 +1325,7 @@ fn one_revision_cannot_both_check_and_not_check_a_range() {
     let mut c = commit(&ws);
     c.coverage = full_coverage(&ws);
     c.unsupported = vec![unsupported];
-    assert_eq!(rejection(apply(&mut st, c)), contradiction);
+    assert_eq!(rejected(&mut st, c), contradiction);
 
     // Across commits of one revision, in either order.
     let mut c = commit(&ws);
@@ -1314,7 +1333,7 @@ fn one_revision_cannot_both_check_and_not_check_a_range() {
     apply(&mut st, c).unwrap();
     let mut c = commit(&ws);
     c.unsupported = vec![unsupported];
-    assert_eq!(rejection(apply(&mut st, c)), contradiction);
+    assert_eq!(rejected(&mut st, c), contradiction);
 
     let mut c = commit(&ws);
     c.revision = revision(2, true);
@@ -1323,7 +1342,7 @@ fn one_revision_cannot_both_check_and_not_check_a_range() {
     let mut c = commit(&ws);
     c.revision = revision(2, true);
     c.coverage = full_coverage(&ws);
-    assert_eq!(rejection(apply(&mut st, c)), contradiction);
+    assert_eq!(rejected(&mut st, c), contradiction);
 }
 
 #[test]
@@ -1412,7 +1431,7 @@ fn coinbase_is_a_property_of_the_transaction() {
         ..coinbase.clone()
     }];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::TransactionCoinbase(coinbase_txid))
     );
 
@@ -1422,7 +1441,7 @@ fn coinbase_is_a_property_of_the_transaction() {
     c.receives = vec![earlier.clone()];
     c.spends = vec![spend(1, &earlier, at)];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::TransactionCoinbase(coinbase_txid))
     );
 
@@ -1438,9 +1457,11 @@ fn coinbase_is_a_property_of_the_transaction() {
         ..receive(3, taddr, 1_000, below_target(&ws, 1))
     }];
     assert_eq!(
-        rejection(apply(&mut st, c)),
+        rejected(&mut st, c),
         CommitRejection::Integrity(IntegrityFailure::TransactionCoinbase(TxId::from_bytes(
             [3; 32]
         )))
     );
 }
+
+mod activation;
