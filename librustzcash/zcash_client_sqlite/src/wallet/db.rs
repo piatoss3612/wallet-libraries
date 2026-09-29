@@ -306,7 +306,7 @@ CREATE TABLE blocks (
 ///   will only be set for transactions created using this wallet specifically, and not any
 ///   other wallet that uses the same seed (including previous installations of the same
 ///   wallet application.)
-/// - `min_observed_height`: the mempool height at the time that the wallet observed the
+/// - `observed_height`: the mempool height at the time that the wallet observed the
 ///   transaction, or the mined height of the transaction, whichever is less. For locally
 ///   constructed transactions (`target_height IS NOT NULL`), rewinds may lower this further
 ///   to preserve a conservative status inclusion bound. Legacy local bounds are widened to
@@ -329,7 +329,7 @@ CREATE TABLE "transactions" (
     raw BLOB,
     fee INTEGER,
     target_height INTEGER,
-    min_observed_height INTEGER NOT NULL,
+    observed_height INTEGER NOT NULL,
     confirmed_unmined_at_height INTEGER,
     trust_status INTEGER,
     FOREIGN KEY (block) REFERENCES blocks(height),
@@ -337,7 +337,7 @@ CREATE TABLE "transactions" (
         block IS NULL OR mined_height = block
     ),
     CONSTRAINT min_observed_consistency CHECK (
-        mined_height IS NULL OR min_observed_height <= mined_height
+        mined_height IS NULL OR observed_height <= mined_height
     ),
     CONSTRAINT confirmed_unmined_consistency CHECK (
         confirmed_unmined_at_height IS NULL OR mined_height IS NULL

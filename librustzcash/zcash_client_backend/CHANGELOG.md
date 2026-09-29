@@ -64,6 +64,8 @@ workspace.
 - `InputSelector::propose_transaction` and `InputSelector::propose_shielding`
   no longer take ZIP 318 parameters; they read the grid from
   `InputSource::anchor_retention_interval`.
+- `EnhancePirRead::transaction_enhancement_work` documents that SQLite stores
+  require an explicit transparent ledger mode in addition to enhancement mode.
 
 ## [0.1.0-rc7] - 2026-09-27
 

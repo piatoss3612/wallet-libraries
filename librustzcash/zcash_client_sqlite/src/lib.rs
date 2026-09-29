@@ -481,9 +481,12 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// Transparent discovery and transparent input selection likewise require
-    /// `set_transparent_ledger_mode`; see that method. Modes are not persisted; reopened handles
-    /// must be configured again.
+    /// The same call also requires `set_transparent_ledger_mode` (or
+    /// `with_transparent_ledger_mode`): an unconfigured ledger mode fails closed rather than
+    /// assuming public authority, including for shielded-only wallets. Transparent discovery
+    /// and transparent input selection likewise require that ledger mode; see
+    /// `set_transparent_ledger_mode`. Modes are not persisted; reopened handles must be
+    /// configured again.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
         params: P,
@@ -572,6 +575,12 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Discard outstanding in-memory request batches when changing mode. Already dispatched
     /// network requests cannot be recalled. New handles must choose their mode before
     /// enumerating enhancement work.
+    ///
+    /// SQLite enhancement dispatch also requires [`Self::set_transparent_ledger_mode`] (or
+    /// [`Self::with_transparent_ledger_mode`]) on the same handle. An unconfigured ledger mode
+    /// returns [`SqliteClientError::TransparentLedgerModeNotConfigured`], including for
+    /// shielded-only wallets and wallets without a chain tip. Under a required-private ledger
+    /// policy, public enhancement work is withheld regardless of this enhancement mode.
     pub fn set_enhancement_mode(&mut self, mode: EnhancementMode) {
         self.enhancement_mode = Some(mode);
     }
@@ -579,7 +588,8 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Chooses the enhancement mode before enumerating enhancement work on this handle.
     ///
     /// This preference is not persisted. See [`Self::set_enhancement_mode`] for
-    /// the requirements when changing mode after requests have been obtained.
+    /// the requirements when changing mode after requests have been obtained, including the
+    /// transparent-ledger mode prerequisite.
     pub fn with_enhancement_mode(mut self, mode: EnhancementMode) -> Self {
         self.set_enhancement_mode(mode);
         self
@@ -620,9 +630,12 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// Transparent discovery and transparent input selection likewise require
-    /// `set_transparent_ledger_mode`; see that method. Modes are not persisted; reopened handles
-    /// must be configured again.
+    /// The same call also requires `set_transparent_ledger_mode` (or
+    /// `with_transparent_ledger_mode`): an unconfigured ledger mode fails closed rather than
+    /// assuming public authority, including for shielded-only wallets. Transparent discovery
+    /// and transparent input selection likewise require that ledger mode; see
+    /// `set_transparent_ledger_mode`. Modes are not persisted; reopened handles must be
+    /// configured again.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
             conn,

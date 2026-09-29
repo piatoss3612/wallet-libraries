@@ -3845,7 +3845,7 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
                         OR (
                             t.expiry_height IS NULL
                             AND t.confirmed_unmined_at_height
-                                < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
+                                < COALESCE(t.target_height, t.observed_height) + :certainty_depth
                         )
                     )
                  )",
@@ -3870,8 +3870,8 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
             conn.execute(
                 "UPDATE transactions
                  SET mined_height = :height,
-                     min_observed_height = MIN(
-                        min_observed_height,
+                     observed_height = MIN(
+                        observed_height,
                         IFNULL(mined_height, :height),
                         :height
                      ),
@@ -5098,13 +5098,13 @@ pub(crate) fn put_tx_meta(
 ) -> Result<TxRef, SqliteClientError> {
     // It isn't there, so insert our transaction into the database.
     let mut stmt_upsert_tx_meta = conn.prepare_cached(
-        "INSERT INTO transactions (txid, block, mined_height, tx_index, min_observed_height)
+        "INSERT INTO transactions (txid, block, mined_height, tx_index, observed_height)
         VALUES (:txid, :block, :block, :tx_index, :block)
         ON CONFLICT (txid) DO UPDATE
         SET block = :block,
             mined_height = :block,
             tx_index = :tx_index,
-            min_observed_height = MIN(min_observed_height, :block),
+            observed_height = MIN(observed_height, :block),
             confirmed_unmined_at_height = NULL
         RETURNING id_tx",
     )?;
@@ -5181,7 +5181,7 @@ pub(crate) fn put_tx_data(
     observed_height: BlockHeight,
 ) -> Result<TxRef, SqliteClientError> {
     let mut stmt_upsert_tx_data = conn.prepare_cached(
-        "INSERT INTO transactions (txid, tx_index, created, expiry_height, raw, fee, target_height, min_observed_height)
+        "INSERT INTO transactions (txid, tx_index, created, expiry_height, raw, fee, target_height, observed_height)
         VALUES (:txid, :tx_index, :created_at, :expiry_height, :raw, :fee, :target_height, :observed_height)
         ON CONFLICT (txid) DO UPDATE
         SET expiry_height = :expiry_height,
@@ -5190,8 +5190,8 @@ pub(crate) fn put_tx_data(
             created = COALESCE(created, :created_at),
             target_height = COALESCE(target_height, :target_height),
             tx_index = IFNULL(tx_index, :tx_index),
-            min_observed_height = MIN(
-                min_observed_height,
+            observed_height = MIN(
+                observed_height,
                 :observed_height
             )
         RETURNING id_tx",
@@ -5383,7 +5383,7 @@ pub(crate) fn transaction_status_work(
         let scanned_height = fully_scanned_height(conn)?.map(u32::from);
         let mut tx_retrieval_stmt = conn.prepare_cached(
             "SELECT q.txid,
-                CASE WHEN t.target_height IS NOT NULL THEN MIN(t.target_height, t.min_observed_height) END,
+                CASE WHEN t.target_height IS NOT NULL THEN MIN(t.target_height, t.observed_height) END,
                 q.policy_generation
          FROM tx_retrieval_queue q
          LEFT JOIN transactions t ON t.txid = q.txid
@@ -5405,7 +5405,7 @@ pub(crate) fn transaction_status_work(
             OR (
                 t.expiry_height IS NULL
                 AND t.confirmed_unmined_at_height
-                    < COALESCE(t.target_height, t.min_observed_height) + :certainty_depth
+                    < COALESCE(t.target_height, t.observed_height) + :certainty_depth
             )
          )",
         )?;
@@ -5454,8 +5454,8 @@ fn lower_creation_evidence(
     rescan_floor: BlockHeight,
 ) -> Result<(), SqliteClientError> {
     conn.execute(
-        "UPDATE transactions SET min_observed_height = :height
-         WHERE target_height IS NOT NULL AND min_observed_height > :height",
+        "UPDATE transactions SET observed_height = :height
+         WHERE target_height IS NOT NULL AND observed_height > :height",
         named_params![":height": u32::from(rescan_floor)],
     )?;
     Ok(())
@@ -5487,13 +5487,13 @@ fn record_transaction_created_in(
     // Read chain context and write evidence in one statement, so a concurrent rewind cannot
     // interleave between reading the tip and inserting an outbox's transaction metadata.
     let updated = conn.execute(
-        "INSERT INTO transactions (txid, target_height, min_observed_height)
+        "INSERT INTO transactions (txid, target_height, observed_height)
          SELECT :txid, :target, MIN(:target, MAX(tip_end - 1, 0))
          FROM (SELECT MAX(block_range_end) AS tip_end FROM scan_queue)
          WHERE tip_end IS NOT NULL
          ON CONFLICT (txid) DO UPDATE SET
              target_height = COALESCE(target_height, :target),
-             min_observed_height = MIN(min_observed_height, excluded.min_observed_height)",
+             observed_height = MIN(observed_height, excluded.observed_height)",
         named_params![":txid": txid.as_ref(), ":target": u32::from(earliest)],
     )?;
     if updated == 0 {
@@ -5534,7 +5534,7 @@ pub(crate) fn transaction_status_work_for(
         } else {
             mode
         };
-        let earliest = conn.query_row("SELECT CASE WHEN target_height IS NOT NULL THEN MIN(target_height, min_observed_height) END FROM transactions WHERE txid = ?1", [txid.as_ref()], |row| row.get::<_, Option<u32>>(0)).optional()?.flatten().map(BlockHeight::from);
+        let earliest = conn.query_row("SELECT CASE WHEN target_height IS NOT NULL THEN MIN(target_height, observed_height) END FROM transactions WHERE txid = ?1", [txid.as_ref()], |row| row.get::<_, Option<u32>>(0)).optional()?.flatten().map(BlockHeight::from);
         Ok(route_status_work(effective, txid, earliest))
     })
 }
@@ -6459,12 +6459,12 @@ mod tests {
             st.wallet()
                 .conn()
                 .execute(
-                    "INSERT INTO transactions (txid, expiry_height, min_observed_height)
-                     VALUES (:txid, :expiry_height, :min_observed_height)",
+                    "INSERT INTO transactions (txid, expiry_height, observed_height)
+                     VALUES (:txid, :expiry_height, :observed_height)",
                     named_params![
                         ":txid": txid.as_ref(),
                         ":expiry_height": expiry_height,
-                        ":min_observed_height": u32::from(tip),
+                        ":observed_height": u32::from(tip),
                     ],
                 )
                 .unwrap();
@@ -6535,7 +6535,7 @@ mod tests {
         );
         st.wallet_mut().db_mut().transactionally(|db| {
             let tx_ref = db.conn.0.query_row(
-                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1) RETURNING id_tx",
+                "INSERT INTO transactions (txid, observed_height) VALUES (?1, 1) RETURNING id_tx",
                 [txid.as_ref()], |row| row.get(0).map(TxRef))?;
             queue_tx_retrieval(db.conn.0, std::iter::once(txid), None)?;
             db.queue_ironwood_enhancement(tx_ref, &scanned)?;
@@ -6586,12 +6586,12 @@ mod tests {
             .wallet()
             .conn()
             .query_row(
-                "INSERT INTO transactions (txid, expiry_height, min_observed_height)
-                 VALUES (:txid, 0, :min_observed_height)
+                "INSERT INTO transactions (txid, expiry_height, observed_height)
+                 VALUES (:txid, 0, :observed_height)
                  RETURNING id_tx",
                 named_params![
                     ":txid": protected_txid.as_ref(),
-                    ":min_observed_height": u32::from(tip),
+                    ":observed_height": u32::from(tip),
                 ],
                 |row| row.get::<_, i64>(0),
             )
@@ -6599,11 +6599,11 @@ mod tests {
         st.wallet()
             .conn()
             .execute(
-                "INSERT INTO transactions (txid, expiry_height, min_observed_height)
-                 VALUES (:txid, 0, :min_observed_height)",
+                "INSERT INTO transactions (txid, expiry_height, observed_height)
+                 VALUES (:txid, 0, :observed_height)",
                 named_params![
                     ":txid": unprotected_txid.as_ref(),
-                    ":min_observed_height": u32::from(tip),
+                    ":observed_height": u32::from(tip),
                 ],
             )
             .unwrap();
@@ -6611,12 +6611,12 @@ mod tests {
             .wallet()
             .conn()
             .query_row(
-                "INSERT INTO transactions (txid, expiry_height, min_observed_height)
-                 VALUES (:txid, 0, :min_observed_height)
+                "INSERT INTO transactions (txid, expiry_height, observed_height)
+                 VALUES (:txid, 0, :observed_height)
                  RETURNING id_tx",
                 named_params![
                     ":txid": mixed_pool_txid.as_ref(),
-                    ":min_observed_height": u32::from(tip),
+                    ":observed_height": u32::from(tip),
                 ],
                 |row| row.get::<_, i64>(0),
             )
@@ -7833,12 +7833,12 @@ mod tests {
         const SENT_OUTPUT_POOL: i64 = 0;
 
         conn.execute(
-            "INSERT INTO transactions (id_tx, txid, min_observed_height)
-             VALUES (:id_tx, :txid, :min_observed_height)",
+            "INSERT INTO transactions (id_tx, txid, observed_height)
+             VALUES (:id_tx, :txid, :observed_height)",
             named_params! {
                 ":id_tx": TX_ROW_ID,
                 ":txid": &TXID[..],
-                ":min_observed_height": OBSERVED_HEIGHT,
+                ":observed_height": OBSERVED_HEIGHT,
             },
         )
         .unwrap();

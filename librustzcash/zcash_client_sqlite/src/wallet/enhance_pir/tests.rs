@@ -861,7 +861,7 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
         .wallet()
         .conn()
         .query_row(
-            "INSERT INTO transactions (txid, mined_height, min_observed_height)
+            "INSERT INTO transactions (txid, mined_height, observed_height)
          VALUES (:txid, 100001, 100001) RETURNING id_tx",
             named_params![":txid": txid.as_ref()],
             |row| row.get(0).map(crate::TxRef),
@@ -2156,7 +2156,7 @@ fn routed(st: &State) -> (Vec<TxId>, Vec<EnhancePirWork>) {
 fn queue_ordinary(st: &State, txid: TxId, route: Option<i64>) {
     let conn = st.wallet().conn();
     conn.execute(
-        "INSERT INTO transactions (txid, expiry_height, min_observed_height) VALUES (:txid, 0, 1)",
+        "INSERT INTO transactions (txid, expiry_height, observed_height) VALUES (:txid, 0, 1)",
         named_params![":txid": txid.as_ref()],
     )
     .unwrap();

@@ -20,6 +20,14 @@ workspace.
 - The additive `transparent_policy_generation` migration. It adds
   `tx_retrieval_queue.policy_generation` (default 0) and extends
   `ironwood_enhance_routing.route` to allow `2` (`PRIVATE_DETAILS_UNSUPPORTED`).
+- The `withhold_legacy_retrieval` migration. Under durable `PrivateRequired` it
+  relocates remaining ordinary retrieval-queue codes and installs SQLite triggers
+  that abort Phase 1 inserts/updates of query types `0`/`1`.
+- The `rename_observed_height` migration. It renames
+  `transactions.min_observed_height` to `observed_height` so Phase 1
+  `transaction_status_work_for` (which selects the old column name) fails closed
+  on migrated wallets instead of constructing a public status request for a
+  caller-supplied txid.
 - Projection origins for new transparent records. Public discovery records a
   legacy-public origin, and local construction, including creation evidence
   recorded by an outbox, records a local origin. Each is written in the same
@@ -74,9 +82,12 @@ workspace.
   public LWD `route = 1` rows are included until relocated); financial rows are
   not deleted. Status obligations become `TransactionStatusWork::Private`.
   Applying durable `PrivateRequired` also relocates ordinary retrieval-queue
-  rows to withheld query-type codes Phase 1 readers do not enumerate, so the
-  raised `min_reader_version` is effective against legacy status/enhancement
-  dispatch even though those builds never call `durable_policy`.
+  rows to withheld query-type codes Phase 1 readers do not enumerate, and the
+  `withhold_legacy_retrieval` triggers reject later Phase 1 inserts of those
+  codes. The `rename_observed_height` migration makes Phase 1
+  `transaction_status_work_for` fail at prepare time (it still selects
+  `min_observed_height`), so direct status lookups cannot leak a supplied txid
+  on a migrated wallet even though Phase 1 never calls `durable_policy`.
 - Transparent authority is unavailable under `PrivateRequired`, while the chain
   tip is unknown, and in builds without `transparent-inputs`. While it is
   unavailable:

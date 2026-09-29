@@ -692,7 +692,7 @@ mod handles {
         // so it still counts toward provenance.
         conn(&st)
             .execute_batch(
-                "INSERT INTO transactions (id_tx, txid, expiry_height, min_observed_height)
+                "INSERT INTO transactions (id_tx, txid, expiry_height, observed_height)
                  VALUES (9999, X'77', 1, 1);
                  INSERT INTO transparent_received_output_spends
                      (transparent_received_output_id, transaction_id)
@@ -1196,7 +1196,7 @@ mod handles {
         let lwd = zcash_primitives::transaction::TxId::from_bytes([0x61; 32]);
         conn(&st)
             .execute(
-                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
+                "INSERT INTO transactions (txid, observed_height) VALUES (?1, 1)",
                 [lwd.as_ref()],
             )
             .unwrap();
@@ -1324,6 +1324,43 @@ mod handles {
 
     #[cfg(feature = "orchard")]
     #[test]
+    fn phase1_status_lookup_sql_fails_after_observed_height_rename() {
+        let (mut st, _, _) = funded_wallet();
+        let txid = [0x65u8; 32];
+        conn(&st)
+            .execute(
+                "INSERT INTO transactions (txid, observed_height) VALUES (?1, 1)",
+                [&txid[..]],
+            )
+            .unwrap();
+
+        // Phase 1 transaction_status_work_for prepares this exact statement.
+        let err = conn(&st)
+            .query_row(
+                "SELECT CASE WHEN target_height IS NOT NULL THEN MIN(target_height, min_observed_height) END FROM transactions WHERE txid = ?1",
+                [&txid[..]],
+                |row| row.get::<_, Option<u32>>(0),
+            )
+            .expect_err("Phase 1 status lookup must fail without min_observed_height");
+        assert!(
+            err.to_string().contains("min_observed_height")
+                || err.to_string().contains("no such column"),
+            "unexpected error: {err}"
+        );
+
+        // This build's column name still works.
+        let height: Option<u32> = conn(&st)
+            .query_row(
+                "SELECT CASE WHEN target_height IS NOT NULL THEN MIN(target_height, observed_height) END FROM transactions WHERE txid = ?1",
+                [&txid[..]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(height.is_none());
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
     fn handle_only_private_required_route_two_is_public_again_after_handle_switch() {
         use zcash_client_backend::data_api::{
             PublicTransactionEnhancementRequest,
@@ -1333,7 +1370,7 @@ mod handles {
         let mixed = zcash_primitives::transaction::TxId::from_bytes([0x62; 32]);
         conn(&st)
             .execute(
-                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
+                "INSERT INTO transactions (txid, observed_height) VALUES (?1, 1)",
                 [mixed.as_ref()],
             )
             .unwrap();
@@ -1392,7 +1429,7 @@ mod handles {
         let mixed = zcash_primitives::transaction::TxId::from_bytes([0x52; 32]);
         conn(&st)
             .execute(
-                "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 1)",
+                "INSERT INTO transactions (txid, observed_height) VALUES (?1, 1)",
                 [mixed.as_ref()],
             )
             .unwrap();

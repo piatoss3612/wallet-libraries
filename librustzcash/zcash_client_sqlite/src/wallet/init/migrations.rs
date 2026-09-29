@@ -54,6 +54,7 @@ mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod withhold_legacy_retrieval;
+mod rename_observed_height;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
@@ -162,6 +163,7 @@ pub mod ids {
         transparent_ledger_schema::MIGRATION_ID as TRANSPARENT_LEDGER_SCHEMA,
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
         withhold_legacy_retrieval::MIGRATION_ID as WITHHOLD_LEGACY_RETRIEVAL,
+        rename_observed_height::MIGRATION_ID as RENAME_OBSERVED_HEIGHT,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
         tx_retrieval_queue::MIGRATION_ID as TX_RETRIEVAL_QUEUE,
@@ -398,6 +400,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_ledger_schema::Migration),
         Box::new(transparent_policy_generation::Migration),
         Box::new(withhold_legacy_retrieval::Migration),
+        Box::new(rename_observed_height::Migration),
     ]
 }
 
@@ -606,7 +609,7 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[withhold_legacy_retrieval::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[rename_observed_height::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -747,6 +750,7 @@ pub(crate) mod tests {
             ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TRANSPARENT_POLICY_GENERATION,
             ids::WITHHOLD_LEGACY_RETRIEVAL,
+            ids::RENAME_OBSERVED_HEIGHT,
             ids::TREE_RETAINED_CHECKPOINTS,
             ids::TX_OBSERVATION_HEIGHT,
             ids::TX_RETRIEVAL_QUEUE,

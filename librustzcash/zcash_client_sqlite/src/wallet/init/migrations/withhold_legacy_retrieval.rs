@@ -32,6 +32,7 @@ BEGIN
 END;
 "#;
 
+/// Identifier for the migration that forbids Phase 1 retrieval-queue inserts under PrivateRequired.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xc8d5f3b2_ae40_4f9c_b7d6_2e1f9e8d7c6b);
 
 const DEPENDENCIES: &[Uuid] = &[transparent_policy_generation::MIGRATION_ID];

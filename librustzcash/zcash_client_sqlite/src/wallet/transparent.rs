@@ -2825,7 +2825,7 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
     };
 
     let id_tx = conn.query_row(
-        "INSERT INTO transactions (txid, block, mined_height, min_observed_height)
+        "INSERT INTO transactions (txid, block, mined_height, observed_height)
          VALUES (:txid, :block, :mined_height, :observation_height)
          ON CONFLICT (txid) DO UPDATE
          SET block = IFNULL(block, :block),
@@ -2834,7 +2834,7 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
              -- it must not discard a previously-recorded mined height. Un-mining is the
              -- responsibility of `truncate_to_height`.
              mined_height = IFNULL(:mined_height, mined_height),
-             min_observed_height = MIN(min_observed_height, :observation_height),
+             observed_height = MIN(observed_height, :observation_height),
              confirmed_unmined_at_height = CASE
                 WHEN :mined_height IS NOT NULL THEN NULL
                 ELSE confirmed_unmined_at_height
@@ -3456,7 +3456,7 @@ mod tests {
 
         // A UTXO attached to the imported row.
         tx.execute(
-            "INSERT INTO transactions (id_tx, txid, min_observed_height) VALUES (1, X'00', 1)",
+            "INSERT INTO transactions (id_tx, txid, observed_height) VALUES (1, X'00', 1)",
             [],
         )
         .unwrap();
@@ -3575,7 +3575,7 @@ mod tests {
 
         // A UTXO attached to the imported row, attributed to account B.
         tx.execute(
-            "INSERT INTO transactions (id_tx, txid, min_observed_height) VALUES (1, X'00', 1)",
+            "INSERT INTO transactions (id_tx, txid, observed_height) VALUES (1, X'00', 1)",
             [],
         )
         .unwrap();
@@ -3732,12 +3732,12 @@ mod tests {
         let foreign_id = tx.last_insert_rowid();
 
         tx.execute(
-            "INSERT INTO transactions (id_tx, txid, min_observed_height)
-             VALUES (:id_tx, :txid, :min_observed_height)",
+            "INSERT INTO transactions (id_tx, txid, observed_height)
+             VALUES (:id_tx, :txid, :observed_height)",
             named_params! {
                 ":id_tx": TX_ROW_ID,
                 ":txid": &TXID[..],
-                ":min_observed_height": OBSERVED_HEIGHT,
+                ":observed_height": OBSERVED_HEIGHT,
             },
         )
         .unwrap();
@@ -4558,7 +4558,7 @@ mod tests {
             mined_height: BlockHeight,
         ) -> i64 {
             conn.execute(
-                "INSERT INTO transactions (txid, mined_height, min_observed_height)
+                "INSERT INTO transactions (txid, mined_height, observed_height)
                  VALUES (:txid, :mined_height, :mined_height)",
                 named_params! {
                     ":txid": &NOTE_FUNDING_TXID[..],
