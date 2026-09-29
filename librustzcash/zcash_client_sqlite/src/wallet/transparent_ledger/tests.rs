@@ -1131,10 +1131,10 @@ mod handles {
                 .unwrap(),
             vec![PrivateTransparentDetail::ParentTransaction { txid: parent }]
         );
-        // Queue row and funded notes remain.
+        // Queue row remains under the withheld enhancement code so Phase 1 cannot see it.
         let still_queued: bool = conn(&st)
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1 AND query_type = 1)",
+                "SELECT EXISTS(SELECT 1 FROM tx_retrieval_queue WHERE txid = ?1 AND query_type = 11)",
                 [parent.as_ref()],
                 |row| row.get(0),
             )

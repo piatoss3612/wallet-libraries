@@ -121,7 +121,7 @@ pub(crate) fn apply_transparent_policy(
                  SET query_type = query_type + :offset
                  WHERE query_type IN (0, 1)",
                 rusqlite::named_params![
-                    ":offset": super::TxQueryType::WITHHELD_OFFSET,
+                    ":offset": crate::wallet::TxQueryType::WITHHELD_OFFSET,
                 ],
             )?;
         } else if mode.retains_public_authority() {
@@ -131,9 +131,9 @@ pub(crate) fn apply_transparent_policy(
                  SET query_type = query_type - :offset
                  WHERE query_type IN (:withheld_status, :withheld_enhancement)",
                 rusqlite::named_params![
-                    ":offset": super::TxQueryType::WITHHELD_OFFSET,
-                    ":withheld_status": super::TxQueryType::Status.withheld_code(),
-                    ":withheld_enhancement": super::TxQueryType::Enhancement.withheld_code(),
+                    ":offset": crate::wallet::TxQueryType::WITHHELD_OFFSET,
+                    ":withheld_status": crate::wallet::TxQueryType::Status.withheld_code(),
+                    ":withheld_enhancement": crate::wallet::TxQueryType::Enhancement.withheld_code(),
                 ],
             )?;
             // Sticky route 2 was assigned while public enhancement was forbidden. With
@@ -193,7 +193,7 @@ pub(crate) fn pending_private_transparent_details(
          ORDER BY q.txid",
     )?;
     for txid in parents.query_map(
-        rusqlite::named_params![":offset": super::TxQueryType::WITHHELD_OFFSET],
+        rusqlite::named_params![":offset": crate::wallet::TxQueryType::WITHHELD_OFFSET],
         |row| row.get::<_, [u8; 32]>(0),
     )? {
         details.push(PrivateTransparentDetail::ParentTransaction {
