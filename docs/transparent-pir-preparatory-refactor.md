@@ -396,34 +396,98 @@ They may be implemented in smaller changes. Keep successful promotion unavailabl
 outside focused tests until those library components pass together; only then
 let Vizor's fixture coordinator exercise activation.
 
-**Wallet-libraries steps**
+**Wallet-libraries plan**
 
-1. Project candidate events into existing transaction/output/spend structures.
-   Join mixed transactions by txid with pool-specific identities, preserving
-   independent local, shielded, and payload contributions. Keep coinbase
-   classification explicit even without raw bytes or transaction indices.
-2. Implement authoritative commits and projection in one SQLite transaction.
-   Add rollback to every applicable height/chain-state truncation and rescan
-   path using its actual retained height. Invalidate evidence, coverage, work,
-   and derived state without deleting valid independent origins or issued-address
-   history.
-3. Implement guarded per-account promotion: recheck complete watch-set coverage,
-   accepted anchors, stable window expansion, resolved spends/pages, production
-   source qualification, and explained legacy discrepancies. Atomically project,
-   merge local overlays, switch authority, and revoke candidate work. Allow
-   fixture promotion only through test/development paths.
-4. Implement the atomic ledger snapshot, distinguishing authorized, last-known,
-   and recovered-unverified amounts. Historical snapshots and incomplete net
-   amounts cannot authorize a current spend.
-5. Enforce eligibility inside existing individual, address, batched, and
-   value-bounded transparent selectors, plus proposal consumption and hardware
-   finalization. Coverage through accepted `H` supports target `H + 1`;
-   recheck the current chain and retain confirmations, maturity, spend,
-   reservation, and lock rules. No freshness tolerance or alternate selector.
-6. Preserve legitimate same-proposal chained outputs through local evidence.
-   Block incomplete transparent inputs without blocking independently eligible
-   shielded-funded unshielding. Its resulting own transparent outputs must pass
-   transparent eligibility before later spending.
+The half lands as one PR on top of Phase 3. Every intermediate commit fails
+closed: `PrivateRequired` keeps the Phase 1 mode-level "unavailable" until the
+gating change lands. Only a test/development hook can qualify a revision, so
+production can never promote.
+
+1. **Schema.** A seedless, additive `transparent_activation_schema` migration
+   adds four empty tables:
+   - `tpir_active_accounts`: the account lifecycle. A row makes the account
+     *active*; otherwise it is a *candidate*.
+   - `tpir_qualified_revisions`: revisions qualified to support authority.
+   - `tpir_quarantined_sources` and `tpir_quarantined_accounts`: integrity
+     quarantine.
+
+   The first write to any of them raises `min_reader_version` to 4, so a
+   build that ignores them fails closed. Epochs are left out: nothing can clear
+   a quarantine yet, so there is no revalidation race to guard.
+2. **Contract.**
+   - `TransparentAuthority::Private` and `RecoveryCompletion::Complete`.
+   - The snapshot gains `covered_through` and `recovered_unverified`, and
+     `LastKnownSource::PrivateLedger` reports a blocked active account. Its
+     amount is anchored at `covered_through` only when that is the tip.
+   - `RecoveryBlocker` becomes the one blocker enum for the snapshot and
+     promotion. It gains `Recovery(CandidateBlocker)`, `NotActivated`,
+     `Quarantined`, `UnqualifiedRevision`, `LegacyDiscrepancy` and
+     `ChainBehindTip`.
+   - `TransparentLedgerWrite::promote_transparent_account(account)`.
+   - The watch set and the recovery context carry the account's
+     `AccountLifecycle`; a commit captured under another lifecycle is
+     `StaleCommit::LifecycleChanged`.
+   - `CommitRejection::Refused` covers a quarantined source or account and an
+     unqualified revision on an active account.
+   - Qualification is a sqlite-only test/development hook, not a trait method.
+3. **Quarantine.** An integrity rejection rolls back every submitted fact.
+   In the same transaction it quarantines the source, the committing account,
+   and every account holding that source's evidence, and deletes those
+   accounts' pending pages. Quarantine survives restarts and rewinds.
+4. **Projection.** Placed events are written into the LRZ tables through the
+   existing `put_transparent_output` and `mark_transparent_utxo_spent`, with
+   a new projection origin, *ledger event* (code 2). Mixed transactions join on
+   the shared `transactions` row, which keeps raw data, fees, local creation
+   evidence, notes and locks. A projected coinbase receive records
+   `tx_index = 0`, so its classification does not depend on raw bytes. A
+   placement or content conflict with the projection is an integrity failure,
+   and so is an event the wallet's stored transaction bytes contradict: a
+   receive of an output the transaction lacks or holds with another value,
+   script or coinbase status, or a spend by an input that spends another
+   outpoint or does not exist.
+   Legacy-only rows are never deleted, and never authorize a spend.
+5. **Promotion.** One transaction:
+   1. rechecks the policy (`PrivateRequired` on the handle and durably), the
+      account, quarantine, the candidate blockers at the local target, a
+      local target equal to the chain tip, qualification of every revision
+      that contributed coverage or observations, and legacy discrepancies;
+   2. writes the candidate-window addresses, and the legacy external receiver
+      when it has no row, into `addresses` (the projection requires an address
+      row), then drops the candidate window rows. A window reaching the last
+      non-hardened index is `WindowUnderivable`: the address table cannot hold
+      that index, so the account stays a candidate;
+   3. projects every placed event;
+   4. records the account as active.
+
+   A legacy discrepancy is a legacy public output whose content differs from
+   the candidate receive; a legacy output mined at or below the target that
+   the complete candidate set lacks; or a legacy mined spend of an output the
+   candidate set shows unspent. Each blocks promotion.
+6. **Active commits** follow the candidate path, additionally require qualified
+   revisions, and project their events in the same transaction. After
+   activation, window growth uses LRZ's gap-limit address generation.
+   Leaving `PrivateRequired` demotes every account in the policy transaction.
+7. **Rewind.** LRZ un-mining already makes projected rows unspendable, and the
+   Phase 3 truncation clips coverage, so an active account loses authority until
+   it is re-covered. Activation, qualification and quarantine survive rewinds;
+   re-placed events are re-projected.
+8. **Financial gating.** Under `PrivateRequired`, an account is eligible for
+   target `T` when it is active and not quarantined, has no candidate blockers,
+   and its local target and the chain tip are both `T - 1`. All four selectors
+   check eligibility and query in one read snapshot, and admit only
+   ledger-origin outputs of eligible accounts. The account and outpoint lookups
+   fail for an ineligible account. The address selectors filter out ineligible
+   accounts, and fail only when no owning account is eligible.
+   `store_transactions_to_be_sent` rechecks every transparent input at the
+   transaction's target height, which covers proposals, PCZTs and hardware
+   finalization. An input created by an earlier transaction of the same batch
+   is allowed. Shielded-funded unshielding spends no transparent input, and
+   its own transparent output is spendable only once a ledger commit covers it.
+9. **Snapshot.** Under `PrivateRequired`, an eligible account reports
+   `Private` authority, its ledger-origin balance as authorized, and
+   `Complete`. Otherwise authority is unavailable and the blockers explain
+   why. `get_wallet_summary` and `get_transparent_balances` keep omitting
+   transparent funds under `PrivateRequired`, so clients read the snapshot.
 
 **Vizor steps**
 
