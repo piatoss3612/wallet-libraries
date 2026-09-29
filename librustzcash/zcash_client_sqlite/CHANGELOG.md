@@ -11,60 +11,54 @@ workspace.
 ## [Unreleased]
 
 ### Added
-- The seedless `transparent_ledger_schema` migration, which adds the `tpir_*`
-  transparent ledger tables and records the durable policy as public. It
-  classifies every existing transparent output and spend as legacy evidence,
-  and marks records whose transaction has local creation evidence as local
-  construction too. Neither origin is coverage. It writes no coverage, event,
-  script, or pending-work rows. Existing wallet tables are unchanged.
+- The seedless `transparent_ledger_schema` migration. It adds `tpir_meta`, the
+  durable transparent policy recorded as public, and the `tpir_output_origins`
+  and `tpir_spend_origins` provenance tables. It classifies every existing
+  transparent output and spend as legacy evidence, and marks records whose
+  transaction has local creation evidence as local construction too. Neither
+  origin is coverage. Existing wallet tables are unchanged.
+- Projection origins for new transparent records. Public discovery records a
+  legacy-public origin, and local construction, including creation evidence
+  recorded by an outbox, records a local origin. Each is written in the same
+  transaction as the record it describes.
 - `WalletDb::set_transparent_ledger_mode` and `with_transparent_ledger_mode`,
-  and implementations of `TransparentLedgerRead` and `TransparentLedgerWrite`.
-  The mode is not persisted; transactional handles inherit it. The ledger APIs
-  return `SqliteClientError::TransparentLedgerModeNotConfigured` on an
-  unconfigured handle, including an empty wallet. Commits and promotion are
-  validated and then rejected as unavailable; nothing is written.
-- `SqliteClientError::TransparentLedgerPolicyConflict`: a handle configured
-  with a mode weaker than a durably applied `PrivateRequired` policy cannot use
-  the ledger APIs or authorize transparent inputs. The stored policy is never
-  weakened.
-- `SqliteClientError::TransparentAuthorityUnavailable`: under
-  `PrivateRequired`, the four transparent `InputSource` selectors and storing a
-  transaction that spends transparent outputs fail, because private authority
-  is not yet available. Shielded-funded spends, including unshielding, are
-  unaffected.
-- `SqliteClientError::TransparentLedgerIncompatible`: a wallet whose
-  `tpir_meta.min_reader_version` exceeds this build's reader version is
-  refused by the ledger APIs and transparent selectors.
-- The transparent ledger snapshot reports no balance, with blocker
-  `TransparentSupportUnavailable`, when built without `transparent-inputs`,
-  rather than a fabricated zero. `transparent_ledger_watched_scripts` lists
-  each account's watch generation; script enumeration arrives with recovery.
-- Transparent input selection, storing transparent-spending transactions,
-  `put_received_transparent_utxo`, and the transparent spend-detection and
-  address-history requests of `transaction_data_requests` now require an
-  explicitly configured transparent ledger mode. Financial authorization and
-  public discovery never default to public.
-- Under `PrivateRequired`, public transparent discovery stops:
-  `transaction_data_requests` omits transparent address-history requests, and
-  `put_received_transparent_utxo` fails with
-  `SqliteClientError::PublicTransparentDiscoveryForbidden`. `get_wallet_summary`
-  omits transparent funds when private authority is required by the handle or
-  by the durable policy, and `get_transparent_balances` then fails with
-  `TransparentAuthorityUnavailable`.
-- A `tpir_meta` table without its policy row, or a missing `tpir_meta` after
-  the ledger migration has been recorded, is reported as corrupted data, never
-  as a wallet without a policy.
-- The ledger snapshot reports `Unavailable` authority, never public authority,
-  while the chain tip is unknown or transparent state cannot be read.
-- `transparent_ledger_pending_pages` enumerates durable pending pages with their
-  source revision, captured context, and affected scripts. The watched-script
-  snapshot reports each account's lifecycle and quarantine.
-- Storing a transaction checks transparent authority when the transaction
-  spends any wallet-owned transparent output, derived from its transparent
-  bundle rather than only from the caller-supplied `utxos_spent`.
-- Projection origins for new transparent records: public discovery writes
-  record a legacy-public origin, and local construction records a local
-  origin, in the same transaction as the record.
+  and an implementation of `TransparentLedgerRead`. The mode is not persisted,
+  and transactional handles inherit it. The snapshot reports `Unavailable`
+  authority, never a fabricated or public balance, when:
+  - private authority is required;
+  - the chain tip is unknown; or
+  - the build cannot read transparent state.
+- `SqliteClientError` variants:
+  - `TransparentLedgerModeNotConfigured`;
+  - `TransparentLedgerPolicyConflict`: the handle's mode is weaker than a
+    durably applied `PrivateRequired` policy, which is never weakened;
+  - `TransparentAuthorityUnavailable`;
+  - `PublicTransparentDiscoveryForbidden`;
+  - `TransparentLedgerIncompatible`: the wallet requires a newer ledger reader.
+
+  A `tpir_meta` table without its policy row, or a missing `tpir_meta` after the
+  migration has run, is reported as corrupted data.
+
+### Changed
+- The following now require an explicitly configured transparent ledger mode;
+  they never default to public authority:
+  - transparent input selection;
+  - storing a transaction that spends wallet transparent outputs, detected from
+    its transparent bundle in every build;
+  - `put_received_transparent_utxo`;
+  - the transparent spend-detection and address-history requests of
+    `transaction_data_requests`.
+- Under `PrivateRequired`, set on the handle or durably applied:
+  - transparent inputs and transparent-spending stores fail;
+  - public transparent discovery stops;
+  - `get_wallet_summary` omits transparent funds;
+  - `get_transparent_balances` fails;
+  - `get_received_outputs` reports transparent outputs as not spendable
+    (`u32::MAX`).
+
+  Shielded-funded spends, including unshielding, are unaffected.
+- A transparent output report whose script or value conflicts with the stored
+  output is refused.
 
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`

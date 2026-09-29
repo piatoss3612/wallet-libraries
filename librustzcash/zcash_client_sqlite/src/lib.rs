@@ -42,9 +42,7 @@ use zcash_client_backend::data_api::status::{
     TransactionStatusMode, TransactionStatusRead, TransactionStatusWork, TransactionStatusWrite,
 };
 use zcash_client_backend::data_api::transparent_ledger::{
-    CommitOutcome, OutstandingPage, PromotionContext, PromotionOutcome, TransparentLedgerCommit,
     TransparentLedgerMode, TransparentLedgerRead, TransparentLedgerSnapshot,
-    TransparentLedgerWrite, WatchedScriptSnapshot,
 };
 
 use std::{
@@ -1686,7 +1684,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
 {
     fn transparent_ledger_mode(&self) -> Result<TransparentLedgerMode, Self::Error> {
         wallet::transparent_ledger::resolve_mode(self.conn.borrow(), self.transparent_ledger_mode)
-            .map(|(mode, _)| mode)
     }
 
     fn transparent_ledger_snapshot(
@@ -1696,7 +1693,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
     ) -> Result<TransparentLedgerSnapshot<Self::AccountId>, Self::Error> {
         let conn = self.conn.borrow();
         let read = |conn: &rusqlite::Connection| {
-            let (mode, _) =
+            let mode =
                 wallet::transparent_ledger::resolve_mode(conn, self.transparent_ledger_mode)?;
             wallet::transparent_ledger::snapshot(conn, account, mode, confirmations_policy)
         };
@@ -1709,67 +1706,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         } else {
             read(conn)
         }
-    }
-
-    fn transparent_ledger_pending_pages(&self) -> Result<Vec<OutstandingPage>, Self::Error> {
-        let conn = self.conn.borrow();
-        wallet::transparent_ledger::resolve_mode(conn, self.transparent_ledger_mode)?;
-        wallet::transparent_ledger::pending_pages(conn)
-    }
-
-    fn transparent_ledger_watched_scripts(
-        &self,
-    ) -> Result<WatchedScriptSnapshot<Self::AccountId>, Self::Error> {
-        let conn = self.conn.borrow();
-        let read = |conn: &rusqlite::Connection| {
-            let (_, durable) =
-                wallet::transparent_ledger::resolve_mode(conn, self.transparent_ledger_mode)?;
-            wallet::transparent_ledger::watched_scripts(conn, durable)
-        };
-        if conn.is_autocommit() {
-            let tx = conn.unchecked_transaction()?;
-            let snapshot = read(&tx)?;
-            tx.commit()?;
-            Ok(snapshot)
-        } else {
-            read(conn)
-        }
-    }
-}
-
-impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
-    TransparentLedgerWrite for WalletDb<C, P, CL, R>
-{
-    fn apply_transparent_ledger_commit(
-        &mut self,
-        commit: TransparentLedgerCommit<<Self as WalletRead>::AccountId>,
-    ) -> Result<CommitOutcome, <Self as WalletRead>::Error> {
-        self.transactionally(|wdb| wdb.apply_transparent_ledger_commit(commit))
-    }
-
-    fn promote_transparent_ledger_account(
-        &mut self,
-        context: PromotionContext<<Self as WalletRead>::AccountId>,
-    ) -> Result<PromotionOutcome, <Self as WalletRead>::Error> {
-        self.transactionally(|wdb| wdb.promote_transparent_ledger_account(context))
-    }
-}
-
-impl<P: consensus::Parameters, CL: Clock, R: Rng> TransparentLedgerWrite
-    for WalletDb<SqlTransaction<'_>, P, CL, R>
-{
-    fn apply_transparent_ledger_commit(
-        &mut self,
-        commit: TransparentLedgerCommit<<Self as WalletRead>::AccountId>,
-    ) -> Result<CommitOutcome, <Self as WalletRead>::Error> {
-        wallet::transparent_ledger::apply_commit(self.conn.0, self.transparent_ledger_mode, &commit)
-    }
-
-    fn promote_transparent_ledger_account(
-        &mut self,
-        context: PromotionContext<<Self as WalletRead>::AccountId>,
-    ) -> Result<PromotionOutcome, <Self as WalletRead>::Error> {
-        wallet::transparent_ledger::promote(self.conn.0, self.transparent_ledger_mode, &context)
     }
 }
 

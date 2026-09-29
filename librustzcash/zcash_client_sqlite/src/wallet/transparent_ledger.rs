@@ -4,21 +4,16 @@
 //! that invalidating one source never removes a record another source still supports. Legacy
 //! and local origins are provenance only; they never constitute ledger coverage.
 //!
-//! Handle configuration is enforced here. Until private recovery is implemented, private
-//! authority is never available: ledger commits and promotion are rejected, and
-//! `PrivateRequired` handles cannot authorize transparent inputs.
+//! Handle configuration and the durable policy are enforced here. Until private recovery is
+//! implemented, private authority is never available, so `PrivateRequired` handles cannot
+//! authorize transparent inputs.
 
 use rusqlite::OptionalExtension as _;
 use zcash_client_backend::data_api::{
     transparent_ledger::{
-        AccountLifecycle, ChainPoint, CommitOutcome, CommitRejection, LastKnownBalance,
-        LastKnownSource, LedgerLifecycle, Lineage, OutstandingPage, PageId, PendingPage,
-        PromotionContext, PromotionOutcome, PromotionRejection, PublicationAnchor,
-        PublicationStatus, QualifiedRevision, RecoveryBlocker, RecoveryCompletion,
-        RecoveryDiagnostics, RecoveryStart, RevisionId, SourceId, SourceRevision, SourceTrust,
-        TransparentAuthority, TransparentLedgerBalance, TransparentLedgerCommit,
-        TransparentLedgerMode, TransparentLedgerSnapshot, WatchedAccount, WatchedScript,
-        WatchedScriptSnapshot,
+        LastKnownBalance, LastKnownSource, RecoveryBlocker, RecoveryCompletion,
+        TransparentAuthority, TransparentLedgerBalance, TransparentLedgerMode,
+        TransparentLedgerSnapshot,
     },
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
@@ -61,7 +56,6 @@ pub(crate) const TPIR_READER_VERSION: i64 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DurablePolicy {
     pub(crate) mode: TransparentLedgerMode,
-    pub(crate) generation: u64,
 }
 
 /// Reads the durable policy. A wallet that predates the ledger schema has none, and so cannot
@@ -92,35 +86,25 @@ pub(crate) fn durable_policy(
             Ok(None)
         };
     }
-    conn.query_row(
-        "SELECT applied_mode, policy_generation, min_reader_version FROM tpir_meta WHERE id = 0",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        },
-    )
-    .optional()?
-    // Once the table exists, a missing singleton is damage, not the absence of a policy.
-    .ok_or_else(|| SqliteClientError::CorruptedData("tpir_meta policy row is missing".into()))
-    .map(Some)?
-    .map(|(mode, generation, min_reader_version)| {
-        if min_reader_version > TPIR_READER_VERSION {
-            return Err(SqliteClientError::TransparentLedgerIncompatible {
-                required: min_reader_version,
-            });
-        }
-        Ok(DurablePolicy {
-            mode: mode_from_code(mode)?,
-            generation: u64::try_from(generation).map_err(|_| {
-                SqliteClientError::CorruptedData("negative transparent policy generation".into())
-            })?,
-        })
-    })
-    .transpose()
+    let (mode, min_reader_version) = conn
+        .query_row(
+            "SELECT applied_mode, min_reader_version FROM tpir_meta WHERE id = 0",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        // Once the table exists, a missing singleton is damage, not the absence of a policy.
+        .ok_or_else(|| {
+            SqliteClientError::CorruptedData("tpir_meta policy row is missing".into())
+        })?;
+    if min_reader_version > TPIR_READER_VERSION {
+        return Err(SqliteClientError::TransparentLedgerIncompatible {
+            required: min_reader_version,
+        });
+    }
+    Ok(Some(DurablePolicy {
+        mode: mode_from_code(mode)?,
+    }))
 }
 
 /// Rejects a handle whose configured mode is weaker than a durably applied private-required
@@ -148,11 +132,10 @@ fn check_not_weaker(
 pub(crate) fn resolve_mode(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
-) -> Result<(TransparentLedgerMode, Option<DurablePolicy>), SqliteClientError> {
+) -> Result<TransparentLedgerMode, SqliteClientError> {
     let mode = configured.ok_or(SqliteClientError::TransparentLedgerModeNotConfigured)?;
-    let durable = durable_policy(conn)?;
-    check_not_weaker(configured, durable)?;
-    Ok((mode, durable))
+    check_not_weaker(configured, durable_policy(conn)?)?;
+    Ok(mode)
 }
 
 /// Checks that the handle may authorize consuming transparent inputs.
@@ -164,7 +147,7 @@ pub(crate) fn check_transparent_authority(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<(), SqliteClientError> {
-    match resolve_mode(conn, configured)?.0 {
+    match resolve_mode(conn, configured)? {
         TransparentLedgerMode::PrivateRequired => {
             Err(SqliteClientError::TransparentAuthorityUnavailable)
         }
@@ -179,7 +162,7 @@ pub(crate) fn public_discovery_permitted(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<bool, SqliteClientError> {
-    Ok(resolve_mode(conn, configured)?.0.retains_public_authority())
+    Ok(resolve_mode(conn, configured)?.retains_public_authority())
 }
 
 /// Rejects recording publicly discovered transparent data unless public discovery is permitted.
@@ -323,209 +306,11 @@ pub(crate) fn snapshot(
         account,
         mode,
         authority,
-        target: None,
-        covered_through: None,
-        settled_through: None,
         authorized,
         last_known,
-        recovered_net: None,
         completion,
         blockers,
-        diagnostics: RecoveryDiagnostics::default(),
     })
-}
-
-/// Reads the watched scripts and the generations a recovery run must capture.
-///
-/// Script enumeration is not yet implemented, so accounts are listed with their current
-/// generations and no scripts; that is not evidence of empty history.
-pub(crate) fn watched_scripts(
-    conn: &rusqlite::Connection,
-    durable: Option<DurablePolicy>,
-) -> Result<WatchedScriptSnapshot<AccountUuid>, SqliteClientError> {
-    let mut accounts = vec![];
-    let mut stmt = conn.prepare(
-        "SELECT a.uuid, IFNULL(s.watch_generation, 0), s.lifecycle, IFNULL(s.quarantined, 0),
-                IFNULL(s.quarantine_epoch, 0)
-         FROM accounts a
-         LEFT JOIN tpir_account_state s ON s.account_id = a.id
-         ORDER BY a.id",
-    )?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        accounts.push(WatchedAccount {
-            account: AccountUuid(row.get(0)?),
-            watch_generation: to_u64(row.get(1)?)?,
-            lifecycle: match row.get::<_, Option<i64>>(2)? {
-                None => AccountLifecycle::LegacyPublic,
-                Some(0) => AccountLifecycle::Candidate,
-                Some(1) => AccountLifecycle::Active,
-                Some(other) => {
-                    return Err(SqliteClientError::CorruptedData(format!(
-                        "unknown transparent ledger lifecycle {other}"
-                    )));
-                }
-            },
-            quarantined: row.get(3)?,
-            quarantine_epoch: to_u64(row.get(4)?)?,
-        });
-    }
-    let scripts = conn
-        .prepare(
-            "SELECT a.uuid, s.script, s.required_from
-             FROM tpir_scripts s
-             JOIN accounts a ON a.id = s.account_id
-             ORDER BY s.id",
-        )?
-        .query_map([], |row| {
-            Ok(WatchedScript {
-                account: AccountUuid(row.get(0)?),
-                script: transparent::address::Script(zcash_script::script::Code(row.get(1)?)),
-                required_from: match row.get::<_, Option<u32>>(2)? {
-                    Some(height) => RecoveryStart::From(height.into()),
-                    None => RecoveryStart::Unknown,
-                },
-            })
-        })?
-        .collect::<Result<_, _>>()?;
-    let mut sources = vec![];
-    let mut stmt = conn.prepare(
-        "SELECT source_id, quarantined, trust_epoch
-         FROM tpir_sources
-         ORDER BY source_id",
-    )?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        sources.push(SourceTrust {
-            source: opaque(row.get(0)?, SourceId::new)?,
-            qualified_revisions: qualified_revisions(conn, &row.get::<_, Vec<u8>>(0)?)?,
-            quarantined: row.get(1)?,
-            trust_epoch: to_u64(row.get(2)?)?,
-        });
-    }
-    Ok(WatchedScriptSnapshot {
-        policy_generation: durable.map_or(0, |p| p.generation),
-        accounts,
-        scripts,
-        sources,
-    })
-}
-
-fn to_u64(value: i64) -> Result<u64, SqliteClientError> {
-    u64::try_from(value)
-        .map_err(|_| SqliteClientError::CorruptedData(format!("negative ledger counter {value}")))
-}
-
-fn to_height(value: i64) -> Result<zcash_protocol::consensus::BlockHeight, SqliteClientError> {
-    u32::try_from(value)
-        .map(Into::into)
-        .map_err(|_| SqliteClientError::CorruptedData(format!("invalid ledger height {value}")))
-}
-
-fn to_hash(bytes: Vec<u8>) -> Result<zcash_primitives::block::BlockHash, SqliteClientError> {
-    zcash_primitives::block::BlockHash::try_from_slice(&bytes)
-        .ok_or_else(|| SqliteClientError::CorruptedData("invalid ledger block hash".into()))
-}
-
-fn opaque<T>(
-    bytes: Vec<u8>,
-    new: impl FnOnce(
-        Vec<u8>,
-    )
-        -> Result<T, zcash_client_backend::data_api::transparent_ledger::OpaqueIdError>,
-) -> Result<T, SqliteClientError> {
-    new(bytes).map_err(|e| SqliteClientError::CorruptedData(format!("invalid ledger id: {e:?}")))
-}
-
-/// Reads the revisions of `source` that passed production qualification.
-fn qualified_revisions(
-    conn: &rusqlite::Connection,
-    source: &[u8],
-) -> Result<Vec<QualifiedRevision>, SqliteClientError> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT revision_id, lineage FROM tpir_qualified_revisions
-         WHERE source_id = ?1
-         ORDER BY lineage",
-    )?;
-    let mut rows = stmt.query([source])?;
-    let mut revisions = vec![];
-    while let Some(row) = rows.next()? {
-        revisions.push(QualifiedRevision {
-            revision: opaque(row.get(0)?, RevisionId::new)?,
-            lineage: Lineage::new(to_u64(row.get(1)?)?).ok_or_else(|| {
-                SqliteClientError::CorruptedData("ledger lineage out of range".into())
-            })?,
-        });
-    }
-    Ok(revisions)
-}
-
-/// Reads every durable pending page with its source revision, captured context, and affected
-/// watched scripts.
-pub(crate) fn pending_pages(
-    conn: &rusqlite::Connection,
-) -> Result<Vec<OutstandingPage>, SqliteClientError> {
-    let mut scripts_stmt = conn.prepare(
-        "SELECT s.script FROM tpir_pending_page_scripts ps
-         JOIN tpir_scripts s ON s.id = ps.script_id
-         WHERE ps.pending_page_id = ?1
-         ORDER BY s.id",
-    )?;
-    let mut stmt = conn.prepare(
-        "SELECT id, source_id, revision_id, lineage, sealed, anchor_height, anchor_hash,
-                page_id, from_height, to_height, lifecycle, policy_generation,
-                target_height, target_hash, source_trust_epoch
-         FROM tpir_pending_pages
-         ORDER BY id",
-    )?;
-    let mut rows = stmt.query([])?;
-    let mut pages = vec![];
-    while let Some(row) = rows.next()? {
-        let id: i64 = row.get(0)?;
-        let scripts = scripts_stmt
-            .query_map([id], |r| {
-                Ok(transparent::address::Script(zcash_script::script::Code(
-                    r.get(0)?,
-                )))
-            })?
-            .collect::<Result<_, _>>()?;
-        pages.push(OutstandingPage {
-            source: SourceRevision {
-                source: opaque(row.get(1)?, SourceId::new)?,
-                revision: opaque(row.get(2)?, RevisionId::new)?,
-                lineage: Lineage::new(to_u64(row.get(3)?)?).ok_or_else(|| {
-                    SqliteClientError::CorruptedData("ledger lineage out of range".into())
-                })?,
-                status: if row.get(4)? {
-                    PublicationStatus::Sealed
-                } else {
-                    PublicationStatus::Provisional
-                },
-                anchor: PublicationAnchor {
-                    height: to_height(row.get(5)?)?,
-                    hash: to_hash(row.get(6)?)?,
-                },
-            },
-            page: PendingPage {
-                page: opaque(row.get(7)?, PageId::new)?,
-                from: to_height(row.get(8)?)?,
-                to: to_height(row.get(9)?)?,
-                scripts,
-            },
-            lifecycle: if row.get::<_, i64>(10)? == 1 {
-                LedgerLifecycle::Active
-            } else {
-                LedgerLifecycle::Candidate
-            },
-            policy_generation: to_u64(row.get(11)?)?,
-            source_trust_epoch: to_u64(row.get(14)?)?,
-            target: ChainPoint {
-                height: to_height(row.get(12)?)?,
-                hash: to_hash(row.get(13)?)?,
-            },
-        });
-    }
-    Ok(pages)
 }
 
 /// Classifies the provenance of an account's unspent transparent outputs: legacy public rows
@@ -557,37 +342,6 @@ fn last_known_source(
     } else {
         LastKnownSource::LegacyPublic
     })
-}
-
-/// Validates a commit's context and rejects it: no ledger state is writable yet. Nothing is
-/// written.
-pub(crate) fn apply_commit(
-    conn: &rusqlite::Connection,
-    configured: Option<TransparentLedgerMode>,
-    commit: &TransparentLedgerCommit<AccountUuid>,
-) -> Result<CommitOutcome, SqliteClientError> {
-    let (mode, durable) = resolve_mode(conn, configured)?;
-    if commit.context.mode != mode {
-        return Ok(CommitOutcome::Rejected(CommitRejection::ModeMismatch));
-    }
-    if durable.map_or(0, |p| p.generation) != commit.context.policy_generation {
-        return Ok(CommitOutcome::Rejected(CommitRejection::StalePolicy));
-    }
-    Ok(CommitOutcome::Rejected(CommitRejection::Unavailable))
-}
-
-/// Validates a promotion request and rejects it: private authority is not yet available.
-/// Nothing is changed.
-pub(crate) fn promote(
-    conn: &rusqlite::Connection,
-    configured: Option<TransparentLedgerMode>,
-    context: &PromotionContext<AccountUuid>,
-) -> Result<PromotionOutcome, SqliteClientError> {
-    let (_, durable) = resolve_mode(conn, configured)?;
-    if durable.map_or(0, |p| p.generation) != context.policy_generation {
-        return Ok(PromotionOutcome::Rejected(PromotionRejection::StalePolicy));
-    }
-    Ok(PromotionOutcome::Rejected(PromotionRejection::Unavailable))
 }
 
 /// Durably applies `mode` for test fixtures. Production policy transitions are not yet

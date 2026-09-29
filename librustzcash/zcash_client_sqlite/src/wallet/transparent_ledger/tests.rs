@@ -395,12 +395,8 @@ mod handles {
             WalletWrite as _,
             testing::{AddressType, single_output_change_strategy},
             transparent_ledger::{
-                AccountLifecycle, ChainPoint, CommitOutcome, CommitRejection, LastKnownSource,
-                LedgerLifecycle, Placed, PromotionContext, PromotionOutcome, PromotionRejection,
-                PublicationAnchor, PublicationStatus, ReceiveEvent, RecoveryBlocker,
-                RecoveryCompletion, RevisionId, SourceId, SourceRevision, TransparentAuthority,
-                TransparentLedgerCommit, TransparentLedgerContext, TransparentLedgerMode,
-                TransparentLedgerRead as _, TransparentLedgerWrite as _,
+                LastKnownSource, RecoveryBlocker, RecoveryCompletion, TransparentAuthority,
+                TransparentLedgerMode, TransparentLedgerRead as _,
             },
             wallet::{
                 ConfirmationsPolicy, TargetHeight,
@@ -415,11 +411,7 @@ mod handles {
     };
     use zcash_keys::address::Address;
     use zcash_primitives::block::BlockHash;
-    use zcash_protocol::{
-        ShieldedPool,
-        consensus::{BlockHeight, Network},
-        value::Zatoshis,
-    };
+    use zcash_protocol::{ShieldedPool, consensus::Network, value::Zatoshis};
     use zip321::{Payment, TransactionRequest};
 
     use super::{State, conn, funded_wallet};
@@ -436,79 +428,6 @@ mod handles {
     };
 
     use TransparentLedgerMode::{PrivateRequired, PrivateShadow, Public};
-
-    fn point() -> ChainPoint {
-        ChainPoint {
-            height: BlockHeight::from(1),
-            hash: BlockHash([0; 32]),
-        }
-    }
-
-    fn commit(
-        mode: TransparentLedgerMode,
-        policy_generation: u64,
-    ) -> TransparentLedgerCommit<AccountUuid> {
-        TransparentLedgerCommit {
-            context: TransparentLedgerContext {
-                mode,
-                policy_generation,
-                target: point(),
-                lifecycle: LedgerLifecycle::Candidate,
-                accounts: vec![],
-                source_trust_epoch: 0,
-            },
-            source: SourceRevision {
-                source: SourceId::new(b"source".to_vec()).unwrap(),
-                revision: RevisionId::new(b"revision".to_vec()).unwrap(),
-                lineage: zcash_client_backend::data_api::transparent_ledger::Lineage::new(0)
-                    .unwrap(),
-                status: PublicationStatus::Provisional,
-                anchor: PublicationAnchor {
-                    height: BlockHeight::from(2),
-                    hash: BlockHash([1; 32]),
-                },
-            },
-            receives: vec![Placed {
-                event: ReceiveEvent {
-                    outpoint: OutPoint::new([5; 32], 0),
-                    script: Default::default(),
-                    value: Zatoshis::const_from_u64(1),
-                    is_coinbase: false,
-                },
-                mined: point(),
-            }],
-            spends: vec![],
-            coverage: vec![],
-            unsupported: vec![],
-            pages: Default::default(),
-        }
-    }
-
-    fn promotion(account: AccountUuid, policy_generation: u64) -> PromotionContext<AccountUuid> {
-        PromotionContext {
-            account,
-            policy_generation,
-            watch_generation: 0,
-            decision_point: point(),
-        }
-    }
-
-    fn ledger_rows(st: &State) -> i64 {
-        conn(st)
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM tpir_account_state)
-                      + (SELECT COUNT(*) FROM tpir_scripts)
-                      + (SELECT COUNT(*) FROM tpir_receive_events)
-                      + (SELECT COUNT(*) FROM tpir_spend_events)
-                      + (SELECT COUNT(*) FROM tpir_event_placements)
-                      + (SELECT COUNT(*) FROM tpir_event_observations)
-                      + (SELECT COUNT(*) FROM tpir_coverage)
-                      + (SELECT COUNT(*) FROM tpir_pending_pages)",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-    }
 
     fn meta(st: &State) -> (i64, i64) {
         conn(st)
@@ -595,14 +514,6 @@ mod handles {
             db.transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN),
             Err(SqliteClientError::TransparentLedgerModeNotConfigured)
         ));
-        assert!(matches!(
-            db.apply_transparent_ledger_commit(commit(Public, 0)),
-            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
-        ));
-        assert!(matches!(
-            db.promote_transparent_ledger_account(promotion(account, 0)),
-            Err(SqliteClientError::TransparentLedgerModeNotConfigured)
-        ));
     }
 
     #[test]
@@ -657,11 +568,6 @@ mod handles {
             assert_eq!(s.last_known, None);
             assert_eq!(s.completion, RecoveryCompletion::NotApplicable);
             assert!(s.blockers.is_empty());
-            assert_eq!(
-                (s.target, s.covered_through, s.settled_through),
-                (None, None, None)
-            );
-            assert_eq!(s.recovered_net, None);
         }
 
         // Private authority is unavailable: the public amount is shown as last-known legacy
@@ -682,7 +588,6 @@ mod handles {
             s.blockers,
             vec![RecoveryBlocker::PrivateRecoveryUnavailable]
         );
-        assert_eq!((s.covered_through, s.recovered_net), (None, None));
     }
 
     #[test]
@@ -805,59 +710,6 @@ mod handles {
     }
 
     #[test]
-    fn commits_and_promotion_are_rejected_without_writes() {
-        let (mut st, _, _) = funded_wallet();
-        let (account, _) = account_taddr(&st);
-        let origins_before: i64 = conn(&st)
-            .query_row("SELECT COUNT(*) FROM tpir_output_origins", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-
-        for mode in [Public, PrivateShadow, PrivateRequired] {
-            set_mode(&mut st, mode);
-            let db = st.wallet_mut().db_mut();
-            let other = if mode == Public {
-                PrivateShadow
-            } else {
-                Public
-            };
-            assert_eq!(
-                db.apply_transparent_ledger_commit(commit(other, 0))
-                    .unwrap(),
-                CommitOutcome::Rejected(CommitRejection::ModeMismatch)
-            );
-            assert_eq!(
-                db.apply_transparent_ledger_commit(commit(mode, 5)).unwrap(),
-                CommitOutcome::Rejected(CommitRejection::StalePolicy)
-            );
-            assert_eq!(
-                db.apply_transparent_ledger_commit(commit(mode, 0)).unwrap(),
-                CommitOutcome::Rejected(CommitRejection::Unavailable)
-            );
-            assert_eq!(
-                db.promote_transparent_ledger_account(promotion(account, 1))
-                    .unwrap(),
-                PromotionOutcome::Rejected(PromotionRejection::StalePolicy)
-            );
-            assert_eq!(
-                db.promote_transparent_ledger_account(promotion(account, 0))
-                    .unwrap(),
-                PromotionOutcome::Rejected(PromotionRejection::Unavailable)
-            );
-        }
-
-        assert_eq!(ledger_rows(&st), 0);
-        assert_eq!(meta(&st), (0, 0));
-        let origins_after: i64 = conn(&st)
-            .query_row("SELECT COUNT(*) FROM tpir_output_origins", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(origins_after, origins_before);
-    }
-
-    #[test]
     fn durable_private_policy_is_never_weakened() {
         let (mut st, _, funded) = funded_wallet();
         let (account, _) = account_taddr(&st);
@@ -883,12 +735,6 @@ mod handles {
             for error in selector_errors(&st, &funded) {
                 assert!(conflict(&error.unwrap()));
             }
-            assert!(conflict(
-                &st.wallet_mut()
-                    .db_mut()
-                    .apply_transparent_ledger_commit(commit(mode, 1))
-                    .unwrap_err()
-            ));
         }
         // An unconfigured handle is blocked too.
         assert!(matches!(
@@ -929,71 +775,6 @@ mod handles {
         for error in selector_errors(&st, &funded) {
             assert!(incompatible(&error.unwrap()));
         }
-    }
-
-    #[test]
-    fn watched_scripts_report_generations_without_fabricated_scripts() {
-        let (st, _, _) = funded_wallet();
-        let (account, _) = account_taddr(&st);
-        let snapshot = st
-            .wallet()
-            .db()
-            .transparent_ledger_watched_scripts()
-            .unwrap();
-        assert_eq!(snapshot.policy_generation, 0);
-        assert_eq!(snapshot.accounts.len(), 1);
-        assert_eq!(snapshot.accounts[0].account, account);
-        assert_eq!(snapshot.accounts[0].watch_generation, 0);
-        assert_eq!(
-            snapshot.accounts[0].lifecycle,
-            AccountLifecycle::LegacyPublic
-        );
-        assert_eq!(
-            snapshot.accounts[0].lifecycle.commit_destination(),
-            LedgerLifecycle::Candidate
-        );
-        assert!(!snapshot.accounts[0].quarantined);
-        assert!(snapshot.scripts.is_empty());
-        assert!(snapshot.sources.is_empty());
-
-        conn(&st)
-            .execute_batch(
-                "INSERT INTO tpir_sources (source_id, accepted_lineage, accepted_revision_id,
-                     accepted_sealed, accepted_anchor_height, accepted_anchor_hash, quarantined,
-                     trust_epoch)
-                 VALUES (X'0A', 4, X'0B', 1, 30, zeroblob(32), 1, 2);
-                 INSERT INTO tpir_qualified_revisions (source_id, revision_id, lineage)
-                 VALUES (X'0A', X'0C', 3), (X'0A', X'0D', 1);",
-            )
-            .unwrap();
-        let sources = st
-            .wallet()
-            .db()
-            .transparent_ledger_watched_scripts()
-            .unwrap()
-            .sources;
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].source.as_bytes(), &[0x0a]);
-        assert!(sources[0].quarantined);
-        assert_eq!(sources[0].trust_epoch, 2);
-        // Qualification binds to each verified revision, not to the source; qualifying a later
-        // revision leaves the earlier one qualified, and the newer accepted revision is not.
-        let qualified = &sources[0].qualified_revisions;
-        assert_eq!(qualified.len(), 2);
-        assert_eq!(
-            (
-                qualified[0].revision.as_bytes(),
-                qualified[0].lineage.value()
-            ),
-            (&[0x0d][..], 1)
-        );
-        assert_eq!(
-            (
-                qualified[1].revision.as_bytes(),
-                qualified[1].lineage.value()
-            ),
-            (&[0x0c][..], 3)
-        );
     }
 
     #[test]
@@ -1085,43 +866,6 @@ mod handles {
         for error in selector_errors(&st, &funded) {
             assert!(matches!(error, Some(SqliteClientError::CorruptedData(_))));
         }
-    }
-
-    #[test]
-    fn pending_pages_are_enumerable_after_restart() {
-        let (mut st, _, _) = funded_wallet();
-        conn(&st)
-            .execute_batch(
-                "INSERT INTO tpir_scripts (id, account_id, script, key_scope, required_from,
-                     watch_generation)
-                 VALUES (1, 1, X'76A9', 0, NULL, 1);
-                 INSERT INTO tpir_pending_pages (id, source_id, revision_id, lineage, sealed,
-                     anchor_height, anchor_hash, source_trust_epoch, page_id, from_height,
-                     to_height, lifecycle, policy_generation, target_height, target_hash)
-                 VALUES (1, X'01', X'02', 3, 1, 20, zeroblob(32), 6, X'03', 5, 9, 0, 0, 18,
-                     zeroblob(32));
-                 INSERT INTO tpir_pending_page_scripts (pending_page_id, script_id) VALUES (1, 1);",
-            )
-            .unwrap();
-        // Reopening the handle loses nothing: pages are read from durable state.
-        set_mode(&mut st, PrivateShadow);
-        let pages = st.wallet().db().transparent_ledger_pending_pages().unwrap();
-        assert_eq!(pages.len(), 1);
-        let page = &pages[0];
-        assert_eq!(page.source.source.as_bytes(), &[1]);
-        assert_eq!(page.source.revision.as_bytes(), &[2]);
-        assert_eq!(page.source.lineage.value(), 3);
-        assert_eq!(page.source.status, PublicationStatus::Sealed);
-        assert_eq!(page.source.anchor.height, BlockHeight::from(20));
-        assert_eq!(page.page.page.as_bytes(), &[3]);
-        assert_eq!(
-            (page.page.from, page.page.to),
-            (BlockHeight::from(5), BlockHeight::from(9))
-        );
-        assert_eq!(page.page.scripts.len(), 1);
-        assert_eq!(page.lifecycle, LedgerLifecycle::Candidate);
-        assert_eq!(page.target.height, BlockHeight::from(18));
-        assert_eq!(page.source_trust_epoch, 6);
     }
 
     #[test]
