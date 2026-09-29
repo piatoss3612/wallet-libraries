@@ -32,11 +32,15 @@ workspace.
   - the chain tip is unknown; or
   - the build cannot read transparent state.
 - Durable policy transitions via `apply_transparent_policy`. A mode change
-  increments `policy_generation` by one in the same SQLite transaction;
-  same-mode reapplication does not. Applying `PrivateRequired` raises
+  increments `policy_generation` by one in the same SQLite transaction and
+  restamps outstanding `tx_retrieval_queue` rows to that generation so
+  still-required work remains dispatchable under modes that retain public
+  authority; same-mode reapplication does not. Applying `PrivateRequired` raises
   `min_reader_version` to 2. `check_transparent_policy_generation` is the
   commit check an older open handle must fail. Pending withheld follow-on
-  details are exposed by `pending_private_transparent_details`.
+  details are exposed by `pending_private_transparent_details`. Mixed
+  (`route = 2`) details are reported only while the transaction has no stored
+  raw payload.
 - `SqliteClientError` variants:
   - `TransparentLedgerModeNotConfigured`;
   - `TransparentLedgerPolicyConflict`: the handle's mode is weaker than a
@@ -57,13 +61,15 @@ workspace.
   - storing any transaction with transparent inputs, in every build;
   - `put_received_transparent_utxo`;
   - the transparent spend-detection and address-history requests of
-    `transaction_data_requests`.
+    `transaction_data_requests`;
+  - `transaction_status_work` and `transaction_status_work_for`.
 - Under `PrivateRequired`, set on the handle or durably applied, public
   transparent discovery stops. Public enhancement and status dispatch require
   a matching `policy_generation` and a mode that retains public authority.
   Parent-transaction retrieval and mixed Enhance results are withheld from
-  public requests and reported as pending private details; financial rows are
-  not deleted. Status obligations become `TransactionStatusWork::Private`.
+  public requests and reported as pending private details while they remain
+  unresolved (mixed `route = 2` rows with stored raw are omitted); financial
+  rows are not deleted. Status obligations become `TransactionStatusWork::Private`.
 - Transparent authority is unavailable under `PrivateRequired`, while the chain
   tip is unknown, and in builds without `transparent-inputs`. While it is
   unavailable:

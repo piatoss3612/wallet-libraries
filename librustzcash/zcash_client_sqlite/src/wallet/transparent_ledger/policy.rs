@@ -88,6 +88,18 @@ pub(crate) fn apply_transparent_policy(
                 "tpir_meta policy row is missing".into(),
             ));
         }
+        // Keep still-required retrieval obligations on the new generation. Leaving the old
+        // stamp would hide them from public dispatch after a transition that still retains
+        // public authority (Public → PrivateShadow). Under PrivateRequired, matching
+        // generation does not restore public follow-on: authority is absent.
+        conn.execute(
+            "UPDATE tx_retrieval_queue SET policy_generation = :generation",
+            rusqlite::named_params![
+                ":generation": i64::try_from(generation).map_err(|_| {
+                    SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+                })?,
+            ],
+        )?;
         Ok(AppliedTransparentPolicy { mode, generation })
     };
 
@@ -129,7 +141,7 @@ pub(crate) fn pending_private_transparent_details(
     let mut mixed = conn.prepare_cached(
         "SELECT t.txid FROM ironwood_enhance_routing r
          JOIN transactions t ON t.id_tx = r.transaction_id
-         WHERE r.route = 2
+         WHERE r.route = 2 AND t.raw IS NULL
          ORDER BY t.txid",
     )?;
     for txid in mixed.query_map([], |row| row.get::<_, [u8; 32]>(0))? {

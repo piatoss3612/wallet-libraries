@@ -512,6 +512,10 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Selects status disclosure policy. Discard outstanding work snapshots when changing it.
     /// This is not persisted; each reopened handle must select a mode explicitly.
+    /// SQLite status dispatch also requires [`Self::set_transparent_ledger_mode`]: an
+    /// unconfigured ledger mode fails closed rather than assuming public authority, including
+    /// for shielded-only wallets. Under a required-private ledger policy every status
+    /// obligation is private regardless of this status mode.
     pub fn set_status_mode(&mut self, mode: TransactionStatusMode) {
         self.status_mode = Some(mode);
     }

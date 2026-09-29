@@ -1947,6 +1947,22 @@ fn has_transparent_under_private_required_keeps_financial_facts() {
             .any(|w| matches!(w, TransactionEnhancementWork::Public(r) if r.txid() == txid))
     );
 
+    // Stored full data ends the pending mixed detail; the sticky route remains.
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET raw = x'00' WHERE id_tx = ?1",
+            [tx_ref.0],
+        )
+        .unwrap();
+    assert!(
+        !st.wallet()
+            .db()
+            .pending_private_transparent_details()
+            .unwrap()
+            .contains(&PrivateTransparentDetail::MixedTransaction { txid })
+    );
+
     // A later status observation does not clear the marker.
     st.wallet_mut()
         .db_mut()

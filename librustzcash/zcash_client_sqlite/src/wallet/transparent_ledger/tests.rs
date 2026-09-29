@@ -1151,7 +1151,7 @@ mod handles {
     }
 
     #[test]
-    fn stale_generation_is_not_dispatched_after_public_to_private_shadow() {
+    fn stale_generation_is_restamped_after_public_to_private_shadow() {
         use zcash_client_backend::data_api::{
             PublicTransactionEnhancementRequest,
             enhance_pir::{EnhancePirRead, TransactionEnhancementWork},
@@ -1174,7 +1174,7 @@ mod handles {
             .db_mut()
             .set_enhancement_mode(zcash_client_backend::data_api::enhance_pir::EnhancementMode::Standard);
         let work = st.wallet().transaction_enhancement_work().unwrap();
-        assert!(!work.contains(&TransactionEnhancementWork::Public(
+        assert!(work.contains(&TransactionEnhancementWork::Public(
             PublicTransactionEnhancementRequest::new(stale)
         )));
         assert!(work.contains(&TransactionEnhancementWork::Public(

@@ -20,7 +20,9 @@ workspace.
 - `AppliedTransparentPolicy`, `PrivateTransparentDetail`, and
   `TransparentLedgerWrite::apply_transparent_policy`. `TransparentLedgerRead`
   gains `applied_transparent_policy`, `check_transparent_policy_generation`, and
-  `pending_private_transparent_details`.
+  `pending_private_transparent_details`. Mixed `PrivateTransparentDetail`s
+  describe unresolved transactions (no stored raw), not sticky markers after
+  payload completion.
 - `EnhancePirStoreResult::PrivateDetailsUnsupported` for mixed transactions
   whose transparent details cannot be recovered over a public request under
   `PrivateRequired`.

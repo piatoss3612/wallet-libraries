@@ -74,8 +74,9 @@ pub enum PrivateTransparentDetail {
         txid: TxId,
     },
     /// A mixed transaction whose Enhance response indicated transparent data; public LWD
-    /// enhancement is forbidden and the private-details marker remains until an explicit
-    /// policy change restores public authority for newly stamped work.
+    /// enhancement is forbidden while the transaction remains unresolved (no stored raw).
+    /// The sticky route-2 marker is not itself completion; storing full data, or restoring
+    /// public authority for newly stamped work, ends the pending private detail.
     MixedTransaction {
         /// The mixed transaction.
         txid: TxId,
