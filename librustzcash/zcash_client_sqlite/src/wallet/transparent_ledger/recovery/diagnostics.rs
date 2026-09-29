@@ -14,17 +14,31 @@ fn merge(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
     merged
 }
 
-/// Returns `account`'s candidate diagnostics. The caller provides the read snapshot.
+/// An account's candidate recovery progress at the local target, without its event lists.
 #[cfg(feature = "transparent-inputs")]
-pub(crate) fn candidate_recovery<P: consensus::Parameters>(
+pub(super) struct RecoveryStatus {
+    /// The highest contiguously scanned local block.
+    pub(super) target: Option<ChainPoint>,
+    /// The highest height through which every watched address is continuously covered from its
+    /// required start.
+    pub(super) covered_through: Option<BlockHeight>,
+    /// Why recovery is incomplete; empty when complete through the target.
+    pub(super) blockers: Vec<CandidateBlocker>,
+    pub(super) watched_addresses: usize,
+    pub(super) pending_pages: usize,
+    pub(super) unresolved_spends: usize,
+    /// The unverified sum of mined receives no mined spend consumes; `None` above `MAX_MONEY`.
+    pub(super) recovered_unverified: Option<Zatoshis>,
+}
+
+/// Returns `watch`'s account recovery progress at the local target. The caller provides the
+/// read snapshot.
+#[cfg(feature = "transparent-inputs")]
+fn recovery_status(
     conn: &rusqlite::Connection,
-    params: &P,
     gap_limits: &GapLimits,
-    configured: Option<TransparentLedgerMode>,
-    account: AccountUuid,
-) -> Result<CandidateRecovery<AccountUuid>, SqliteClientError> {
-    resolve_mode(conn, configured)?;
-    let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    watch: &Watch,
+) -> Result<RecoveryStatus, SqliteClientError> {
     let account_ref = watch.account.internal_id();
     let target = local_target(conn)?;
 
@@ -87,6 +101,94 @@ pub(crate) fn candidate_recovery<P: consensus::Parameters>(
         |row| row.get::<_, i64>(0),
     )? as usize;
 
+    // Distinct outpoints consumed by a mined spend but not recovered as a mined receive.
+    let unresolved_spends: usize = conn.query_row(
+        "SELECT COUNT(*) FROM (
+             SELECT DISTINCT s.prevout_txid, s.prevout_output_index
+             FROM tpir_spend_events s
+             WHERE s.account_id = :account_id AND s.mined_height IS NOT NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM tpir_receive_events r
+                 WHERE r.account_id = :account_id AND r.mined_height IS NOT NULL
+                 AND r.txid = s.prevout_txid AND r.output_index = s.prevout_output_index
+             )
+         )",
+        named_params![":account_id": account_ref.0],
+        |row| row.get::<_, i64>(0),
+    )? as usize;
+
+    // Partially recovered receives can legitimately exceed any real balance, so a sum above
+    // `MAX_MONEY` is reported as unrepresentable rather than as an error.
+    let mut stmt = conn.prepare_cached(
+        "SELECT r.value_zat FROM tpir_receive_events r
+         WHERE r.account_id = :account_id AND r.mined_height IS NOT NULL
+         AND NOT EXISTS (
+             SELECT 1 FROM tpir_spend_events s
+             WHERE s.account_id = :account_id AND s.mined_height IS NOT NULL
+             AND s.prevout_txid = r.txid AND s.prevout_output_index = r.output_index
+         )",
+    )?;
+    let mut recovered_unverified = Some(Zatoshis::ZERO);
+    let mut rows = stmt.query(named_params![":account_id": account_ref.0])?;
+    while let Some(row) = rows.next()? {
+        let value = Zatoshis::from_nonnegative_i64(row.get(0)?)
+            .map_err(|_| SqliteClientError::CorruptedData("invalid receive value".into()))?;
+        recovered_unverified = recovered_unverified.and_then(|sum| sum + value);
+    }
+
+    let window_underivable = watch
+        .window_needs(conn, gap_limits)?
+        .iter()
+        .zip(watch.derivable)
+        .any(|(needed, derivable)| needed.is_some() && !derivable);
+
+    let mut blockers = vec![];
+    match target {
+        None => blockers.push(CandidateBlocker::ChainUnknown),
+        Some(target) => {
+            if covered_through.is_none_or(|c| c < u32::from(target.height)) {
+                blockers.push(CandidateBlocker::IncompleteCoverage);
+            }
+        }
+    }
+    if pending_pages > 0 {
+        blockers.push(CandidateBlocker::PendingPages);
+    }
+    if unresolved_spends > 0 {
+        blockers.push(CandidateBlocker::UnresolvedSpends);
+    }
+    if unsupported_uncovered {
+        blockers.push(CandidateBlocker::UnsupportedRanges);
+    }
+    if window_underivable {
+        blockers.push(CandidateBlocker::WindowUnderivable);
+    }
+
+    Ok(RecoveryStatus {
+        target,
+        covered_through: covered_through.map(height),
+        blockers,
+        watched_addresses: watch.addresses.len(),
+        pending_pages,
+        unresolved_spends,
+        recovered_unverified,
+    })
+}
+
+/// Returns `account`'s candidate diagnostics. The caller provides the read snapshot.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn candidate_recovery<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    params: &P,
+    gap_limits: &GapLimits,
+    configured: Option<TransparentLedgerMode>,
+    account: AccountUuid,
+) -> Result<CandidateRecovery<AccountUuid>, SqliteClientError> {
+    resolve_mode(conn, configured)?;
+    let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    let account_ref = watch.account.internal_id();
+    let status = recovery_status(conn, gap_limits, &watch)?;
+
     let mut stmt = conn.prepare_cached(
         "SELECT txid, output_index, script, value_zat, coinbase, mined_height
          FROM tpir_receive_events
@@ -125,66 +227,26 @@ pub(crate) fn candidate_recovery<P: consensus::Parameters>(
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    let received: BTreeSet<_> = receives
-        .iter()
-        .map(|r| (*r.outpoint.hash(), r.outpoint.n()))
-        .collect();
     let spent: BTreeSet<_> = spends
         .iter()
         .map(|s| (*s.prevout.hash(), s.prevout.n()))
         .collect();
-    let unresolved_spends = spent.difference(&received).count();
-    let unspent_receives: Vec<&ReceiveEvent> = receives
+    let unspent = receives
         .iter()
         .filter(|r| !spent.contains(&(*r.outpoint.hash(), r.outpoint.n())))
+        .map(|r| r.outpoint.clone())
         .collect();
-    // Partially recovered receives can legitimately exceed any real balance, so a sum above
-    // `MAX_MONEY` is reported as unrepresentable rather than as an error.
-    let recovered_unverified = unspent_receives
-        .iter()
-        .try_fold(Zatoshis::ZERO, |sum, r| sum + r.value);
-
-    let window_underivable = watch
-        .window_needs(conn, gap_limits)?
-        .iter()
-        .zip(watch.derivable)
-        .any(|(needed, derivable)| needed.is_some() && !derivable);
-
-    let mut blockers = vec![];
-    match target {
-        None => blockers.push(CandidateBlocker::ChainUnknown),
-        Some(target) => {
-            if covered_through.is_none_or(|c| c < u32::from(target.height)) {
-                blockers.push(CandidateBlocker::IncompleteCoverage);
-            }
-        }
-    }
-    if pending_pages > 0 {
-        blockers.push(CandidateBlocker::PendingPages);
-    }
-    if unresolved_spends > 0 {
-        blockers.push(CandidateBlocker::UnresolvedSpends);
-    }
-    if unsupported_uncovered {
-        blockers.push(CandidateBlocker::UnsupportedRanges);
-    }
-    if window_underivable {
-        blockers.push(CandidateBlocker::WindowUnderivable);
-    }
 
     Ok(CandidateRecovery {
         account,
-        target,
-        covered_through: covered_through.map(height),
-        blockers,
-        watched_addresses: watch.addresses.len(),
-        pending_pages,
-        unresolved_spends,
-        unspent: unspent_receives
-            .iter()
-            .map(|r| r.outpoint.clone())
-            .collect(),
-        recovered_unverified,
+        target: status.target,
+        covered_through: status.covered_through,
+        blockers: status.blockers,
+        watched_addresses: status.watched_addresses,
+        pending_pages: status.pending_pages,
+        unresolved_spends: status.unresolved_spends,
+        unspent,
+        recovered_unverified: status.recovered_unverified,
         receives,
         spends,
     })

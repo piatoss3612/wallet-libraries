@@ -680,7 +680,7 @@ pub(crate) fn reserve_next_n_addresses<P: consensus::Parameters>(
 /// [`WalletWrite::get_next_available_address`]: zcash_client_backend::data_api::WalletWrite::get_next_available_address
 /// [`WalletWrite::get_address_for_index`]: zcash_client_backend::data_api::WalletWrite::get_address_for_index
 pub(crate) fn generate_address_range<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     account_id: AccountRef,
     key_scope: TransparentKeyScope,
@@ -706,7 +706,7 @@ pub(crate) fn generate_address_range<P: consensus::Parameters>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_address_range_internal<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     account_id: AccountRef,
     account_uivk: &UnifiedIncomingViewingKey,
@@ -730,7 +730,7 @@ pub(crate) fn generate_address_range_internal<P: consensus::Parameters>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn store_address_range<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     account_id: AccountRef,
     key_scope: TransparentKeyScope,
@@ -891,7 +891,7 @@ pub(crate) fn store_address_range<P: consensus::Parameters>(
 /// [`WalletWrite::get_next_available_address`]: zcash_client_backend::data_api::WalletWrite::get_next_available_address
 /// [`WalletWrite::get_address_for_index`]: zcash_client_backend::data_api::WalletWrite::get_address_for_index
 pub(crate) fn generate_gap_addresses<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
     account_id: AccountRef,
@@ -921,7 +921,7 @@ pub(crate) fn generate_gap_addresses<P: consensus::Parameters>(
 /// Finds the wallet addresses that are involved with the given transaction, and regenerates the gap
 /// limit worth of addresses as appropriate for each key scope.
 pub(crate) fn update_gap_limits<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
     txid: TxId,
@@ -2077,7 +2077,7 @@ pub(crate) fn add_transparent_account_balances(
 ///
 /// Returns `true` if the UTXO was known to the wallet.
 pub(crate) fn mark_transparent_utxo_spent(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     spent_in_tx: TxRef,
     outpoint: &OutPoint,
     origin: Option<ProjectionOrigin>,
@@ -2779,7 +2779,7 @@ pub(crate) fn find_account_uuid_for_transparent_address<P: consensus::Parameters
 /// transaction we created, that we do not yet know to have been mined.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put_transparent_output<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
     output: &WalletTransparentOutput<AccountUuid>,
