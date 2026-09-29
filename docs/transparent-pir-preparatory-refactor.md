@@ -1,9 +1,9 @@
 # Preparatory refactor for a transparent PIR ledger
 
 Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
-its Vizor half is pending. Phase 2's wallet-libraries half is in review (#64),
-with Phase 3's stacked on it. The Vizor halves of Phases 2–3 and all of
-Phases 4–6 remain to be implemented and qualified. Production transparent
+its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64), and
+Phase 3's is in review. The Vizor halves of Phases 2–3 and all of Phases 4–6
+remain to be implemented and qualified. Production transparent
 authority stays public during preparation.
 
 ## Objective and fixed boundaries
