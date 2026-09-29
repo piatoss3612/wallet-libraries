@@ -2,6 +2,7 @@
 
 use std::borrow::BorrowMut;
 
+use crate::wallet;
 use rusqlite::{Connection, params};
 use zakura_swap_receiving::RefundMemo;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -34,6 +35,50 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         account: AccountUuid,
     ) -> Result<Vec<RecoveredRefund>, Error> {
         self.transactionally(|db| db.recover_swap_refund_memos(account))
+    }
+
+    /// Claims due provider lookups for authenticated refund records. Call at sync
+    /// time, including when no new blocks arrive. The persisted retry time also
+    /// bounds failed requests across restarts. Unknown responses leave watches active.
+    /// Applications pass a Unix timestamp and perform network I/O after this returns.
+    pub fn take_swap_refund_status_checks(
+        &mut self,
+        account: AccountUuid,
+        now: i64,
+    ) -> Result<Vec<(KeyId, String)>, Error> {
+        if now < 0 {
+            return Err(super::corrupt("invalid provider-check time"));
+        }
+        self.transactionally(|db| {
+            let (id, _) = account_key(db.conn.0, &db.params, account)?;
+            let mut stmt = db.conn.0.prepare_cached(
+                "SELECT k.key_index,w.operation_id FROM ironwood_swap_refund_watches w
+                 JOIN ironwood_receiving_keys k ON k.id=w.receiving_key_id
+                 JOIN ironwood_swap_scan_uses s ON s.receiving_key_id=w.receiving_key_id
+                    AND s.operation_id=w.operation_id
+                 WHERE k.account_id=?1 AND s.scan_through IS NULL AND w.next_check_at<=?2",
+            )?;
+            let rows = stmt
+                .query_map(params![id.0, now], |r| {
+                    Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let next = now
+                .checked_add(60)
+                .ok_or_else(|| super::corrupt("provider-check time overflow"))?;
+            let mut result = Vec::new();
+            for (index, operation) in rows {
+                let key = KeyId::new(Purpose::Refund, decode_index(index)?);
+                let key_ref = super::payments::key_ref(db.conn.0, account, key)?;
+                db.conn.0.execute(
+                    "UPDATE ironwood_swap_refund_watches SET next_check_at=?3
+                    WHERE receiving_key_id=?1 AND operation_id=?2",
+                    params![key_ref, operation, next],
+                )?;
+                result.push((key, operation));
+            }
+            Ok(result)
+        })
     }
 
     /// Ensures `count` incoming keys beyond the highest reserved or paid index.
@@ -75,6 +120,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
+        let restored_through = wallet::fully_scanned_height(self.conn.0)?;
         let mut recovered = Vec::new();
         for (bytes, height) in records {
             // SQLite omits trailing zero padding when storing MemoBytes.
@@ -99,6 +145,29 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                     key_id,
                     height.into(),
                     true,
+                )?;
+            }
+            // Seed restoration has no local activity record. Persist its provider
+            // identity and activate future scanning before returning the new key.
+            if let Some(scanned) = restored_through {
+                let id = super::payments::key_ref(self.conn.0, account, key_id)?;
+                let local: bool = self.conn.0.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM
+                    ironwood_swap_scan_uses WHERE receiving_key_id=?1 AND operation_id=?2)",
+                    params![id, memo.deposit_address()],
+                    |r| r.get(0),
+                )?;
+                let initial = (!local).then_some(u32::from(scanned));
+                self.conn.0.execute(
+                    "INSERT OR IGNORE INTO ironwood_swap_refund_watches
+                    (receiving_key_id,operation_id,initial_height) VALUES(?1,?2,?3)",
+                    params![id, memo.deposit_address(), initial],
+                )?;
+                // Never reset a locally observed terminal deadline on another scan.
+                self.conn.0.execute(
+                    "INSERT OR IGNORE INTO ironwood_swap_scan_uses
+                    (receiving_key_id,operation_id,scan_from,scan_through) VALUES(?1,?2,?3,NULL)",
+                    params![id, memo.deposit_address(), height],
                 )?;
             }
             recovered.push(RecoveredRefund {

@@ -1965,3 +1965,71 @@ pub(super) const TABLE_IRONWOOD_SWAP_DIRECTORY_CHECKS: &str = "CREATE TABLE iron
             height INTEGER NOT NULL CHECK (height BETWEEN 0 AND 4294967295),
             block_hash BLOB NOT NULL CHECK (length(block_hash) = 32)
         )";
+
+#[cfg(test)]
+pub(super) const TABLE_IRONWOOD_SWAP_SCAN_USES: &str = "CREATE TABLE ironwood_swap_scan_uses (
+            receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+            operation_id TEXT NOT NULL,
+            scan_from INTEGER NOT NULL CHECK(scan_from BETWEEN 0 AND 4294967295),
+            scan_through INTEGER CHECK(scan_through BETWEEN 0 AND 4294967295),
+            PRIMARY KEY(receiving_key_id, operation_id)
+        )";
+
+#[cfg(test)]
+pub(super) const TABLE_IRONWOOD_SWAP_RECOVERY_TARGETS: &str = "CREATE TABLE ironwood_swap_recovery_targets (
+            receiving_key_id INTEGER PRIMARY KEY REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+            height INTEGER NOT NULL CHECK(height BETWEEN 0 AND 4294967295),
+            block_hash BLOB NOT NULL CHECK(length(block_hash) = 32)
+        )";
+
+#[cfg(test)]
+pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_USED: &str = "CREATE TABLE ironwood_swap_receive_used (
+            receiving_key_id INTEGER PRIMARY KEY REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE
+        )";
+
+#[cfg(test)]
+pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_RESERVATIONS: &str = "CREATE TABLE ironwood_swap_receive_reservations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL,
+            started INTEGER NOT NULL DEFAULT 0 CHECK(started IN (0,1)),
+            legacy_unknown INTEGER NOT NULL DEFAULT 0 CHECK(legacy_unknown IN (0,1)),
+            closed_at INTEGER
+        )";
+
+#[cfg(test)]
+pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_QUOTES: &str = "CREATE TABLE ironwood_swap_receive_quotes (
+            request_id TEXT PRIMARY KEY,
+            reservation_id INTEGER NOT NULL REFERENCES ironwood_swap_receive_reservations(id) ON DELETE CASCADE,
+            requested_at INTEGER NOT NULL,
+            operation_id TEXT,
+            deposit_memo TEXT,
+            deadline INTEGER,
+            status TEXT,
+            funded INTEGER NOT NULL DEFAULT 0 CHECK(funded IN (0,1)),
+            checked_at INTEGER,
+            rejected INTEGER NOT NULL DEFAULT 0 CHECK(rejected IN (0,1))
+        )";
+
+#[cfg(test)]
+pub(super) const INDEX_ONE_OPEN_SWAP_RECEIVE_RESERVATION: &str = "CREATE UNIQUE INDEX one_open_swap_receive_reservation ON ironwood_swap_receive_reservations(receiving_key_id)
+            WHERE closed_at IS NULL";
+
+#[cfg(test)]
+pub(super) const INDEX_SWAP_RECEIVE_QUOTE_OPERATION: &str = "CREATE INDEX swap_receive_quote_operation ON ironwood_swap_receive_quotes(operation_id)";
+
+#[cfg(test)]
+pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_CHECKS: &str = "CREATE TABLE ironwood_swap_receive_checks (
+   receiving_key_id INTEGER PRIMARY KEY REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+   height INTEGER NOT NULL CHECK(height BETWEEN 0 AND 4294967295),
+   block_hash BLOB NOT NULL CHECK(length(block_hash)=32)
+  )";
+
+#[cfg(test)]
+pub(super) const TABLE_IRONWOOD_SWAP_REFUND_WATCHES: &str = "CREATE TABLE ironwood_swap_refund_watches (
+            receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
+            operation_id TEXT NOT NULL,
+            initial_height INTEGER CHECK(initial_height BETWEEN 0 AND 4294967295),
+            next_check_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(receiving_key_id,operation_id)
+        )";

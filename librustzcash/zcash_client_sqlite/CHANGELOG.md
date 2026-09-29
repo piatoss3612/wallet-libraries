@@ -44,7 +44,9 @@ workspace.
   Ironwood spend history is released after memo, lookahead and payment recovery
   completes. Other pools keep ordinary pruning. Missing spend history queues
   the account's public compact-block recovery interval after note inclusion is
-  verified, without substituting public address discovery for PIR.
+  verified, without substituting public address discovery for PIR. Funding memos
+  also restore provider-status polling and active refund watches. Restored refunds
+  check existing history before waiting for terminal status and its scan deadline.
 - The following now require an explicitly configured transparent ledger mode;
   they never default to public authority:
   - transparent input selection;

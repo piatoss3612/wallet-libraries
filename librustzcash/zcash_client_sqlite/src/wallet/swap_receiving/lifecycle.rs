@@ -1,4 +1,4 @@
-//! Only locally persisted operations enable temporary compact trial decryption.
+//! Persisted local and restored operations enable temporary compact trial decryption.
 //! Registry entries and note ownership remain available for PIR and spending.
 use super::{Error, KeyId, corrupt, payments::key_ref};
 use crate::{AccountUuid, WalletDb, wallet};
@@ -94,8 +94,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 
     /// Saves one closeout target once a local operation's grace height is scanned.
-    /// Restored and lookahead keys have no local operation and target the first
-    /// accepted restore tip. A pending operation uses local scanning until terminal.
+    /// Restored refunds first check the accepted restore tip and keep scanning
+    /// while pending. Lookahead keys target only their first accepted restore tip.
     /// Reorgs remove invalid targets; retries and restarts preserve canonical targets.
     pub fn prepare_swap_recovery_target(
         &mut self,
@@ -105,6 +105,27 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     ) -> Result<Option<ChainAnchor>, Error> {
         self.transactionally(|db| {
             let id = key_ref(db.conn.0, account, key)?;
+            // A restored pending swap may already have a payment. Check the
+            // history present at restoration before waiting for terminal closeout.
+            let initial: Option<u32> = db.conn.0.query_row("SELECT MAX(initial_height)
+                FROM ironwood_swap_refund_watches WHERE receiving_key_id=?1", [id], |r| r.get(0))?;
+            if let Some(initial) = initial {
+                let checked = db.swap_directory_check(account,key)?;
+                if checked.is_none_or(|c| u32::from(c.height)<initial) {
+                    let height = BlockHeight::from(initial);
+                    if height > through.height { return Ok(None); }
+                    let hash = wallet::get_block_hash(db.conn.0,height)?
+                        .ok_or_else(|| corrupt("restore target has not been scanned"))?;
+                    db.conn.0.execute("INSERT INTO ironwood_swap_recovery_targets(receiving_key_id,height,block_hash)
+                        VALUES(?1,?2,?3) ON CONFLICT(receiving_key_id) DO UPDATE SET height=excluded.height,block_hash=excluded.block_hash",
+                        params![id,initial,hash.0])?;
+                    return Ok(Some(ChainAnchor {height,hash:hash.0}));
+                }
+                // Once historical discovery is complete, only the operation's
+                // terminal deadline may serve as its final recovery target.
+                db.conn.0.execute("DELETE FROM ironwood_swap_recovery_targets
+                    WHERE receiving_key_id=?1 AND height<=?2", params![id,initial])?;
+            }
             if let Some(saved) = db.swap_recovery_target(account,key)? { return Ok(Some(saved)); }
             let (count,pending,end): (u32,u32,Option<u32>) = db.conn.0.query_row("SELECT COUNT(*),COUNT(*)-COUNT(scan_through),MAX(scan_through) FROM ironwood_swap_scan_uses WHERE receiving_key_id=?1", [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
             if pending > 0 { return Ok(None); }
