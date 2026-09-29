@@ -31,9 +31,9 @@ use {
 };
 
 pub(crate) use policy::{
-    applied_transparent_policy, apply_transparent_policy, capture_policy_generation,
-    check_transparent_policy_generation, ensure_policy_generation,
-    pending_private_transparent_details, retains_public_authority,
+    LEGACY_RETRIEVAL_GATE_SQL, applied_transparent_policy, apply_transparent_policy,
+    capture_policy_generation, check_transparent_policy_generation, ensure_legacy_retrieval_gate,
+    ensure_policy_generation, pending_private_transparent_details, retains_public_authority,
 };
 
 fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError> {

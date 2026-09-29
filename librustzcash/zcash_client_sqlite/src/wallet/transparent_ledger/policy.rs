@@ -13,6 +13,52 @@ use crate::error::SqliteClientError;
 
 use super::{TPIR_READER_VERSION, durable_policy, mode_code, resolve_mode};
 
+/// SQLite gates that abort Phase 1 inserts/updates of ordinary retrieval codes (`0`/`1`) while
+/// durable `PrivateRequired` is active. Withheld codes (`+10`) are unaffected. When the durable
+/// mode is not private-required the `WHEN` clause is false, so public and PrivateShadow writers
+/// keep their ordinary queue codes.
+pub(crate) const LEGACY_RETRIEVAL_GATE_SQL: &str = r#"
+CREATE TRIGGER IF NOT EXISTS tpir_forbid_legacy_retrieval_insert
+BEFORE INSERT ON tx_retrieval_queue
+FOR EACH ROW
+WHEN NEW.query_type IN (0, 1)
+ AND EXISTS (SELECT 1 FROM tpir_meta WHERE id = 0 AND applied_mode = 2)
+BEGIN
+  SELECT RAISE(ABORT, 'transparent ledger requires a newer reader');
+END;
+
+CREATE TRIGGER IF NOT EXISTS tpir_forbid_legacy_retrieval_update
+BEFORE UPDATE OF query_type ON tx_retrieval_queue
+FOR EACH ROW
+WHEN NEW.query_type IN (0, 1)
+ AND EXISTS (SELECT 1 FROM tpir_meta WHERE id = 0 AND applied_mode = 2)
+BEGIN
+  SELECT RAISE(ABORT, 'transparent ledger requires a newer reader');
+END;
+"#;
+
+/// Installs the Phase 1 retrieval-queue gate. Idempotent; safe to call on every
+/// `PrivateRequired` apply (including same-mode reapplication).
+pub(crate) fn ensure_legacy_retrieval_gate(
+    conn: &rusqlite::Connection,
+) -> Result<(), SqliteClientError> {
+    conn.execute_batch(LEGACY_RETRIEVAL_GATE_SQL)?;
+    Ok(())
+}
+
+/// Relocates ordinary status/enhancement codes so Phase 1 enumerators cannot see them.
+fn relocate_legacy_retrieval_codes(conn: &rusqlite::Connection) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE tx_retrieval_queue
+         SET query_type = query_type + :offset
+         WHERE query_type IN (0, 1)",
+        rusqlite::named_params![
+            ":offset": crate::wallet::TxQueryType::WITHHELD_OFFSET,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Reads the durable policy, including its generation. The handle must already be configured,
 /// and a stored `PrivateRequired` policy is never weakened by a weaker handle.
 pub(crate) fn applied_transparent_policy(
@@ -58,7 +104,13 @@ pub(crate) fn apply_transparent_policy(
             SqliteClientError::CorruptedData("tpir_meta policy row is missing".into())
         })?;
         if current.mode == mode {
-            // Same-mode reapply: leave generation and outstanding work unchanged.
+            // Same-mode reapply: leave generation unchanged. Under PrivateRequired, still
+            // install the write gate and relocate any ordinary codes a Phase 1 writer may
+            // have inserted after an earlier transition (the transition itself runs once).
+            if mode == TransparentLedgerMode::PrivateRequired {
+                ensure_legacy_retrieval_gate(conn)?;
+                relocate_legacy_retrieval_codes(conn)?;
+            }
             return Ok(current);
         }
         let generation = current
@@ -115,15 +167,10 @@ pub(crate) fn apply_transparent_policy(
             )?;
             // Relocate ordinary status/enhancement obligations out of the Phase 1 enumerator
             // codes. Older readers never check min_reader_version and would otherwise dispatch
-            // these txids publicly despite the raised gate.
-            conn.execute(
-                "UPDATE tx_retrieval_queue
-                 SET query_type = query_type + :offset
-                 WHERE query_type IN (0, 1)",
-                rusqlite::named_params![
-                    ":offset": crate::wallet::TxQueryType::WITHHELD_OFFSET,
-                ],
-            )?;
+            // these txids publicly despite the raised gate. The write gate then rejects any
+            // later Phase 1 inserts of codes 0/1 while this mode remains durable.
+            relocate_legacy_retrieval_codes(conn)?;
+            ensure_legacy_retrieval_gate(conn)?;
         } else if mode.retains_public_authority() {
             // Restore Phase 1-visible codes before converting sticky private-details markers.
             conn.execute(

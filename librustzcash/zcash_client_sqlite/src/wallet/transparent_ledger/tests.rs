@@ -1269,6 +1269,61 @@ mod handles {
 
     #[cfg(feature = "orchard")]
     #[test]
+    fn private_required_rejects_legacy_queue_inserts() {
+        let (mut st, _, _) = funded_wallet();
+        set_mode(&mut st, PrivateRequired);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateRequired)
+            .unwrap();
+
+        let txid = [0x63u8; 32];
+        let err = conn(&st)
+            .execute(
+                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 1)",
+                [&txid[..]],
+            )
+            .expect_err("Phase 1 enhancement insert must fail under PrivateRequired");
+        assert!(
+            err.to_string().contains("newer reader") || err.to_string().contains("ABORT"),
+            "unexpected error: {err}"
+        );
+        let err = conn(&st)
+            .execute(
+                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 0)",
+                [&txid[..]],
+            )
+            .expect_err("Phase 1 status insert must fail under PrivateRequired");
+        assert!(
+            err.to_string().contains("newer reader") || err.to_string().contains("ABORT"),
+            "unexpected error: {err}"
+        );
+
+        // Current writers use withheld codes and must still succeed.
+        conn(&st)
+            .execute(
+                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 11)",
+                [&txid[..]],
+            )
+            .unwrap();
+
+        // Public and PrivateShadow keep ordinary inserts.
+        set_mode(&mut st, Public);
+        st.wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(Public)
+            .unwrap();
+        let other = [0x64u8; 32];
+        conn(&st)
+            .execute(
+                "INSERT INTO tx_retrieval_queue (txid, query_type) VALUES (?1, 1)",
+                [&other[..]],
+            )
+            .unwrap();
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
     fn handle_only_private_required_route_two_is_public_again_after_handle_switch() {
         use zcash_client_backend::data_api::{
             PublicTransactionEnhancementRequest,
