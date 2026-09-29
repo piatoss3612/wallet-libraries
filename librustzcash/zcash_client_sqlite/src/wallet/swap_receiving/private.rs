@@ -67,8 +67,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         self.transactionally(|db| {
             let (id, _) = account_key(db.conn.0, &db.params, account)?;
             db.conn.0.execute(
-                "INSERT OR IGNORE INTO ironwood_swap_private_recovery(account_id) VALUES (?1)",
-                [id.0],
+                "INSERT OR IGNORE INTO ironwood_swap_private_recovery(account_id,nullifier_retention_height)
+                 SELECT id, MAX(birthday_height, ?2) FROM accounts WHERE id=?1",
+                params![id.0, db.params.activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+                    .map(u32::from).unwrap_or(0)],
             )?;
             Ok(())
         })

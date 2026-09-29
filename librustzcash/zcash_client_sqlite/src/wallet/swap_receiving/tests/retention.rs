@@ -99,6 +99,12 @@ fn retention_prunes_other_pools_and_respects_the_oldest_account() {
         .enable_private_swap_recovery(other)
         .unwrap();
     let conn = st.wallet_mut().conn_mut();
+    // Use small synthetic heights to isolate shared pruning from network activation.
+    conn.execute(
+        "UPDATE ironwood_swap_private_recovery SET nullifier_retention_height=0",
+        [],
+    )
+    .unwrap();
     conn.execute("UPDATE ironwood_swap_private_recovery SET nullifier_retention_height=200 WHERE account_id=(SELECT id FROM accounts WHERE uuid=?1)", [account.0]).unwrap();
     for (pool, nf) in [
         (PoolType::SAPLING, 1u8),
@@ -253,7 +259,7 @@ fn retention_waits_for_internal_memos_and_own_send_evidence() {
     );
     assert_eq!(
         crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap(),
-        Some(0.into())
+        Some(through.height)
     );
     // Even an enhanced marker waits if its funding-account evidence is unresolved.
     st.wallet()
