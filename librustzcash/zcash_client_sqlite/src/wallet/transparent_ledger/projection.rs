@@ -225,3 +225,118 @@ pub(super) fn project_spend<P: consensus::Parameters>(
         spend.mined_height,
     )
 }
+
+/// A SQL condition that spend event `e` has lost its last observation.
+const UNOBSERVED_SPEND: &str =
+    "NOT EXISTS (SELECT 1 FROM tpir_spend_observations ob WHERE ob.spend_id = e.id)";
+
+/// A SQL condition that the spend of `e.prevout_*` by transaction `st` has an origin
+/// in `{origins}`.
+fn spend_origin(origins: &str) -> String {
+    format!(
+        "EXISTS (
+             SELECT 1 FROM tpir_spend_origins so
+             WHERE so.spending_transaction_id = st.id_tx
+             AND so.prevout_txid = e.prevout_txid
+             AND so.prevout_output_index = e.prevout_output_index
+             AND so.origin {origins}
+         )"
+    )
+}
+
+/// Withdraws the projection of every event that has lost its last observation, before the
+/// event itself is removed. A superseded provisional revision is no longer evidence, so what
+/// the ledger alone contributed to the wallet goes with it: a spend link or pending spend, or
+/// an output, whose only origin is the ledger. Rows with a public, local, or payload origin stay,
+/// less their ledger origin. Candidate accounts never project, so for them this is a no-op.
+pub(super) fn unproject_unobserved(conn: &rusqlite::Connection) -> Result<(), SqliteClientError> {
+    let ledger_only = format!("{} AND NOT {}", spend_origin("= 2"), spend_origin("!= 2"));
+    conn.execute(
+        &format!(
+            "DELETE FROM transparent_received_output_spends
+             WHERE EXISTS (
+                 SELECT 1 FROM tpir_spend_events e
+                 JOIN transactions st ON st.txid = e.spending_txid
+                 JOIN transparent_received_outputs o
+                     ON o.id = transparent_received_output_spends.transparent_received_output_id
+                 JOIN transactions ot ON ot.id_tx = o.transaction_id
+                 WHERE st.id_tx = transparent_received_output_spends.transaction_id
+                 AND ot.txid = e.prevout_txid AND o.output_index = e.prevout_output_index
+                 AND {UNOBSERVED_SPEND} AND {ledger_only}
+             )"
+        ),
+        [],
+    )?;
+    conn.execute(
+        &format!(
+            "DELETE FROM transparent_spend_map
+             WHERE EXISTS (
+                 SELECT 1 FROM tpir_spend_events e
+                 JOIN transactions st ON st.txid = e.spending_txid
+                 WHERE st.id_tx = transparent_spend_map.spending_transaction_id
+                 AND e.prevout_txid = transparent_spend_map.prevout_txid
+                 AND e.prevout_output_index = transparent_spend_map.prevout_output_index
+                 AND {UNOBSERVED_SPEND} AND {ledger_only}
+             )"
+        ),
+        [],
+    )?;
+    conn.execute(
+        &format!(
+            "DELETE FROM tpir_spend_origins
+             WHERE origin = 2 AND EXISTS (
+                 SELECT 1 FROM tpir_spend_events e
+                 JOIN transactions st ON st.txid = e.spending_txid
+                 WHERE st.id_tx = tpir_spend_origins.spending_transaction_id
+                 AND e.prevout_txid = tpir_spend_origins.prevout_txid
+                 AND e.prevout_output_index = tpir_spend_origins.prevout_output_index
+                 AND {UNOBSERVED_SPEND}
+             )"
+        ),
+        [],
+    )?;
+
+    // Outputs whose receive lost its last observation, projected by the ledger.
+    let unobserved_receive = "EXISTS (
+         SELECT 1 FROM tpir_receive_events r
+         JOIN transactions t ON t.txid = r.txid
+         WHERE t.id_tx = o.transaction_id AND r.output_index = o.output_index
+         AND NOT EXISTS (
+             SELECT 1 FROM tpir_receive_observations ob WHERE ob.receive_id = r.id
+         )
+     ) AND EXISTS (
+         SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin = 2
+     )";
+    let ledger_only_output = format!(
+        "{unobserved_receive} AND NOT EXISTS (
+             SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin != 2
+         )"
+    );
+    conn.execute(
+        &format!(
+            "DELETE FROM transparent_spend_search_queue
+             WHERE EXISTS (
+                 SELECT 1 FROM transparent_received_outputs o
+                 WHERE o.transaction_id = transparent_spend_search_queue.transaction_id
+                 AND o.output_index = transparent_spend_search_queue.output_index
+                 AND {ledger_only_output}
+             )"
+        ),
+        [],
+    )?;
+    // Deleting an output also removes its spend links and origins.
+    conn.execute(
+        &format!("DELETE FROM transparent_received_outputs AS o WHERE {ledger_only_output}"),
+        [],
+    )?;
+    conn.execute(
+        &format!(
+            "DELETE FROM tpir_output_origins
+             WHERE origin = 2 AND output_id IN (
+                 SELECT o.id FROM transparent_received_outputs o WHERE {unobserved_receive}
+             )"
+        ),
+        [],
+    )?;
+    Ok(())
+}

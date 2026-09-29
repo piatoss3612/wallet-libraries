@@ -211,7 +211,7 @@ fn snapshot(st: &State, account: AccountUuid) -> TransparentLedgerSnapshot<Accou
         .unwrap()
 }
 
-fn qualify(st: &mut State, revision: &RecoveryRevision) -> bool {
+fn qualify(st: &mut State, revision: &RecoveryRevision) {
     st.wallet_mut()
         .db_mut()
         .qualify_transparent_revision(revision)
@@ -275,7 +275,7 @@ fn private_snapshots_report_candidate_coverage_and_an_unverified_total() {
             RecoveryBlocker::UnqualifiedRevision
         ]
     );
-    assert!(qualify(&mut st, &fixture));
+    qualify(&mut st, &fixture);
     assert_eq!(
         snapshot(&st, account).blockers,
         vec![RecoveryBlocker::NotActivated]
@@ -311,7 +311,7 @@ fn a_legacy_output_the_candidate_lacks_is_a_discrepancy() {
         .put_received_transparent_utxo(&utxo)
         .unwrap();
     recover_completely(&mut st, account, &fixture, 1);
-    assert!(qualify(&mut st, &fixture));
+    qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
     let s = snapshot(&st, account);
     assert_eq!(
@@ -391,10 +391,9 @@ fn commits_capture_the_account_lifecycle() {
 }
 
 #[test]
-fn qualification_binds_to_the_exact_stored_revision() {
+fn qualification_binds_to_the_exact_revision() {
     let (mut st, account) = shadow_wallet();
     let fixture = revision(1, true);
-    assert!(!qualify(&mut st, &fixture), "an unknown revision");
     recover_one(&mut st, account, fixture.clone(), 1);
     assert_eq!(reader_version(&st), 3);
     for other in [
@@ -414,13 +413,46 @@ fn qualification_binds_to_the_exact_stored_revision() {
             ..fixture.clone()
         },
     ] {
-        assert!(!qualify(&mut st, &other));
+        assert!(matches!(
+            st.wallet_mut()
+                .db_mut()
+                .qualify_transparent_revision(&other),
+            Err(SqliteClientError::TransparentLedgerCommitRejected(
+                CommitRejection::Integrity(IntegrityFailure::RevisionMismatch)
+            ))
+        ));
     }
     assert_eq!(count(&st, "tpir_qualified_revisions"), 0);
-    assert!(qualify(&mut st, &fixture));
-    assert!(qualify(&mut st, &fixture), "qualification is idempotent");
+    qualify(&mut st, &fixture);
+    qualify(&mut st, &fixture);
     assert_eq!(count(&st, "tpir_qualified_revisions"), 1);
     assert_eq!(reader_version(&st), 4);
+
+    // A new revision is recorded as a commit would record it, superseding older provisional
+    // revisions of its source.
+    let provisional = RecoveryRevision {
+        source: b"moving".to_vec(),
+        ..revision(1, false)
+    };
+    recover_one(&mut st, account, provisional.clone(), 2);
+    let coverage = count(&st, "tpir_coverage");
+    qualify(
+        &mut st,
+        &RecoveryRevision {
+            revision: b"next".to_vec(),
+            lineage: 2,
+            ..provisional.clone()
+        },
+    );
+    assert!(count(&st, "tpir_coverage") < coverage);
+    assert!(matches!(
+        st.wallet_mut()
+            .db_mut()
+            .qualify_transparent_revision(&provisional),
+        Err(SqliteClientError::TransparentLedgerCommitRejected(
+            CommitRejection::Stale(StaleCommit::SupersededRevision)
+        ))
+    ));
 }
 
 fn promote(st: &mut State, account: AccountUuid) -> Result<(), SqliteClientError> {
@@ -490,7 +522,7 @@ fn ready_wallet() -> (State, AccountUuid, ReceiveEvent, ReceiveEvent) {
     c.coverage = full_coverage(&ws);
     apply(&mut st, c).unwrap();
     assert_eq!(recovery(&st, account).blockers, vec![]);
-    assert!(qualify(&mut st, &fixture));
+    qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
     (st, account, unspent, spent)
 }
@@ -682,7 +714,7 @@ fn promotion_is_blocked_until_every_condition_holds() {
         vec![RecoveryBlocker::UnqualifiedRevision]
     );
     unchanged(&st, &before);
-    assert!(qualify(&mut st, &fixture));
+    qualify(&mut st, &fixture);
 
     // A quarantined account.
     conn(&st)
@@ -877,7 +909,7 @@ fn projection_joins_a_local_transaction_and_keeps_its_details() {
         mined_height: below_target(&ws, 0),
     };
     cover(&mut st, account, &fixture, vec![recovered.clone()]);
-    assert!(qualify(&mut st, &fixture));
+    qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
     promote(&mut st, account).unwrap();
 
@@ -977,7 +1009,7 @@ fn coinbase_receives_keep_their_maturity_rule() {
         ..receive(1, external(&ws), 90_000, below_target(&ws, 3))
     };
     cover(&mut st, account, &fixture, vec![coinbase.clone()]);
-    assert!(qualify(&mut st, &fixture));
+    qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
     promote(&mut st, account).unwrap();
 
@@ -1021,7 +1053,7 @@ fn unmined_legacy_outputs_do_not_enter_the_authorized_balance() {
         .unwrap();
     let recovered = receive(1, taddr, 40_000, below_target(&ws, 3));
     cover(&mut st, account, &fixture, vec![recovered]);
-    assert!(qualify(&mut st, &fixture));
+    qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
     promote(&mut st, account).unwrap();
 
@@ -1031,4 +1063,270 @@ fn unmined_legacy_outputs_do_not_enter_the_authorized_balance() {
         super::super::output_origins(conn(&st), &mempool.outpoint().clone()),
         vec![0]
     );
+}
+
+/// Promotes a [`ready_wallet`] and scans two more blocks, leaving coverage one commit behind.
+fn active_wallet() -> (State, AccountUuid, ReceiveEvent) {
+    let (mut st, account, unspent, _) = ready_wallet();
+    promote(&mut st, account).unwrap();
+    scan_new_blocks(&mut st, 2);
+    (st, account, unspent)
+}
+
+#[test]
+fn active_commits_project_their_events_in_the_same_transaction() {
+    let (mut st, account, unspent) = active_wallet();
+    // Authority lapses while coverage lags the tip, keeping the ledger's amount as last-known.
+    let s = snapshot(&st, account);
+    assert_eq!(s.authority, TransparentAuthority::Unavailable);
+    assert_eq!(
+        s.blockers,
+        vec![RecoveryBlocker::Recovery(
+            CandidateBlocker::IncompleteCoverage
+        )]
+    );
+    let last_known = s.last_known.unwrap();
+    assert_eq!(last_known.source, LastKnownSource::PrivateLedger);
+    // The amount is evaluated at the tip, past the covered point, so it is not anchored there.
+    assert!(s.covered_through.is_some());
+    assert_eq!(last_known.at, None);
+    assert_eq!(
+        last_known.balance.regular.total(),
+        Zatoshis::const_from_u64(40_000)
+    );
+
+    let ws = watch(&st, account);
+    assert_eq!(ws.lifecycle, AccountLifecycle::Active);
+    let fresh = receive(5, external(&ws), 60_000, below_target(&ws, 0));
+    let mut c = commit(&ws);
+    c.receives = vec![fresh.clone()];
+    c.spends = vec![spend(6, &unspent, below_target(&ws, 1))];
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+
+    assert_eq!(
+        super::super::output_origins(conn(&st), &fresh.outpoint),
+        vec![2]
+    );
+    assert_eq!(spend_count(&st, &unspent.outpoint), 1);
+    let s = snapshot(&st, account);
+    assert_eq!(s.authority, TransparentAuthority::Private);
+    assert_eq!(
+        s.authorized.unwrap().regular.total(),
+        Zatoshis::const_from_u64(60_000)
+    );
+}
+
+#[test]
+fn active_window_growth_uses_the_wallets_own_addresses() {
+    let (mut st, account, _) = active_wallet();
+    let ws = watch(&st, account);
+    let (last, index) = last_external(&ws);
+    let addresses = count(&st, "addresses");
+    let mut c = commit(&ws);
+    c.receives = vec![receive(5, last, 60_000, below_target(&ws, 0))];
+    assert!(apply(&mut st, c).unwrap().window_grew);
+    assert!(count(&st, "addresses") > addresses);
+    assert_eq!(count(&st, "tpir_candidate_windows"), 0);
+    let (_, grown) = last_external(&watch(&st, account));
+    assert!(grown > index);
+}
+
+#[test]
+fn an_active_account_accepts_only_qualified_revisions() {
+    let (mut st, account, _) = active_wallet();
+    let ws = watch(&st, account);
+    let next = revision(2, true);
+    let mut c = commit(&ws);
+    c.revision = next.clone();
+    c.receives = vec![receive(5, external(&ws), 60_000, below_target(&ws, 0))];
+    c.coverage = full_coverage(&ws);
+    let before = production_dump(conn(&st));
+    let revisions = count(&st, "tpir_revisions");
+    assert_eq!(
+        rejection(apply(&mut st, c.clone())),
+        CommitRejection::Refused(RefusedCommit::UnqualifiedRevision)
+    );
+    assert_eq!(production_dump(conn(&st)), before);
+    assert_eq!(count(&st, "tpir_revisions"), revisions);
+
+    qualify(&mut st, &next);
+    apply(&mut st, c).unwrap();
+    assert_eq!(
+        snapshot(&st, account).authority,
+        TransparentAuthority::Private
+    );
+}
+
+#[test]
+fn a_projection_conflict_is_an_integrity_failure() {
+    let (mut st, account, _) = active_wallet();
+    let ws = watch(&st, account);
+    let fresh = receive(5, external(&ws), 60_000, below_target(&ws, 0));
+    // The wallet already holds the transaction at another height.
+    conn(&st)
+        .execute(
+            "INSERT INTO transactions (txid, mined_height, min_observed_height)
+             VALUES (?1, ?2, ?2)",
+            rusqlite::params![fresh.outpoint.hash(), u32::from(below_target(&ws, 4))],
+        )
+        .unwrap();
+    let before = production_dump(conn(&st));
+    let events = count(&st, "tpir_receive_events");
+    let mut c = commit(&ws);
+    c.receives = vec![fresh.clone()];
+    c.coverage = full_coverage(&ws);
+    assert_eq!(
+        rejection(apply(&mut st, c)),
+        CommitRejection::Integrity(IntegrityFailure::TransactionPlacement(
+            *fresh.outpoint.txid()
+        ))
+    );
+    assert_eq!(production_dump(conn(&st)), before);
+    assert_eq!(count(&st, "tpir_receive_events"), events);
+    assert_eq!(quarantined_accounts(&st), vec![account]);
+    assert!(
+        snapshot(&st, account)
+            .blockers
+            .contains(&RecoveryBlocker::Quarantined)
+    );
+}
+
+#[test]
+fn a_spend_conflicting_with_a_mined_wallet_spend_is_an_integrity_failure() {
+    let (mut st, account, unspent) = active_wallet();
+    let ws = watch(&st, account);
+    // The wallet already holds another mined transaction spending the ledger output.
+    conn(&st)
+        .execute_batch(&format!(
+            "INSERT INTO transactions (txid, mined_height, min_observed_height)
+             VALUES (x'{txid}', {height}, {height});
+             INSERT INTO transparent_received_output_spends (transparent_received_output_id, transaction_id)
+             SELECT o.id, (SELECT id_tx FROM transactions WHERE txid = x'{txid}')
+             FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id
+             WHERE t.txid = x'{prevout}' AND o.output_index = {index};",
+            txid = hex::encode([0xcd; 32]),
+            height = u32::from(below_target(&ws, 2)),
+            prevout = hex::encode(unspent.outpoint.hash()),
+            index = unspent.outpoint.n(),
+        ))
+        .unwrap();
+    assert_eq!(spend_count(&st, &unspent.outpoint), 1);
+    let before = production_dump(conn(&st));
+    let mut c = commit(&ws);
+    c.spends = vec![spend(7, &unspent, below_target(&ws, 1))];
+    c.coverage = full_coverage(&ws);
+    assert_eq!(
+        rejection(apply(&mut st, c)),
+        CommitRejection::Integrity(IntegrityFailure::ConflictingSpends(
+            unspent.outpoint.clone()
+        ))
+    );
+    assert_eq!(production_dump(conn(&st)), before);
+    assert_eq!(quarantined_accounts(&st), vec![account]);
+}
+
+#[test]
+fn a_superseded_provisional_revision_withdraws_its_projection() {
+    let (mut st, account, unspent) = active_wallet();
+    let provisional = revision(2, false);
+    qualify(&mut st, &provisional);
+    let ws = watch(&st, account);
+    let fresh = receive(5, external(&ws), 60_000, below_target(&ws, 0));
+    let also_public = receive(7, external(&ws), 5_000, below_target(&ws, 0));
+    let mut c = commit(&ws);
+    c.revision = provisional;
+    c.receives = vec![fresh.clone(), also_public.clone()];
+    c.spends = vec![spend(6, &unspent, below_target(&ws, 1))];
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    assert_eq!(
+        super::super::output_origins(conn(&st), &fresh.outpoint),
+        vec![2]
+    );
+    assert_eq!(spend_count(&st, &unspent.outpoint), 1);
+    // Public discovery recorded one of the outputs as well.
+    conn(&st)
+        .execute(
+            "INSERT INTO tpir_output_origins (output_id, origin)
+             SELECT o.id, 0 FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id
+             WHERE t.txid = ?1",
+            [also_public.outpoint.hash()],
+        )
+        .unwrap();
+
+    // A higher provisional lineage replaces it and reports neither event.
+    let replacement = revision(3, false);
+    qualify(&mut st, &replacement);
+    let ws = watch(&st, account);
+    let mut c = commit(&ws);
+    c.revision = replacement;
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+
+    // The ledger-only output and spend link are withdrawn; the sealed revision's receive stays.
+    assert_eq!(
+        super::super::output_origins(conn(&st), &fresh.outpoint),
+        Vec::<i64>::new()
+    );
+    let outputs: i64 = conn(&st)
+        .query_row(
+            "SELECT COUNT(*) FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id
+             WHERE t.txid = ?1",
+            [fresh.outpoint.hash()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outputs, 0);
+    assert_eq!(spend_count(&st, &unspent.outpoint), 0);
+    assert_eq!(
+        super::super::spend_origins(conn(&st), &unspent.outpoint),
+        Vec::<i64>::new()
+    );
+    // An output with another origin stays, as that evidence alone.
+    assert_eq!(
+        super::super::output_origins(conn(&st), &also_public.outpoint),
+        vec![0]
+    );
+    assert_eq!(super::super::records_without_origin(conn(&st)), 0);
+    let s = snapshot(&st, account);
+    assert_eq!(s.authority, TransparentAuthority::Private);
+    assert_eq!(s.authorized.unwrap().regular.total(), unspent.value);
+}
+
+#[test]
+fn a_failed_projection_write_rolls_back_the_commit() {
+    let (mut st, account, _) = active_wallet();
+    conn(&st)
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_projection BEFORE INSERT ON tpir_output_origins
+             WHEN NEW.origin = 2
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+    let ws = watch(&st, account);
+    let mut c = commit(&ws);
+    c.receives = vec![receive(5, external(&ws), 60_000, below_target(&ws, 0))];
+    c.coverage = full_coverage(&ws);
+    let before = production_dump(conn(&st));
+    let (events, coverage) = (
+        count(&st, "tpir_receive_events"),
+        count(&st, "tpir_coverage"),
+    );
+    assert!(matches!(
+        apply(&mut st, c),
+        Err(SqliteClientError::DbError(_))
+    ));
+    assert_eq!(production_dump(conn(&st)), before);
+    assert_eq!(
+        (
+            count(&st, "tpir_receive_events"),
+            count(&st, "tpir_coverage")
+        ),
+        (events, coverage)
+    );
+    assert_eq!(count(&st, "tpir_quarantined_accounts"), 0);
 }

@@ -92,7 +92,8 @@ fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<()
 
 /// Returns the stored id of `revision`, recording it if new. Accepting a newer lineage
 /// supersedes the source's older provisional revisions, removing their coverage, pages, and
-/// observations. Events with no remaining observations are removed; an independent source's
+/// observations. Events with no remaining observations are removed, together with what their
+/// projection alone contributed to an active account's wallet; an independent source's
 /// observation or a sealed revision keeps an event alive.
 #[cfg(feature = "transparent-inputs")]
 fn accept_revision(
@@ -167,6 +168,7 @@ fn accept_revision(
                 named_params![":source": revision.source, ":lineage": lineage],
             )?;
         }
+        projection::unproject_unobserved(conn)?;
         conn.execute(
             "DELETE FROM tpir_receive_events
              WHERE NOT EXISTS (
@@ -259,7 +261,9 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
 
         // The facts apply under a nested savepoint, so an integrity failure can discard them
         // all while its quarantine commits.
-        match atomically(conn, |conn| apply_facts(conn, gap_limits, &watch, &commit)) {
+        match atomically(conn, |conn| {
+            apply_facts(conn, params, gap_limits, &watch, &commit)
+        }) {
             Err(SqliteClientError::TransparentLedgerCommitRejected(
                 rejection @ CommitRejection::Integrity(_),
             )) => {
@@ -271,10 +275,12 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
     })?
 }
 
-/// Applies a validated commit's revision, pages, events, ranges, and window growth.
+/// Applies a validated commit's revision, pages, events, ranges, and window growth. An active
+/// account's commit also requires a qualified revision and projects its events.
 #[cfg(feature = "transparent-inputs")]
-fn apply_facts(
+fn apply_facts<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
+    params: &P,
     gap_limits: &GapLimits,
     watch: &Watch,
     commit: &TransparentLedgerCommit<AccountUuid>,
@@ -282,8 +288,14 @@ fn apply_facts(
     let stale = |reason| reject(CommitRejection::Stale(reason));
     let account_ref = watch.account.internal_id();
     let target = commit.context.target;
+    let active = commit.context.lifecycle == AccountLifecycle::Active;
 
     let revision_id = accept_revision(conn, &commit.revision)?;
+    if active && !is_qualified(conn, revision_id)? {
+        return Err(reject(CommitRejection::Refused(
+            RefusedCommit::UnqualifiedRevision,
+        )));
+    }
 
     for page in &commit.completed_pages {
         let removed = conn.execute(
@@ -317,33 +329,60 @@ fn apply_facts(
         record_range(conn, account_ref, revision_id, &commit.anchor, range, false)?;
     }
 
-    let mut window_grew = false;
-    for (slot, needed) in watch
-        .window_needs(conn, gap_limits)?
-        .into_iter()
-        .enumerate()
-    {
-        if let Some(needed) = needed.filter(|_| watch.derivable[slot]) {
-            conn.execute(
-                "INSERT INTO tpir_candidate_windows (account_id, key_scope, end_index)
-                 VALUES (:account_id, :key_scope, :end_index)
-                 ON CONFLICT (account_id, key_scope)
-                 DO UPDATE SET end_index = MAX(end_index, excluded.end_index)",
-                named_params![
-                    ":account_id": account_ref.0,
-                    ":key_scope": KeyScope::try_from(WINDOW_SCOPES[slot])?.encode(),
-                    ":end_index": needed,
-                ],
-            )?;
-            window_grew = true;
+    let window_grew = if active {
+        // Events join the wallet's outputs and spends, where the wallet's own gap-limit
+        // generation extends its address window.
+        for receive in &commit.receives {
+            projection::project_receive(conn, params, gap_limits, commit.context.account, receive)?;
         }
-    }
+        for spend in &commit.spends {
+            projection::project_spend(conn, params, gap_limits, spend)?;
+        }
+        let after = Watch::load(conn, params, commit.context.account)?
+            .ok_or(SqliteClientError::AccountUnknown)?;
+        after.production_end != watch.production_end
+    } else {
+        let mut window_grew = false;
+        for (slot, needed) in watch
+            .window_needs(conn, gap_limits)?
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(needed) = needed.filter(|_| watch.derivable[slot]) {
+                conn.execute(
+                    "INSERT INTO tpir_candidate_windows (account_id, key_scope, end_index)
+                     VALUES (:account_id, :key_scope, :end_index)
+                     ON CONFLICT (account_id, key_scope)
+                     DO UPDATE SET end_index = MAX(end_index, excluded.end_index)",
+                    named_params![
+                        ":account_id": account_ref.0,
+                        ":key_scope": KeyScope::try_from(WINDOW_SCOPES[slot])?.encode(),
+                        ":end_index": needed,
+                    ],
+                )?;
+                window_grew = true;
+            }
+        }
+        window_grew
+    };
 
     // Builds without the recovery lifecycle would leave this state stale across rewinds;
     // once any exists, they must fail closed.
     super::super::require_reader_version(conn, super::super::RECOVERY_READER_VERSION)?;
 
     Ok(CommitOutcome { window_grew })
+}
+
+/// Whether the stored revision `revision_id` is qualified.
+#[cfg(feature = "transparent-inputs")]
+fn is_qualified(conn: &rusqlite::Connection, revision_id: i64) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM tpir_qualified_revisions WHERE revision_id = :revision_id
+         )",
+        named_params![":revision_id": revision_id],
+        |row| row.get(0),
+    )?)
 }
 
 /// Returns `account_ref`'s lifecycle.
@@ -427,44 +466,29 @@ fn quarantine(
     super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)
 }
 
-/// Qualifies the stored revision equal to `revision`, returning whether one exists.
+/// Qualifies `revision`, recording it first if it is new, exactly as a commit would.
 ///
-/// Qualification binds to the exact stored revision: identifiers, lineage, sealing, and
-/// publication must all match.
+/// Qualification binds to the exact revision: a stored revision with the same identity and
+/// other lineage, sealing, or publication is an integrity failure, and a superseded provisional
+/// revision is stale.
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn qualify_revision(
     conn: &rusqlite::Connection,
     revision: &RecoveryRevision,
-) -> Result<bool, SqliteClientError> {
+) -> Result<(), SqliteClientError> {
+    let identifier_ok = |id: &[u8]| !id.is_empty() && id.len() <= MAX_RECOVERY_IDENTIFIER_LEN;
+    if !identifier_ok(&revision.source) || !identifier_ok(&revision.revision) {
+        return Err(reject(CommitRejection::Invalid(InvalidCommit::Identifier)));
+    }
+    if i64::try_from(revision.lineage).is_err() {
+        return Err(reject(CommitRejection::Invalid(InvalidCommit::Lineage)));
+    }
     atomically(conn, |conn| {
-        let Ok(lineage) = i64::try_from(revision.lineage) else {
-            return Ok(false);
-        };
-        let Some(revision_id) = conn
-            .query_row(
-                "SELECT id FROM tpir_revisions
-                 WHERE source = :source AND revision = :revision AND lineage = :lineage
-                 AND sealed = :sealed AND publication_height = :publication_height
-                 AND publication_hash = :publication_hash",
-                named_params![
-                    ":source": revision.source,
-                    ":revision": revision.revision,
-                    ":lineage": lineage,
-                    ":sealed": revision.sealed,
-                    ":publication_height": u32::from(revision.publication.height),
-                    ":publication_hash": revision.publication.hash.0.to_vec(),
-                ],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-        else {
-            return Ok(false);
-        };
+        let revision_id = accept_revision(conn, revision)?;
         conn.execute(
             "INSERT OR IGNORE INTO tpir_qualified_revisions (revision_id) VALUES (:revision_id)",
             named_params![":revision_id": revision_id],
         )?;
-        super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)?;
-        Ok(true)
+        super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)
     })
 }

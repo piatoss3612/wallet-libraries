@@ -1725,8 +1725,8 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
     any(test, feature = "test-dependencies")
 ))]
 impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
-    /// Qualifies the stored recovery revision equal to `revision`, so that it can support
-    /// promotion and an active account's commits. Returns whether such a revision is stored.
+    /// Qualifies `revision` so that it can support promotion and an active account's commits,
+    /// recording it first if it is new, exactly as a commit would.
     ///
     /// This is a test and development hook only: production builds cannot qualify a revision,
     /// and so can never promote an account. Qualification of real sources arrives with source
@@ -1734,7 +1734,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     pub fn qualify_transparent_revision(
         &mut self,
         revision: &zcash_client_backend::data_api::transparent_ledger::RecoveryRevision,
-    ) -> Result<bool, SqliteClientError> {
+    ) -> Result<(), SqliteClientError> {
         wallet::transparent_ledger::qualify_revision(self.conn.borrow(), revision)
     }
 }
