@@ -940,5 +940,11 @@ mod handles {
         assert_eq!(snapshot.authorized, None);
         assert_eq!(snapshot.completion, RecoveryCompletion::Blocked);
         assert_eq!(snapshot.blockers, vec![RecoveryBlocker::ChainUnknown]);
+        // Selectors and stores cannot authorize transparent inputs without a known chain tip,
+        // matching the snapshot.
+        assert!(matches!(
+            check_transparent_authority(conn(&st), Some(Public)),
+            Err(SqliteClientError::TransparentAuthorityUnavailable)
+        ));
     }
 }

@@ -2683,27 +2683,25 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         transactions: &[SentTransaction<<Self as WalletRead>::AccountId>],
     ) -> Result<(), <Self as WalletRead>::Error> {
-        // Consuming transparent inputs requires transparent authority; check before any write.
-        // Wallet-owned inputs are derived from each transaction itself, not only from the
-        // caller-supplied `utxos_spent`, which could omit them.
-        // This applies in every build: a database may hold transparent outputs recorded by a
-        // build with transparent support.
-        let mut spends_transparent = false;
-        for tx in transactions {
-            #[cfg(feature = "transparent-inputs")]
-            {
-                spends_transparent |= !tx.utxos_spent().is_empty();
-            }
-            spends_transparent = spends_transparent
-                || wallet::transparent_ledger::spends_wallet_outputs(self.conn.0, tx.tx())?;
-        }
-        if spends_transparent {
-            wallet::transparent_ledger::check_transparent_authority(
-                self.conn.0,
-                self.transparent_ledger_mode,
-            )?;
-        }
+        // Consuming transparent inputs requires transparent authority. Each transaction is
+        // checked as it is staged, so wallet outputs created by earlier transactions in this
+        // batch are recognized; a failure rolls back the whole batch. Wallet-owned inputs are
+        // derived from the transaction itself, not only from the caller-supplied `utxos_spent`,
+        // and this applies in every build: a database may hold transparent outputs recorded by
+        // a build with transparent support.
         for sent_tx in transactions {
+            #[cfg(feature = "transparent-inputs")]
+            let listed_spends = !sent_tx.utxos_spent().is_empty();
+            #[cfg(not(feature = "transparent-inputs"))]
+            let listed_spends = false;
+            if listed_spends
+                || wallet::transparent_ledger::spends_wallet_outputs(self.conn.0, sent_tx.tx())?
+            {
+                wallet::transparent_ledger::check_transparent_authority(
+                    self.conn.0,
+                    self.transparent_ledger_mode,
+                )?;
+            }
             wallet::store_transaction_to_be_sent(
                 self.conn.0,
                 &self.params,

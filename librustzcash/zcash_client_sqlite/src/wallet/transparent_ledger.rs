@@ -141,8 +141,10 @@ pub(crate) fn resolve_mode(
 /// Checks that the handle may authorize consuming transparent inputs.
 ///
 /// Public authority is retained only by explicitly configured `Public` and `PrivateShadow`
-/// handles; financial authorization never defaults to public. Private authority is not yet
-/// available, so `PrivateRequired` handles are rejected.
+/// handles; financial authorization never defaults to public. Even then it requires the same
+/// conditions under which the snapshot reports public authority: a known chain tip, and a build
+/// that can read transparent state. Private authority is not yet available, so
+/// `PrivateRequired` handles are rejected.
 pub(crate) fn check_transparent_authority(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
@@ -151,7 +153,13 @@ pub(crate) fn check_transparent_authority(
         TransparentLedgerMode::PrivateRequired => {
             Err(SqliteClientError::TransparentAuthorityUnavailable)
         }
-        TransparentLedgerMode::Public | TransparentLedgerMode::PrivateShadow => Ok(()),
+        TransparentLedgerMode::Public | TransparentLedgerMode::PrivateShadow => {
+            if cfg!(not(feature = "transparent-inputs")) || chain_tip_height(conn)?.is_none() {
+                Err(SqliteClientError::TransparentAuthorityUnavailable)
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
