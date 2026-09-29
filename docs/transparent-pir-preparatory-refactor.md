@@ -1,7 +1,8 @@
 # Preparatory refactor for a transparent PIR ledger
 
-Status: proposed execution plan. All phases below remain to be implemented and
-qualified; production transparent authority stays public during preparation.
+Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
+its Vizor half is pending. Phases 2–6 remain to be implemented and qualified.
+Production transparent authority stays public during preparation.
 
 ## Objective and fixed boundaries
 
@@ -37,8 +38,8 @@ in the final qualification phase.
 
 | Phase | Wallet-libraries deliverable | Vizor deliverable | Behavior available at phase exit |
 | --- | --- | --- | --- |
-| 0. Baseline | Contract/call-site inventory and reference fixtures. | Consumer baseline and discovery/handle inventory. | Existing public behavior recorded. |
-| 1. Contract and migration | Types, additive schema, provenance, configured handles. | Dependency upgrade and explicit handle configuration. | Schema upgrades; private transparent input use remains unavailable. |
+| 0. Baseline (done) | Contract/call-site inventory and reference fixtures. | Consumer baseline and discovery/handle inventory. | Existing public behavior recorded. |
+| 1. Contract and migration (library merged) | Read contract, policy/provenance schema, configured handles. | Dependency upgrade and explicit handle configuration. | Schema upgrades; private transparent input use remains unavailable. |
 | 2. Privacy boundaries | Durable policy transitions and guarded follow-on work. | Shared policy, dispatch guards, native/preview coverage. | Required-private fixtures fail closed before any unsupported request. |
 | 3. Candidate recovery | Watched scripts, candidate events, coverage, resumable commits. | Disabled/fixture source and bounded coordinator. | Isolated shadow recovery; no production projection changes. |
 | 4. Safe activation | Atomic projection, rewind, promotion, and all financial gates. | Balance/operation integration and activation fixtures. | Per-account private activation and spending exercised with fixtures. |
@@ -62,88 +63,141 @@ root. New modules are marked proposed. Reuse existing transport and database
 boundaries; do not create a general sync plugin framework or a second
 authoritative database.
 
-## Phase 0 — Establish the implementation baseline
+## Phase 0 — Establish the implementation baseline (done)
 
-Planning snapshot: wallet-libraries `1709e4dd3d` on
-`docs/transparent-pir-design`; Vizor `a3a2683ef` on
-`roman/ironwood-memo-pir`, with wallet-libraries dependencies pinned to
-`2e206f7894`. Recheck both checkouts, dirty work, dependency graphs, and feature
-configuration before implementation. A newer library checkout is not evidence
-that Vizor already runs its behavior.
+Phase 0 produced the call-site inventory on both sides. The library inventory
+shaped Phase 1 below. The Vizor inventory, which later phases depend on, is:
 
-**Wallet-libraries steps**
-
-1. Map the contract onto `backend/data_api.rs` and `backend/data_api/`, plus
-   `sqlite/lib.rs`, `sqlite/wallet.rs`, `sqlite/wallet/transparent.rs`, and
-   `sqlite/wallet/init/`.
-2. Inventory transparent selectors, transaction/proposal consumption, rewind and
-   rescan entry points, local-send ingestion, and enhancement/status routing.
-   Identify where shared transaction origins must survive projection rollback.
-3. Define synthetic reference fixtures for receives, spends, empty ranges,
-   coinbase, mixed transactions, local sends, and imported/hardware accounts.
-   Derive expected effects independently of the candidate ledger implementation.
-
-**Vizor steps**
-
-1. Map DB constructors in `rust/src/wallet/db.rs` and their exceptions; include
-   foreground, read-only, transaction, native/background, and pre-DB import or
-   preview entry points.
-2. Inventory UTXO refresh, `ledger_discovery.rs`, `address_history.rs`, and
-   enhancement auxiliary lanes under `rust/src/wallet/sync_engine/`, plus
-   `rust/src/wallet/transaction_data/`. Record current source authorization.
-3. Record reference balances, known local payment details, pending sends, locks,
-   and account/address behavior using fixtures. Run the relevant existing
-   tests and distinguish pre-existing failures from refactor regressions.
-
-**Exit gate:** both repositories have a concrete call-site and fixture inventory,
-with an agreed dependency baseline. No source, schema, or authority change.
+- **Handles.** Every production `WalletDb` comes from the three constructors in
+  `rust/src/wallet/db.rs`: `open_wallet_db_with_timeout`,
+  `open_wallet_db_for_read_with_timeout`, and
+  `open_wallet_db_readonly_with_timeout`. The one exception is the
+  borrowed-transaction handle in `record_creation_evidence`
+  (`rust/src/wallet/sync/migration.rs`). `open_wallet_raw_conn_with_timeout`
+  returns a raw connection, not a `WalletDb`. Tests and examples construct
+  their own handles (`rust/src/wallet/addresses/tests.rs`,
+  `rust/examples/ledger_zcash_speculos_poc.rs`).
+- **Transparent discovery** runs on the per-sync handle: UTXO refresh
+  (`store_transparent_outputs` in `rust/src/wallet/sync_engine/mod.rs`),
+  Ledger discovery (`rust/src/wallet/sync_engine/ledger_discovery.rs`), and
+  transparent history
+  (`rust/src/wallet/sync_engine/enhancement/auxiliary/transparent_history.rs`).
+- **Pre-DB public requests**, with no `WalletDb`:
+  `discover_used_software_accounts` and
+  `preview_software_account_transparent_balance` in `rust/src/api/wallet.rs`.
+  Phase 2 guards them.
+- **Migrations** run seedless through `ensure_db_migrated_once`
+  (`rust/src/wallet/keys.rs`) at startup, before the Enhance/Status policy is
+  applied. Only creating the first software account passes a seed; hardware and
+  observer imports are seedless.
+- **Sync.** Vizor runs its own sync engine over `scan_cached_blocks` and does
+  not call the backend's `sync::run`.
 
 ## Phase 1 — Add the contract, schema, and configured handles
 
-**Wallet-libraries steps**
+The wallet-libraries half shipped in #60 (contract), #61 (schema and
+provenance), and #62 (configured handles). It is narrower than originally
+planned in some places and stricter in others; see the deviations below.
 
-1. Add proposed `backend/data_api/transparent_ledger.rs` with `ChainPoint`,
-   `TransparentLedgerMode`, `TransparentLedgerRead/Write`,
-   `TransparentLedgerSnapshot<AccountId>`, normalized commit/context types,
-   and guarded promotion signatures. Reuse wallet account/error types and keep
-   protocol layouts, HTTP, and PIR-client types out of the API.
-2. Define history completeness separately from the transparent balance snapshot:
-   owned effects, provisional classification, recipients, per-output memos,
-   optional fees/provenance, and mining/status evidence. Define contracts now;
-   implement the complete read path in Phase 5.
-3. Add seedless, additive migrations through `sqlite/wallet/init.rs` and
-   `sqlite/wallet/init/migrations/`. Establish `tpir_*` policy/account state,
-   scripts, event observations, coverage, pending work, and projection origins.
-   Classify existing remote rows as legacy evidence, never private coverage.
-4. Preserve local transaction bytes, sent outputs, known recipients/fees/grouping,
-   outboxes, locks, reservations, and independent shielded/payload origins.
-   Do not infer local creation from a row's presence.
-5. Add explicit handle configuration and inheritance in `WalletDb`. New APIs
-   reject unconfigured use, including an empty DB. Until Phase 4,
-   `PrivateRequired` rejects promotion and transparent financial authorization
-   as unavailable; incomplete implementations cannot fabricate successful
-   coverage or a spendable private transparent balance.
+**What shipped in wallet-libraries**
+
+1. **Contract.** `backend/data_api/transparent_ledger.rs` provides
+   `ChainPoint`, `TransparentLedgerMode` (`Public`, `PrivateShadow`,
+   `PrivateRequired`), `TransparentLedgerSnapshot<AccountId>`, and
+   `TransparentLedgerRead` (`transparent_ledger_mode`,
+   `transparent_ledger_snapshot`). The snapshot carries the authority, the
+   authorized balance split into regular and coinbase, the last-known amount
+   with `LegacyPublic` or `LegacyPublicAndLocal` provenance, and blockers.
+   There is no write trait.
+2. **Schema.** The `transparent_ledger_schema` migration is seedless and
+   additive. It creates three tables:
+   - `tpir_meta`: the durable policy (`applied_mode`, `policy_generation`,
+     `min_reader_version`), seeded as public, generation 0, reader version 1;
+   - `tpir_output_origins` and `tpir_spend_origins`: provenance, with codes
+     0 = legacy public and 1 = local construction; 2 and 3 are reserved.
+
+   It backfills legacy and local origins. From then on every transparent
+   output or spend write records its origin in the same transaction, and
+   outbox creation evidence adds local origins atomically. Existing remote rows
+   are legacy evidence, never private coverage.
+3. **Handles.** `WalletDb::set_transparent_ledger_mode` and
+   `with_transparent_ledger_mode` set a per-handle mode. It is not persisted;
+   `transactionally` inherits it.
+4. **Fail-closed rules.**
+   - An explicit mode is required for transparent input selection, storing any
+     transaction with transparent inputs, `put_received_transparent_utxo`,
+     transparent history requests, and the ledger APIs. Unconfigured handles
+     fail. An unconfigured handle on a wallet without a private policy can
+     still read balances for display.
+   - A durable `PrivateRequired` is never weakened: weaker handles fail with
+     `TransparentLedgerPolicyConflict`. A missing policy row or table, or a
+     newer reader requirement, fails closed.
+   - Transparent authority is unavailable under `PrivateRequired`, while the
+     chain tip is unknown, and in builds without `transparent-inputs`. Then
+     selectors and stores with transparent inputs fail,
+     `get_wallet_summary` omits transparent funds,
+     `get_transparent_balances` fails, and `get_received_outputs` reports
+     `u32::MAX` confirmations until spendable.
+   - Under `PrivateRequired`, public transparent discovery is refused, the
+     backend `sync::run` skips UTXO refresh before any request (it now requires
+     `TransparentLedgerRead`), and transparent history requests are withheld.
+5. **CI** runs an `orchard,transparent-inputs,test-dependencies,unstable` lane.
+
+**Deviations from the original plan**
+
+- **Schema.** Only the policy and provenance tables exist. The recovery tables
+  (scripts, event observations, coverage, pending work) move to the Phase 3
+  migration.
+- **Contract.** Write, commit, promotion, and history-completeness types were
+  left out. Phases 3–5 add them with the code that uses them.
+- **Existing APIs require configuration.** The plan had only new APIs reject
+  unconfigured handles; the existing transparent APIs above do too.
+- **Phase 2 gates pulled forward.** Refusing public discovery and withholding
+  transparent summary and balances under `PrivateRequired` are already in the
+  library. Phase 2 keeps the rest.
+- **Release.** No release contains the migration yet, so it can still be
+  corrected in place. Once a release includes it, it is frozen and schema
+  changes need forward migrations; record it in `PUBLIC_MIGRATION_STATES`
+  then.
 
 **Vizor steps**
 
-1. Upgrade the dependency pin/lockfile to this library revision and exercise the
-   migration using existing wallet initialization paths, including imported-only
-   and hardware-first databases without access to a seed.
-2. Configure the new transparent mode on every relevant handle from the Phase 0
-   inventory. Preparatory production builds explicitly retain public transparent
-   authority and the existing Enhance/Status behavior; development fixtures can
-   request stricter modes.
+1. Consume wallet-libraries `main` (at least `0e0d1b128`) through
+   `[patch.crates-io]` git entries for `zakura-client-backend` and
+   `zakura-client-sqlite`. Other Vizor dependencies such as `zakura-pir-enhance`
+   reach the backend through crates.io, so a direct git dependency would
+   duplicate it. The pin also brings in the ZIP 318 schema drop (#55).
+2. Configure `TransparentLedgerMode::Public` on every handle in the Phase 0
+   inventory, from one mode source in
+   `rust/src/wallet/sync_engine/enhancement/policy.rs`. It always returns
+   `Public` in Phase 1; Phase 2 derives it from the private-queries setting.
+   Development fixtures can request stricter modes.
 3. Keep the saved user setting intact. Never overwrite a durably applied
-   `PrivateRequired` policy with `Public` because a build lacks support.
-   Such a database must remain blocked or use a supported privacy-aware release.
+   `PrivateRequired` policy with `Public` because a build lacks support; such a
+   database stays blocked, and the user sees that it needs a newer build.
+4. Check callers that shield or propose before the first chain-tip update,
+   which now fail.
+5. Extend the upgrade probes: fixtures from a pre-Phase-1 base (and the
+   existing `mobile/v0.0.18` base), including a hardware-first scenario
+   without a seed and raw-SQL transparent rows (a remote UTXO and a local send
+   with a lock).
 
-**Exit gate:** representative databases upgrade without seeds, changed public
-balances, or lost local history. Transactional/reopened handles retain the
-required configuration; unconfigured/private-unavailable paths fail explicitly.
-Migration interruption and storage failures fabricate neither coverage nor
-history completeness.
+**Exit gate:** representative databases, including imported-only and
+hardware-first ones, upgrade without seeds, changed public balances, or lost
+local history. Verified with raw SQL: the `tpir_*` tables exist, `tpir_meta` is
+`(0, 0, 1)`, and every transparent output and spend has an origin.
+Transactional/reopened handles retain the required configuration;
+unconfigured/private-unavailable paths fail explicitly, and a durable
+`PrivateRequired` survives startup migration unchanged. Migration interruption
+and storage failures fabricate neither coverage nor history completeness.
 
 ## Phase 2 — Enforce privacy before adding recovery networking
+
+Phase 1 already refuses public transparent discovery and withholds transparent
+history requests, summary funds, and balances under `PrivateRequired`. This
+phase owns the rest: queued follow-on work such as parent-transaction retrieval
+from `tx_retrieval_queue`, Status routing, durable policy transitions with
+generations checked at dispatch, and the Vizor paths.
 
 **Wallet-libraries steps**
 
@@ -194,7 +248,9 @@ tests. No real transparent PIR client is needed to pass this gate.
 
 **Wallet-libraries steps**
 
-1. Implement proposed `sqlite/wallet/transparent_ledger.rs` storage and
+1. Add the recovery tables deferred from Phase 1 (scripts, event observations,
+   coverage, pending work) as a new seedless, additive migration.
+   Implement proposed `sqlite/wallet/transparent_ledger.rs` storage and
    `apply_transparent_ledger_commit` for candidate state. Enumerate owned
    scripts with account/scope, conservative recovery bounds, and watch-set
    generations; unknown starts require recovery from genesis.
