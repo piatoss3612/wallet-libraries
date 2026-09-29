@@ -596,6 +596,9 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
     v_transactions_zip318_kind::MIGRATION_ID,
 ];
 
+/// The migration that creates the transparent ledger schema.
+pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
+
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_ledger_schema::MIGRATION_ID];
 

@@ -19,6 +19,7 @@ use {
                 scan_cached_blocks,
             },
             scanning::{ScanPriority, ScanRange},
+            transparent_ledger::TransparentLedgerRead,
         },
         proto::service::{self, BlockId, compact_tx_streamer_client::CompactTxStreamerClient},
         scanning::ScanError,
@@ -72,7 +73,7 @@ where
     <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
-    DbT: WalletWrite + WalletCommitmentTrees,
+    DbT: WalletWrite + WalletCommitmentTrees + TransparentLedgerRead,
     <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
@@ -102,7 +103,7 @@ where
     <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
-    DbT: WalletWrite,
+    DbT: WalletWrite + TransparentLedgerRead,
     <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
 {
@@ -113,16 +114,26 @@ where
     // Refresh UTXOs for the accounts in the wallet. We do this before we perform
     // any shielded scanning, to ensure that we discover any UTXOs between the old
     // fully-scanned height and the current chain tip.
+    //
+    // UTXO refresh discloses every transparent receiver to the server, so it runs only when
+    // the configured transparent ledger mode permits public discovery. The mode is resolved
+    // before any request; an unconfigured handle fails rather than defaulting to public.
     #[cfg(feature = "transparent-inputs")]
-    for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
-        let start_height = db_data
-            .utxo_query_height(account_id)
-            .map_err(Error::Wallet)?;
-        info!(
-            "Refreshing UTXOs for {:?} from height {}",
-            account_id, start_height,
-        );
-        refresh_utxos(params, client, db_data, account_id, start_height).await?;
+    if db_data
+        .transparent_ledger_mode()
+        .map_err(Error::Wallet)?
+        .retains_public_authority()
+    {
+        for account_id in db_data.get_account_ids().map_err(Error::Wallet)? {
+            let start_height = db_data
+                .utxo_query_height(account_id)
+                .map_err(Error::Wallet)?;
+            info!(
+                "Refreshing UTXOs for {:?} from height {}",
+                account_id, start_height,
+            );
+            refresh_utxos(params, client, db_data, account_id, start_height).await?;
+        }
     }
 
     // 5) Get the suggested scan ranges from the wallet database

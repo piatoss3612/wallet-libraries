@@ -18,6 +18,7 @@ use zcash_client_backend::data_api::NoteFilter;
 use zcash_client_backend::data_api::error::RewindError;
 use zcash_client_backend::data_api::ll;
 use zcash_client_backend::data_api::ll::wallet::PutBlocksError;
+use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 use zcash_client_backend::wallet::OutputRef;
 use zcash_keys::address::UnifiedAddress;
 use zcash_keys::keys::AddressGenerationError;
@@ -47,6 +48,26 @@ pub enum SqliteClientError {
     /// Payload-work enumeration requires an explicit enhancement mode on this handle.
     #[cfg(feature = "orchard")]
     EnhancementModeNotConfigured,
+    /// Transparent ledger APIs require an explicit mode on this handle.
+    TransparentLedgerModeNotConfigured,
+    /// The handle's transparent ledger mode is weaker than the policy durably applied to the
+    /// wallet. The stored policy is never weakened by a handle's configuration.
+    TransparentLedgerPolicyConflict {
+        /// The handle's configured mode, if any.
+        configured: Option<TransparentLedgerMode>,
+        /// The durably applied mode.
+        applied: TransparentLedgerMode,
+    },
+    /// Consuming transparent inputs requires private transparent authority, which is not
+    /// available.
+    TransparentAuthorityUnavailable,
+    /// Public transparent discovery is forbidden by the handle's transparent ledger mode.
+    PublicTransparentDiscoveryForbidden,
+    /// The wallet's transparent ledger state requires a newer reader than this build.
+    TransparentLedgerIncompatible {
+        /// The minimum reader version the wallet requires.
+        required: i64,
+    },
 
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
@@ -333,6 +354,29 @@ impl fmt::Display for SqliteClientError {
             SqliteClientError::EnhancementModeNotConfigured => write!(
                 f,
                 "Enhancement mode is not configured; call set_enhancement_mode before enumerating enhancement work"
+            ),
+            SqliteClientError::TransparentLedgerModeNotConfigured => write!(
+                f,
+                "Transparent ledger mode is not configured; call set_transparent_ledger_mode first"
+            ),
+            SqliteClientError::TransparentLedgerPolicyConflict {
+                configured,
+                applied,
+            } => write!(
+                f,
+                "Transparent ledger mode {configured:?} is weaker than the wallet's applied policy {applied:?}; this build cannot operate on this wallet's transparent funds"
+            ),
+            SqliteClientError::PublicTransparentDiscoveryForbidden => write!(
+                f,
+                "Public transparent discovery is forbidden by the configured transparent ledger mode"
+            ),
+            SqliteClientError::TransparentLedgerIncompatible { required } => write!(
+                f,
+                "Transparent ledger state requires reader version {required}; this build cannot operate on this wallet's transparent funds"
+            ),
+            SqliteClientError::TransparentAuthorityUnavailable => write!(
+                f,
+                "Transparent funds are unavailable: private transparent authority is required but not available"
             ),
             SqliteClientError::CorruptedData(reason) => {
                 write!(f, "Data DB is corrupted: {reason}")

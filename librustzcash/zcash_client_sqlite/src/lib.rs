@@ -41,6 +41,9 @@ use shardtree::{ShardTree, error::ShardTreeError, store::ShardStore};
 use zcash_client_backend::data_api::status::{
     TransactionStatusMode, TransactionStatusRead, TransactionStatusWork, TransactionStatusWrite,
 };
+use zcash_client_backend::data_api::transparent_ledger::{
+    TransparentLedgerMode, TransparentLedgerRead, TransparentLedgerSnapshot,
+};
 
 use std::{
     borrow::{Borrow, BorrowMut},
@@ -304,6 +307,7 @@ pub struct WalletDb<C, P, CL, R> {
     #[cfg(feature = "orchard")]
     enhancement_mode: Option<EnhancementMode>,
     status_mode: Option<TransactionStatusMode>,
+    transparent_ledger_mode: Option<TransparentLedgerMode>,
     #[cfg(feature = "transparent-inputs")]
     gap_limits: GapLimits,
 }
@@ -476,8 +480,9 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// `WalletRead::transaction_data_requests` (transparent history) does not
-    /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
+    /// Transparent discovery and transparent input selection likewise require
+    /// `set_transparent_ledger_mode`; see that method. Modes are not persisted; reopened handles
+    /// must be configured again.
     pub fn for_path<F: AsRef<Path>>(
         path: F,
         params: P,
@@ -493,6 +498,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
                 rng,
                 anchor_retention_interval: AnchorRetentionInterval::default(),
                 status_mode: None,
+                transparent_ledger_mode: None,
                 #[cfg(feature = "orchard")]
                 enhancement_mode: None,
                 #[cfg(feature = "transparent-inputs")]
@@ -512,6 +518,26 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Configures status policy before obtaining routed work.
     pub fn with_status_mode(mut self, mode: TransactionStatusMode) -> Self {
         self.set_status_mode(mode);
+        self
+    }
+
+    /// Selects the transparent ledger mode: the source authorization for transparent discovery
+    /// and financial authority. This is not persisted; each reopened handle must select a mode.
+    /// Transparent ledger APIs reject unconfigured handles, and a mode weaker than a policy
+    /// durably applied to the wallet is rejected rather than weakening that policy.
+    ///
+    /// The mode governs work this handle produces from now on. Discovery requests already
+    /// obtained, such as address-bearing [`TransactionDataRequest`]s, are owned values the
+    /// handle cannot recall: before switching to a stricter mode, the caller must cancel or
+    /// discard all outstanding transparent discovery work and must not dispatch it afterwards.
+    /// Durable policy generations, checked at dispatch and commit, enforce this across handles.
+    pub fn set_transparent_ledger_mode(&mut self, mode: TransparentLedgerMode) {
+        self.transparent_ledger_mode = Some(mode);
+    }
+
+    /// Configures the transparent ledger mode; see [`Self::set_transparent_ledger_mode`].
+    pub fn with_transparent_ledger_mode(mut self, mode: TransparentLedgerMode) -> Self {
+        self.set_transparent_ledger_mode(mode);
         self
     }
 
@@ -589,8 +615,9 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// `set_enhancement_mode` or `with_enhancement_mode` before calling
     /// `EnhancePirRead::transaction_enhancement_work`. Until then, that method returns
     /// `SqliteClientError::EnhancementModeNotConfigured`, even for an empty wallet.
-    /// `WalletRead::transaction_data_requests` (transparent history) does not
-    /// depend on the mode. Mode is not persisted; reopened handles must be configured again.
+    /// Transparent discovery and transparent input selection likewise require
+    /// `set_transparent_ledger_mode`; see that method. Modes are not persisted; reopened handles
+    /// must be configured again.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
             conn,
@@ -599,6 +626,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             rng,
             anchor_retention_interval: AnchorRetentionInterval::default(),
             status_mode: None,
+            transparent_ledger_mode: None,
             #[cfg(feature = "orchard")]
             enhancement_mode: None,
             #[cfg(feature = "transparent-inputs")]
@@ -630,6 +658,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
             status_mode: self.status_mode,
+            transparent_ledger_mode: self.transparent_ledger_mode,
             #[cfg(feature = "orchard")]
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
@@ -691,6 +720,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             rng: &mut self.rng,
             anchor_retention_interval: self.anchor_retention_interval,
             status_mode: self.status_mode,
+            transparent_ledger_mode: self.transparent_ledger_mode,
             #[cfg(feature = "orchard")]
             enhancement_mode: self.enhancement_mode,
             #[cfg(feature = "transparent-inputs")]
@@ -1056,6 +1086,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         outpoint: &OutPoint,
         target_height: TargetHeight,
     ) -> Result<Option<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        wallet::transparent_ledger::check_transparent_authority(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         wallet::transparent::get_wallet_transparent_output(
             self.conn.borrow(),
             outpoint,
@@ -1072,6 +1106,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         output_filter: CoinbaseFilter,
         lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        wallet::transparent_ledger::check_transparent_authority(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         wallet::transparent::get_spendable_transparent_outputs(
             self.conn.borrow(),
             &self.params,
@@ -1092,6 +1130,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         output_filter: CoinbaseFilter,
         lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        wallet::transparent_ledger::check_transparent_authority(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         wallet::transparent::get_spendable_transparent_outputs_for_addresses(
             self.conn.borrow(),
             &self.params,
@@ -1116,6 +1158,10 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
         fee_rule: &StandardFeeRule,
         lock_filter: LockFilter<'_>,
     ) -> Result<Vec<WalletTransparentOutput<Self::AccountId>>, Self::Error> {
+        wallet::transparent_ledger::check_transparent_authority(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         wallet::transparent::select_spendable_transparent_outputs(
             self.conn.borrow(),
             &self.params,
@@ -1340,11 +1386,17 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     ) -> Result<Option<WalletSummary<Self::AccountId>>, Self::Error> {
         // This will return a runtime error if we call `get_wallet_summary` from two
         // threads at the same time, as transactions cannot nest.
+        let tx = self.conn.borrow().unchecked_transaction()?;
+        let include_transparent = wallet::transparent_ledger::transparent_funds_current(
+            &tx,
+            self.transparent_ledger_mode,
+        )?;
         wallet::get_wallet_summary(
-            &self.conn.borrow().unchecked_transaction()?,
+            &tx,
             &self.params,
             confirmations_policy,
             &SubtreeProgressEstimator,
+            include_transparent,
         )
     }
 
@@ -1482,6 +1534,14 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<TransparentBalances, Self::Error> {
+        // Under a required-private policy these legacy public rows are not current balances;
+        // report the absence of authority rather than an empty or public result.
+        if !wallet::transparent_ledger::transparent_funds_current(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )? {
+            return Err(SqliteClientError::TransparentAuthorityUnavailable);
+        }
         wallet::transparent::get_transparent_balances(
             self.conn.borrow(),
             &self.params,
@@ -1513,15 +1573,29 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
+        // Transparent spend-detection and address-history requests are public discovery. The
+        // mode is resolved first, so an unconfigured handle fails even before a chain tip exists.
+        #[cfg(feature = "transparent-inputs")]
+        let public_discovery = wallet::transparent_ledger::public_discovery_permitted(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )?;
         if let Some(_chain_tip_height) = wallet::chain_tip_height(self.conn.borrow())? {
             let iter = std::iter::empty();
-
             #[cfg(feature = "transparent-inputs")]
-            let iter = iter.chain(wallet::transparent::transaction_data_requests(
-                self.conn.borrow(),
-                &self.params,
-                _chain_tip_height,
-            )?);
+            let iter = iter.chain(
+                public_discovery
+                    .then(|| {
+                        wallet::transparent::transaction_data_requests(
+                            self.conn.borrow(),
+                            &self.params,
+                            _chain_tip_height,
+                        )
+                    })
+                    .transpose()?
+                    .into_iter()
+                    .flatten(),
+            );
 
             Ok(iter.collect())
         } else {
@@ -1537,12 +1611,36 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Vec<ReceivedTransactionOutput>, Self::Error> {
-        wallet::get_received_outputs(
+        let outputs = wallet::get_received_outputs(
             self.conn.borrow(),
             txid,
             target_height,
             confirmations_policy,
-        )
+        )?;
+        // Without current transparent authority, transparent outputs are not spendable however
+        // many confirmations they gain.
+        if wallet::transparent_ledger::transparent_funds_current(
+            self.conn.borrow(),
+            self.transparent_ledger_mode,
+        )? {
+            Ok(outputs)
+        } else {
+            Ok(outputs
+                .into_iter()
+                .map(|output| {
+                    if output.pool_type() == zcash_protocol::PoolType::Transparent {
+                        ReceivedTransactionOutput::from_parts(
+                            output.pool_type(),
+                            output.output_index(),
+                            output.value(),
+                            u32::MAX,
+                        )
+                    } else {
+                        output
+                    }
+                })
+                .collect())
+        }
     }
 }
 
@@ -1578,6 +1676,36 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
         earliest: BlockHeight,
     ) -> Result<(), Self::Error> {
         wallet::record_transaction_created(self.conn.borrow(), txid, earliest)
+    }
+}
+
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> TransparentLedgerRead
+    for WalletDb<C, P, CL, R>
+{
+    fn transparent_ledger_mode(&self) -> Result<TransparentLedgerMode, Self::Error> {
+        wallet::transparent_ledger::resolve_mode(self.conn.borrow(), self.transparent_ledger_mode)
+    }
+
+    fn transparent_ledger_snapshot(
+        &self,
+        account: Self::AccountId,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<TransparentLedgerSnapshot<Self::AccountId>, Self::Error> {
+        let conn = self.conn.borrow();
+        let read = |conn: &rusqlite::Connection| {
+            let mode =
+                wallet::transparent_ledger::resolve_mode(conn, self.transparent_ledger_mode)?;
+            wallet::transparent_ledger::snapshot(conn, account, mode, confirmations_policy)
+        };
+        // Every field must come from one consistent read.
+        if conn.is_autocommit() {
+            let tx = conn.unchecked_transaction()?;
+            let snapshot = read(&tx)?;
+            tx.commit()?;
+            Ok(snapshot)
+        } else {
+            read(conn)
+        }
     }
 }
 
@@ -2494,6 +2622,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
     ) -> Result<Self::UtxoRef, <Self as WalletRead>::Error> {
         #[cfg(feature = "transparent-inputs")]
         return {
+            wallet::transparent_ledger::check_public_discovery(
+                self.conn.0,
+                self.transparent_ledger_mode,
+            )?;
             let (account_id, _, key_scope, utxo_id) =
                 wallet::transparent::put_received_transparent_utxo(
                     self.conn.0,
@@ -2551,7 +2683,18 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         transactions: &[SentTransaction<<Self as WalletRead>::AccountId>],
     ) -> Result<(), <Self as WalletRead>::Error> {
+        // Consuming transparent inputs requires transparent authority, checked before each
+        // transaction is staged; a failure rolls back the whole batch. Transparent inputs are
+        // read from the transaction itself rather than from caller-supplied metadata, and this
+        // applies in every build: a database may hold transparent outputs recorded by a build
+        // with transparent support.
         for sent_tx in transactions {
+            if wallet::transparent_ledger::has_transparent_inputs(sent_tx.tx()) {
+                wallet::transparent_ledger::check_transparent_authority(
+                    self.conn.0,
+                    self.transparent_ledger_mode,
+                )?;
+            }
             wallet::store_transaction_to_be_sent(
                 self.conn.0,
                 &self.params,

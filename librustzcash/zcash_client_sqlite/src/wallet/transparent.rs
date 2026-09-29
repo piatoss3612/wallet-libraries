@@ -1829,6 +1829,112 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
     Ok(result)
 }
 
+/// The confirmations required of transparent outputs counted in account balances.
+///
+/// We treat all transparent UTXOs as untrusted; however, if zero-conf shielding is enabled, the
+/// minimum number of confirmations is zero.
+fn balance_min_confirmations(confirmations_policy: ConfirmationsPolicy) -> u32 {
+    if confirmations_policy.allow_zero_conf_shielding() {
+        0u32
+    } else {
+        u32::from(confirmations_policy.untrusted())
+    }
+}
+
+/// Generates a SQL condition that the transaction creating an output is mined with fewer than
+/// the required confirmations, or is unmined and definitely unexpired.
+///
+/// # Usage requirements
+/// - `tx` must be set to the SQL variable name for the transaction in the parent.
+/// - The parent must provide `:target_height` and `:min_confirmations` as named arguments.
+fn tx_unconfirmed_condition(tx: &str) -> String {
+    format!(
+        r#"
+        -- the transaction that created the output is mined with not enough confirmations
+        (
+            {tx}.mined_height < :target_height
+            AND :target_height - {tx}.mined_height < :min_confirmations
+        )
+        -- or the tx is unmined but definitely not expired
+        OR (
+            {tx}.mined_height IS NULL
+            AND ({tx}.expiry_height = 0 OR {tx}.expiry_height >= :target_height)
+        )
+        "#
+    )
+}
+
+/// Whether an account's balance-counted transparent outputs include locally constructed value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BalanceProvenance {
+    /// Every counted output has a legacy-public origin.
+    LegacyPublic,
+    /// Some counted output has only a local-construction origin.
+    IncludesLocalOnly,
+}
+
+/// Classifies the provenance of exactly the outputs that [`add_transparent_account_balances`]
+/// counts for `account`. An output with no recorded origin is reported as corrupted data rather
+/// than guessed.
+pub(crate) fn transparent_balance_provenance(
+    conn: &rusqlite::Connection,
+    account: AccountUuid,
+    target_height: TargetHeight,
+    confirmations_policy: ConfirmationsPolicy,
+) -> Result<BalanceProvenance, SqliteClientError> {
+    let (missing, local_only): (bool, bool) = conn.query_row(
+        &format!(
+            "WITH counted AS (
+                 SELECT u.id
+                 FROM transparent_received_outputs u
+                 JOIN accounts ON accounts.id = u.account_id
+                 JOIN transactions t ON t.id_tx = u.transaction_id
+                 JOIN addresses ON addresses.id = u.address_id
+                 WHERE accounts.uuid = :account_uuid
+                 AND (({}) OR (:min_confirmations > 0 AND ({})))
+                 AND u.id NOT IN ({})
+                 AND ({})
+             )
+             SELECT
+                 EXISTS (
+                     SELECT 1 FROM counted c
+                     WHERE NOT EXISTS (SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = c.id)
+                 ),
+                 EXISTS (
+                     SELECT 1 FROM counted c
+                     WHERE EXISTS (
+                         SELECT 1 FROM tpir_output_origins oo
+                         WHERE oo.output_id = c.id AND oo.origin = 1
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM tpir_output_origins oo
+                         WHERE oo.output_id = c.id AND oo.origin = 0
+                     )
+                 )",
+            tx_unexpired_condition_minconf_0("t"),
+            tx_unconfirmed_condition("t"),
+            spent_utxos_clause(),
+            excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        ),
+        named_params![
+            ":account_uuid": account.0,
+            ":target_height": u32::from(target_height),
+            ":min_confirmations": balance_min_confirmations(confirmations_policy),
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if missing {
+        return Err(SqliteClientError::CorruptedData(
+            "a counted transparent output has no recorded provenance".into(),
+        ));
+    }
+    Ok(if local_only {
+        BalanceProvenance::IncludesLocalOnly
+    } else {
+        BalanceProvenance::LegacyPublic
+    })
+}
+
 #[tracing::instrument(skip(conn, account_balances))]
 pub(crate) fn add_transparent_account_balances(
     conn: &rusqlite::Connection,
@@ -1836,13 +1942,7 @@ pub(crate) fn add_transparent_account_balances(
     confirmations_policy: ConfirmationsPolicy,
     account_balances: &mut HashMap<AccountUuid, AccountBalance>,
 ) -> Result<(), SqliteClientError> {
-    // We treat all transparent UTXOs as untrusted; however, if zero-conf shielding
-    // is enabled, we set the minimum number of confirmations to zero.
-    let min_confirmations = if confirmations_policy.allow_zero_conf_shielding() {
-        0u32
-    } else {
-        u32::from(confirmations_policy.untrusted())
-    };
+    let min_confirmations = balance_min_confirmations(confirmations_policy);
 
     let mut stmt_account_spendable_balances = conn.prepare(&format!(
         "SELECT accounts.uuid, u.lock_expiry_height, SUM(u.value_zat),
@@ -1922,21 +2022,11 @@ pub(crate) fn add_transparent_account_balances(
              JOIN accounts ON accounts.id = u.account_id
              JOIN transactions t ON t.id_tx = u.transaction_id
              JOIN addresses ON addresses.id = u.address_id
-             WHERE (
-                 -- the transaction that created the output is mined with not enough confirmations
-                (
-                    t.mined_height < :target_height
-                    AND :target_height - t.mined_height < :min_confirmations
-                )
-                -- or the tx is unmined but definitely not expired
-                OR (
-                    t.mined_height IS NULL
-                    AND (t.expiry_height = 0 OR t.expiry_height >= :target_height)
-                )
-             )
+             WHERE ({})
              AND u.id NOT IN ({}) -- and the received txo is unspent
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
              GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
+            tx_unconfirmed_condition("t"),
             spent_utxos_clause(),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         ))?;
