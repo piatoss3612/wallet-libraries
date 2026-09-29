@@ -108,15 +108,9 @@ empty-range, and mixed-transaction fixtures for candidate recovery are deferred
 to Phase 3, where their expected effects are derived independently of the ledger
 implementation.
 
-## Deferred review items
+## Later-phase design
 
-Review of the Phase 1 stack raised points that belong to later phases. They are
-tracked here and must be addressed by the phase named.
-
-| Item | Owning phase |
-| --- | --- |
-| A privileged source-verification operation that qualifies a revision, clears source quarantine, and advances the trust epoch; commits cannot assert trust. | Phase 6 (real-source qualification), with the contract added when source verification is implemented. |
-| Qualification enforced for active commits, so an unqualified revision's events are rejected or isolated rather than projected into authoritative state. | Phase 4 (projection and promotion gates). |
-| Per-script coverage gaps or a durable next-work cursor in the watched-script snapshot, so bounded recovery resumes uncovered scripts after restart. | Phase 3 (candidate recovery and resumable commits). |
-| Withholding or privately routing queued transparent follow-on enhancement work (parent-transaction retrieval) under `PrivateRequired`. | Phase 2 (Enhance/Status routing and dispatch guards). |
-
+Review of the Phase 1 stack produced design decisions for recovery, activation,
+qualification, and remaining privacy enforcement. They are recorded in
+[design notes](transparent-pir-ledger-design-notes.md) for the phases that
+implement them.

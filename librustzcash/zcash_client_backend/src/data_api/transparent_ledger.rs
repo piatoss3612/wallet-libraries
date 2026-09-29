@@ -1,18 +1,16 @@
-//! Storage-neutral contract for privately recovered transparent ledger state.
+//! Storage-neutral contract for transparent ledger configuration and financial authority.
 //!
-//! Recovery sources submit normalized receive/spend events, source-bound coverage, and
-//! resumable progress. The store decides whether a submission is rejected, isolated as
-//! candidate state, or projected into wallet state; a source cannot choose its destination.
-//! No transport, filter layout, shard, or PIR protocol type appears here. See
-//! `docs/transparent-pir-ledger-architecture.md` for the invariants these types carry.
+//! This is the preparatory surface of the private transparent ledger: explicit handle modes
+//! and an honest balance-and-authority snapshot. Recovery commits, promotion, and their
+//! supporting types are added with the recovery and activation work that implements them;
+//! see `docs/transparent-pir-ledger-architecture.md` and `docs/transparent-pir-baseline.md`.
 
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;
-use transparent::{address::Script, bundle::OutPoint};
-use zcash_primitives::{block::BlockHash, transaction::TxId};
-use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
+use zcash_primitives::block::BlockHash;
+use zcash_protocol::consensus::BlockHeight;
 
-use super::{Balance, WalletRead, WalletWrite, wallet::ConfirmationsPolicy};
+use super::{Balance, WalletRead, wallet::ConfirmationsPolicy};
 
 /// A locally accepted block: its height and the hash the wallet holds for that height.
 ///
@@ -57,411 +55,8 @@ impl TransparentLedgerMode {
 pub enum TransparentAuthority {
     /// Balances and inputs derive from public discovery.
     Public,
-    /// Balances and inputs derive from promoted private ledger state.
-    Private,
     /// No current authority can be established; transparent inputs are unavailable.
     Unavailable,
-}
-
-/// The largest accepted length, in bytes, of an opaque source, revision, or page identifier.
-pub const MAX_OPAQUE_ID_LEN: usize = 64;
-
-/// Why an opaque identifier was rejected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OpaqueIdError {
-    /// Identifiers must not be empty.
-    Empty,
-    /// The identifier exceeded [`MAX_OPAQUE_ID_LEN`] bytes.
-    TooLong {
-        /// The rejected length.
-        len: usize,
-    },
-}
-
-macro_rules! opaque_id {
-    ($(#[$doc:meta])* $name:ident) => {
-        $(#[$doc])*
-        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-        pub struct $name(Vec<u8>);
-
-        impl $name {
-            /// Accepts between 1 and [`MAX_OPAQUE_ID_LEN`] bytes. The store compares
-            /// identifiers bytewise and never interprets them.
-            pub fn new(bytes: impl Into<Vec<u8>>) -> Result<Self, OpaqueIdError> {
-                let bytes = bytes.into();
-                match bytes.len() {
-                    0 => Err(OpaqueIdError::Empty),
-                    len if len > MAX_OPAQUE_ID_LEN => Err(OpaqueIdError::TooLong { len }),
-                    _ => Ok(Self(bytes)),
-                }
-            }
-
-            /// Returns the identifier bytes.
-            pub fn as_bytes(&self) -> &[u8] {
-                &self.0
-            }
-        }
-    };
-}
-
-opaque_id!(
-    /// Identifies a recovery source, such as one publication service.
-    SourceId
-);
-opaque_id!(
-    /// Identifies one publication revision of a source.
-    RevisionId
-);
-opaque_id!(
-    /// Identifies one resumable unit of retrieval work within a revision.
-    PageId
-);
-
-/// A position in a source's publication lineage, strictly increasing with each replacement.
-///
-/// Values are bounded by [`Lineage::MAX`] so that stores can persist and order them as signed
-/// 64-bit integers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Lineage(u64);
-
-impl Lineage {
-    /// The largest representable lineage.
-    pub const MAX: u64 = i64::MAX as u64;
-
-    /// Accepts values up to [`Lineage::MAX`].
-    pub fn new(value: u64) -> Option<Self> {
-        (value <= Self::MAX).then_some(Self(value))
-    }
-
-    /// Returns the lineage value.
-    pub fn value(self) -> u64 {
-        self.0
-    }
-}
-
-/// A publication revision of a source that passed production qualification.
-///
-/// Qualification is store-held metadata established by the store's source-verification path,
-/// never asserted by a commit, and it binds to this exact revision: verification checks one
-/// publication's digest and anchors. Each revision is qualified separately, so qualifying a
-/// later sealed revision leaves earlier verified revisions qualified; an unverified revision,
-/// including every later replacement, is unqualified until verified in turn, and every
-/// deterministic fixture source is unqualified. Promotion requires each revision that
-/// contributed an account's coverage to be a qualified revision of its source.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct QualifiedRevision {
-    /// The verified revision.
-    pub revision: RevisionId,
-    /// Its lineage.
-    pub lineage: Lineage,
-}
-
-/// Whether a publication revision can still be replaced by its publisher.
-///
-/// Sealed is not chain finality: a reorg invalidates affected sealed coverage too.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PublicationStatus {
-    /// The publisher will not replace this revision's contents.
-    Sealed,
-    /// A later revision may replace this one; its coverage must be revalidated, not extended.
-    Provisional,
-}
-
-/// A block height and hash asserted by a publication.
-///
-/// Unlike [`ChainPoint`], this is not local chain evidence: it may lie beyond the wallet's
-/// accepted chain, and a matching hash never substitutes for local acceptance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PublicationAnchor {
-    /// The asserted height.
-    pub height: BlockHeight,
-    /// The asserted block hash.
-    pub hash: BlockHash,
-}
-
-/// The publication that supplied a commit's events and coverage.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SourceRevision {
-    /// The recovery source.
-    pub source: SourceId,
-    /// The publication revision.
-    pub revision: RevisionId,
-    /// The revision's position in the source's publication lineage, strictly increasing with
-    /// each replacement. Captured with the revision before any retrieval. A provisional
-    /// revision is superseded once the store accepts a newer revision of the same source, so a
-    /// delayed result cannot resurrect replaced coverage. A sealed revision is never
-    /// superseded: its commits, including resumed pages and recovery for newly added accounts,
-    /// remain acceptable after later revisions.
-    pub lineage: Lineage,
-    /// Whether the revision is sealed or provisional.
-    pub status: PublicationStatus,
-    /// The publication's asserted anchor, retained alongside each accepted endpoint.
-    pub anchor: PublicationAnchor,
-}
-
-/// Immutable content of a transparent output paying a watched script.
-///
-/// Its identity is the transaction identifier plus output index. Coinbase classification
-/// is explicit; a missing transaction index never makes an output non-coinbase.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReceiveEvent {
-    /// The received output.
-    pub outpoint: OutPoint,
-    /// The exact output script.
-    pub script: Script,
-    /// The output value.
-    pub value: Zatoshis,
-    /// Whether the output belongs to a coinbase transaction.
-    pub is_coinbase: bool,
-}
-
-impl ReceiveEvent {
-    /// Returns the receive identity: transaction identifier and output index.
-    pub fn identity(&self) -> (TxId, u32) {
-        (TxId::from_bytes(*self.outpoint.hash()), self.outpoint.n())
-    }
-}
-
-/// Immutable content of a transaction input spending a watched output.
-///
-/// Its identity is the spending transaction identifier plus input index. The spent outpoint
-/// is checked content, so two different outpoints claimed for one input are a contradiction.
-/// A spend may arrive before its output and remains unresolved until the output arrives.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpendEvent {
-    /// The spending transaction.
-    pub spending_txid: TxId,
-    /// The input index within the spending transaction.
-    pub input_index: u32,
-    /// The output consumed by this input.
-    pub spent: OutPoint,
-    /// The watched script of the consumed output, which identifies the owning account even
-    /// when the spend arrives before its output. Checked against the output once it arrives.
-    pub spent_script: Script,
-}
-
-impl SpendEvent {
-    /// Returns the spend identity: spending transaction identifier and input index.
-    pub fn identity(&self) -> (TxId, u32) {
-        (self.spending_txid, self.input_index)
-    }
-}
-
-/// An event with the block that mined it on the source's chain.
-///
-/// Placement is separate from event identity: re-mining after an accepted rewind changes
-/// placement without making a different event.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Placed<E> {
-    /// The immutable event content.
-    pub event: E,
-    /// The block containing the event's transaction.
-    pub mined: ChainPoint,
-}
-
-/// A checked, continuous interval for one watched script.
-///
-/// A checked interval with no events is still coverage. Coverage cannot span missing pages,
-/// unsupported scripts, or ranges the source has not validated.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CoverageInterval {
-    /// The watched script this interval covers.
-    pub script: Script,
-    /// The first covered height, inclusive.
-    pub from: BlockHeight,
-    /// The accepted endpoint, inclusive.
-    pub through: ChainPoint,
-}
-
-/// Why a source cannot cover a watched script or range.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum UnsupportedReason {
-    /// The source does not index this script type.
-    ScriptType,
-    /// The source has no history for the range, such as heights before its first publication.
-    HistoryUnavailable,
-}
-
-/// A watched script range the commit's source explicitly cannot cover.
-///
-/// This is distinct from work not yet attempted: it blocks completeness for the owning
-/// account until another source covers the range.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnsupportedCoverage {
-    /// The watched script.
-    pub script: Script,
-    /// The first unsupported height, inclusive.
-    pub from: BlockHeight,
-    /// The last unsupported height, inclusive; `None` extends through the commit target.
-    pub to: Option<BlockHeight>,
-    /// Why the source cannot cover the range.
-    pub reason: UnsupportedReason,
-}
-
-/// Bounded resumable retrieval work, keyed by the commit's source revision.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingPage {
-    /// The page identity within the revision.
-    pub page: PageId,
-    /// The first height the page covers, inclusive.
-    pub from: BlockHeight,
-    /// The last height the page covers, inclusive.
-    pub to: BlockHeight,
-    /// The watched scripts whose matches opened the page. Only their accounts are blocked
-    /// while the page is outstanding.
-    pub scripts: Vec<Script>,
-}
-
-/// Pending-page progress recorded atomically with a commit.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PendingPageUpdate {
-    /// Pages discovered but not yet fully retrieved.
-    pub opened: Vec<PendingPage>,
-    /// Previously opened pages whose contents this commit completes.
-    pub completed: Vec<PageId>,
-}
-
-/// Whether a commit targets isolated candidate state or an activated account.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum LedgerLifecycle {
-    /// Isolated recovery that cannot change balances, spends, locks, or address state.
-    Candidate,
-    /// Authoritative recovery for a promoted account, projected atomically.
-    Active,
-}
-
-/// The watch-set generation an operation observed for one account.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct AccountWatchGeneration<AccountId> {
-    /// The account whose scripts were enumerated.
-    pub account: AccountId,
-    /// The account's watch-set generation at enumeration time.
-    pub watch_generation: u64,
-    /// The account's quarantine epoch at enumeration time. An integrity failure advances it,
-    /// so work captured before the failure is rejected as stale and cannot clear the quarantine.
-    pub quarantine_epoch: u64,
-}
-
-/// The immutable operation context a recovery run captured before any network I/O.
-///
-/// The store rechecks all of it inside the commit transaction. Stale context is retried
-/// from a new snapshot, never committed under obsolete authority.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransparentLedgerContext<AccountId> {
-    /// The mode the operation was authorized under.
-    pub mode: TransparentLedgerMode,
-    /// The applied policy generation at capture time.
-    pub policy_generation: u64,
-    /// The fixed accepted chain point the run recovers through.
-    pub target: ChainPoint,
-    /// Candidate or active destination; the store checks it against account lifecycle.
-    pub lifecycle: LedgerLifecycle,
-    /// The watch-set generation observed for each account in the run.
-    pub accounts: Vec<AccountWatchGeneration<AccountId>>,
-    /// The source's trust epoch captured before I/O; a source never seen before has epoch 0.
-    pub source_trust_epoch: u64,
-}
-
-/// One normalized, atomically applied recovery result.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransparentLedgerCommit<AccountId> {
-    /// The context captured before retrieval.
-    pub context: TransparentLedgerContext<AccountId>,
-    /// The publication that supplied this result.
-    pub source: SourceRevision,
-    /// Validated receives. Only events through `context.target` may enter canonical state.
-    pub receives: Vec<Placed<ReceiveEvent>>,
-    /// Validated spends, including spends whose outputs have not yet arrived.
-    pub spends: Vec<Placed<SpendEvent>>,
-    /// Completed coverage, including checked intervals without events.
-    pub coverage: Vec<CoverageInterval>,
-    /// Ranges the source explicitly cannot cover.
-    pub unsupported: Vec<UnsupportedCoverage>,
-    /// Resumable page progress.
-    pub pages: PendingPageUpdate,
-}
-
-/// Counts of what a successful commit recorded.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CommitSummary {
-    /// Receives recorded or confirmed idempotently.
-    pub receives: usize,
-    /// Spends recorded or confirmed idempotently.
-    pub spends: usize,
-    /// Coverage intervals recorded.
-    pub coverage_intervals: usize,
-}
-
-/// Why a commit was not applied. A rejected commit records none of its submitted facts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CommitRejection {
-    /// The store cannot accept ledger commits in its current state.
-    Unavailable,
-    /// The context's mode differs from the handle's configured mode.
-    ModeMismatch,
-    /// The applied policy changed after the context was captured.
-    StalePolicy,
-    /// Account, watch-set, lifecycle, or chain state changed after capture.
-    StaleContext,
-    /// The commit's revision is provisional and the store has already accepted a newer revision
-    /// of its source. Sealed revisions are never superseded.
-    SupersededRevision,
-    /// The commit contradicts accepted content or placement; trust in the session ends.
-    ///
-    /// Unlike other rejections, this durably quarantines the commit's source and the accounts
-    /// whose watched scripts it touched, in the same transaction that refuses its facts. Their
-    /// transparent authority stays blocked with [`RecoveryBlocker::IntegrityFailure`] across
-    /// restarts. The quarantine advances each affected account's quarantine epoch, so only a
-    /// run captured afterwards can revalidate the account and clear it.
-    Integrity,
-}
-
-/// The result of submitting a commit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CommitOutcome {
-    /// Events, coverage, and progress were recorded together.
-    Committed(CommitSummary),
-    /// None of the submitted facts were recorded; see [`CommitRejection::Integrity`] for the
-    /// quarantine it records.
-    Rejected(CommitRejection),
-}
-
-/// The context a caller expects when requesting promotion of one account.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PromotionContext<AccountId> {
-    /// The account to promote.
-    pub account: AccountId,
-    /// The applied policy generation the caller observed.
-    pub policy_generation: u64,
-    /// The account's watch-set generation the caller observed.
-    pub watch_generation: u64,
-    /// The accepted decision point coverage must reach.
-    pub decision_point: ChainPoint,
-}
-
-/// Why promotion did not occur. A rejected promotion changes nothing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PromotionRejection {
-    /// The store cannot promote accounts in its current state.
-    Unavailable,
-    /// The applied policy changed after the context was captured.
-    StalePolicy,
-    /// Account, watch-set, or chain state changed after capture.
-    StaleContext,
-    /// Recovery is incomplete for the listed reasons.
-    NotReady(Vec<RecoveryBlocker>),
-}
-
-/// The result of requesting promotion.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PromotionOutcome {
-    /// The account's private ledger became authoritative through `through`.
-    Promoted {
-        /// The accepted point through which the promoted account is covered.
-        through: ChainPoint,
-    },
-    /// Nothing changed.
-    Rejected(PromotionRejection),
 }
 
 /// A transparent balance split by coinbase classification, using the existing confirmation
@@ -483,8 +78,6 @@ pub enum LastKnownSource {
     /// private authority applied, such as a shielded-funded payment to an own transparent
     /// receiver.
     LegacyPublicAndLocal,
-    /// A previously authorized private ledger state.
-    Ledger,
 }
 
 /// A prior amount that is informational only; it never authorizes a spend.
@@ -498,80 +91,31 @@ pub struct LastKnownBalance {
     pub at: Option<ChainPoint>,
 }
 
-/// The net of currently recovered candidate events.
-///
-/// This is unverified until coverage is complete. It can overstate or understate the true
-/// balance and is not a lower bound.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecoveredNet {
-    /// The unverified net value of recovered unspent receives.
-    pub value: Zatoshis,
-}
-
 /// Financial recovery progress for one account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecoveryCompletion {
     /// Public authority applies; private recovery completion is not required.
     NotApplicable,
-    /// Private recovery has not started.
-    NotStarted,
-    /// Private recovery is running and has not covered the watch set.
-    InProgress,
-    /// The watch set is covered through the snapshot's decision point.
-    Complete,
-    /// Recovery cannot progress until the listed blockers clear.
+    /// Authority cannot be established until the listed blockers clear.
     Blocked,
 }
 
-/// A reason financial recovery is incomplete. Display-only history gaps are not blockers.
+/// A reason transparent financial authority is unavailable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecoveryBlocker {
     /// This build or configuration cannot perform private recovery.
     PrivateRecoveryUnavailable,
     /// No accepted chain point is known locally.
     ChainUnknown,
-    /// The publication has not reached the accepted chain point.
-    PublicationLag,
-    /// Retrieval work remains outstanding.
-    PendingPages,
-    /// Spends were recovered before their outputs.
-    UnresolvedSpends,
-    /// Some watched script or history is unsupported by the source.
-    UnsupportedHistory,
-    /// Recovered content contradicted accepted state.
-    IntegrityFailure,
     /// This build cannot read the wallet's transparent state.
     TransparentSupportUnavailable,
-    /// Candidate recovery disagrees with legacy public records in a way not yet explained by
-    /// accepted-chain evidence. This is not an integrity failure: legacy records are not
-    /// authoritative, but the discrepancy must be explained before promotion.
-    UnexplainedLegacyDiscrepancy,
-    /// A revision contributing the account's coverage is not a production-qualified revision of
-    /// its source.
-    UnqualifiedSource,
-    /// Some watched script, including one added by address-window expansion, lacks continuous
-    /// coverage through the decision point.
-    IncompleteCoverage,
-    /// Address-window expansion has not yet stabilized at the decision point.
-    WatchWindowUnstable,
 }
 
-/// Counts that explain an account's recovery state.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RecoveryDiagnostics {
-    /// Outstanding pending pages relevant to the account.
-    pub pending_pages: u64,
-    /// Recovered spends whose outputs are not yet known.
-    pub unresolved_spends: u64,
-    /// Watched scripts the source cannot cover.
-    pub unsupported_scripts: u64,
-}
-
-/// The single atomic balance-and-recovery result for one account's transparent funds.
+/// The single atomic balance-and-authority result for one account's transparent funds.
 ///
 /// Every field comes from one database read. Unavailable is not zero: an absent
 /// `authorized` balance means no current authority, never an empty wallet. This describes
-/// transparent financial recovery only, not whole-wallet history completeness.
+/// transparent financial authority only, not whole-wallet history completeness.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransparentLedgerSnapshot<AccountId> {
     /// The account described.
@@ -580,138 +124,17 @@ pub struct TransparentLedgerSnapshot<AccountId> {
     pub mode: TransparentLedgerMode,
     /// The current source of financial authority.
     pub authority: TransparentAuthority,
-    /// The accepted chain point captured for recovery, when one exists.
-    pub target: Option<ChainPoint>,
-    /// Continuous coverage of the account's current watch set.
-    pub covered_through: Option<ChainPoint>,
-    /// Continuous coverage from sealed publications only.
-    pub settled_through: Option<ChainPoint>,
     /// The spendable-authority balance; absent when authority cannot be established.
     pub authorized: Option<TransparentLedgerBalance>,
     /// A prior amount shown for context; never current or spendable.
     pub last_known: Option<LastKnownBalance>,
-    /// Unverified net of recovered candidate events.
-    pub recovered_net: Option<RecoveredNet>,
-    /// Financial recovery progress.
+    /// Whether authority is established or blocked.
     pub completion: RecoveryCompletion,
-    /// Reasons recovery is incomplete.
+    /// Reasons authority is unavailable.
     pub blockers: Vec<RecoveryBlocker>,
-    /// Counts explaining the recovery state.
-    pub diagnostics: RecoveryDiagnostics,
 }
 
-/// Where a watched script's history must be recovered from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum RecoveryStart {
-    /// A justified conservative lower bound. It may move earlier, never later.
-    From(BlockHeight),
-    /// The start is unknown; recovery must begin at genesis.
-    Unknown,
-}
-
-/// Store-held trust state for one recovery source.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SourceTrust {
-    /// The source.
-    pub source: SourceId,
-    /// Every revision that passed production qualification. Coverage from any other revision
-    /// cannot qualify an account for promotion.
-    pub qualified_revisions: Vec<QualifiedRevision>,
-    /// Whether an integrity failure has quarantined the source.
-    pub quarantined: bool,
-    /// Advanced by the store whenever the source is quarantined or re-verified. A run captures
-    /// it before I/O; a commit citing an older epoch is rejected as stale, so work started
-    /// before a quarantine is never accepted after the source is re-verified.
-    pub trust_epoch: u64,
-}
-
-/// An account's transparent ledger lifecycle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum AccountLifecycle {
-    /// The account has no private ledger state; its transparent records came from public
-    /// discovery. Its recovery commits target [`LedgerLifecycle::Candidate`].
-    LegacyPublic,
-    /// Isolated candidate recovery is under way; commits target [`LedgerLifecycle::Candidate`].
-    Candidate,
-    /// The account was promoted; commits target [`LedgerLifecycle::Active`], including while
-    /// its authorization is paused for recovery to catch up.
-    Active,
-}
-
-impl AccountLifecycle {
-    /// Returns the destination that recovery commits for this account must declare.
-    pub fn commit_destination(self) -> LedgerLifecycle {
-        match self {
-            Self::LegacyPublic | Self::Candidate => LedgerLifecycle::Candidate,
-            Self::Active => LedgerLifecycle::Active,
-        }
-    }
-}
-
-/// An account in a watched-script snapshot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct WatchedAccount<AccountId> {
-    /// The account.
-    pub account: AccountId,
-    /// Its watch-set generation, to place in a commit's context.
-    pub watch_generation: u64,
-    /// Its lifecycle, which determines the commit destination.
-    pub lifecycle: AccountLifecycle,
-    /// Whether an integrity failure has quarantined the account's recovery.
-    pub quarantined: bool,
-    /// The quarantine epoch to place in a commit's context. Only a run captured at the current
-    /// epoch can revalidate a quarantined account and clear the quarantine.
-    pub quarantine_epoch: u64,
-}
-
-/// A script watched by transparent ledger recovery.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WatchedScript<AccountId> {
-    /// The owning account.
-    pub account: AccountId,
-    /// The exact output script.
-    pub script: Script,
-    /// Where the script's history must be recovered from.
-    pub required_from: RecoveryStart,
-}
-
-/// The watched scripts, with the generations a recovery run must capture in its context.
-///
-/// An account listed with no scripts has none enumerated; that is not evidence of an empty
-/// history.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WatchedScriptSnapshot<AccountId> {
-    /// The applied policy generation.
-    pub policy_generation: u64,
-    /// Each account's watch-set generation, lifecycle, and quarantine state. A run commits
-    /// candidate and active accounts separately, each with its declared destination.
-    pub accounts: Vec<WatchedAccount<AccountId>>,
-    /// The watched scripts across all listed accounts.
-    pub scripts: Vec<WatchedScript<AccountId>>,
-    /// Every source the store has recorded, with the trust epoch a run must capture.
-    pub sources: Vec<SourceTrust>,
-}
-
-/// A durable pending page with everything a restarted coordinator needs to resume it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OutstandingPage {
-    /// The source revision the page belongs to; completion must cite this exact revision.
-    pub source: SourceRevision,
-    /// The source trust epoch when the page was opened. A page never outlives a quarantine:
-    /// an integrity failure durably removes the pending pages of the quarantined source and of
-    /// every affected account, so resumed work cannot be mistaken for post-revalidation work.
-    pub source_trust_epoch: u64,
-    /// The page identity, range, and affected watched scripts.
-    pub page: PendingPage,
-    /// The applied policy generation when the page was opened.
-    pub policy_generation: u64,
-    /// The accepted chain point of the run that opened the page.
-    pub target: ChainPoint,
-    /// The destination of the run that opened the page.
-    pub lifecycle: LedgerLifecycle,
-}
-
-/// Reads transparent ledger configuration and recovery state.
+/// Reads transparent ledger configuration and financial authority.
 ///
 /// Implementations reject unconfigured handles, including for an empty wallet, and must not
 /// fabricate coverage or a spendable private balance from incomplete state.
@@ -723,7 +146,7 @@ pub trait TransparentLedgerRead: WalletRead {
     /// durably applied to the wallet. A stored stricter policy is never weakened by reading.
     fn transparent_ledger_mode(&self) -> Result<TransparentLedgerMode, Self::Error>;
 
-    /// Returns the transparent balance-and-recovery snapshot for `account`, from one read.
+    /// Returns the transparent balance-and-authority snapshot for `account`, from one read.
     ///
     /// `confirmations_policy` applies the existing confirmation rules to any authorized or
     /// last-known balance. A historical snapshot never authorizes a current spend.
@@ -732,100 +155,16 @@ pub trait TransparentLedgerRead: WalletRead {
         account: Self::AccountId,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<TransparentLedgerSnapshot<Self::AccountId>, Self::Error>;
-
-    /// Returns the watched scripts with ownership, recovery bounds, and the policy and
-    /// watch-set generations to place in a [`TransparentLedgerContext`], from one read.
-    fn transparent_ledger_watched_scripts(
-        &self,
-    ) -> Result<WatchedScriptSnapshot<Self::AccountId>, Self::Error>;
-
-    /// Returns every durable pending page, so that a restarted coordinator can resume or
-    /// revalidate outstanding work instead of replaying whole sources.
-    fn transparent_ledger_pending_pages(&self) -> Result<Vec<OutstandingPage>, Self::Error>;
-}
-
-/// Applies recovery results and guarded account promotion.
-///
-/// Recovery sources cannot mark results authoritative; the store checks account lifecycle
-/// and current policy. Domain rejections are returned in `Ok`; only storage failures are
-/// errors. There is no standalone ledger rewind: rollback accompanies wallet chain rewinds.
-pub trait TransparentLedgerWrite: TransparentLedgerRead + WalletWrite {
-    /// Records `commit` atomically after rechecking its operation context, or records nothing.
-    fn apply_transparent_ledger_commit(
-        &mut self,
-        commit: TransparentLedgerCommit<<Self as WalletRead>::AccountId>,
-    ) -> Result<CommitOutcome, <Self as WalletRead>::Error>;
-
-    /// Promotes one account's recovered ledger to financial authority in one transaction,
-    /// after rechecking coverage, anchors, pending work, and `context`; or changes nothing.
-    fn promote_transparent_ledger_account(
-        &mut self,
-        context: PromotionContext<<Self as WalletRead>::AccountId>,
-    ) -> Result<PromotionOutcome, <Self as WalletRead>::Error>;
 }
 
 #[cfg(test)]
 mod tests {
-    use transparent::bundle::OutPoint;
-    use zcash_primitives::transaction::TxId;
-
-    use super::{
-        MAX_OPAQUE_ID_LEN, OpaqueIdError, PageId, ReceiveEvent, RevisionId, SourceId, SpendEvent,
-        TransparentLedgerMode,
-    };
-
-    #[test]
-    fn opaque_ids_are_bounded_and_nonempty() {
-        assert_eq!(SourceId::new(Vec::new()), Err(OpaqueIdError::Empty));
-        assert_eq!(
-            RevisionId::new(vec![7; MAX_OPAQUE_ID_LEN + 1]),
-            Err(OpaqueIdError::TooLong {
-                len: MAX_OPAQUE_ID_LEN + 1
-            })
-        );
-        let page = PageId::new(vec![7; MAX_OPAQUE_ID_LEN]).unwrap();
-        assert_eq!(page.as_bytes(), &[7; MAX_OPAQUE_ID_LEN][..]);
-    }
-
-    #[test]
-    fn lineage_is_bounded_for_signed_storage() {
-        assert_eq!(
-            super::Lineage::new(super::Lineage::MAX).unwrap().value(),
-            i64::MAX as u64
-        );
-        assert_eq!(super::Lineage::new(super::Lineage::MAX + 1), None);
-        assert!(super::Lineage::new(1).unwrap() < super::Lineage::new(2).unwrap());
-    }
+    use super::TransparentLedgerMode;
 
     #[test]
     fn only_private_required_drops_public_authority() {
         assert!(TransparentLedgerMode::Public.retains_public_authority());
         assert!(TransparentLedgerMode::PrivateShadow.retains_public_authority());
         assert!(!TransparentLedgerMode::PrivateRequired.retains_public_authority());
-    }
-
-    #[test]
-    fn event_identities_exclude_checked_content() {
-        let outpoint = OutPoint::new([1; 32], 3);
-        let receive = ReceiveEvent {
-            outpoint: outpoint.clone(),
-            script: Default::default(),
-            value: zcash_protocol::value::Zatoshis::const_from_u64(5),
-            is_coinbase: false,
-        };
-        assert_eq!(receive.identity(), (TxId::from_bytes([1; 32]), 3));
-
-        let spend = SpendEvent {
-            spending_txid: TxId::from_bytes([2; 32]),
-            input_index: 4,
-            spent: outpoint,
-            spent_script: Default::default(),
-        };
-        let conflicting = SpendEvent {
-            spent: OutPoint::new([9; 32], 0),
-            ..spend.clone()
-        };
-        assert_eq!(spend.identity(), conflicting.identity());
-        assert_ne!(spend, conflicting);
     }
 }

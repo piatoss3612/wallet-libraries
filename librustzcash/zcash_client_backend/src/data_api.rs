@@ -107,7 +107,6 @@ use crate::{
 };
 
 pub mod enhance_pir;
-pub mod history;
 pub mod status;
 pub mod transparent_ledger;
 
