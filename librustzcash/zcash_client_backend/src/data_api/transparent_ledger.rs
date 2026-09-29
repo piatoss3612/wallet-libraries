@@ -187,9 +187,11 @@ pub struct SourceRevision {
     /// The publication revision.
     pub revision: RevisionId,
     /// The revision's position in the source's publication lineage, strictly increasing with
-    /// each replacement. Captured with the revision before any retrieval; the store rejects a
-    /// commit whose lineage is older than one it has already accepted from the same source,
-    /// so a delayed result cannot resurrect replaced coverage.
+    /// each replacement. Captured with the revision before any retrieval. A provisional
+    /// revision is superseded once the store accepts a newer revision of the same source, so a
+    /// delayed result cannot resurrect replaced coverage. A sealed revision is never
+    /// superseded: its commits, including resumed pages and recovery for newly added accounts,
+    /// remain acceptable after later revisions.
     pub lineage: Lineage,
     /// Whether the revision is sealed or provisional.
     pub status: PublicationStatus,
@@ -401,7 +403,8 @@ pub enum CommitRejection {
     StalePolicy,
     /// Account, watch-set, lifecycle, or chain state changed after capture.
     StaleContext,
-    /// The store has already accepted a newer revision of the commit's source.
+    /// The commit's revision is provisional and the store has already accepted a newer revision
+    /// of its source. Sealed revisions are never superseded.
     SupersededRevision,
     /// The commit contradicts accepted content or placement; trust in the session ends.
     ///
@@ -476,6 +479,10 @@ pub struct TransparentLedgerBalance {
 pub enum LastKnownSource {
     /// Rows admitted under public authority before private authority applied.
     LegacyPublic,
+    /// Legacy public rows together with rows recorded by local transaction construction after
+    /// private authority applied, such as a shielded-funded payment to an own transparent
+    /// receiver.
+    LegacyPublicAndLocal,
     /// A previously authorized private ledger state.
     Ledger,
 }
