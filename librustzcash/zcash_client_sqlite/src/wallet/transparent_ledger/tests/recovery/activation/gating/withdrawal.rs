@@ -94,9 +94,9 @@ fn trusted_withdrawal_fences_retained_rows_from_older_readers() {
     // Simulate a wallet last activated by the previous Phase 4 reader.
     st.wallet().set_transparent_reader_version(4);
     cover(&mut st, account, &replacement, vec![]);
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 6);
     qualify(&mut st, &replacement);
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 6);
 }
 
 #[test]

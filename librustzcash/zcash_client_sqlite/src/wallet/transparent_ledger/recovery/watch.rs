@@ -164,9 +164,13 @@ impl Watch {
         gap_limits: &GapLimits,
     ) -> Result<[Option<u32>; 3], SqliteClientError> {
         let mut stmt = conn.prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM tpir_receive_events WHERE script = ?1 AND mined_height IS NOT NULL)
-             OR EXISTS(SELECT 1 FROM tpir_spend_events WHERE prevout_script = ?1 AND mined_height IS NOT NULL)"
+            "SELECT script FROM tpir_receive_events WHERE mined_height IS NOT NULL
+             UNION
+             SELECT prevout_script FROM tpir_spend_events WHERE mined_height IS NOT NULL",
         )?;
+        let used = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?;
         let mut max_used: [Option<u32>; 3] = [None; 3];
         for (address, origin) in &self.window_origins {
             let (WatchOrigin::Derived { scope, index }
@@ -175,7 +179,7 @@ impl Watch {
                 continue;
             };
             if let Some(slot) = scope_slot(*scope)
-                && stmt.query_row([script_bytes(address)], |row| row.get::<_, bool>(0))?
+                && used.contains(&script_bytes(address))
             {
                 max_used[slot] =
                     Some(max_used[slot].map_or(index.index(), |m| m.max(index.index())));
@@ -274,18 +278,6 @@ fn pending_pages(
             })?
             .map(|script| address_from_script(script?))
             .collect::<Result<_, _>>()?;
-        let target_height: u32 = row.get(4)?;
-        let target_hash: Vec<u8> = row.get(5)?;
-        let accepted: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM blocks WHERE height = ?1 AND hash = ?2)",
-            rusqlite::params![target_height, &target_hash],
-            |row| row.get(0),
-        )?;
-        if !accepted {
-            return Err(SqliteClientError::CorruptedData(
-                "transparent pending page target is not accepted".into(),
-            ));
-        }
         result.push(PendingPage {
             request: PageRequest {
                 page: row.get(1)?,

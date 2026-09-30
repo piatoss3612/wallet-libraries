@@ -13,7 +13,7 @@ use zcash_client_backend::data_api::{
 
 use super::oracle::{assert_authority_agrees, assert_diagnostics_agree, promoted_oracle_wallet};
 use super::*;
-use crate::wallet::transparent_ledger::TPIR_READER_VERSION;
+use crate::wallet::transparent_ledger::{REVISION_READER_VERSION, TPIR_READER_VERSION};
 
 /// The wallet's own tables and the provenance of every output and spend.
 fn projection_state(conn: &Connection) -> Vec<(String, Vec<String>)> {
@@ -110,7 +110,7 @@ fn a_policy_alone_needs_no_newer_reader_and_nothing_lowers_the_requirement() {
     scan_new_blocks(&mut st, 10);
     // Every reader of the ledger schema honors `PrivateRequired`.
     set_policy(&mut st, PrivateRequired);
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 1);
 
     // Activation state requires an activation-aware reader, and demotion does not release it:
     // the qualification and the ledger's projection remain.
@@ -121,9 +121,9 @@ fn a_policy_alone_needs_no_newer_reader_and_nothing_lowers_the_requirement() {
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
     promote(&mut st, account).unwrap();
-    assert_eq!(reader_version(&st), TPIR_READER_VERSION);
+    assert_eq!(reader_version(&st), REVISION_READER_VERSION);
     set_policy(&mut st, Public);
-    assert_eq!(reader_version(&st), TPIR_READER_VERSION);
+    assert_eq!(reader_version(&st), REVISION_READER_VERSION);
 }
 
 #[test]

@@ -18,7 +18,7 @@ fn candidate_observations_cannot_revoke_another_accounts_financial_evidence() {
         assert_eq!(production_dump(conn(&st)), before);
         assert_eq!(snapshot(&st, active), authority);
         assert_eq!(recovery(&st, active), evidence);
-        assert_eq!(reader_version(&st), 7);
+        assert_eq!(reader_version(&st), 6);
         // Observing lineage 2 does not make the qualified lineage 1 stale.
         let mut c = commit(&watch(&st, active));
         c.revision = revision(1, false);

@@ -8,7 +8,6 @@ pub(super) fn atomically<T>(
     conn: &rusqlite::Connection,
     f: impl FnOnce(&rusqlite::Connection) -> Result<T, SqliteClientError>,
 ) -> Result<T, SqliteClientError> {
-    super::super::writer_guard::register(conn)?;
     if conn.is_autocommit() {
         // The guard rolls back when dropped, including after a failed commit.
         let tx =

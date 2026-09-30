@@ -10,8 +10,6 @@ workspace.
 
 ## [Unreleased]
 
-- Persistent writer guards require reader version 7 at installation and refuse older chain,
-  transaction and ownership writers. Recovery refuses obsolete stored anchors/placements.
 - Candidate windows respect existing receiver ownership; imports discard competing candidate
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 

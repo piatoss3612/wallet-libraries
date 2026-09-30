@@ -68,6 +68,7 @@ mod diagnostics;
 #[cfg(feature = "transparent-inputs")]
 mod events;
 mod lifecycle;
+#[cfg(feature = "transparent-inputs")]
 mod ownership;
 #[cfg(feature = "transparent-inputs")]
 mod promotion;

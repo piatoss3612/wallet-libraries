@@ -10,7 +10,7 @@ pub(super) fn register_revision(
     conn: &rusqlite::Connection,
     revision: &RecoveryRevision,
 ) -> Result<i64, SqliteClientError> {
-    super::super::require_reader_version(conn, super::super::TPIR_READER_VERSION)?;
+    super::super::require_reader_version(conn, super::super::REVISION_READER_VERSION)?;
     let lineage = i64::try_from(revision.lineage).expect("checked by check_well_formed");
     let accepted: Option<i64> = conn.query_row(
         "SELECT MAX(r.lineage) FROM tpir_revisions r

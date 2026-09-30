@@ -25,17 +25,6 @@ pub(super) fn read(
     conn: &rusqlite::Connection,
     account_ref: AccountRef,
 ) -> Result<Coverage, SqliteClientError> {
-    // Reject damaged historical state instead of treating an obsolete anchor as coverage.
-    let invalid: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM tpir_coverage c LEFT JOIN blocks b ON b.height = c.anchor_height
-         WHERE c.account_id = ?1 AND (b.hash IS NULL OR b.hash != c.anchor_hash))",
-        [account_ref.0], |row| row.get(0),
-    )?;
-    if invalid {
-        return Err(SqliteClientError::CorruptedData(
-            "transparent coverage anchor is not accepted; rewind and recover before use".into(),
-        ));
-    }
     let mut supported: BTreeMap<Vec<u8>, Vec<(u32, u32)>> = BTreeMap::new();
     let mut unsupported: Vec<(Vec<u8>, u32, u32)> = vec![];
     let mut stmt = conn.prepare_cached(

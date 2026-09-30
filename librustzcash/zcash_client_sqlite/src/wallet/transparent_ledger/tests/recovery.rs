@@ -1401,7 +1401,7 @@ fn the_first_candidate_commit_requires_a_recovery_aware_reader() {
             .unwrap()
     };
     let before = reader(&st);
-    assert_eq!(before, super::super::TPIR_READER_VERSION);
+    assert!(before < 3);
 
     // A refused commit persists nothing, including the requirement.
     let ws = watch(&st, account);
@@ -1411,7 +1411,7 @@ fn the_first_candidate_commit_requires_a_recovery_aware_reader() {
     assert_eq!(reader(&st), before);
 
     apply(&mut st, commit(&ws)).unwrap();
-    assert_eq!(reader(&st), super::super::TPIR_READER_VERSION);
+    assert_eq!(reader(&st), 6);
     // This build still reads the wallet.
     watch(&st, account);
 }

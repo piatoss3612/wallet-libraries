@@ -120,7 +120,7 @@ fn integrity_failure_quarantines_the_source_and_every_affected_account() {
     apply(&mut st, c).unwrap();
     // The third account holds evidence from another source only.
     recover_one(&mut st, third, source(b"other", 1), 3);
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 6);
 
     let ws = watch(&st, first);
     let before = count(&st, "tpir_receive_events");
@@ -143,7 +143,7 @@ fn integrity_failure_quarantines_the_source_and_every_affected_account() {
     assert_eq!(quarantined_accounts(&st), vec![first, second]);
     assert_eq!(count(&st, "tpir_quarantined_sources"), 1);
     assert_eq!(count(&st, "tpir_pending_pages"), 0);
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 6);
 
     // Neither the source nor the accounts accept further commits, whatever their content.
     let ws = watch(&st, third);
@@ -196,7 +196,7 @@ fn a_failed_quarantine_write_aborts_the_commit() {
     ));
     assert_eq!(count(&st, "tpir_receive_events"), events);
     assert_eq!(count(&st, "tpir_quarantined_accounts"), 0);
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 6);
     assert_eq!(production_dump(conn(&st)), before);
 }
 
@@ -391,7 +391,7 @@ fn qualification_binds_to_the_exact_revision() {
     let (mut st, account) = shadow_wallet();
     let fixture = revision(1, true);
     recover_one(&mut st, account, fixture.clone(), 1);
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 6);
     for other in [
         RecoveryRevision {
             sealed: false,
@@ -422,7 +422,7 @@ fn qualification_binds_to_the_exact_revision() {
     qualify(&mut st, &fixture);
     qualify(&mut st, &fixture);
     assert_eq!(count(&st, "tpir_qualified_revisions"), 1);
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 6);
 
     // A new revision is recorded as a commit would record it, superseding older provisional
     // revisions of its source.
@@ -532,7 +532,7 @@ fn promotion_projects_the_ledger_and_grants_private_authority() {
 
     promote(&mut st, account).unwrap();
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Active);
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 6);
 
     // The window's addresses are now the wallet's own, and its candidate rows are gone.
     assert_eq!(count(&st, "tpir_candidate_windows"), 0);

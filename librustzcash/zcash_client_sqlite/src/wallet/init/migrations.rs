@@ -55,7 +55,6 @@ mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod transparent_recovery_schema;
-mod transparent_writer_guard;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
@@ -402,7 +401,6 @@ pub(super) fn all_migrations<
         Box::new(transparent_policy_generation::Migration),
         Box::new(transparent_recovery_schema::Migration),
         Box::new(transparent_activation_schema::Migration),
-        Box::new(transparent_writer_guard::Migration),
     ]
 }
 
@@ -611,7 +609,7 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_writer_guard::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_activation_schema::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
