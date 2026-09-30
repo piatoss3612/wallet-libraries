@@ -15,8 +15,7 @@ workspace.
   ledger configuration and financial authority. It adds `ChainPoint`,
   `TransparentLedgerMode`, the atomic `TransparentLedgerSnapshot`, and the
   `TransparentLedgerRead` trait. Stores must reject unconfigured handles and must
-  not fabricate a spendable private balance. Recovery commits and promotion are
-  added with the work that implements them.
+  not fabricate a spendable private balance.
 - `AppliedTransparentPolicy`, `PrivateTransparentDetail`, and
   `TransparentLedgerWrite::apply_transparent_policy`. `TransparentLedgerRead`
   gains `applied_transparent_policy`, `check_transparent_policy_generation`, and
@@ -45,6 +44,23 @@ workspace.
     development diagnostics (`CandidateRecovery`, `CandidateBlocker`).
   - Candidate state never changes balances, spend links, locks, address use,
     receiving-address selection, or history.
+- Private transparent activation, behind `transparent-inputs`:
+  - `TransparentLedgerWrite::promote_transparent_account` promotes an account's
+    complete, qualified ledger to private authority, projecting its events into
+    the wallet.
+  - `AccountLifecycle` (`Candidate`, `Active`) in `TransparentWatchSet` and
+    `TransparentRecoveryContext`, with `StaleCommit::LifecycleChanged`.
+  - `CommitRejection::Refused(RefusedCommit)` for quarantined sources and
+    accounts and for unqualified revisions on active accounts, and
+    `IntegrityFailure::ProjectionContent`. An integrity rejection quarantines
+    the source and the accounts holding its evidence.
+- `TransparentAuthority::Private`, `RecoveryCompletion::Complete`,
+  `LastKnownSource::PrivateLedger`, and the snapshot fields `covered_through`
+  and `recovered_unverified`.
+- `RecoveryBlocker` variants `Recovery(CandidateBlocker)`, `NotActivated`,
+  `Quarantined`, `UnqualifiedRevision`, `LegacyDiscrepancy`, and
+  `ChainBehindTip`. `CandidateBlocker` moved to `data_api::transparent_ledger`
+  and is available in every build.
 
 ### Changed
 - `sync::run` requires `TransparentLedgerRead` and refreshes UTXOs only when the

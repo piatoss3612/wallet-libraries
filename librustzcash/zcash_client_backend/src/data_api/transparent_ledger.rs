@@ -1,15 +1,14 @@
 //! Storage-neutral contract for transparent ledger configuration and financial authority.
 //!
 //! This is the preparatory surface of the private transparent ledger: explicit handle modes,
-//! durable policy transitions, an honest balance-and-authority snapshot, and isolated candidate
-//! recovery. Promotion and its supporting types are added with the activation work that
-//! implements them; see `docs/transparent-pir-ledger-architecture.md` and
+//! durable policy transitions, an honest balance-and-authority snapshot, candidate recovery, and
+//! per-account activation; see `docs/transparent-pir-ledger-architecture.md` and
 //! `docs/transparent-pir-ledger-design-notes.md`.
 
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;
 use zcash_primitives::{block::BlockHash, transaction::TxId};
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
 use super::{Balance, WalletRead, wallet::ConfirmationsPolicy};
 
@@ -93,6 +92,9 @@ pub enum PrivateTransparentDetail {
 pub enum TransparentAuthority {
     /// Balances and inputs derive from public discovery.
     Public,
+    /// Balances and inputs derive from the account's private ledger, which is active and
+    /// complete through the chain tip.
+    Private,
     /// No current authority can be established; transparent inputs are unavailable.
     Unavailable,
 }
@@ -116,6 +118,10 @@ pub enum LastKnownSource {
     /// private authority applied, such as a shielded-funded payment to an own transparent
     /// receiver.
     LegacyPublicAndLocal,
+    /// The account's active private ledger, which is blocked or covered short of the chain tip,
+    /// so it does not authorize a current spend. It is anchored at the covered point only when
+    /// that point is the tip; while coverage lags, it may count placed events above it.
+    PrivateLedger,
 }
 
 /// A prior amount that is informational only; it never authorizes a spend.
@@ -134,11 +140,31 @@ pub struct LastKnownBalance {
 pub enum RecoveryCompletion {
     /// Public authority applies; private recovery completion is not required.
     NotApplicable,
+    /// Private authority is established through the chain tip.
+    Complete,
     /// Authority cannot be established until the listed blockers clear.
     Blocked,
 }
 
-/// A reason transparent financial authority is unavailable.
+/// Why candidate recovery for an account is not yet complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CandidateBlocker {
+    /// No local target exists.
+    ChainUnknown,
+    /// Some watched address lacks continuous coverage from its required start to the target.
+    IncompleteCoverage,
+    /// Pages remain open.
+    PendingPages,
+    /// A mined spend consumes an output that has not been recovered.
+    UnresolvedSpends,
+    /// A range recorded as unsupported is not covered by any source.
+    UnsupportedRanges,
+    /// Activity near the end of a derived window needs addresses that this account's keys
+    /// cannot derive, or reaches the last non-hardened index, which the wallet cannot store.
+    WindowUnderivable,
+}
+
+/// A reason transparent financial authority is unavailable, or an account cannot be promoted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecoveryBlocker {
     /// This build or configuration cannot perform private recovery.
@@ -147,6 +173,20 @@ pub enum RecoveryBlocker {
     ChainUnknown,
     /// This build cannot read the wallet's transparent state.
     TransparentSupportUnavailable,
+    /// The account's recovered ledger is incomplete at the local target.
+    Recovery(CandidateBlocker),
+    /// The account has not been promoted to private authority.
+    NotActivated,
+    /// An integrity failure quarantined the account or a source of its evidence.
+    Quarantined,
+    /// A revision that contributed the account's coverage or events is not qualified.
+    UnqualifiedRevision,
+    /// The wallet's own evidence, legacy public or local, disagrees with the complete candidate
+    /// ledger: a mined output the candidate ledger lacks or holds with other content, or a
+    /// legacy spend it does not confirm.
+    LegacyDiscrepancy,
+    /// The contiguously scanned local chain is behind the known chain tip.
+    ChainBehindTip,
 }
 
 /// The single atomic balance-and-authority result for one account's transparent funds.
@@ -170,6 +210,13 @@ pub struct TransparentLedgerSnapshot<AccountId> {
     pub completion: RecoveryCompletion,
     /// Reasons authority is unavailable.
     pub blockers: Vec<RecoveryBlocker>,
+    /// Under a private mode, the local block through which every watched address is
+    /// continuously covered from its required start.
+    pub covered_through: Option<ChainPoint>,
+    /// Under a private mode, the sum of recovered unspent outputs. It is unverified until
+    /// recovery is complete, is neither authoritative nor a lower bound, and is absent when it
+    /// exceeds `MAX_MONEY`.
+    pub recovered_unverified: Option<Zatoshis>,
 }
 
 /// Reads transparent ledger configuration and financial authority.
@@ -233,11 +280,10 @@ pub trait TransparentLedgerRead: WalletRead {
     ) -> Result<CandidateRecovery<Self::AccountId>, Self::Error>;
 }
 
-/// Writes transparent ledger policy transitions and candidate recovery.
+/// Writes transparent ledger policy transitions, recovery, and promotion.
 ///
-/// Promotion is added with the work that implements it. Implementations
-/// typically also implement [`WalletWrite`](super::WalletWrite); the write trait itself only
-/// requires the read contract so associated `Error` types stay unambiguous.
+/// Implementations typically also implement [`WalletWrite`](super::WalletWrite); the write trait
+/// itself only requires the read contract so associated `Error` types stay unambiguous.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// Durably applies `mode` as the wallet's transparent policy.
@@ -253,26 +299,44 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// it cannot recall a network request that has already begun. Arbitrary older readers that do
     /// not implement this contract are not supported rollback targets.
     ///
-    /// The handle must already be configured. Returns the policy after the write.
+    /// The handle must already be configured. Returns the policy after the write. Leaving
+    /// `PrivateRequired` demotes every active account in the same transaction.
     fn apply_transparent_policy(
         &mut self,
         mode: TransparentLedgerMode,
     ) -> Result<AppliedTransparentPolicy, Self::Error>;
 
-    /// Atomically applies one recovery pass to the account's candidate ledger.
+    /// Atomically applies one recovery pass to the account's ledger.
     ///
     /// The durable policy must still be at the captured generation and must permit private
     /// recovery (`PrivateShadow` or `PrivateRequired`), as must the handle. The account must
-    /// exist, the target and anchor must still be local blocks, and every address the commit
-    /// names must still be watched by the account. Any failure applies nothing.
+    /// exist with the captured lifecycle and without quarantine, the target and anchor must
+    /// still be local blocks, and every address the commit names must still be watched by the
+    /// account. Any failure applies none of the commit's facts; an integrity failure also
+    /// quarantines the source and the accounts holding its evidence.
     ///
-    /// Candidate state is isolated: this never changes balances, spend links, locks, address
-    /// use, receiving-address selection, or transaction history.
+    /// A candidate account's state is isolated: its commits never change balances, spend
+    /// links, locks, address use, receiving-address selection, or transaction history. An
+    /// active account's commits require a qualified revision and project their events into the
+    /// wallet's outputs and spends in the same transaction.
     #[cfg(feature = "transparent-inputs")]
     fn apply_transparent_ledger_commit(
         &mut self,
         commit: TransparentLedgerCommit<Self::AccountId>,
     ) -> Result<CommitOutcome, Self::Error>;
+
+    /// Atomically promotes `account` to private transparent authority.
+    ///
+    /// Requires `PrivateRequired` both on the handle and durably. Promotion rechecks, in one
+    /// transaction, that the account is not quarantined, that its ledger is complete through a
+    /// local target equal to the chain tip, that every revision contributing its coverage or
+    /// events is qualified, and that its legacy public evidence agrees with the ledger. It then
+    /// adds the ledger's window addresses to the wallet, projects every recovered event into the
+    /// wallet's outputs and spends, and records the account as active. Promoting an active
+    /// account does nothing. Any failure changes nothing; a blocked promotion reports its
+    /// [`RecoveryBlocker`]s.
+    #[cfg(feature = "transparent-inputs")]
+    fn promote_transparent_account(&mut self, account: Self::AccountId) -> Result<(), Self::Error>;
 }
 
 #[cfg(test)]

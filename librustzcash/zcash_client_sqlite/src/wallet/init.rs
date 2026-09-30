@@ -188,8 +188,9 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
             unreachable!("migrations neither use ledger APIs nor select transparent inputs")
         }
         #[cfg(feature = "transparent-inputs")]
-        SqliteClientError::TransparentLedgerCommitRejected(_) => {
-            unreachable!("migrations do not commit candidate recovery")
+        SqliteClientError::TransparentLedgerCommitRejected(_)
+        | SqliteClientError::TransparentPromotionBlocked(_) => {
+            unreachable!("migrations do not recover or promote transparent ledgers")
         }
         SqliteClientError::CorruptedData(e) => WalletMigrationError::CorruptedData(e),
         SqliteClientError::Protobuf(e) => WalletMigrationError::CorruptedData(e.to_string()),
@@ -868,12 +869,16 @@ mod tests {
             db::TABLE_SCHEMERZ_MIGRATIONS,
             db::TABLE_SENT_NOTES,
             db::TABLE_SQLITE_SEQUENCE,
+            db::TABLE_TPIR_ACTIVE_ACCOUNTS,
             db::TABLE_TPIR_CANDIDATE_WINDOWS,
             db::TABLE_TPIR_COVERAGE,
             db::TABLE_TPIR_META,
             db::TABLE_TPIR_OUTPUT_ORIGINS,
             db::TABLE_TPIR_PENDING_PAGE_SCRIPTS,
             db::TABLE_TPIR_PENDING_PAGES,
+            db::TABLE_TPIR_QUALIFIED_REVISIONS,
+            db::TABLE_TPIR_QUARANTINED_ACCOUNTS,
+            db::TABLE_TPIR_QUARANTINED_SOURCES,
             db::TABLE_TPIR_RECEIVE_EVENTS,
             db::TABLE_TPIR_RECEIVE_OBSERVATIONS,
             db::TABLE_TPIR_REVISIONS,

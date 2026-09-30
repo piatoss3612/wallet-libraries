@@ -1,9 +1,10 @@
 # Preparatory refactor for a transparent PIR ledger
 
 Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
-its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64), and
-Phase 3's is in review. The Vizor halves of Phases 2–3 and all of Phases 4–6
-remain to be implemented and qualified. Production transparent
+its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64).
+Phase 3's is in review, and Phase 4's is in review on top of it. The Vizor
+halves of Phases 2–4 and all of Phases 5–6 remain to be implemented and
+qualified. Production transparent
 authority stays public during preparation.
 
 ## Objective and fixed boundaries
@@ -44,7 +45,7 @@ in the final qualification phase.
 | 1. Contract and migration (library merged) | Read contract, policy/provenance schema, configured handles. | Dependency upgrade and explicit handle configuration. | Schema upgrades; private transparent input use remains unavailable. |
 | 2. Privacy boundaries | Durable policy transitions and guarded follow-on work. | Shared policy, dispatch guards, native/preview coverage. | Required-private fixtures fail closed before any unsupported request. |
 | 3. Candidate recovery | Watched scripts, candidate events, coverage, resumable commits. | Disabled/fixture source and bounded coordinator. | Isolated shadow recovery; no production projection changes. |
-| 4. Safe activation | Atomic projection, rewind, promotion, and all financial gates. | Balance/operation integration and activation fixtures. | Per-account private activation and spending exercised with fixtures. |
+| 4. Safe activation (library in review) | Atomic projection, rewind, promotion, and all financial gates. | Balance/operation integration and activation fixtures. | Per-account private activation and spending exercised with fixtures. |
 | 5. History integration | Evidence-backed history reads and detail state. | Partial-history classification, FFI, and UI. | Mixed transactions and restored history represented accurately. |
 | 6. Qualification | Lifecycle/failure evidence and repair compatibility. | Cross-repository regression and request-capture results. | Preparatory refactor complete; real PIR integration still gated. |
 
@@ -396,34 +397,152 @@ They may be implemented in smaller changes. Keep successful promotion unavailabl
 outside focused tests until those library components pass together; only then
 let Vizor's fixture coordinator exercise activation.
 
-**Wallet-libraries steps**
+**What the wallet-libraries half adds**
 
-1. Project candidate events into existing transaction/output/spend structures.
-   Join mixed transactions by txid with pool-specific identities, preserving
-   independent local, shielded, and payload contributions. Keep coinbase
-   classification explicit even without raw bytes or transaction indices.
-2. Implement authoritative commits and projection in one SQLite transaction.
-   Add rollback to every applicable height/chain-state truncation and rescan
-   path using its actual retained height. Invalidate evidence, coverage, work,
-   and derived state without deleting valid independent origins or issued-address
-   history.
-3. Implement guarded per-account promotion: recheck complete watch-set coverage,
-   accepted anchors, stable window expansion, resolved spends/pages, production
-   source qualification, and explained legacy discrepancies. Atomically project,
-   merge local overlays, switch authority, and revoke candidate work. Allow
-   fixture promotion only through test/development paths.
-4. Implement the atomic ledger snapshot, distinguishing authorized, last-known,
-   and recovered-unverified amounts. Historical snapshots and incomplete net
-   amounts cannot authorize a current spend.
-5. Enforce eligibility inside existing individual, address, batched, and
-   value-bounded transparent selectors, plus proposal consumption and hardware
-   finalization. Coverage through accepted `H` supports target `H + 1`;
-   recheck the current chain and retain confirmations, maturity, spend,
-   reservation, and lock rules. No freshness tolerance or alternate selector.
-6. Preserve legitimate same-proposal chained outputs through local evidence.
-   Block incomplete transparent inputs without blocking independently eligible
-   shielded-funded unshielding. Its resulting own transparent outputs must pass
-   transparent eligibility before later spending.
+The half is one PR on top of Phase 3. Every intermediate commit fails
+closed: `PrivateRequired` keeps the Phase 1 mode-level "unavailable" until the
+gating change lands. Only a test/development hook can qualify a revision, so
+production can never promote.
+
+1. **Schema.** A seedless, additive `transparent_activation_schema` migration
+   adds four empty tables:
+   - `tpir_active_accounts`: the account lifecycle. A row makes the account
+     *active*; otherwise it is a *candidate*.
+   - `tpir_qualified_revisions`: revisions qualified to support authority.
+   - `tpir_quarantined_sources` and `tpir_quarantined_accounts`: integrity
+     quarantine.
+
+   The first write to any of them raises `min_reader_version` to 5, so a
+   build that ignores them or retained-output withdrawal semantics fails closed.
+   Withdrawing a previously projected receive also requires 5 when the account
+   has been demoted to a candidate. Version 4 admitted all stored outputs under
+   public policy and therefore cannot safely read retained withdrawn rows.
+   Epochs are left out: nothing can clear
+   a quarantine yet, so there is no revalidation race to guard.
+2. **Contract.**
+   - `TransparentAuthority::Private` and `RecoveryCompletion::Complete`.
+   - The snapshot gains `covered_through` and `recovered_unverified`, and
+     `LastKnownSource::PrivateLedger` reports a blocked active account. Its
+     amount is anchored at `covered_through` only when that is the tip.
+   - `RecoveryBlocker` becomes the one blocker enum for the snapshot and
+     promotion. It gains `Recovery(CandidateBlocker)`, `NotActivated`,
+     `Quarantined`, `UnqualifiedRevision`, `LegacyDiscrepancy` and
+     `ChainBehindTip`.
+   - `TransparentLedgerWrite::promote_transparent_account(account)`.
+   - The watch set and the recovery context carry the account's
+     `AccountLifecycle`; a commit captured under another lifecycle is
+     `StaleCommit::LifecycleChanged`.
+   - `CommitRejection::Refused` covers a quarantined source or account and an
+     unqualified revision on an active account.
+   - Qualification is a sqlite-only test/development hook, not a trait method.
+     It records a new revision exactly as a commit would, so a revision can be
+     qualified before its first commit to an active account.
+3. **Quarantine.** An integrity rejection rolls back every submitted fact.
+   In the same transaction it quarantines the source, the committing account,
+   and every account holding that source's evidence, and deletes those
+   accounts' pending pages. Quarantine survives restarts and rewinds.
+4. **Projection.** Placed events are written into the LRZ tables through the
+   existing `put_transparent_output` and `mark_transparent_utxo_spent`, with
+   a new projection origin, *ledger event* (code 2). Mixed transactions join on
+   the shared `transactions` row, which keeps raw data, fees, local creation
+   evidence, notes and locks. A projected coinbase receive records
+   `tx_index = 0`, so its classification does not depend on raw bytes. A
+   placement or content conflict with the projection is an integrity failure,
+   and so is an event the wallet's stored transaction bytes contradict: a
+   receive of an output the transaction lacks or holds with another value,
+   script or coinbase status, or a spend by an input that spends another
+   outpoint or does not exist.
+   Legacy-only rows are never deleted, and never authorize a spend.
+5. **Promotion.** One transaction:
+   1. rechecks the policy (`PrivateRequired` on the handle and durably), the
+      account, quarantine, the candidate blockers at the local target, a
+      local target equal to the chain tip, qualification of every revision
+      that contributed coverage or observations, and legacy discrepancies;
+   2. writes the candidate-window addresses, and the legacy external receiver
+      when it has no row, into `addresses` (the projection requires an address
+      row), then drops the candidate window rows. A window reaching the last
+      non-hardened index is `WindowUnderivable`: the address table cannot hold
+      that index, so the account stays a candidate;
+   3. projects every placed event;
+   4. records the account as active.
+
+   A legacy discrepancy is one of:
+   - a wallet output, of any origin, whose candidate receive has other content,
+     account, or placement;
+   - a wallet output, of any origin, mined at or below the target that the
+     complete candidate set lacks or no longer places;
+   - a legacy spend mined at or below the target that no candidate spend by the
+     same transaction confirms.
+
+   Each blocks promotion; there is no way to explain one yet.
+   A ledger-only output retained after its receive lost every observation is
+   historical wallet state, not independent evidence of a missing receive, and
+   does not block reactivation. Content conflicts and independent legacy evidence
+   still block; a rewound receive still present in the ledger keeps the existing
+   discrepancy rule.
+6. **Active commits** follow the candidate path, additionally require qualified
+   revisions, and project their events in the same transaction. After
+   activation, window growth uses LRZ's gap-limit address generation. When a
+   higher lineage supersedes a provisional revision, each event that loses its
+   last observation withdraws its authority. Unsupported ledger-only spend links
+   and pending spends are removed. A ledger-only output keeps its row and
+   historical origin so independent spend links and reservations survive, but
+   without a placed receive every selector and balance query excludes it under
+   both private and public policy. Replaying the receive updates that same row,
+   preserving its spentness and lock ownership. An output with another origin
+   keeps that independent evidence and loses its ledger origin.
+   Leaving `PrivateRequired` demotes every account in the policy
+   transaction.
+7. **Rewind.** LRZ un-mining already makes projected rows above the truncation
+   unspendable, and the Phase 3 truncation clips coverage to the retained
+   block. That block is then the local tip, so authority continues over the
+   surviving outputs. Once the wallet learns of a newer tip, authority pauses
+   (`ChainBehindTip`) until recovery covers it. A rewound receive keeps its
+   projection, but private authority admits an output only while the ledger
+   places its receive, so an orphaned receive authorizes nothing even after
+   coverage returns. A rewound spend stays a pending spend until its default
+   expiry, as LRZ treats a reorged public spend; that only withholds the
+   output. Activation, qualification, quarantine, and address exposure survive
+   rewinds; re-placed events are re-projected.
+8. **Financial gating.** Under `PrivateRequired`, an account is eligible for
+   target `T` when it is active and not quarantined, has no candidate blockers,
+   and its local target and the chain tip are both `T - 1`. All four selectors
+   check eligibility and query in one read snapshot, and admit only
+   ledger-origin outputs of eligible accounts whose receive is placed. The account and outpoint lookups
+   fail for an ineligible account. The address selectors filter out ineligible
+   accounts, and fail only when no owning account is eligible.
+   `store_transactions_to_be_sent` rechecks every transparent input at the
+   transaction's target height, which covers proposals, PCZTs and hardware
+   finalization. The outpoint lookup enforces the same coinbase maturity rule
+   as the other selectors, including at this final storage gate. Metadata
+   lookups without a spend target can still read immature or withdrawn rows.
+   An input created by an earlier transaction of the same batch
+   is allowed. Shielded-funded unshielding spends no transparent input, and
+   its own transparent output is spendable only once a ledger commit covers it.
+9. **Snapshot.** Under `PrivateRequired`, an eligible account reports
+   `Private` authority, its ledger-origin balance as authorized, and
+   `Complete`. Otherwise authority is unavailable and the blockers explain
+   why. `get_wallet_summary` and `get_transparent_balances` keep omitting
+   transparent funds under `PrivateRequired`, so clients read the snapshot.
+
+**Deviations from the plan**
+
+- **Coinbase.** A projected coinbase receive records `tx_index = 0`, the
+  consensus position of a coinbase transaction, rather than adding a
+  ledger-specific coinbase predicate to the balance and selection queries.
+  Un-mining clears it together with the placement.
+- **Epochs are deferred.** Nothing can clear a quarantine or requalify a source
+  before Phase 6's verification, so trust and quarantine epochs would guard
+  nothing yet.
+- **Rewinds keep authority at the retained tip** (item 7) instead of revoking
+  it outright. Coverage through the retained block is valid on the surviving
+  chain, and learning of any newer tip pauses authority.
+- **Truncation entry points.** The four entry points share
+  `truncate_to_height_internal`, which calls the Phase 3 hook, so the tests
+  exercise `truncate_to_height`.
+- **Quarantine granularity.** Quarantine is per account and per source.
+  Revisions of a quarantined source recorded before the failure stay as
+  evidence, and the accounts holding them are quarantined with the source.
 
 **Vizor steps**
 
@@ -446,6 +565,10 @@ consistent projection and authority. Both discovery orders and payload replay
 preserve mixed effects. All transparent selectors and stale proposals reject
 incomplete coverage; coinbase, locks, local chains, shielded-funded unshielding,
 account isolation, and explicit public behavior have focused regression tests.
+Revision withdrawal/replay preserves independently observed and locally
+constructed spends and reservations across reopen; withdrawn rows contribute
+no public funds and do not block reactivation. Coinbase boundary tests reject
+all four selectors and final storage at 99 blocks and admit them at 100.
 
 ## Phase 5 — Integrate complete and partial transaction history
 

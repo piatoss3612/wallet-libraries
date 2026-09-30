@@ -10,7 +10,7 @@ pub(super) const WINDOW_SCOPES: [TransparentKeyScope; 3] = [
 
 /// One past the highest non-hardened child index.
 #[cfg(feature = "transparent-inputs")]
-const WINDOW_LIMIT: u32 = 1 << 31;
+pub(super) const WINDOW_LIMIT: u32 = 1 << 31;
 
 #[cfg(feature = "transparent-inputs")]
 fn scope_slot(scope: TransparentKeyScope) -> Option<usize> {
@@ -307,6 +307,7 @@ pub(crate) fn watch_set<P: consensus::Parameters>(
     let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
     Ok(TransparentWatchSet {
         account,
+        lifecycle: lifecycle(conn, watch.account.internal_id())?,
         policy_generation: capture_policy_generation(conn)?,
         target: local_target(conn)?,
         addresses: watch.watched_addresses(),

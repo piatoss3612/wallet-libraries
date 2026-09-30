@@ -1,8 +1,10 @@
-//! Candidate recovery storage: watched addresses, events, coverage, and pending pages.
+//! Recovery storage: watched addresses, events, coverage, pending pages, quarantine,
+//! qualification, and promotion.
 //!
-//! Candidate writes touch only `tpir_*` recovery tables. They never change the LRZ outputs,
-//! spends, locks, addresses, or transactions that balances, input selection, receiving-address
-//! allocation, and history read, and the candidate ledger never reads those back as evidence.
+//! A candidate account's writes touch only `tpir_*` recovery tables. They never change the LRZ
+//! outputs, spends, locks, addresses, or transactions that balances, input selection,
+//! receiving-address allocation, and history read, and the ledger never reads those back as
+//! evidence. Promotion and an active account's commits also project events into those tables.
 //!
 //! Rewinds and policy transitions maintain recovery state in every build, because another
 //! build may have written it.
@@ -14,12 +16,17 @@ use crate::error::SqliteClientError;
 
 #[cfg(feature = "transparent-inputs")]
 use {
-    super::{capture_policy_generation, durable_policy, ensure_policy_generation, resolve_mode},
+    super::{
+        capture_policy_generation, durable_policy, ensure_policy_generation, projection,
+        resolve_mode,
+    },
     crate::{
         AccountRef, AccountUuid,
         wallet::{
-            Account, encoding::KeyScope, fully_scanned_height, get_account, get_block_hash,
-            transparent::get_legacy_transparent_address,
+            Account, chain_tip_height,
+            encoding::KeyScope,
+            fully_scanned_height, get_account, get_block_hash,
+            transparent::{generate_address_range, get_legacy_transparent_address},
         },
     },
     std::collections::{BTreeMap, BTreeSet},
@@ -31,14 +38,22 @@ use {
     zcash_client_backend::data_api::{
         Account as _,
         transparent_ledger::{
-            AddressRange, CandidateBlocker, CandidateRecovery, ChainPoint, CommitOutcome,
-            CommitRejection, IntegrityFailure, InvalidCommit, MAX_RECOVERY_IDENTIFIER_LEN,
-            PageRequest, PendingPage, PublicationAnchor, ReceiveEvent, RecoveryRevision,
-            SpendEvent, StaleCommit, TransparentLedgerCommit, TransparentLedgerMode,
-            TransparentWatchSet, WatchOrigin, WatchedAddress,
+            AccountLifecycle, AddressRange, CandidateBlocker, CandidateRecovery, ChainPoint,
+            CommitOutcome, CommitRejection, IntegrityFailure, InvalidCommit,
+            MAX_RECOVERY_IDENTIFIER_LEN, PageRequest, PendingPage, PublicationAnchor, ReceiveEvent,
+            RecoveryBlocker, RecoveryRevision, RefusedCommit, SpendEvent, StaleCommit,
+            TransparentLedgerCommit, TransparentLedgerMode, TransparentWatchSet, WatchOrigin,
+            WatchedAddress,
         },
     },
-    zcash_keys::{address::Address, keys::transparent::gap_limits::GapLimits},
+    zcash_keys::{
+        address::Address,
+        keys::{
+            ReceiverRequirement::{Allow, Require},
+            UnifiedAddressRequest,
+            transparent::gap_limits::GapLimits,
+        },
+    },
     zcash_primitives::{block::BlockHash, transaction::TxId},
     zcash_protocol::{consensus, value::Zatoshis},
     zcash_script::script,
@@ -52,22 +67,32 @@ mod diagnostics;
 mod events;
 mod lifecycle;
 #[cfg(feature = "transparent-inputs")]
+mod promotion;
+#[cfg(feature = "transparent-inputs")]
 mod watch;
 
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use commit::apply_commit;
+pub(crate) use commit::{apply_commit, qualify_revision};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use diagnostics::candidate_recovery;
+#[cfg(feature = "transparent-inputs")]
+use diagnostics::{AccountLedger, placed_receives, placed_spends, recovery_status};
+#[cfg(feature = "transparent-inputs")]
+pub(crate) use diagnostics::{account_ledger, ledger_blockers};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use lifecycle::forget_reattributed_script;
 pub(crate) use lifecycle::{clear_pending_pages, truncate};
 #[cfg(feature = "transparent-inputs")]
+pub(crate) use promotion::promote;
+#[cfg(feature = "transparent-inputs")]
 pub(crate) use watch::watch_set;
 
 #[cfg(feature = "transparent-inputs")]
+use commit::{account_quarantined, atomically, lifecycle};
+#[cfg(feature = "transparent-inputs")]
 use events::{apply_receive, apply_spend, open_page, record_range};
 #[cfg(feature = "transparent-inputs")]
-use watch::{WINDOW_SCOPES, Watch};
+use watch::{WINDOW_LIMIT, WINDOW_SCOPES, Watch};
 
 #[cfg(feature = "transparent-inputs")]
 fn script_bytes(address: &TransparentAddress) -> Vec<u8> {

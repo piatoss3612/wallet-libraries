@@ -81,6 +81,11 @@ pub(crate) fn apply_transparent_policy(
             }
             // Candidate pages were opened under the previous policy.
             super::clear_pending_pages(conn)?;
+            if current.mode == TransparentLedgerMode::PrivateRequired {
+                // Private authority exists only under PrivateRequired. Returning to it requires
+                // promoting each account again, which revalidates its whole ledger.
+                conn.execute("DELETE FROM tpir_active_accounts", [])?;
+            }
             // Keep still-required retrieval obligations on the new generation. Leaving the old
             // stamp would hide them from public dispatch after a transition that still retains
             // public authority (Public → PrivateShadow). Under PrivateRequired, matching

@@ -404,8 +404,9 @@ mod handles {
             WalletWrite as _,
             testing::{AddressType, TestBuilder, single_output_change_strategy},
             transparent_ledger::{
-                LastKnownSource, RecoveryBlocker, RecoveryCompletion, TransparentAuthority,
-                TransparentLedgerMode, TransparentLedgerRead as _, TransparentLedgerWrite as _,
+                CandidateBlocker, LastKnownSource, RecoveryBlocker, RecoveryCompletion,
+                TransparentAuthority, TransparentLedgerMode, TransparentLedgerRead as _,
+                TransparentLedgerWrite as _,
             },
             wallet::{
                 ConfirmationsPolicy, TargetHeight,
@@ -580,8 +581,9 @@ mod handles {
             assert!(s.blockers.is_empty());
         }
 
-        // Private authority is unavailable: the public amount is shown as last-known legacy
-        // evidence only, with no verified anchor, never as an authorized balance.
+        // The account is not promoted, so private authority is unavailable: the public amount
+        // is shown as last-known legacy evidence only, with no verified anchor, never as an
+        // authorized balance.
         set_mode(&mut st, PrivateRequired);
         let s = snapshot(&st);
         assert_eq!(s.authority, TransparentAuthority::Unavailable);
@@ -596,8 +598,13 @@ mod handles {
         assert_eq!(s.completion, RecoveryCompletion::Blocked);
         assert_eq!(
             s.blockers,
-            vec![RecoveryBlocker::PrivateRecoveryUnavailable]
+            vec![
+                RecoveryBlocker::NotActivated,
+                RecoveryBlocker::Recovery(CandidateBlocker::IncompleteCoverage),
+            ]
         );
+        assert_eq!(s.covered_through, None);
+        assert_eq!(s.recovered_unverified, Some(Zatoshis::ZERO));
     }
 
     #[test]

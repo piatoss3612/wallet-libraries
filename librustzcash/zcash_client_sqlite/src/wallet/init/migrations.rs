@@ -50,6 +50,7 @@ mod standalone_p2sh;
 mod status_inclusion_evidence;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
+mod transparent_activation_schema;
 mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
 mod transparent_policy_generation;
@@ -158,6 +159,7 @@ pub mod ids {
         status_inclusion_evidence::MIGRATION_ID as STATUS_INCLUSION_EVIDENCE,
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
+        transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
         transparent_ledger_schema::MIGRATION_ID as TRANSPARENT_LEDGER_SCHEMA,
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
@@ -398,6 +400,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_ledger_schema::Migration),
         Box::new(transparent_policy_generation::Migration),
         Box::new(transparent_recovery_schema::Migration),
+        Box::new(transparent_activation_schema::Migration),
     ]
 }
 
@@ -606,7 +609,7 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_recovery_schema::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_activation_schema::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -743,6 +746,7 @@ pub(crate) mod tests {
             ids::STANDALONE_P2SH,
             ids::SUPPORT_LEGACY_SQLITE,
             ids::SUPPORT_ZCASHD_WALLET_IMPORT,
+            ids::TRANSPARENT_ACTIVATION_SCHEMA,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TRANSPARENT_POLICY_GENERATION,

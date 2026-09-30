@@ -2937,6 +2937,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             tx,
             target_height,
             confirmations_policy,
+            false,
             &mut account_balances,
         )?;
     }

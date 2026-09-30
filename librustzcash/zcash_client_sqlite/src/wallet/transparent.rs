@@ -80,7 +80,9 @@ use crate::{
             is_locked_at, output_eligible_condition, overridable_owners_rarray, push_lock_params,
         },
         mempool_height,
-        transparent_ledger::{ProjectionOrigin, record_output_origin, record_spend_origin},
+        transparent_ledger::{
+            InputAuthority, ProjectionOrigin, record_output_origin, record_spend_origin,
+        },
     },
 };
 #[cfg(feature = "transparent-inputs")]
@@ -680,7 +682,7 @@ pub(crate) fn reserve_next_n_addresses<P: consensus::Parameters>(
 /// [`WalletWrite::get_next_available_address`]: zcash_client_backend::data_api::WalletWrite::get_next_available_address
 /// [`WalletWrite::get_address_for_index`]: zcash_client_backend::data_api::WalletWrite::get_address_for_index
 pub(crate) fn generate_address_range<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     account_id: AccountRef,
     key_scope: TransparentKeyScope,
@@ -706,7 +708,7 @@ pub(crate) fn generate_address_range<P: consensus::Parameters>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_address_range_internal<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     account_id: AccountRef,
     account_uivk: &UnifiedIncomingViewingKey,
@@ -730,7 +732,7 @@ pub(crate) fn generate_address_range_internal<P: consensus::Parameters>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn store_address_range<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     account_id: AccountRef,
     key_scope: TransparentKeyScope,
@@ -891,7 +893,7 @@ pub(crate) fn store_address_range<P: consensus::Parameters>(
 /// [`WalletWrite::get_next_available_address`]: zcash_client_backend::data_api::WalletWrite::get_next_available_address
 /// [`WalletWrite::get_address_for_index`]: zcash_client_backend::data_api::WalletWrite::get_address_for_index
 pub(crate) fn generate_gap_addresses<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
     account_id: AccountRef,
@@ -921,7 +923,7 @@ pub(crate) fn generate_gap_addresses<P: consensus::Parameters>(
 /// Finds the wallet addresses that are involved with the given transaction, and regenerates the gap
 /// limit worth of addresses as appropriate for each key scope.
 pub(crate) fn update_gap_limits<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
     txid: TxId,
@@ -1316,10 +1318,12 @@ pub(crate) fn excluding_immature_coinbase_outputs(tx: &str) -> String {
 /// - `outpoint`: The identifier for the output to be retrieved.
 /// - `target_height`: The target height of a transaction under construction that will spend the
 ///   returned output. If this is `None`, no spendability checks are performed.
+/// - `authority`: which outputs the transparent authority admits; others are not returned.
 pub(crate) fn get_wallet_transparent_output(
     conn: &rusqlite::Connection,
     outpoint: &OutPoint,
     target_height: Option<TargetHeight>,
+    authority: &InputAuthority,
 ) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
     // This could return as unspent outputs that are actually not spendable, if they are the
     // outputs of deshielding transactions where the spend anchors have been invalidated by a
@@ -1345,22 +1349,30 @@ pub(crate) fn get_wallet_transparent_output(
                  ({}) -- the transaction is unexpired
                  AND u.id NOT IN ({}) -- and the output is unspent
                  AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+                 AND ({}) -- exclude immature coinbase outputs
+                 AND ({}) -- exclude withdrawn ledger-only receives
              )
-         )",
+         )
+         AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output",
         tx_unexpired_condition("t"),
         spent_utxos_clause(),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        excluding_immature_coinbase_outputs("t"),
+        super::transparent_ledger::output_observation_condition("u"),
     ))?;
 
     let txid_bytes = outpoint.hash();
     let output_index = outpoint.n();
     let target_height_arg = target_height.map(u32::from);
     let allow_unspendable = target_height.is_none();
+    let (private_authority, eligible_accounts) = authority.sql_params();
     let sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":txid", &txid_bytes),
         (":output_index", &output_index),
         (":target_height", &target_height_arg),
         (":allow_unspendable", &allow_unspendable),
+        (":private_authority", &private_authority),
+        (":eligible_accounts", &eligible_accounts),
     ];
 
     let result: Result<Option<WalletTransparentOutput<_>>, SqliteClientError> = stmt_select_utxo
@@ -1411,11 +1423,14 @@ fn spendable_transparent_outputs_query(
            -- unknown tx_index defaults to 1 (non-coinbase) to avoid false positives,
            -- so such outputs are excluded by CoinbaseOnly and included by NonCoinbaseOnly
          AND ({lock_eligible_sql}) -- the output is eligible under the lock filter
+         AND ({}) -- exclude withdrawn ledger-only receives
+         AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output
          ORDER BY {order_by_sql}",
         tx_unexpired_condition_minconf_0("t"),
         spent_utxos_clause(),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         excluding_immature_coinbase_outputs("t"),
+        super::transparent_ledger::output_observation_condition("u"),
     )
 }
 
@@ -1443,6 +1458,7 @@ fn coinbase_filter_encoding(output_filter: CoinbaseFilter) -> i32 {
 /// spendable, if they are the outputs of deshielding transactions where the spend anchors have
 /// been invalidated by a rewind. There isn't a way to detect this circumstance at present, but
 /// it should be vanishingly rare as the vast majority of rewinds are of a single block.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
@@ -1451,6 +1467,7 @@ pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
     confirmations_policy: ConfirmationsPolicy,
     output_filter: CoinbaseFilter,
     lock_filter: LockFilter<'_>,
+    authority: &InputAuthority,
 ) -> Result<Vec<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
     // Defer to the batched query with a singleton address set, so that there is a single query
     // body to maintain. `transparent_received_outputs.address` is always equal to the
@@ -1466,6 +1483,7 @@ pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
         confirmations_policy,
         output_filter,
         lock_filter,
+        authority,
     )
 }
 
@@ -1482,6 +1500,7 @@ pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
 ///
 /// The query body mirrors that of [`get_spendable_transparent_outputs`], differing only in that
 /// the receiving address is matched against a set via `rarray` rather than a single value.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
@@ -1490,6 +1509,7 @@ pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Para
     confirmations_policy: ConfirmationsPolicy,
     output_filter: CoinbaseFilter,
     lock_filter: LockFilter<'_>,
+    authority: &InputAuthority,
 ) -> Result<Vec<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
     if addresses.is_empty() {
         return Ok(vec![]);
@@ -1522,12 +1542,15 @@ pub(crate) fn get_spendable_transparent_outputs_for_addresses<P: consensus::Para
     let target_height_arg = u32::from(target_height);
     let min_value = u64::from(zip317::MARGINAL_FEE);
     let overridable_owners = overridable_owners_rarray(lock_filter);
+    let (private_authority, eligible_accounts) = authority.sql_params();
     let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":addresses", &addresses_ptr),
         (":target_height", &target_height_arg),
         (":min_confirmations", &min_confirmations),
         (":min_value", &min_value),
         (":coinbase_filter", &coinbase_filter),
+        (":private_authority", &private_authority),
+        (":eligible_accounts", &eligible_accounts),
     ];
     push_lock_params(&mut sql_params, lock_filter, &overridable_owners);
 
@@ -1590,6 +1613,7 @@ pub(crate) fn select_spendable_transparent_outputs<P: consensus::Parameters>(
     max_inputs: usize,
     fee_rule: &StandardFeeRule,
     lock_filter: LockFilter<'_>,
+    authority: &InputAuthority,
 ) -> Result<Vec<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
     // The post-fee bound for `TargetValue::AtLeast`. `TargetValue::AllFunds` has no bound; we
     // return every eligible output in that case.
@@ -1645,6 +1669,7 @@ pub(crate) fn select_spendable_transparent_outputs<P: consensus::Parameters>(
     let min_value = u64::from(zip317::MARGINAL_FEE);
     let has_address_allow_list = address_allow_list.is_some();
     let overridable_owners = overridable_owners_rarray(lock_filter);
+    let (private_authority, eligible_accounts) = authority.sql_params();
     let mut sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":account_uuid", &account_uuid),
         (":target_height", &target_height_arg),
@@ -1653,6 +1678,8 @@ pub(crate) fn select_spendable_transparent_outputs<P: consensus::Parameters>(
         (":coinbase_filter", &coinbase_filter),
         (":has_address_allow_list", &has_address_allow_list),
         (":addresses", &addresses_ptr),
+        (":private_authority", &private_authority),
+        (":eligible_accounts", &eligible_accounts),
     ];
     push_lock_params(&mut sql_params, lock_filter, &overridable_owners);
 
@@ -1744,10 +1771,12 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
          AND u.value_zat > 0
          AND ({}) -- the output is mined with sufficient confirmations, or is unexpired and minconf is 0
          AND u.id NOT IN ({}) -- and the output is unspent
-         AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs",
+         AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+         AND ({}) -- exclude withdrawn ledger-only receives",
         tx_unexpired_condition_minconf_0("t"),
         spent_utxos_clause(),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        super::transparent_ledger::output_observation_condition("u"),
     ))?;
 
     let mut rows = stmt_address_balances.query(named_params![
@@ -1805,9 +1834,11 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
                 )
              )
              AND u.id NOT IN ({}) -- and the output is unspent
-             AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs",
+             AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+             AND ({}) -- exclude withdrawn ledger-only receives",
             spent_utxos_clause(),
-            excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts")
+            excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+            super::transparent_ledger::output_observation_condition("u"),
         ))?;
 
         let mut rows = stmt_address_balances.query(named_params![
@@ -1879,6 +1910,36 @@ pub(crate) enum BalanceProvenance {
     IncludesLocalOnly,
 }
 
+/// A SQL condition that `u`, created by transaction `t`, is projected from a receive the private
+/// ledger currently places. A rewind clears the placement of the receives above the retained
+/// block but leaves their projection; until a later commit places the receive again, the
+/// projection is no evidence that the output exists on the current chain.
+macro_rules! placed_ledger_receive {
+    () => {
+        "EXISTS (
+             SELECT 1 FROM tpir_output_origins oo
+             JOIN tpir_receive_events re
+                 ON re.txid = t.txid
+                 AND re.output_index = u.output_index
+                 AND re.account_id = u.account_id
+             WHERE oo.output_id = u.id AND oo.origin = 2 AND re.mined_height IS NOT NULL
+         )"
+    };
+}
+
+/// A SQL condition admitting `u` as an input under the handle's transparent authority: every
+/// output under public authority, and under private authority only the placed ledger outputs of
+/// the `:eligible_accounts`. Legacy public and local-only outputs never authorize a private
+/// spend.
+const INPUT_AUTHORITY_CONDITION: &str = concat!(
+    "NOT :private_authority OR (u.account_id IN rarray(:eligible_accounts) AND ",
+    placed_ledger_receive!(),
+    ")"
+);
+
+/// A SQL condition restricting `u` to placed ledger outputs when `:ledger_only` is true.
+const LEDGER_ORIGIN_CONDITION: &str = concat!("NOT :ledger_only OR ", placed_ledger_receive!());
+
 /// Classifies the provenance of exactly the outputs that [`add_transparent_account_balances`]
 /// counts for `account`. An output with no recorded origin is reported as corrupted data rather
 /// than guessed.
@@ -1899,6 +1960,7 @@ pub(crate) fn transparent_balance_provenance(
                  WHERE accounts.uuid = :account_uuid
                  AND (({}) OR (:min_confirmations > 0 AND ({})))
                  AND u.id NOT IN ({})
+                 AND ({})
                  AND ({})
              )
              SELECT
@@ -1921,6 +1983,7 @@ pub(crate) fn transparent_balance_provenance(
             tx_unconfirmed_condition("t"),
             spent_utxos_clause(),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+            super::transparent_ledger::output_observation_condition("u"),
         ),
         named_params![
             ":account_uuid": account.0,
@@ -1941,11 +2004,17 @@ pub(crate) fn transparent_balance_provenance(
     })
 }
 
+/// Adds each account's unspent transparent outputs to `account_balances`.
+///
+/// With `ledger_only`, only outputs projected from a receive the private ledger currently places
+/// count: legacy public, local-only, and rewound outputs are excluded, as they are from private
+/// input selection.
 #[tracing::instrument(skip(conn, account_balances))]
 pub(crate) fn add_transparent_account_balances(
     conn: &rusqlite::Connection,
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
+    ledger_only: bool,
     account_balances: &mut HashMap<AccountUuid, AccountBalance>,
 ) -> Result<(), SqliteClientError> {
     let min_confirmations = balance_min_confirmations(confirmations_policy);
@@ -1962,15 +2031,20 @@ pub(crate) fn add_transparent_account_balances(
          WHERE ({}) -- the transaction is mined or unexpired with minconf 0
          AND u.id NOT IN ({}) -- and the received txo is unspent
          AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+         AND ({}) -- the output has the required origin
+         AND ({}) -- exclude withdrawn ledger-only receives
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase, is_mature",
         tx_unexpired_condition_minconf_0("t"),
         spent_utxos_clause(),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        LEDGER_ORIGIN_CONDITION,
+        super::transparent_ledger::output_observation_condition("u"),
     ))?;
 
     let mut rows = stmt_account_spendable_balances.query(named_params![
         ":target_height": u32::from(target_height),
         ":min_confirmations": min_confirmations,
+        ":ledger_only": ledger_only,
     ])?;
 
     while let Some(row) = rows.next()? {
@@ -2031,15 +2105,20 @@ pub(crate) fn add_transparent_account_balances(
              WHERE ({})
              AND u.id NOT IN ({}) -- and the received txo is unspent
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+             AND ({}) -- the output has the required origin
+             AND ({}) -- exclude withdrawn ledger-only receives
              GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
             tx_unconfirmed_condition("t"),
             spent_utxos_clause(),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+            LEDGER_ORIGIN_CONDITION,
+            super::transparent_ledger::output_observation_condition("u"),
         ))?;
 
         let mut rows = stmt_account_unconfirmed_balances.query(named_params![
             ":target_height": u32::from(target_height),
             ":min_confirmations": min_confirmations,
+            ":ledger_only": ledger_only,
         ])?;
 
         while let Some(row) = rows.next()? {
@@ -2077,7 +2156,7 @@ pub(crate) fn add_transparent_account_balances(
 ///
 /// Returns `true` if the UTXO was known to the wallet.
 pub(crate) fn mark_transparent_utxo_spent(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     spent_in_tx: TxRef,
     outpoint: &OutPoint,
     origin: Option<ProjectionOrigin>,
@@ -2779,7 +2858,7 @@ pub(crate) fn find_account_uuid_for_transparent_address<P: consensus::Parameters
 /// transaction we created, that we do not yet know to have been mined.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put_transparent_output<P: consensus::Parameters>(
-    conn: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
     output: &WalletTransparentOutput<AccountUuid>,
@@ -4655,11 +4734,16 @@ mod tests {
             conn: &rusqlite::Connection,
             outpoint: &OutPoint,
         ) -> Option<AccountUuid> {
-            get_wallet_transparent_output(conn, outpoint, None)
-                .unwrap()
-                .expect("the seeded transparent output is retrievable")
-                .funding_account()
-                .copied()
+            get_wallet_transparent_output(
+                conn,
+                outpoint,
+                None,
+                &crate::wallet::transparent_ledger::InputAuthority::Public,
+            )
+            .unwrap()
+            .expect("the seeded transparent output is retrievable")
+            .funding_account()
+            .copied()
         }
 
         /// Scenario: a transparent output whose creating transaction was funded entirely from
