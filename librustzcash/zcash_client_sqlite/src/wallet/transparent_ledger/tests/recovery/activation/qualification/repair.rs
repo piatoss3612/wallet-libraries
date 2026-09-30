@@ -291,8 +291,11 @@ fn low_level_provenance_writes_roll_back_with_the_wallet_transaction() {
     conn(&st)
         .execute_batch("DROP TRIGGER fail_output_origin; DROP TRIGGER fail_spend_link")
         .unwrap();
-    // A reader exactly at the required version remains usable.
-    assert_eq!(reader_version(&st), TPIR_READER_VERSION);
+    // No metadata was written: low-level provenance retains its recovery-v6 fence.
+    assert_eq!(
+        reader_version(&st),
+        crate::wallet::transparent_ledger::RECOVERY_READER_VERSION
+    );
     st.wallet_mut()
         .db_mut()
         .transactionally(|db| db.put_transparent_output(&output, height, true))

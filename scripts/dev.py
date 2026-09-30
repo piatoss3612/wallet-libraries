@@ -22,6 +22,7 @@ CONFIGS = {
     "sqlite": (["-p", "zakura-client-sqlite"], ["test-dependencies"]),
     "enhance-wallet": (["-p", "zakura-pir-enhance"], ["wallet"]),
     "enhance": (["-p", "zakura-pir-enhance"], []),
+    "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
 }
 VERIFY = ("zakura-graph", "wallet-lib-modes", "vendor-ancestry")
 
