@@ -956,7 +956,7 @@ application view over ZIP 318 must be removed by its owner before resumption.
 
 `python3 scripts/check-legacy-rollback.py` creates disposable databases using actual
 published rc5 and rc7 crates. It requires old ingestion to fail before preparation,
-then ingest a real raw transaction twice after preparation, and return to the current
+then ingest a serialized wallet-owned transaction fixture twice after preparation, and return to the current
 schema with identical transaction bytes and migration IDs. This complements unit
 coverage of provenance reconciliation, policy refusal and failure atomicity. It is
 not an application release designation or whole-wallet sync qualification; Vizor
