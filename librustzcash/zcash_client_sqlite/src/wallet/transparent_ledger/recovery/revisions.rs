@@ -79,6 +79,7 @@ pub(super) fn supersede_provisional(
     let older_provisional = "SELECT id FROM tpir_revisions
          WHERE source = :source AND sealed = 0 AND lineage < :lineage";
     for table in [
+        "tpir_transaction_metadata",
         "tpir_coverage",
         "tpir_pending_pages",
         "tpir_receive_observations",

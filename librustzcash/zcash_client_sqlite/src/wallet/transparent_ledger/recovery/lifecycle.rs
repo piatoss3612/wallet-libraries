@@ -20,6 +20,10 @@ pub(crate) fn truncate(
     super::super::durable_policy(conn)?;
     let height = u32::from(floor);
     conn.execute(
+        "DELETE FROM tpir_transaction_metadata WHERE mined_height > :height",
+        named_params![":height": height],
+    )?;
+    conn.execute(
         "UPDATE tpir_receive_events SET mined_height = NULL WHERE mined_height > :height",
         named_params![":height": height],
     )?;
@@ -113,5 +117,24 @@ pub(crate) fn forget_reattributed_script(
             SELECT 1 FROM tpir_pending_page_scripts s WHERE s.page_id = tpir_pending_pages.id AND s.script = :script
         )", params,
     )?;
+    // Address generation also runs while older migrations are being applied.
+    let has_metadata: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table'
+         AND name = 'tpir_transaction_metadata')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_metadata {
+        conn.execute(
+            "DELETE FROM tpir_transaction_metadata AS m WHERE account_id = :account_id
+             AND NOT EXISTS (
+                SELECT 1 FROM tpir_receive_events e JOIN tpir_receive_observations o ON o.receive_id = e.id
+                WHERE e.account_id = m.account_id AND e.txid = m.txid AND o.revision_id = m.revision_id
+             ) AND NOT EXISTS (
+                SELECT 1 FROM tpir_spend_events e JOIN tpir_spend_observations o ON o.spend_id = e.id
+                WHERE e.account_id = m.account_id AND e.spending_txid = m.txid AND o.revision_id = m.revision_id
+             )", named_params![":account_id": from_account.0],
+        )?;
+    }
     Ok(())
 }

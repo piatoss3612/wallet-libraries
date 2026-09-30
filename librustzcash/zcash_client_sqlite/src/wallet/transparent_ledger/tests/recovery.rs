@@ -161,6 +161,7 @@ fn below_target(ws: &TransparentWatchSet<AccountUuid>, depth: u32) -> BlockHeigh
 
 fn receive(tag: u8, address: TransparentAddress, value: u64, at: BlockHeight) -> ReceiveEvent {
     ReceiveEvent {
+        metadata: None,
         outpoint: OutPoint::new([tag; 32], 0),
         address,
         value: Zatoshis::const_from_u64(value),
@@ -171,6 +172,7 @@ fn receive(tag: u8, address: TransparentAddress, value: u64, at: BlockHeight) ->
 
 fn spend(tag: u8, prevout: &ReceiveEvent, at: BlockHeight) -> SpendEvent {
     SpendEvent {
+        metadata: None,
         spending_txid: TxId::from_bytes([tag; 32]),
         input_index: 0,
         prevout: prevout.outpoint.clone(),

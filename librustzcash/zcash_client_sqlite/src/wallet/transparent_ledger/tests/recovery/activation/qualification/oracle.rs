@@ -176,6 +176,7 @@ pub(super) fn oracle(
             for (index, input) in bundle.vin.iter().enumerate() {
                 if let Some(spent) = utxos.remove(&outpoint_key(input.prevout())) {
                     spends.push(SpendEvent {
+                        metadata: None,
                         spending_txid: tx.txid(),
                         input_index: index as u32,
                         prevout: input.prevout().clone(),
@@ -190,6 +191,7 @@ pub(super) fn oracle(
                 continue;
             };
             let received = ReceiveEvent {
+                metadata: None,
                 outpoint: OutPoint::new(*tx.txid().as_ref(), n as u32),
                 address,
                 value: output.value(),
@@ -227,6 +229,7 @@ pub(super) fn source(
                 paid.insert(outpoint_key(&outpoint), address);
                 if addresses.contains(&address) {
                     receives.push(ReceiveEvent {
+                        metadata: None,
                         outpoint,
                         address,
                         value: output.value(),
@@ -245,6 +248,7 @@ pub(super) fn source(
                 .filter(|a| addresses.contains(a))
             {
                 spends.push(SpendEvent {
+                    metadata: None,
                     spending_txid: tx.txid(),
                     input_index: index as u32,
                     prevout: input.prevout().clone(),
@@ -615,6 +619,7 @@ pub(super) fn shadow_oracle_wallet() -> (
 
     // Public discovery already saw the second payment.
     let legacy = ReceiveEvent {
+        metadata: None,
         outpoint: OutPoint::new(*r2.as_ref(), 0),
         address: e(0),
         value: Zatoshis::const_from_u64(20_000),

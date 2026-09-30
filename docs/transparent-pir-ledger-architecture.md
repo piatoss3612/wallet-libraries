@@ -1031,3 +1031,30 @@ availability. Keep detailed comparisons local and export only redacted aggregate
 diagnostics. Record the exact library pin, protocol/publication version, and
 tested application release for each gate. Preparation alone qualifies none of
 the remote protocol, service, or production privacy claims.
+
+## Activity metadata implementation
+
+Normalized recovery events now carry optional transaction metadata. `None` means
+unavailable legacy evidence. `WholeTransactionFee` represents an exact fee,
+unknown fee or coinbase's non-applicable fee; it remains separate from the
+account-related `FeeState`. Metadata does not populate the local transaction fee
+or replace local send records and intent.
+
+SQLite records assertions with their account, source revision and mined height
+in the same recovery transaction as events, coverage and pending pages. Any
+conflicting assertion rejects the commit and enters the existing quarantine
+path. Rewinds, trusted provisional replacement and ownership withdrawal remove
+the associated assertions. The additive schema migration starts empty; storing
+metadata raises the durable reader fence to version 7. Rollback requires a reader
+that supports that fence.
+
+History exposes agreed metadata only from active, qualified, non-quarantined
+evidence. Aggregate outgoing payment is exact only for complete transparent
+effects, transparent-only transactions, an exact fee, and distinct owned input
+indices accounting for every published transparent input. Its value is owned
+inputs minus owned outputs minus the whole-transaction fee. Shared funding,
+mixed pools, incomplete coverage and unresolved inputs retain unknown or partial
+amounts. Individual recipient details may remain incomplete even when this
+aggregate is exact. Account movement reports known received and spent amounts
+with a separate completeness flag; public unverified effects do not make it
+complete. Metadata grants no qualification, promotion or spending authority.
