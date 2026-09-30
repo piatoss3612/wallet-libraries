@@ -424,8 +424,7 @@ fn public_rows_are_unverified_and_incomplete_once_private_authority_applies() {
     assert_eq!(entry.classification, HistoryClassification::Provisional);
 }
 
-#[test]
-fn local_intent_survives_discovery_of_the_same_transaction() {
+fn check_local_intent_survives_discovery(with_metadata: bool) {
     let (mut st, accounts) = shadow_wallet_with(0);
     let account = accounts[0];
     // A shielded-funded payment to the account's own transparent address.
@@ -462,7 +461,11 @@ fn local_intent_survives_discovery_of_the_same_transaction() {
     let fixture = revision(1, true);
     let ws = watch(&st, account);
     let recovered = ReceiveEvent {
-        metadata: None,
+        metadata: with_metadata.then_some(TransactionMetadata {
+            fee: WholeTransactionFee::Exact(fee),
+            transparent_input_count: 0,
+            has_shielded_components: true,
+        }),
         outpoint: OutPoint::new(*txid.as_ref(), output_index),
         address: taddr,
         value: zat(50_000),
@@ -476,13 +479,29 @@ fn local_intent_survives_discovery_of_the_same_transaction() {
 
     // The local record is kept: only the placement changed.
     let discovered = history(&st, account, txid);
+    assert_eq!(discovered.fee, FeeState::Known(fee));
+    assert_eq!(
+        discovered.transaction_metadata.as_ref().map(|e| e.metadata),
+        recovered.metadata
+    );
     assert_eq!(
         discovered,
         TransactionHistoryDetails {
             mined_height: Some(recovered.mined_height),
+            transaction_metadata: discovered.transaction_metadata.clone(),
             ..local
         }
     );
+}
+
+#[test]
+fn local_intent_survives_discovery_of_the_same_transaction() {
+    check_local_intent_survives_discovery(false);
+}
+
+#[test]
+fn local_intent_and_fee_survive_mixed_transaction_metadata() {
+    check_local_intent_survives_discovery(true);
 }
 
 #[test]

@@ -650,6 +650,23 @@ impl ReferenceRecovery {
                     || !commit.completed_pages.is_empty()
             })
             .collect();
+        // Persist the conservative export intent before handing facts to the caller.
+        // Wallet commits and this companion database cannot share a transaction:
+        // a crash before acknowledgment must still report later withdrawal of
+        // any batch that might have reached the wallet. Unapplied intents are safe
+        // to reconcile through the same trusted wallet controls.
+        let tx = self
+            .catalog
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        for commit in &commits {
+            tx.execute(
+                "UPDATE pir_bridge_revisions SET exported=1 WHERE source=?1 AND revision=?2",
+                params![commit.revision.source, commit.revision.revision],
+            )
+            .map_err(failure)?;
+        }
+        tx.commit().map_err(failure)?;
         let mut hash = Sha256::new();
         hash.update(identity);
         hash.update(self.store.last_commit().map_err(failure)?.to_le_bytes());
@@ -668,6 +685,7 @@ impl ReferenceRecovery {
     }
 
     /// Acknowledge only after trusted reconciliation and every wallet commit succeeded.
+    /// Clears retired export intents; current intents were persisted before return.
     /// A crash before this acknowledgement replays the same candidate facts. It
     /// never advances a wallet's qualification, coverage or financial authority.
     pub fn acknowledge_applied<A>(
@@ -976,6 +994,92 @@ mod tests {
             )
             .unwrap();
         assert_eq!(after_restart.reconciliation, changed.reconciliation);
+    }
+
+    #[test]
+    fn possible_wallet_export_survives_crash_before_ack_and_withdrawal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("companion.sqlite");
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        let map = map();
+        let entry = &map.shards[0];
+        let watch = watch();
+        let script = address_script(watch.addresses[0].address);
+        adapter.store.bind_set(&SetIdentity::of(&map)).unwrap();
+        adapter
+            .store
+            .add_scripts(&[ScriptEntry {
+                script: script.clone(),
+                origin: ScriptOrigin::Imported,
+                required_from: map.start_height,
+            }])
+            .unwrap();
+        adapter
+            .store
+            .commit_shard(transparent_wallet::ShardCommit {
+                source_anchor: None,
+                shard_id: entry.shard_id,
+                revision_digest: entry.manifest_digest.clone(),
+                sealed: entry.sealed,
+                start_height: entry.start_height,
+                end_height: entry.end_height,
+                terminal_block_hash: entry.terminal_block_hash.clone(),
+                events: vec![],
+                covered_scripts: vec![script],
+                pending_upsert: vec![],
+                pending_complete: vec![],
+            })
+            .unwrap();
+        let batch = adapter
+            .normalize(&watch, map.clone(), report(), &StaticChain::from_map(&map))
+            .unwrap();
+        assert_eq!(batch.commits.len(), 1);
+        let possibly_applied = batch.commits[0].revision.clone();
+        // The application may have committed this batch, then died before acknowledging it.
+        drop(adapter);
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        adapter
+            .store
+            .rollback_above(
+                &Anchor {
+                    height: map.start_height - 1,
+                    hash: entry.parent_block_hash.clone(),
+                },
+                "controlled revision withdrawal",
+            )
+            .unwrap();
+        let mut replacement = map;
+        replacement.shards[0].manifest_digest = "ab".repeat(32);
+        let withdrawn = adapter
+            .normalize(
+                &watch,
+                replacement.clone(),
+                report(),
+                &StaticChain::from_map(&replacement),
+            )
+            .unwrap();
+        assert_eq!(withdrawn.reconciliation, vec![possibly_applied.clone()]);
+        drop(adapter);
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        let repeated = adapter
+            .normalize(
+                &watch,
+                replacement.clone(),
+                report(),
+                &StaticChain::from_map(&replacement),
+            )
+            .unwrap();
+        assert_eq!(repeated.reconciliation, vec![possibly_applied]);
+        adapter.acknowledge_applied(&repeated).unwrap();
+        let acknowledged = adapter
+            .normalize(
+                &watch,
+                replacement.clone(),
+                report(),
+                &StaticChain::from_map(&replacement),
+            )
+            .unwrap();
+        assert!(acknowledged.reconciliation.is_empty());
     }
 
     #[test]

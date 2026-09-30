@@ -646,9 +646,14 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         } else {
             AggregatePayment::Unknown
         };
+        // Local construction records the fee independently of recovered metadata.
+        // Mixed-pool metadata cannot erase that richer local-send fact.
         let fee = match tx.fee {
             Some(fee)
-                if spent > 0 && (transaction_metadata.is_none() || sole_transparent_funding) =>
+                if spent > 0
+                    && (tx.constructed
+                        || transaction_metadata.is_none()
+                        || sole_transparent_funding) =>
             {
                 FeeState::Known(fee)
             }

@@ -9,7 +9,9 @@ outpoint lookup fallback exists.
 Every pass has script, publication, response, query, byte and export bounds.
 The companion store owns reference page continuation and revision-bound caches;
 the wallet store owns candidate evidence, qualification and activation. Replaying
-a pass after a crash is idempotent. Apply returned commits with the existing
+a pass after a crash is idempotent. Export intent is persisted before returning
+a batch, so withdrawal remains reconcilable even if the wallet committed and the
+process died before acknowledgment. Apply returned commits with the existing
 wallet writer and retain its failures; the adapter never qualifies a revision,
 promotes an account or authorizes a spend.
 
