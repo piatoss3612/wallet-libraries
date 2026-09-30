@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -54,6 +55,20 @@ class WorkflowTests(unittest.TestCase):
             with dev.Lease(Path(root), "test") as reused:
                 self.assertEqual(first, reused.path)
                 self.assertEqual(json.loads((reused.path / "owner.json").read_text())["pid"], os.getpid())
+
+    def test_child_retains_lease_after_wrapper_exit(self):
+        with tempfile.TemporaryDirectory() as root:
+            with dev.Lease(Path(root), "test") as owner:
+                first = owner.path
+                child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], pass_fds=(owner.lock.fileno(),))
+            try:
+                with dev.Lease(Path(root), "test") as second:
+                    self.assertNotEqual(first, second.path)
+            finally:
+                child.terminate()
+                child.wait(timeout=10)
+            with dev.Lease(Path(root), "test") as reused:
+                self.assertEqual(first, reused.path)
 
     def run_filtered(self, listing, states=None):
         args = argparse.Namespace(command="test", config="transparent", package=["zakura-client-sqlite"], profile=None, only=None, filter="ledger", exact=False)
