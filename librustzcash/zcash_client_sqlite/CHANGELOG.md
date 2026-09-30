@@ -122,8 +122,17 @@ workspace.
 
   A `tpir_meta` table without its policy row, or a missing `tpir_meta` after the
   migration has run, is reported as corrupted data.
+- `WalletDb` implements `transaction_history_details`. Every result is derived
+  from stored facts in one read (the transaction row, the account's outputs and
+  spends, the scan queue, ledger coverage, and queued follow-on work); no
+  completion marker is stored.
 
 ### Changed
+- Unmined shielded history remains incomplete when scanning discovers a funding
+  note whose spend was not linked at payload ingestion. A scanned chain tip and
+  stored raw data certify completeness only once all known owned nullifiers
+  have their spend links, preventing a debit's change from being classified as
+  a complete receive with no applicable fee.
 - Transparent outpoint lookup with a spend target now enforces coinbase
   maturity, matching the other selectors. The final private transaction storage
   gate therefore rejects an immature coinbase input, including externally

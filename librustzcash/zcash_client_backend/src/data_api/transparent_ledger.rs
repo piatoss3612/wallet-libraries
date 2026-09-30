@@ -1,8 +1,8 @@
 //! Storage-neutral contract for transparent ledger configuration and financial authority.
 //!
 //! This is the preparatory surface of the private transparent ledger: explicit handle modes,
-//! durable policy transitions, an honest balance-and-authority snapshot, candidate recovery, and
-//! per-account activation; see `docs/transparent-pir-ledger-architecture.md` and
+//! durable policy transitions, an honest balance-and-authority snapshot, candidate recovery,
+//! per-account activation, and history completeness; see `docs/transparent-pir-ledger-architecture.md` and
 //! `docs/transparent-pir-ledger-design-notes.md`.
 
 #[cfg(feature = "test-dependencies")]
@@ -11,6 +11,9 @@ use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
 use super::{Balance, WalletRead, wallet::ConfirmationsPolicy};
+
+mod history;
+pub use history::*;
 
 #[cfg(feature = "transparent-inputs")]
 mod recovery;
@@ -258,6 +261,22 @@ pub trait TransparentLedgerRead: WalletRead {
         account: Self::AccountId,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<TransparentLedgerSnapshot<Self::AccountId>, Self::Error>;
+
+    /// Returns `account`'s history view of each of `txids`, from one read.
+    ///
+    /// The result holds one entry, in request order, for each transaction in which the account
+    /// has a recorded output or spend, including a spend its active ledger recovered before the
+    /// output it consumes; other transactions are omitted. Every entry is derived from
+    /// the facts the wallet currently holds, so rewinds, promotion, account changes, and later
+    /// enhancement are reflected as soon as they are stored. An incomplete effect, unknown fee, or
+    /// missing payment detail is reported as such; none of them authorizes public retrieval.
+    ///
+    /// The handle must be configured.
+    fn transaction_history_details(
+        &self,
+        account: Self::AccountId,
+        txids: &[TxId],
+    ) -> Result<Vec<TransactionHistoryDetails>, Self::Error>;
 
     /// Returns the addresses candidate recovery must cover for `account`, the context a run
     /// captures, and the pages earlier runs left open, from one read.

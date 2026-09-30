@@ -42,8 +42,9 @@ use zcash_client_backend::data_api::status::{
     TransactionStatusMode, TransactionStatusRead, TransactionStatusWork, TransactionStatusWrite,
 };
 use zcash_client_backend::data_api::transparent_ledger::{
-    AppliedTransparentPolicy, PrivateTransparentDetail, TransparentLedgerMode,
-    TransparentLedgerRead, TransparentLedgerSnapshot, TransparentLedgerWrite,
+    AppliedTransparentPolicy, PrivateTransparentDetail, TransactionHistoryDetails,
+    TransparentLedgerMode, TransparentLedgerRead, TransparentLedgerSnapshot,
+    TransparentLedgerWrite,
 };
 #[cfg(feature = "transparent-inputs")]
 use zcash_client_backend::data_api::transparent_ledger::{
@@ -1894,6 +1895,24 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         } else {
             read(conn)
         }
+    }
+
+    fn transaction_history_details(
+        &self,
+        account: Self::AccountId,
+        txids: &[TxId],
+    ) -> Result<Vec<TransactionHistoryDetails>, Self::Error> {
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            wallet::transparent_ledger::transaction_history_details(
+                conn,
+                &self.params,
+                #[cfg(feature = "transparent-inputs")]
+                &self.gap_limits,
+                self.transparent_ledger_mode,
+                account,
+                txids,
+            )
+        })
     }
 
     #[cfg(feature = "transparent-inputs")]

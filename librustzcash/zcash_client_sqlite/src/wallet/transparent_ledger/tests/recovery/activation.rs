@@ -820,20 +820,10 @@ fn cover(
     }
 }
 
-/// A shadow wallet whose test account made a shielded-funded payment to its own transparent
-/// address, stored with its raw bytes. Returns the transaction and that output's index.
-fn local_payment_to_self() -> (
-    State,
-    AccountUuid,
-    TransparentAddress,
-    zcash_primitives::transaction::TxId,
-    u32,
-) {
-    let (mut st, accounts) = shadow_wallet_with(0);
+/// Funds the test account with a scanned Sapling note, then pays `value` to `to` from it,
+/// returning the unmined transaction.
+fn pay_address_from_sapling(st: &mut State, to: zcash_keys::address::Address, value: u64) -> TxId {
     let account = st.test_account().cloned().unwrap();
-    assert_eq!(account.id(), accounts[0]);
-
-    // A shielded-funded payment to the account's own transparent address.
     let dfvk = account.usk().sapling().to_diversifiable_full_viewing_key();
     let (height, _, _) = st.generate_next_block(
         &dfvk,
@@ -841,10 +831,9 @@ fn local_payment_to_self() -> (
         Zatoshis::const_from_u64(200_000),
     );
     st.scan_cached_blocks(height, 1);
-    let taddr = external(&watch(&st, account.id()));
     let request = zip321::TransactionRequest::new(vec![zip321::Payment::without_memo(
-        zcash_keys::address::Address::Transparent(taddr).to_zcash_address(st.network()),
-        Zatoshis::const_from_u64(50_000),
+        to.to_zcash_address(st.network()),
+        Zatoshis::const_from_u64(value),
     )])
     .unwrap();
     let change = zcash_client_backend::data_api::testing::single_output_change_strategy(
@@ -862,13 +851,18 @@ fn local_payment_to_self() -> (
             &Default::default(),
         )
         .unwrap();
-    let txid = st
-        .create_proposed_transactions::<std::convert::Infallible, _, std::convert::Infallible, _>(
-            account.usk(),
-            zcash_client_backend::wallet::OvkPolicy::Sender,
-            &proposal,
-        )
-        .unwrap()[0];
+    st.create_proposed_transactions::<std::convert::Infallible, _, std::convert::Infallible, _>(
+        account.usk(),
+        zcash_client_backend::wallet::OvkPolicy::Sender,
+        &proposal,
+    )
+    .unwrap()[0]
+}
+
+/// Like [`pay_address_from_sapling`] for a transparent recipient, also returning the index of
+/// its output.
+fn pay_from_sapling(st: &mut State, to: TransparentAddress, value: u64) -> (TxId, u32) {
+    let txid = pay_address_from_sapling(st, zcash_keys::address::Address::Transparent(to), value);
     let output_index = st
         .wallet()
         .get_transaction(txid)
@@ -878,9 +872,19 @@ fn local_payment_to_self() -> (
         .unwrap()
         .vout
         .iter()
-        .position(|out| out.script_pubkey() == &taddr.script().into())
+        .position(|out| out.script_pubkey() == &to.script().into())
         .unwrap() as u32;
-    (st, account.id(), taddr, txid, output_index)
+    (txid, output_index)
+}
+
+/// A shadow wallet whose test account made a shielded-funded payment to its own transparent
+/// address, stored with its raw bytes. Returns the transaction and that output's index.
+fn local_payment_to_self() -> (State, AccountUuid, TransparentAddress, TxId, u32) {
+    let (mut st, accounts) = shadow_wallet_with(0);
+    let account = accounts[0];
+    let taddr = external(&watch(&st, account));
+    let (txid, output_index) = pay_from_sapling(&mut st, taddr, 50_000);
+    (st, account, taddr, txid, output_index)
 }
 
 #[test]
@@ -1436,6 +1440,8 @@ fn leaving_private_required_demotes_every_account() {
         TransparentAuthority::Unavailable
     );
 }
+
+mod history;
 
 mod gating {
     mod coinbase;
