@@ -4,11 +4,12 @@
 //! that invalidating one source never removes a record another source still supports. Legacy
 //! and local origins are provenance only; they never constitute ledger coverage.
 //!
-//! Handle configuration and the durable policy are enforced here. Until private recovery is
-//! implemented, private authority is never available, so `PrivateRequired` handles cannot
-//! authorize transparent inputs.
+//! Handle configuration and the durable policy are enforced here. Candidate recovery
+//! (`recovery`) is isolated from the projection, and promotion is not implemented, so private
+//! authority is never available: `PrivateRequired` handles cannot authorize transparent inputs.
 
 mod policy;
+mod recovery;
 
 use rusqlite::OptionalExtension as _;
 use zcash_client_backend::data_api::{
@@ -35,6 +36,11 @@ pub(crate) use policy::{
     check_transparent_policy_generation, ensure_policy_generation,
     pending_private_transparent_details, retains_public_authority,
 };
+#[cfg(feature = "transparent-inputs")]
+pub(crate) use recovery::{
+    apply_commit, candidate_recovery, forget_reattributed_script, watch_set,
+};
+pub(crate) use recovery::{clear_pending_pages, truncate as truncate_recovery};
 
 fn mode_from_code(code: i64) -> Result<TransparentLedgerMode, SqliteClientError> {
     match code {
@@ -57,7 +63,10 @@ pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
 
 /// The highest `tpir_meta.min_reader_version` this build can interpret. A wallet requiring a
 /// newer reader is refused rather than operated on with semantics this build lacks.
-pub(crate) const TPIR_READER_VERSION: i64 = 2;
+///
+/// Version 3 maintains candidate recovery state through rewinds, policy transitions, and
+/// account changes. The first candidate commit requires it.
+pub(crate) const TPIR_READER_VERSION: i64 = 3;
 
 /// The policy durably applied to the wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

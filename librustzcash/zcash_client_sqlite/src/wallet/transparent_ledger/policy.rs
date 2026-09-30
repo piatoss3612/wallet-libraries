@@ -79,6 +79,8 @@ pub(crate) fn apply_transparent_policy(
                     "tpir_meta policy row is missing".into(),
                 ));
             }
+            // Candidate pages were opened under the previous policy.
+            super::clear_pending_pages(conn)?;
             // Keep still-required retrieval obligations on the new generation. Leaving the old
             // stamp would hide them from public dispatch after a transition that still retains
             // public authority (Public → PrivateShadow). Under PrivateRequired, matching

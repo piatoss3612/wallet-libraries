@@ -325,14 +325,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(meta, (0, 0, 1));
-        assert_eq!(
-            ledger_table_names(&db.conn),
-            BTreeSet::from([
-                "tpir_meta".to_string(),
-                "tpir_output_origins".to_string(),
-                "tpir_spend_origins".to_string(),
-            ])
-        );
+        // Later migrations add the recovery tables, empty.
+        let ledger_tables = ledger_table_names(&db.conn);
+        assert!(ledger_tables.is_superset(&BTreeSet::from([
+            "tpir_meta".to_string(),
+            "tpir_output_origins".to_string(),
+            "tpir_spend_origins".to_string(),
+        ])));
+        for table in &ledger_tables {
+            if !["tpir_meta", "tpir_output_origins", "tpir_spend_origins"].contains(&&**table) {
+                assert_eq!(count(&db.conn, table), 0, "{table} must start empty");
+            }
+        }
     }
 
     #[test]

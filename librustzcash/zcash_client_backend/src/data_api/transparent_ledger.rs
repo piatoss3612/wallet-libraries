@@ -1,8 +1,8 @@
 //! Storage-neutral contract for transparent ledger configuration and financial authority.
 //!
 //! This is the preparatory surface of the private transparent ledger: explicit handle modes,
-//! durable policy transitions, and an honest balance-and-authority snapshot. Recovery commits,
-//! promotion, and their supporting types are added with the recovery and activation work that
+//! durable policy transitions, an honest balance-and-authority snapshot, and isolated candidate
+//! recovery. Promotion and its supporting types are added with the activation work that
 //! implements them; see `docs/transparent-pir-ledger-architecture.md` and
 //! `docs/transparent-pir-ledger-design-notes.md`.
 
@@ -12,6 +12,11 @@ use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::BlockHeight;
 
 use super::{Balance, WalletRead, wallet::ConfirmationsPolicy};
+
+#[cfg(feature = "transparent-inputs")]
+mod recovery;
+#[cfg(feature = "transparent-inputs")]
+pub use recovery::*;
 
 /// A locally accepted block: its height and the hash the wallet holds for that height.
 ///
@@ -206,11 +211,31 @@ pub trait TransparentLedgerRead: WalletRead {
         account: Self::AccountId,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<TransparentLedgerSnapshot<Self::AccountId>, Self::Error>;
+
+    /// Returns the addresses candidate recovery must cover for `account`, the context a run
+    /// captures, and the pages earlier runs left open, from one read.
+    ///
+    /// The handle must be configured. Addresses added later, such as by window growth or new
+    /// receiving addresses, appear in the next read; a run repeats until the set is stable.
+    #[cfg(feature = "transparent-inputs")]
+    fn transparent_watch_set(
+        &self,
+        account: Self::AccountId,
+    ) -> Result<TransparentWatchSet<Self::AccountId>, Self::Error>;
+
+    /// Returns development diagnostics for `account`'s candidate ledger, from one read.
+    ///
+    /// Candidate amounts are unverified and never authorize a spend.
+    #[cfg(feature = "transparent-inputs")]
+    fn transparent_candidate_recovery(
+        &self,
+        account: Self::AccountId,
+    ) -> Result<CandidateRecovery<Self::AccountId>, Self::Error>;
 }
 
-/// Writes transparent ledger policy transitions.
+/// Writes transparent ledger policy transitions and candidate recovery.
 ///
-/// Recovery commits and promotion are added with the work that implements them. Implementations
+/// Promotion is added with the work that implements it. Implementations
 /// typically also implement [`WalletWrite`](super::WalletWrite); the write trait itself only
 /// requires the read contract so associated `Error` types stay unambiguous.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
@@ -233,6 +258,21 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
         &mut self,
         mode: TransparentLedgerMode,
     ) -> Result<AppliedTransparentPolicy, Self::Error>;
+
+    /// Atomically applies one recovery pass to the account's candidate ledger.
+    ///
+    /// The durable policy must still be at the captured generation and must permit private
+    /// recovery (`PrivateShadow` or `PrivateRequired`), as must the handle. The account must
+    /// exist, the target and anchor must still be local blocks, and every address the commit
+    /// names must still be watched by the account. Any failure applies nothing.
+    ///
+    /// Candidate state is isolated: this never changes balances, spend links, locks, address
+    /// use, receiving-address selection, or transaction history.
+    #[cfg(feature = "transparent-inputs")]
+    fn apply_transparent_ledger_commit(
+        &mut self,
+        commit: TransparentLedgerCommit<Self::AccountId>,
+    ) -> Result<CommitOutcome, Self::Error>;
 }
 
 #[cfg(test)]

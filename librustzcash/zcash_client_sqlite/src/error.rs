@@ -18,6 +18,8 @@ use zcash_client_backend::data_api::NoteFilter;
 use zcash_client_backend::data_api::error::RewindError;
 use zcash_client_backend::data_api::ll;
 use zcash_client_backend::data_api::ll::wallet::PutBlocksError;
+#[cfg(feature = "transparent-inputs")]
+use zcash_client_backend::data_api::transparent_ledger::CommitRejection;
 use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 use zcash_client_backend::wallet::OutputRef;
 use zcash_keys::address::UnifiedAddress;
@@ -76,6 +78,12 @@ pub enum SqliteClientError {
         /// The generation currently stored on the wallet.
         applied: u64,
     },
+    /// Candidate recovery commits require a `PrivateShadow` or `PrivateRequired` policy, both
+    /// durably applied and configured on the handle.
+    TransparentRecoveryNotEnabled,
+    /// A candidate recovery commit was refused; nothing in it was applied.
+    #[cfg(feature = "transparent-inputs")]
+    TransparentLedgerCommitRejected(CommitRejection),
 
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
@@ -390,6 +398,14 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "Transparent funds are unavailable: private transparent authority is required but not available"
             ),
+            SqliteClientError::TransparentRecoveryNotEnabled => write!(
+                f,
+                "Candidate transparent recovery requires a PrivateShadow or PrivateRequired policy"
+            ),
+            #[cfg(feature = "transparent-inputs")]
+            SqliteClientError::TransparentLedgerCommitRejected(rejection) => {
+                write!(f, "Transparent ledger commit rejected: {rejection:?}")
+            }
             SqliteClientError::CorruptedData(reason) => {
                 write!(f, "Data DB is corrupted: {reason}")
             }

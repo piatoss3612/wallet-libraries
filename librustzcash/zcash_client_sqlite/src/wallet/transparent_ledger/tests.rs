@@ -384,6 +384,8 @@ fn conflicting_output_content_is_refused() {
     assert_eq!(value, 100_000);
 }
 
+mod recovery;
+
 mod handles {
     use std::{
         convert::Infallible,
@@ -807,13 +809,14 @@ mod handles {
     #[test]
     fn newer_reader_requirement_fails_closed() {
         let (st, _, funded) = funded_wallet();
+        let newer = crate::wallet::transparent_ledger::TPIR_READER_VERSION + 1;
         conn(&st)
-            .execute("UPDATE tpir_meta SET min_reader_version = 3", [])
+            .execute("UPDATE tpir_meta SET min_reader_version = ?1", [newer])
             .unwrap();
         let incompatible = |e: &SqliteClientError| {
             matches!(
                 e,
-                SqliteClientError::TransparentLedgerIncompatible { required: 3 }
+                SqliteClientError::TransparentLedgerIncompatible { required } if *required == newer
             )
         };
         assert!(incompatible(
