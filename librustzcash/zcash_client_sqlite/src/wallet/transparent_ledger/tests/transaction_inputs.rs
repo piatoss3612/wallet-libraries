@@ -187,3 +187,24 @@ fn retry_authorization_preserves_authority_maturity_and_chained_bounds() {
             .is_err()
     );
 }
+
+#[test]
+fn caller_owned_deletion_transaction_rolls_back_without_commit() {
+    use crate::{SqlTransaction, WalletDb, util::SystemClock};
+    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
+    let (mut st, _, _) = funded_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    {
+        let tx = st.wallet_mut().conn_mut().transaction().unwrap();
+        let mut db =
+            WalletDb::from_connection(SqlTransaction::new(&tx), network, SystemClock, rand::rng())
+                .with_transparent_ledger_mode(TransparentLedgerMode::Public);
+        db.delete_account(account).unwrap();
+        assert!(db.get_account(account).unwrap().is_none());
+        drop(db);
+        // Outer owner elects not to commit, including after a consumer cleanup failure.
+        tx.rollback().unwrap();
+    }
+    assert!(st.wallet().get_account(account).unwrap().is_some());
+}

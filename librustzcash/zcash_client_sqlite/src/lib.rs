@@ -339,6 +339,17 @@ pub struct WalletHandleModes {
 /// A wrapper for a SQLite transaction affecting the wallet database.
 pub struct SqlTransaction<'conn>(&'conn rusqlite::Transaction<'conn>);
 
+impl<'conn> SqlTransaction<'conn> {
+    /// Borrows a caller-owned transaction for wallet operations.
+    ///
+    /// The caller retains responsibility for committing or rolling back. Wallet operations
+    /// on the resulting handle share this transaction with application-owned cleanup; no
+    /// nested transaction is started and dropping the wrapper does not commit it.
+    pub fn new(transaction: &'conn rusqlite::Transaction<'conn>) -> Self {
+        Self(transaction)
+    }
+}
+
 impl Borrow<rusqlite::Connection> for SqlTransaction<'_> {
     fn borrow(&self) -> &rusqlite::Connection {
         self.0
