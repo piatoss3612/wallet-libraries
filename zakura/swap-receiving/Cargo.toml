@@ -15,8 +15,6 @@ hmac = { version = "0.12", default-features = false }
 orchard.workspace = true
 pasta_curves.workspace = true
 sha2.workspace = true
-zcash_address.workspace = true
-zcash_keys = { workspace = true, features = ["orchard", "sapling"] }
 zcash_protocol.workspace = true
 zcash_note_encryption.workspace = true
 zeroize.workspace = true

@@ -13,8 +13,6 @@ use orchard::{
 use rand::rng;
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
 use zakura_swap_receiving::{Purpose, RefundMemo, derive_full_viewing_key};
-use zcash_address::{ToAddress, ZcashAddress};
-use zcash_protocol::consensus::NetworkType;
 
 #[test]
 fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
@@ -26,10 +24,7 @@ fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
     let sk = SpendingKey::from_bytes([0; 32]).unwrap();
     let account = FullViewingKey::from(&sk);
     let internal = account.address_at(0u32, Scope::Internal);
-    let deposit = ZcashAddress::from_transparent_p2pkh(NetworkType::Regtest, [7; 20]).to_string();
-    let memo = RefundMemo::new(NetworkType::Regtest, 7, &deposit)
-        .unwrap()
-        .encode();
+    let memo = RefundMemo::new(7).encode();
 
     // Only a proven bundle and fixture output indices survive this scope. Recovery below
     // must reconstruct the swap FVKs instead of retaining them from issuance.
@@ -97,10 +92,7 @@ fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
         .decrypt_output_with_key(positions[0], &account.to_ivk(Scope::Internal))
         .unwrap();
     assert_eq!(marker.value(), NoteValue::ZERO);
-    let record = RefundMemo::decode(NetworkType::Regtest, &recovered_memo)
-        .unwrap()
-        .unwrap();
-    assert_eq!(record.deposit_address(), deposit);
+    let record = RefundMemo::decode(&recovered_memo).unwrap().unwrap();
     let refund = derive_full_viewing_key(&account, Purpose::Refund, record.index()).unwrap();
     // The incoming index is enumerated by lookahead, not read from a refund memo.
     let incoming = derive_full_viewing_key(&account, Purpose::Receive, 0).unwrap();

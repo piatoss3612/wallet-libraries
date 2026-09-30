@@ -5,6 +5,7 @@ use std::borrow::BorrowMut;
 use crate::wallet;
 use rusqlite::{Connection, params};
 use zakura_swap_receiving::RefundMemo;
+use zcash_keys::encoding::AddressCodec as _;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{Error, KeyId, Purpose, account_key, decode_index, register};
@@ -16,7 +17,7 @@ use crate::{AccountUuid, SqlTransaction, WalletDb};
 pub struct RecoveredRefund {
     /// Refund sequence index.
     pub index: u64,
-    /// Exact deposit address authenticated by the memo.
+    /// Address of the funding transaction's only transparent output (P2PKH or P2SH).
     pub deposit_address: String,
     /// Earliest block to scan with the recovered refund key.
     pub funding_height: BlockHeight,
@@ -28,7 +29,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Run after scanning and memo enhancement, including during restore. Own-send
     /// evidence must include an input belonging to the same account. Records whose
     /// inputs or memos are not yet available remain eligible on subsequent calls.
-    /// Spent and zero-value marker notes are included. Unsupported records return
+    /// Spent and zero-value marker notes are included. Unsupported records, and
+    /// funding transactions without a single transparent deposit output, return
     /// an error and remain stored, rather than silently completing recovery.
     /// Returns only records processed by this call. Completed records are skipped
     /// across restarts unless their memo or funding height changes. Progress is
@@ -112,7 +114,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         let (account_ref, _) = account_key(self.conn.0, &self.params, account)?;
         let records = {
             let mut stmt = self.conn.0.prepare_cached(
-                "SELECT n.memo, t.mined_height, n.id
+                "SELECT n.memo, t.mined_height, n.id, t.raw
                  FROM ironwood_received_notes n
                  JOIN transactions t ON t.id_tx = n.transaction_id
                  WHERE n.account_id = ?1 AND n.recipient_key_scope = 1
@@ -129,19 +131,28 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, u32>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
         let restored_through = wallet::fully_scanned_height(self.conn.0)?;
         let mut recovered = Vec::new();
-        for (bytes, height, note_id) in records {
+        for (bytes, height, note_id, raw) in records {
             // SQLite omits trailing zero padding when storing MemoBytes.
             let bytes = zcash_protocol::memo::MemoBytes::from_bytes(&bytes)
                 .map_err(|_| super::corrupt("invalid stored swap memo length"))?;
-            let memo = RefundMemo::decode(self.params.network_type(), bytes.as_array())
+            let memo = RefundMemo::decode(bytes.as_array())
                 .map_err(|e| super::corrupt(&e.to_string()))?
                 .ok_or_else(|| super::corrupt("missing swap memo discriminator"))?;
+            let raw = raw.ok_or_else(|| super::corrupt("missing swap funding transaction"))?;
+            let (_, tx) = wallet::parse_tx(&self.params, &raw, Some(height.into()), None)?;
+            let deposit_address = match tx.transparent_bundle().map(|b| &b.vout[..]) {
+                Some([output]) => output.recipient_address(),
+                _ => None,
+            }
+            .ok_or_else(|| super::corrupt("invalid swap funding deposit output"))?
+            .encode(&self.params);
             let key_id = KeyId::new(Purpose::Refund, memo.index());
             let needs_registration: bool = self.conn.0.query_row(
                 "SELECT NOT EXISTS (SELECT 1 FROM ironwood_receiving_keys
@@ -167,20 +178,20 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 let local: bool = self.conn.0.query_row(
                     "SELECT EXISTS(SELECT 1 FROM
                     ironwood_swap_scan_uses WHERE receiving_key_id=?1 AND operation_id=?2)",
-                    params![id, memo.deposit_address()],
+                    params![id, deposit_address],
                     |r| r.get(0),
                 )?;
                 let initial = (!local).then_some(u32::from(scanned));
                 self.conn.0.execute(
                     "INSERT OR IGNORE INTO ironwood_swap_refund_watches
                     (receiving_key_id,operation_id,initial_height) VALUES(?1,?2,?3)",
-                    params![id, memo.deposit_address(), initial],
+                    params![id, deposit_address, initial],
                 )?;
                 // Never reset a locally observed terminal deadline on another scan.
                 self.conn.0.execute(
                     "INSERT OR IGNORE INTO ironwood_swap_scan_uses
                     (receiving_key_id,operation_id,scan_from,scan_through) VALUES(?1,?2,?3,NULL)",
-                    params![id, memo.deposit_address(), height],
+                    params![id, deposit_address, height],
                 )?;
                 self.conn.0.execute(
                     "INSERT INTO ironwood_swap_refund_memo_progress
@@ -193,7 +204,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             }
             recovered.push(RecoveredRefund {
                 index: memo.index(),
-                deposit_address: memo.deposit_address().to_owned(),
+                deposit_address,
                 funding_height: height.into(),
             });
         }

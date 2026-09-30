@@ -12,8 +12,9 @@ issuing live addresses.
    `address_at(0u32, Scope::External)` for the receiver.
 3. Register that FVK for scanning and retain its purpose/index with received notes.
 4. For a refund, encode `RefundMemo` in an ordinary internal note in the funding
-   transaction. Decode only after note authentication and verification that the
-   transaction was the wallet's own send, including zero-value and spent notes.
+   transaction, whose only transparent output pays the P2PKH or P2SH deposit.
+   Decode only after note authentication and verification that the transaction
+   was the wallet's own send, including zero-value and spent notes.
 5. Reconstruct inputs with their derived FVKs. Use the account's spending key to
    sign, and its ordinary internal key for change.
 
@@ -84,14 +85,15 @@ internal incoming viewing keys. Exhaustion returns an error.
 | 5 | 1 | Version `1` |
 | 6 | 1 | Refund purpose `0` |
 | 7 | 8 | Index, little-endian |
-| 15 | 2 | Address length, little-endian |
-| 17 | N | Exact ASCII deposit address, 1–495 bytes |
-| 17 + N | 495 − N | Zero padding |
+| 15 | 497 | Reserved: written as zero, ignored on decode |
 
-Address validation uses the funding transaction's network and supported wallet
-address types. Incoming indices are recovered through lookahead, not this memo.
-The decoder distinguishes unrelated memos from malformed or unsupported records.
-Callers must retain unsupported records as incomplete recovery work.
+The memo does not store the deposit address. Swaps fund only address-only
+transparent deposits, so recovery reads it from the funding transaction's single
+P2PKH or P2SH output. Ignoring the reserved bytes keeps prerelease records, which
+appended the address there, decoding to their index. Incoming indices are
+recovered through lookahead, not this memo. The decoder distinguishes unrelated
+memos from unsupported versions or purposes. Callers must retain unsupported
+records as incomplete recovery work.
 
 ## Validation
 

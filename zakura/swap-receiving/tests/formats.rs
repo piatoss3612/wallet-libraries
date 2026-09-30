@@ -2,8 +2,6 @@ use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use zakura_swap_receiving::{
     MemoError, Purpose, RefundMemo, derive_full_viewing_key, has_same_spending_authority,
 };
-use zcash_address::{ToAddress, ZcashAddress};
-use zcash_protocol::consensus::NetworkType;
 
 #[test]
 fn derived_keys_separate_purposes_and_preserve_only_authority() {
@@ -38,78 +36,51 @@ fn derived_keys_separate_purposes_and_preserve_only_authority() {
     assert!(!has_same_spending_authority(&account, &substituted));
 }
 
-fn deposit(network: NetworkType) -> String {
-    ZcashAddress::from_transparent_p2pkh(network, [7; 20]).to_string()
-}
-
 #[test]
-fn memo_has_exact_wire_layout_and_network_validation() {
-    let address = deposit(NetworkType::Main);
-    let record = RefundMemo::new(NetworkType::Main, 0x0807060504030201, &address).unwrap();
+fn memo_has_exact_wire_layout() {
+    let record = RefundMemo::new(0x0807060504030201);
     let bytes = record.encode();
     assert_eq!(&bytes[..7], b"\xffZSWP\x01\x00");
     assert_eq!(&bytes[7..15], &[1, 2, 3, 4, 5, 6, 7, 8]);
-    assert_eq!(&bytes[15..17], &(address.len() as u16).to_le_bytes());
-    assert_eq!(&bytes[17..17 + address.len()], address.as_bytes());
-    assert!(bytes[17 + address.len()..].iter().all(|b| *b == 0));
-    assert_eq!(
-        RefundMemo::decode(NetworkType::Main, &bytes),
-        Ok(Some(record))
-    );
-    assert_eq!(
-        RefundMemo::decode(NetworkType::Test, &bytes),
-        Err(MemoError::InvalidAddress)
-    );
+    assert!(bytes[15..].iter().all(|b| *b == 0));
+    assert_eq!(RefundMemo::decode(&bytes), Ok(Some(record)));
+    for index in [0, u64::MAX] {
+        let record = RefundMemo::new(index);
+        assert_eq!(RefundMemo::decode(&record.encode()), Ok(Some(record)));
+    }
+}
 
-    let test = RefundMemo::new(NetworkType::Test, u64::MAX, &deposit(NetworkType::Test)).unwrap();
-    // Transparent testnet and regtest addresses intentionally share an encoding.
+#[test]
+fn reserved_bytes_are_ignored_including_prerelease_addresses() {
+    // Prerelease records appended a u16 length and the ASCII deposit address.
+    let address = b"t1JWm9xJLM9qcJyPgLfg1bHbZDUd4PKpqXb";
+    let mut legacy = RefundMemo::new(7).encode();
+    legacy[15..17].copy_from_slice(&(address.len() as u16).to_le_bytes());
+    legacy[17..17 + address.len()].copy_from_slice(address);
+    assert_eq!(RefundMemo::decode(&legacy), Ok(Some(RefundMemo::new(7))));
+
+    let mut arbitrary = RefundMemo::new(u64::MAX).encode();
+    arbitrary[15..].fill(0xff);
     assert_eq!(
-        RefundMemo::decode(NetworkType::Regtest, &test.encode()),
-        Ok(Some(test))
+        RefundMemo::decode(&arbitrary),
+        Ok(Some(RefundMemo::new(u64::MAX)))
     );
 }
 
 #[test]
 fn malformed_and_future_memos_cannot_look_like_completed_recovery() {
-    let valid = RefundMemo::new(NetworkType::Main, 0, &deposit(NetworkType::Main))
-        .unwrap()
-        .encode();
-    assert_eq!(RefundMemo::decode(NetworkType::Main, &[0; 512]), Ok(None));
+    let valid = RefundMemo::new(0).encode();
+    assert_eq!(RefundMemo::decode(&[0; 512]), Ok(None));
+    let mut unrelated = valid;
+    unrelated[0] = b'Z';
+    assert_eq!(RefundMemo::decode(&unrelated), Ok(None));
     for (offset, value, expected) in [
+        (5, 0, MemoError::UnsupportedVersion(0)),
         (5, 2, MemoError::UnsupportedVersion(2)),
         (6, 1, MemoError::InvalidPurpose(1)),
-        (16, 2, MemoError::InvalidLength),
-        (17, 0xff, MemoError::InvalidAddress),
-        (511, 1, MemoError::NonzeroPadding),
     ] {
         let mut bytes = valid;
         bytes[offset] = value;
-        assert_eq!(RefundMemo::decode(NetworkType::Main, &bytes), Err(expected));
+        assert_eq!(RefundMemo::decode(&bytes), Err(expected));
     }
-    let mut empty = valid;
-    empty[15..17].fill(0);
-    assert_eq!(
-        RefundMemo::decode(NetworkType::Main, &empty),
-        Err(MemoError::InvalidLength)
-    );
-    for address in [String::new(), "t".repeat(496)] {
-        assert_eq!(
-            RefundMemo::new(NetworkType::Main, 0, &address),
-            Err(MemoError::InvalidLength)
-        );
-    }
-    for address in ["é", "not an address"] {
-        assert_eq!(
-            RefundMemo::new(NetworkType::Main, 0, address),
-            Err(MemoError::InvalidAddress)
-        );
-    }
-    assert_eq!(
-        RefundMemo::new(
-            NetworkType::Main,
-            0,
-            &format!(" {} ", deposit(NetworkType::Main))
-        ),
-        Err(MemoError::InvalidAddress)
-    );
 }

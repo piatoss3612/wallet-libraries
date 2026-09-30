@@ -7703,8 +7703,6 @@ dependencies = [
  "rand 0.10.3",
  "sha2 0.10.9",
  "shardtree",
- "zakura-address",
- "zakura-keys",
  "zakura-orchard",
  "zakura-pasta-curves",
  "zakura-protocol",

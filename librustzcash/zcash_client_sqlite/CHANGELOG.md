@@ -59,6 +59,12 @@ workspace.
   verified, without substituting public address discovery for PIR. Funding memos
   also restore provider-status polling and active refund watches. Restored refunds
   check existing history before waiting for terminal status and its scan deadline.
+- Funding-memo recovery reads the provider deposit address from the stored raw
+  funding transaction's single P2PKH or P2SH output, since the memo now carries
+  only the refund index. A missing raw transaction or any other output shape is
+  reported as corrupted data. A refund record retrieved through Enhance PIR routes
+  its funding transaction to a raw fetch whatever the server's unauthenticated
+  transparent flags say.
 - The following now require an explicitly configured transparent ledger mode;
   they never default to public authority:
   - transparent input selection;

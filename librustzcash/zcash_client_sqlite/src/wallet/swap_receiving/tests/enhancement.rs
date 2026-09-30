@@ -1,5 +1,6 @@
 use super::*;
 use std::convert::Infallible;
+use transparent::address::TransparentAddress;
 use zcash_client_backend::{
     data_api::{
         WalletRead,
@@ -13,7 +14,7 @@ use zcash_client_backend::{
     wallet::OvkPolicy,
 };
 use zcash_keys::address::{Address, UnifiedAddress};
-use zcash_protocol::{ShieldedPool, memo::MemoBytes, value::Zatoshis};
+use zcash_protocol::{ShieldedPool, TxId, memo::MemoBytes, value::Zatoshis};
 use zip321::{Payment, TransactionRequest};
 
 fn full_transaction_roundtrip(full_first: bool) {
@@ -163,19 +164,21 @@ fn swap_receiving_full_transaction_before_compact_scan() {
     full_transaction_roundtrip(true);
 }
 
-#[test]
-fn refund_funding_memo_recovers_from_seed_with_zero_change() {
-    use zakura_swap_receiving::RefundMemo;
+/// Builds a wallet whose test account holds one confirmed 1,000,000 zatoshi
+/// Ironwood note, returning the height of the block that paid it.
+fn ironwood_funded_wallet() -> (
+    TestState<crate::testing::BlockCache, TestDb, LocalNetwork>,
+    BlockHeight,
+) {
     let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
     let mut st = TestBuilder::new()
-        .with_network(network)
+        .with_network(LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        })
         .with_data_store_factory(TestDbFactory::file_backed())
         .with_block_cache(crate::testing::BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
@@ -192,18 +195,24 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         let (h, _) = st.generate_empty_block();
         st.scan_cached_blocks(h, 1);
     }
-    let receiver = orchard::keys::FullViewingKey::from(
-        &orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap(),
-    )
-    .address_at(0u32, Scope::External);
-    let address =
-        Address::Unified(UnifiedAddress::from_receivers(Some(receiver), None, None).unwrap())
-            .to_zcash_address(&network);
-    let memo = RefundMemo::new(network.network_type(), 7, &address.to_string()).unwrap();
-    let memo_bytes = MemoBytes::from_bytes(&memo.encode()).unwrap();
+    (st, first)
+}
+
+/// Sends `payments` from the test account with `memo` on Ironwood change, then
+/// mines and scans the transaction. Returns its proposal, txid and height.
+fn send_with_change_memo(
+    st: &mut TestState<crate::testing::BlockCache, TestDb, LocalNetwork>,
+    payments: Vec<Payment>,
+    memo: &MemoBytes,
+) -> (
+    zcash_client_backend::proposal::Proposal<StandardFeeRule, crate::ReceivedNoteId>,
+    TxId,
+    BlockHeight,
+) {
+    let account = st.test_account().cloned().unwrap();
     let strategy = standard::SingleOutputChangeStrategy::<TestDb>::new(
         StandardFeeRule::Zip317,
-        Some(memo_bytes.clone()),
+        Some(memo.clone()),
         ShieldedPool::Ironwood,
         DustOutputPolicy::default(),
     );
@@ -212,18 +221,10 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             account.id(),
             &GreedyInputSelector::new(),
             &strategy,
-            TransactionRequest::new(vec![Payment::without_memo(
-                address,
-                Zatoshis::const_from_u64(990_000),
-            )])
-            .unwrap(),
+            TransactionRequest::new(payments).unwrap(),
             ConfirmationsPolicy::MIN,
         )
         .unwrap();
-    let change = proposal.steps()[0].balance().proposed_change();
-    assert_eq!(change.len(), 1);
-    assert_eq!(change[0].value(), Zatoshis::ZERO);
-    assert_eq!(change[0].memo(), Some(&memo_bytes));
     let created = st
         .create_proposed_transactions::<Infallible, _, Infallible, _>(
             account.usk(),
@@ -231,9 +232,34 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             &proposal,
         )
         .unwrap();
-    let tx = st.wallet().get_transaction(created[0]).unwrap().unwrap();
     let (mined, _) = st.generate_next_block_including(created[0]);
     st.scan_cached_blocks(mined, 1);
+    (proposal, created[0], mined)
+}
+
+#[test]
+fn refund_funding_memo_recovers_from_seed_with_zero_change() {
+    use zakura_swap_receiving::RefundMemo;
+    let (mut st, first) = ironwood_funded_wallet();
+    let network = *st.network();
+    let account = st.test_account().cloned().unwrap();
+    let deposit =
+        Address::Transparent(TransparentAddress::PublicKeyHash([7; 20])).to_zcash_address(&network);
+    let memo = RefundMemo::new(7);
+    let memo_bytes = MemoBytes::from_bytes(&memo.encode()).unwrap();
+    let (proposal, txid, mined) = send_with_change_memo(
+        &mut st,
+        vec![Payment::without_memo(
+            deposit.clone(),
+            Zatoshis::const_from_u64(985_000),
+        )],
+        &memo_bytes,
+    );
+    let change = proposal.steps()[0].balance().proposed_change();
+    assert_eq!(change.len(), 1);
+    assert_eq!(change[0].value(), Zatoshis::ZERO);
+    assert_eq!(change[0].memo(), Some(&memo_bytes));
+    let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
 
     let refund_fvk = KeyId::new(Purpose::Refund, 7)
         .derive(&orchard::keys::FullViewingKey::from(
@@ -285,7 +311,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].index, 7);
-    assert_eq!(records[0].deposit_address, memo.deposit_address());
+    assert_eq!(records[0].deposit_address, deposit.to_string());
     let keys = st.wallet().db().get_swap_receiving_keys(restored).unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].key_id(), KeyId::new(Purpose::Refund, 7));
@@ -343,7 +369,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .db_mut()
             .take_swap_refund_status_checks(restored, 1_000, std::num::NonZeroU32::new(8).unwrap())
             .unwrap(),
-        vec![(key, memo.deposit_address().to_owned())]
+        vec![(key, deposit.to_string())]
     );
     let directory = tempfile::tempdir().unwrap();
     let restored_path = directory.path().join("restored.sqlite");
@@ -403,7 +429,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     );
     st.wallet_mut()
         .db_mut()
-        .observe_swap_operation(restored, key, memo.deposit_address(), true, late)
+        .observe_swap_operation(restored, key, &deposit.to_string(), true, late)
         .unwrap();
     // Repeated memo recovery cannot reopen terminal status or move its deadline.
     st.wallet_mut()
@@ -594,4 +620,224 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .unwrap(),
         records
     );
+}
+
+#[test]
+fn refund_funding_memo_requires_one_transparent_deposit() {
+    use zakura_swap_receiving::RefundMemo;
+    let memo = MemoBytes::from_bytes(&RefundMemo::new(7).encode()).unwrap();
+    let transparent = |byte| Address::Transparent(TransparentAddress::PublicKeyHash([byte; 20]));
+    let receiver = orchard::keys::FullViewingKey::from(
+        &orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap(),
+    )
+    .address_at(0u32, Scope::External);
+    let shielded =
+        Address::Unified(UnifiedAddress::from_receivers(Some(receiver), None, None).unwrap());
+    let payment = |address: &Address, network: &LocalNetwork| {
+        Payment::without_memo(
+            address.to_zcash_address(network),
+            Zatoshis::const_from_u64(100_000),
+        )
+    };
+
+    for recipients in [vec![shielded], vec![transparent(7), transparent(8)]] {
+        let (mut st, _) = ironwood_funded_wallet();
+        let account = st.test_account().unwrap().id();
+        let network = *st.network();
+        let payments = recipients.iter().map(|a| payment(a, &network)).collect();
+        send_with_change_memo(&mut st, payments, &memo);
+        assert!(matches!(
+            st.wallet_mut().db_mut().recover_swap_refund_memos(account),
+            Err(Error::Wallet(SqliteClientError::CorruptedData(m)))
+                if m == "invalid swap funding deposit output"
+        ));
+    }
+
+    // The funding wallet recovers the exact address it paid once the raw
+    // transaction is available.
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let deposit = transparent(7);
+    let (_, txid, _) = send_with_change_memo(&mut st, vec![payment(&deposit, &network)], &memo);
+    let raw: Vec<u8> = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT raw FROM transactions WHERE txid=?1",
+            [txid.as_ref()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET raw=NULL WHERE txid=?1",
+            [txid.as_ref()],
+        )
+        .unwrap();
+    assert!(matches!(
+        st.wallet_mut().db_mut().recover_swap_refund_memos(account),
+        Err(Error::Wallet(SqliteClientError::CorruptedData(m)))
+            if m == "missing swap funding transaction"
+    ));
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE transactions SET raw=?2 WHERE txid=?1",
+            rusqlite::params![txid.as_ref(), raw],
+        )
+        .unwrap();
+    let records = st
+        .wallet_mut()
+        .db_mut()
+        .recover_swap_refund_memos(account)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].index, 7);
+    assert_eq!(
+        records[0].deposit_address,
+        deposit.to_zcash_address(&network).to_string()
+    );
+}
+
+/// Enhance PIR's transparent flags are unauthenticated. Whatever they claim, a
+/// privately retrieved refund record, even of an unsupported version, must wait
+/// for its raw funding transaction.
+#[test]
+fn refund_memo_over_pir_waits_for_raw_funding_transaction() {
+    use zakura_swap_receiving::RefundMemo;
+    use zcash_client_backend::data_api::enhance_pir::{
+        EnhancePirRead, EnhancePirWork, EnhancePirWrite, EnhanceRecord, EnhanceRecordParts,
+        EnhanceTransactionMetadata, EnhancementMode, TransactionEnhancementWork,
+    };
+
+    for (version, flagged) in [(1, true), (1, false), (2, false)] {
+        let (mut st, first) = ironwood_funded_wallet();
+        let network = *st.network();
+        let account = st.test_account().cloned().unwrap();
+        let deposit = Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]))
+            .to_zcash_address(&network);
+        let mut record = RefundMemo::new(7).encode();
+        record[5] = version;
+        let memo = MemoBytes::from_bytes(&record).unwrap();
+        let (_, txid, mined) = send_with_change_memo(
+            &mut st,
+            vec![Payment::without_memo(
+                deposit.clone(),
+                Zatoshis::const_from_u64(985_000),
+            )],
+            &memo,
+        );
+        let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
+        let fee: u64 = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT fee FROM transactions WHERE txid=?1",
+                [txid.as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // Restore privately. Compact blocks carry no transparent data.
+        let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+        let _old_wallet = st.reset();
+        let (restored, _) = st
+            .wallet_mut()
+            .create_account("restored", &seed, account.birthday(), None)
+            .unwrap();
+        st.wallet_mut()
+            .db_mut()
+            .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        st.wallet_mut().update_chain_tip(mined).unwrap();
+        st.scan_cached_blocks(first, (u32::from(mined) - u32::from(first) + 1) as usize);
+
+        let requests: Vec<_> = st
+            .wallet()
+            .db()
+            .transaction_enhancement_work()
+            .unwrap()
+            .into_iter()
+            .filter_map(|work| match work {
+                TransactionEnhancementWork::Private(EnhancePirWork::Query(r))
+                    if r.request_id().txid() == txid =>
+                {
+                    Some(r)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!requests.is_empty());
+
+        // Genuine ciphertexts; only the server's transparent flag varies.
+        let bundle = tx.ironwood_bundle().unwrap();
+        let metadata =
+            EnhanceTransactionMetadata::new(u32::from(tx.expiry_height()), Some(fee)).unwrap();
+        let batch: Vec<_> = requests
+            .iter()
+            .map(|r| {
+                let action = &bundle.actions()[r.request_id().output_index() as usize];
+                let note = action.encrypted_note();
+                (
+                    *r,
+                    EnhanceRecord::from_parts(EnhanceRecordParts {
+                        enc_ciphertext_suffix: note.enc_ciphertext[52..].try_into().unwrap(),
+                        cv_net: action.cv_net().to_bytes(),
+                        out_ciphertext: note.out_ciphertext,
+                        has_transparent_inputs: false,
+                        has_transparent_outputs: flagged,
+                        metadata,
+                    }),
+                )
+            })
+            .collect();
+        st.wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_records(&batch)
+            .unwrap();
+
+        let memo_stored: bool = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
+                 JOIN transactions t ON t.id_tx = n.transaction_id
+                 WHERE t.txid = ?1 AND n.memo IS NOT NULL)",
+                [txid.as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!memo_stored, "version={version} flagged={flagged}");
+        assert!(
+            st.wallet()
+                .db()
+                .transaction_enhancement_work()
+                .unwrap()
+                .iter()
+                .any(|w| matches!(w, TransactionEnhancementWork::Public(p) if p.txid() == txid)),
+            "version={version} flagged={flagged}"
+        );
+        assert!(
+            st.wallet_mut()
+                .db_mut()
+                .recover_swap_refund_memos(restored)
+                .unwrap()
+                .is_empty()
+        );
+
+        decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+        let recovered = st.wallet_mut().db_mut().recover_swap_refund_memos(restored);
+        if version == 1 {
+            let records = recovered.unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].deposit_address, deposit.to_string());
+        } else {
+            assert!(matches!(
+                recovered,
+                Err(Error::Wallet(SqliteClientError::CorruptedData(m)))
+                    if m == "unsupported swap memo version 2"
+            ));
+        }
+    }
 }
