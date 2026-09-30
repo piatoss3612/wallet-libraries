@@ -14,6 +14,7 @@ fn db() -> WalletDb<
         test_clock(),
         test_rng(),
     );
+    rusqlite::vtab::array::load_module(&db.conn).unwrap();
     WalletMigrator::new().init_or_migrate(&mut db).unwrap();
     db
 }
@@ -263,4 +264,13 @@ fn legacy_rollback_reconciles_old_public_outputs_and_spends_without_authority() 
             .unwrap(),
         3
     );
+    // Even inconsistent public metadata must not permit a handover with private provenance.
+    db.conn
+        .execute(
+            "INSERT INTO tpir_output_origins(output_id,origin) VALUES (1,2)",
+            [],
+        )
+        .unwrap();
+    assert!(prepare_legacy_rollback(&mut db).is_err());
+    assert!(!column_restored(&db.conn).unwrap());
 }

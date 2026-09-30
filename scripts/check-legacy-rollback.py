@@ -31,7 +31,9 @@ def consumer(root, version):
     # Pin the PCZT prerelease used by Vizor: caret prerelease resolution otherwise selects
     # rc4's newer dependency family while testing rc5's published writer.
     if version == "rc5":
-        manifest += 'pczt = { package = "zakura-pczt", version = "=0.1.0-rc3", default-features = false }\n'
+        manifest += 'pczt = { package = "zakura-pczt", version = "=0.1.0-rc3", default-features = false, features = ["io-finalizer"] }\n'
+    elif version == "rc7":
+        manifest += 'pczt = { package = "zakura-pczt", version = "=0.1.0-rc4", features = ["io-finalizer"] }\n'
     (dest / "Cargo.toml").write_text(manifest)
     # Retain this repository's locked common dependency versions instead of floating to a
     # newer minor release. Cargo adjusts only the legacy families absent from this lockfile.

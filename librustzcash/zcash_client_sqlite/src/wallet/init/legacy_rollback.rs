@@ -48,8 +48,7 @@ fn prepare(conn: &mut Connection) -> Result<(), WalletMigrationError> {
         if view.matches(column).count() != 1 {
             return Err(WalletMigrationError::CorruptedData(
                 "unexpected history view for legacy rollback".into(),
-            )
-            .into());
+            ));
         }
         let updated = view.replacen(
             column,
@@ -107,9 +106,12 @@ fn require_public_baseline(conn: &Connection) -> Result<(), WalletMigrationError
         "tpir_candidate_windows",
         "tpir_revisions",
         "tpir_receive_events",
+        "tpir_receive_observations",
         "tpir_spend_events",
+        "tpir_spend_observations",
         "tpir_coverage",
         "tpir_pending_pages",
+        "tpir_pending_page_scripts",
         "tpir_active_accounts",
         "tpir_qualified_revisions",
         "tpir_quarantined_sources",
@@ -120,6 +122,16 @@ fn require_public_baseline(conn: &Connection) -> Result<(), WalletMigrationError
         })? {
             return Err(WalletMigrationError::LegacyRollbackNotSupported);
         }
+    }
+    let private_evidence: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tpir_output_origins WHERE origin IN (2, 3))
+             OR EXISTS(SELECT 1 FROM tpir_spend_origins WHERE origin IN (2, 3))
+             OR EXISTS(SELECT 1 FROM ironwood_enhance_routing WHERE route = 2)",
+        [],
+        |r| r.get(0),
+    )?;
+    if private_evidence {
+        return Err(WalletMigrationError::LegacyRollbackNotSupported);
     }
     Ok(())
 }
