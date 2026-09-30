@@ -51,10 +51,12 @@ pub(crate) use policy::{
     check_transparent_policy_generation, ensure_policy_generation,
     pending_private_transparent_details, retains_public_authority,
 };
+#[cfg(all(feature = "transparent-inputs", feature = "transparent-key-import"))]
+pub(crate) use recovery::forget_other_candidates;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use recovery::{
     apply_commit, candidate_recovery, forget_reattributed_script, promote, qualify_revision,
-    watch_set,
+    recovery_work, watch_set,
 };
 pub(crate) use recovery::{clear_pending_pages, truncate as truncate_recovery};
 
@@ -86,7 +88,11 @@ pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
 /// account changes; the first candidate commit requires it. Version 5 honors activation,
 /// qualification, quarantine, and retained outputs whose receive was withdrawn. Version 4
 /// could admit those retained rows under public authority, so activation writes require 5.
-pub(crate) const TPIR_READER_VERSION: i64 = ACTIVATION_READER_VERSION;
+/// Version 6 separates observed revisions from trusted replacement; revision writes require 6.
+pub(crate) const TPIR_READER_VERSION: i64 = REVISION_READER_VERSION;
+
+/// Separates observed revision identities from trusted wallet-wide supersession.
+pub(crate) const REVISION_READER_VERSION: i64 = 6;
 
 /// The reader version candidate recovery state requires.
 #[cfg(feature = "transparent-inputs")]
@@ -454,6 +460,7 @@ fn transparent_balance(
         target_height,
         confirmations_policy,
         ledger_only,
+        Some(account),
         &mut balances,
     )?;
     let balance = balances.remove(&account).unwrap_or(AccountBalance::ZERO);

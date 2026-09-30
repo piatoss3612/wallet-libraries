@@ -88,13 +88,15 @@ fn withdrawing_a_receive_preserves_a_locally_constructed_spend() {
 }
 
 #[test]
-fn a_candidate_withdrawal_fences_retained_rows_from_version_four_readers() {
+fn trusted_withdrawal_fences_retained_rows_from_older_readers() {
     let (mut st, account, _, replacement) = provisional_wallet(false);
     set_policy(&mut st, PrivateShadow);
     // Simulate a wallet last activated by the previous Phase 4 reader.
     st.wallet().set_transparent_reader_version(4);
     cover(&mut st, account, &replacement, vec![]);
-    assert_eq!(reader_version(&st), 5);
+    assert_eq!(reader_version(&st), 6);
+    qualify(&mut st, &replacement);
+    assert_eq!(reader_version(&st), 6);
 }
 
 #[test]

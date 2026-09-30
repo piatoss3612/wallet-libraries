@@ -289,6 +289,20 @@ pub trait TransparentLedgerRead: WalletRead {
         account: Self::AccountId,
     ) -> Result<TransparentWatchSet<Self::AccountId>, Self::Error>;
 
+    /// Returns at most `min(limit, 256)` recovery work items from one read snapshot.
+    ///
+    /// Pending pages precede missing supported-coverage intervals. Page intervals suppress
+    /// duplicate range work; unsupported evidence does not count as coverage. No local target
+    /// means no work. Requery after commits, rewinds or watch-set changes. The handle must be
+    /// configured and the account must exist and not be quarantined. This read grants neither
+    /// network dispatch nor financial authority. The bound limits items, not page address count.
+    #[cfg(feature = "transparent-inputs")]
+    fn transparent_recovery_work(
+        &self,
+        account: Self::AccountId,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<TransparentRecoveryWorkBatch<Self::AccountId>, Self::Error>;
+
     /// Returns development diagnostics for `account`'s candidate ledger, from one read.
     ///
     /// Candidate amounts are unverified and never authorize a spend.

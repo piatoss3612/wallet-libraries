@@ -2015,6 +2015,7 @@ pub(crate) fn add_transparent_account_balances(
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
     ledger_only: bool,
+    account: Option<AccountUuid>,
     account_balances: &mut HashMap<AccountUuid, AccountBalance>,
 ) -> Result<(), SqliteClientError> {
     let min_confirmations = balance_min_confirmations(confirmations_policy);
@@ -2033,6 +2034,7 @@ pub(crate) fn add_transparent_account_balances(
          AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
          AND ({}) -- the output has the required origin
          AND ({}) -- exclude withdrawn ledger-only receives
+         AND (:account IS NULL OR accounts.uuid = :account)
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase, is_mature",
         tx_unexpired_condition_minconf_0("t"),
         spent_utxos_clause(),
@@ -2045,6 +2047,7 @@ pub(crate) fn add_transparent_account_balances(
         ":target_height": u32::from(target_height),
         ":min_confirmations": min_confirmations,
         ":ledger_only": ledger_only,
+        ":account": account.map(|account| account.0),
     ])?;
 
     while let Some(row) = rows.next()? {
@@ -2107,7 +2110,8 @@ pub(crate) fn add_transparent_account_balances(
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
              AND ({}) -- the output has the required origin
              AND ({}) -- exclude withdrawn ledger-only receives
-             GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
+             AND (:account IS NULL OR accounts.uuid = :account)
+         GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
             tx_unconfirmed_condition("t"),
             spent_utxos_clause(),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
@@ -2119,6 +2123,7 @@ pub(crate) fn add_transparent_account_balances(
             ":target_height": u32::from(target_height),
             ":min_confirmations": min_confirmations,
             ":ledger_only": ledger_only,
+        ":account": account.map(|account| account.0),
         ])?;
 
         while let Some(row) = rows.next()? {

@@ -10,7 +10,14 @@ workspace.
 
 ## [Unreleased]
 
+- Candidate windows respect existing receiver ownership; imports discard competing candidate
+  facts atomically, and promotion refuses a transfer that introduces missing coverage.
+
 ### Added
+- `WalletHandleModes`, `set_handle_modes`, and `with_handle_modes` configure every supported disclosure lane together without persisting policy.
+- Revision observations no longer supersede wallet-wide evidence. Only the trusted test/development qualification transition withdraws older provisional evidence. New revision writes require reader version 6; version-5 binaries cannot safely operate those wallets.
+- `get_wallet_summary` reuses existing transactions, allowing summary and transparent authority reads in one snapshot. Per-account transparent balances use an account-scoped query.
+
 - The seedless `transparent_ledger_schema` migration. It adds `tpir_meta`, the
   durable transparent policy recorded as public, and the `tpir_output_origins`
   and `tpir_spend_origins` provenance tables. It classifies every existing

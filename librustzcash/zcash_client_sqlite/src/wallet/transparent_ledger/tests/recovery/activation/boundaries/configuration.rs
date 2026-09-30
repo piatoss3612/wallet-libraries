@@ -1,0 +1,31 @@
+use super::*;
+
+#[test]
+fn combined_handle_modes_preserve_durable_policy_and_stale_commit_checks() {
+    use zcash_client_backend::data_api::{
+        enhance_pir::EnhancementMode, status::TransactionStatusMode,
+    };
+    let (mut st, account) = shadow_wallet();
+    let captured = commit(&watch(&st, account));
+    let db = st.wallet_mut().db_mut();
+    db.set_handle_modes(crate::WalletHandleModes {
+        status: TransactionStatusMode::Private,
+        transparent_ledger: PrivateRequired,
+        enhancement: EnhancementMode::PrivateIronwood,
+    });
+    // Configuring a handle alone does not persist a policy transition.
+    assert_eq!(db.applied_transparent_policy().unwrap().mode, PrivateShadow);
+    db.apply_transparent_policy(PrivateRequired).unwrap();
+    assert!(matches!(
+        apply(&mut st, captured),
+        Err(SqliteClientError::StaleTransparentPolicy { .. })
+    ));
+    st.wallet_mut()
+        .db_mut()
+        .set_handle_modes(crate::WalletHandleModes {
+            status: TransactionStatusMode::Public,
+            transparent_ledger: Public,
+            enhancement: EnhancementMode::Standard,
+        });
+    assert!(st.wallet().db().transparent_ledger_mode().is_err());
+}

@@ -322,7 +322,7 @@ pub(super) fn unproject_unobserved(conn: &rusqlite::Connection) -> Result<(), Sq
         |row| row.get(0),
     )?;
     if withdraws_receive {
-        // A demoted account's candidate commit can withdraw previously projected evidence too.
+        // Trusted revision transitions can withdraw evidence of a previously demoted account.
         // Fence the changed row semantics even when no activation state is written by this call.
         super::require_reader_version(conn, super::ACTIVATION_READER_VERSION)?;
     }

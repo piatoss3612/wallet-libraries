@@ -109,18 +109,9 @@ pub(crate) fn forget_reattributed_script(
         params,
     )?;
     conn.execute(
-        "DELETE FROM tpir_pending_page_scripts
-         WHERE script = :script
-         AND page_id IN (SELECT id FROM tpir_pending_pages WHERE account_id = :account_id)",
-        params,
-    )?;
-    conn.execute(
-        "DELETE FROM tpir_pending_pages
-         WHERE account_id = :account_id
-         AND NOT EXISTS (
-             SELECT 1 FROM tpir_pending_page_scripts s WHERE s.page_id = tpir_pending_pages.id
-         )",
-        named_params![":account_id": from_account.0],
+        "DELETE FROM tpir_pending_pages WHERE account_id = :account_id AND EXISTS (
+            SELECT 1 FROM tpir_pending_page_scripts s WHERE s.page_id = tpir_pending_pages.id AND s.script = :script
+        )", params,
     )?;
     Ok(())
 }

@@ -2,7 +2,7 @@
 
 Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
 its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64).
-Phases 3–5 are merged (#68–#70); Phase 6 is in review. The Vizor halves
+Phases 3–6 are merged (#68–#71); consumer qualification remains pending. The Vizor halves
 of Phases 2–6 are in draft review or in progress. Production transparent
 authority stays public during preparation.
 
@@ -300,7 +300,9 @@ receiving-address allocation, and history read.
    - Refused as integrity failures: contradictory content, a different
      placement on the local chain, and two mined spends of one output.
    - Each revision that reports an event is recorded as an observation.
-   - Within a source, a higher lineage replaces a lower one. Accepting it
+   - Within a source, a trusted qualification transition to a higher lineage replaces
+     a lower one. Observing a candidate revision cannot invalidate financial evidence.
+     Authorizing the transition
      removes the coverage, pages, and event observations of the source's older
      provisional revisions. Events without another active observation are
      removed; sealed revisions are never superseded.
@@ -401,7 +403,8 @@ let Vizor's fixture coordinator exercise activation.
 The half is one PR on top of Phase 3. Every intermediate commit fails
 closed: `PrivateRequired` keeps the Phase 1 mode-level "unavailable" until the
 gating change lands. Only a test/development hook can qualify a revision, so
-production can never promote.
+production cannot qualify nonempty recovery. An empty required interval can still
+promote with zero funds; missing coverage subsequently withholds authority.
 
 1. **Schema.** A seedless, additive `transparent_activation_schema` migration
    adds four empty tables:
@@ -482,7 +485,7 @@ production can never promote.
 6. **Active commits** follow the candidate path, additionally require qualified
    revisions, and project their events in the same transaction. After
    activation, window growth uses LRZ's gap-limit address generation. When a
-   higher lineage supersedes a provisional revision, each event that loses its
+   trusted higher lineage supersedes a provisional revision, each event that loses its
    last observation withdraws its authority. Unsupported ledger-only spend links
    and pending spends are removed. A ledger-only output keeps its row and
    historical origin so independent spend links and reservations survive, but
@@ -802,13 +805,14 @@ one production fix they exposed, and no API or table.
 | wallet-libraries | 3 | #68 (merged) | `89ba66297202a9b9f3efa50733615ad715f67111` |
 | wallet-libraries | 4 | #69 (merged) | `8dab5c8ff34b5ed3ee6e7fa0f4572207335ef958` |
 | wallet-libraries | 5 | #70 (merged) | `0c7adf4f245107363a92f0facabb0e65ddc33b34` |
-| wallet-libraries | 6 compatibility/rollback candidate | #71 | `3ea93c4e9912d5721dcda8b8014bb77c048af259` |
+| wallet-libraries | 6 historical version-5 rollback candidate | #71 | `3ea93c4e9912d5721dcda8b8014bb77c048af259` |
 | Vizor | 3 | chainapsis/vizor-wallet#787 | Consumer release qualification outstanding |
 | Vizor | 4 | chainapsis/vizor-wallet#790 | Consumer release qualification outstanding |
 | Vizor | 5–6 | Consumer qualification stage | Exact release revision and results required |
 
 The pinned Phase 6 commit contains the compatibility fix and regression tests.
-It is a source rollback candidate, not a published or deployed rollback release.
+It is a historical version-5 source rollback candidate, not a published or deployed
+rollback release. It cannot read the version-6 state written by the hardening below.
 The final qualification head is the head of #71, including the commit-hook tests.
 Production release remains blocked until the release process records:
 
@@ -877,3 +881,49 @@ coverage, and explicit fee evidence. It has its own
 This plan requires honest partial history and blocks unauthorized fallback;
 it does not claim full seed-restored recipient/memo/fee parity, cryptographic
 completeness proofs, or support for privacy-unaware rollback binaries.
+
+### Follow-up API and authority hardening
+
+Revision observation and trusted replacement are separate operations. Candidate commits
+register identities and retain evidence; observing a higher lineage does not revoke another
+account's evidence or make a lower qualified lineage stale. Only trusted qualification
+atomically withdraws older provisional coverage, pages and observations across the wallet.
+Sealed and independent evidence retains its existing semantics. Production source verification
+is still required before exposing that privileged operation.
+
+These revision writes require reader version 6 through the existing durable reader fence.
+Version-5 binaries, including the earlier #71 source rollback candidate, are not suitable
+rollback readers for version-6 wallets. There is no new table or automatic release designation;
+a published version-6-aware rollback artifact still requires the release evidence above.
+
+`transparent_recovery_work(account, limit)` returns at most 256 work items, with pending
+pages first and missing supported-coverage intervals second. The batch includes the current
+recovery context and `has_more`; requery after committing it. Unsupported ranges are missing
+work, not completion evidence. Page intervals suppress duplicate range scheduling. The item
+bound does not bound a pending page's address list or total database-read cost. Applications
+continue to choose sources, verify their results and control network concurrency.
+
+Consumers can compose `get_wallet_summary` and `transparent_ledger_snapshot` inside
+`WalletDb::transactionally`; both reuse that database snapshot. Required-private summary
+amounts still withhold transparent funds; the authority snapshot supplies only eligible
+transparent amounts. Do not combine separate reads across a promotion, rewind or mixed spend.
+
+Use `WalletHandleModes` with `with_handle_modes` when opening handles, including exceptional
+and background paths. It explicitly configures status, transparent discovery and (with
+Orchard) enhancement together. It does not persist policy, capture a generation, cancel
+requests or establish a dispatch fence. The application must cancel and join public work,
+apply the durable policy transition, replace handle configuration and discard stale queued
+work. Existing setters remain available for compatibility.
+
+
+### Overlapping receiver ownership
+
+An existing production owner retains a receiver during candidate recovery. Deriving that
+receiver in another account's candidate window does not transfer it or authorize duplicate
+financial events. Activity observed by the existing owner still informs the deriving key's
+gap expansion. Standalone imports invalidate competing candidate facts and entire pending
+page requests atomically; queued work for a removed receiver is stale, not source corruption.
+Explicit production address generation can reattribute an imported receiver under the existing
+rules. Its new owner must recover fresh coverage. Promotion rechecks completeness after
+generating addresses and rolls the entire transition back if that would introduce uncovered
+receivers; perform the explicit production transfer and recover before retrying promotion.

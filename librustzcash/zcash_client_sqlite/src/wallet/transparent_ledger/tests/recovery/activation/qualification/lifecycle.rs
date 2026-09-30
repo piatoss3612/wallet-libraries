@@ -72,6 +72,7 @@ fn a_reorg_clips_sealed_and_provisional_coverage_alike() {
     let ws = watch(&st, account);
     let (first, second) = ws.addresses.split_at(ws.addresses.len() / 2);
     cover_part(&mut st, &ws, first, &sealed).unwrap();
+    qualify(&mut st, &provisional(2));
     cover_part(&mut st, &ws, second, &provisional(2)).unwrap();
     let r = recovery(&st, account);
     assert_eq!(r.covered_through, Some(ws.target.unwrap().height));
