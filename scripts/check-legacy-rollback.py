@@ -20,7 +20,7 @@ def consumer(root, version):
     dest = root / version
     (dest / "src").mkdir(parents=True)
     (dest / "src/main.rs").write_text((ROOT / "scripts/probes/legacy_rollback.rs").read_text())
-    manifest = '[package]\nname = "legacy-rollback-probe"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[features]\ncurrent = []\n[dependencies]\nhex = "0.4"\n'
+    manifest = f'[package]\nname = "legacy-rollback-probe-{version}"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[features]\ncurrent = []\n[dependencies]\nhex = "0.4"\n'
     for alias, package, directory in [
         ("zcash_client_sqlite", "zakura-client-sqlite", "zcash_client_sqlite"),
         ("zcash_client_backend", "zakura-client-backend", "zcash_client_backend"),
