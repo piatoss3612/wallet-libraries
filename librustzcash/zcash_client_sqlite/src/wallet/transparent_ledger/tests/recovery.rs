@@ -5,7 +5,7 @@ use sapling::zip32::ExtendedSpendingKey;
 use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _, WalletWrite as _,
-    testing::AddressType,
+    testing::{AddressType, TestBuilder},
     transparent_ledger::{
         AddressRange, CandidateBlocker, CandidateRecovery, CommitOutcome, CommitRejection,
         IntegrityFailure, InvalidCommit, PageRequest, PublicationAnchor, ReceiveEvent,
@@ -22,7 +22,7 @@ use zcash_protocol::{
 
 use super::{State, conn, wallet_state};
 use crate::{
-    AccountUuid, error::SqliteClientError, testing::db::TestDbFactory,
+    AccountUuid, error::SqliteClientError, testing::{BlockCache, db::TestDbFactory},
     wallet::transparent_ledger::forget_reattributed_script,
 };
 
