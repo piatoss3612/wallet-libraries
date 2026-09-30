@@ -68,9 +68,28 @@ follows.
 - **Still open:**
   - privileged verification: clearing quarantine, requalifying, and explaining
     legacy discrepancies (Phase 6 or later);
-  - history completeness (Phase 5);
+  - history completeness (Phase 5, settled below);
   - the Vizor transition fence: stopping and draining in-flight public lookups
     before a transition to `PrivateRequired` commits.
+
+## Phase 5 outcome
+
+Phase 5 implements the library's history read, and settles the history note
+under "Readiness and blockers" as follows.
+
+- **Implemented:** one entry per account, transaction, and supported pool, so
+  an undiscovered effect is explicit. Unknown, zero, and not-applicable fees
+  are distinct. Public discovery is reported as its own completeness state.
+- **Revised:** completeness is derived on every read from stored facts. There
+  is no stored completion marker.
+- **Still open:**
+  - per-output recipient completeness for external payments, which needs the
+    payload capability in the architecture's capability gate;
+  - a per-account shielded bound for accounts born after the wallet birthday;
+  - upgrading an incoming-viewing-key account to a full viewing key does not
+    recompute nullifiers or rescan, so spends that scanning missed stay
+    unlinked, in balances as in history. Completeness trusts the current key,
+    as balances do.
 
 ## Recovery sources and revisions
 

@@ -2,10 +2,9 @@
 
 Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
 its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64).
-Phase 3's is in review, and Phase 4's is in review on top of it. The Vizor
-halves of Phases 2–4 and all of Phases 5–6 remain to be implemented and
-qualified. Production transparent
-authority stays public during preparation.
+Phase 3's is in review, with Phase 4's and then Phase 5's stacked on it. The
+Vizor halves of Phases 2–5 and all of Phase 6 remain to be implemented and
+qualified. Production transparent authority stays public during preparation.
 
 ## Objective and fixed boundaries
 
@@ -650,6 +649,23 @@ nothing to invalidate.
 Local construction details are kept when discovery arrives in either order,
 because projection and payload ingestion upsert the shared `transactions` row;
 tests check this through the new read.
+
+**Deviations from the plan**
+
+- **Completeness states.** Effects are `Complete`, `PublicDiscovery`, or
+  `Incomplete`, not complete, partial, or unknown. An incomplete effect already
+  carries whatever amounts are known, so "partial" and "unknown" add nothing.
+  Public discovery gets its own state, because it is authoritative by policy
+  but not verified.
+- **Memos and recipients per transaction.** Payment-detail completeness is one
+  value per transaction. Per-output memo state is already distinct in
+  `v_tx_outputs` (`NULL` is not retrieved; `0xF6` is empty), and recipients stay
+  in `v_tx_outputs`; the read adds only what those views cannot say.
+- **Shielded bound.** Shielded completeness uses the wallet's contiguously
+  scanned height, not a per-account bound. That is conservative for an account
+  born after the wallet birthday.
+- **No stored markers.** Every result is derived, so there are no detail
+  markers to tie to evidence or to invalidate.
 
 **Vizor steps**
 
