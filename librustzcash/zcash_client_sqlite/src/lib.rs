@@ -696,6 +696,9 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// Performs wallet database operations and writes to application-owned extension tables
     /// atomically within a single database transaction.
     ///
+    /// Wallet summaries and transparent authority snapshots reuse this transaction, so
+    /// callers can compose shielded and transparent amounts from one database state.
+    ///
     /// This behaves like [`WalletDb::transactionally`], but additionally provides an
     /// [`ExtensionTransaction`] handle sharing the same transaction. This allows an
     /// application to pair a wallet operation (such as importing an account) with writes to
@@ -1423,20 +1426,19 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         &self,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Option<WalletSummary<Self::AccountId>>, Self::Error> {
-        // This will return a runtime error if we call `get_wallet_summary` from two
-        // threads at the same time, as transactions cannot nest.
-        let tx = self.conn.borrow().unchecked_transaction()?;
-        let include_transparent = wallet::transparent_ledger::transparent_funds_current(
-            &tx,
-            self.transparent_ledger_mode,
-        )?;
-        wallet::get_wallet_summary(
-            &tx,
-            &self.params,
-            confirmations_policy,
-            &SubtreeProgressEstimator,
-            include_transparent,
-        )
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            let include_transparent = wallet::transparent_ledger::transparent_funds_current(
+                conn,
+                self.transparent_ledger_mode,
+            )?;
+            wallet::get_wallet_summary(
+                conn,
+                &self.params,
+                confirmations_policy,
+                &SubtreeProgressEstimator,
+                include_transparent,
+            )
+        })
     }
 
     fn chain_height(&self) -> Result<Option<BlockHeight>, Self::Error> {

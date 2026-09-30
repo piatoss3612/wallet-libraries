@@ -458,6 +458,7 @@ fn transparent_balance(
         target_height,
         confirmations_policy,
         ledger_only,
+        Some(account),
         &mut balances,
     )?;
     let balance = balances.remove(&account).unwrap_or(AccountBalance::ZERO);
