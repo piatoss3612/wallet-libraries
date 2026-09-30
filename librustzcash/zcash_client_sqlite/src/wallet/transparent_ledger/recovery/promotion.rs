@@ -80,6 +80,21 @@ pub(crate) fn promote<P: consensus::Parameters>(
             named_params![":account_id": account_ref.0],
         )?;
 
+        // Generating the window may transfer an imported receiver. Its new owner has no
+        // coverage for that receiver: refuse and roll back rather than activate incomplete
+        // recovery. An explicit production address transfer followed by recovery resolves it.
+        let generated =
+            Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+        let status = recovery_status(conn, gap_limits, &generated)?;
+        if !status.blockers.is_empty() {
+            return Err(SqliteClientError::TransparentPromotionBlocked(
+                status
+                    .blockers
+                    .into_iter()
+                    .map(RecoveryBlocker::Recovery)
+                    .collect(),
+            ));
+        }
         for receive in placed_receives(conn, account_ref)? {
             projection::project_receive(conn, params, gap_limits, account, &receive)?;
         }

@@ -21,6 +21,7 @@ python3 scripts/dev.py verify
 | `default` | Workspace except the facade and Enhance PIR; default features |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
+| `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |

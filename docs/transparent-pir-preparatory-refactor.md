@@ -914,3 +914,31 @@ Orchard) enhancement together. It does not persist policy, capture a generation,
 requests or establish a dispatch fence. The application must cancel and join public work,
 apply the durable policy transition, replace handle configuration and discard stale queued
 work. Existing setters remain available for compatibility.
+
+
+### Writer compatibility and overlapping receiver ownership
+
+The writer-guard migration installs persistent SQLite triggers and raises the durable
+reader requirement to version 7, even for an otherwise empty wallet. Compatible path-based
+handles register a connection capability; supplied connections acquire it before migration
+or transactional writes. Plain SQL writes through an unprepared supplied connection fail
+closed. An older binary cannot mutate guarded chain, transaction, address or account tables
+because its connection lacks the capability function. Rescan-queue writes and inserts are
+also guarded, including replacement inserts. Migration installation and its version bump
+are atomic; no table layout is changed.
+
+This barrier does not retroactively make old read APIs policy-aware. Versions 5 and 6 are
+not supported rollback readers for these wallets. Use a compatible version-7 binary or
+restore a separately preserved pre-upgrade database. Missing or mismatched stored recovery
+anchors and placements cause current recovery reads to refuse; repair by a supported rewind
+and recovery, rather than manufacturing completeness.
+
+An existing production owner retains a receiver during candidate recovery. Deriving that
+receiver in another account's candidate window does not transfer it or authorize duplicate
+financial events. Activity observed by the existing owner still informs the deriving key's
+gap expansion. Standalone imports invalidate competing candidate facts and entire pending
+page requests atomically; queued work for a removed receiver is stale, not source corruption.
+Explicit production address generation can reattribute an imported receiver under the existing
+rules. Its new owner must recover fresh coverage. Promotion rechecks completeness after
+generating addresses and rolls the entire transition back if that would introduce uncovered
+receivers; perform the explicit production transfer and recover before retrying promotion.

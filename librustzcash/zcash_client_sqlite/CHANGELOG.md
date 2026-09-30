@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+- Persistent writer guards require reader version 7 at installation and refuse older chain,
+  transaction and ownership writers. Recovery refuses obsolete stored anchors/placements.
+- Candidate windows respect existing receiver ownership; imports discard competing candidate
+  facts atomically, and promotion refuses a transfer that introduces missing coverage.
+
 ### Added
 - `WalletHandleModes`, `set_handle_modes`, and `with_handle_modes` configure every supported disclosure lane together without persisting policy.
 - Revision observations no longer supersede wallet-wide evidence. Only the trusted test/development qualification transition withdraws older provisional evidence. New revision writes require reader version 6; version-5 binaries cannot safely operate those wallets.

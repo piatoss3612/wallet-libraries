@@ -23,6 +23,9 @@ pub(super) struct Watch {
     pub(super) account: Account,
     pub(super) required_from: BlockHeight,
     pub(super) addresses: BTreeMap<TransparentAddress, WatchOrigin>,
+    /// Derivation origins before ownership filtering, used only for gap expansion. A receiver
+    /// owned by another account still supplies activity for its deriving key's window.
+    window_origins: BTreeMap<TransparentAddress, WatchOrigin>,
     /// One past the highest index in the wallet's own address table, per window scope.
     pub(super) production_end: [u32; 3],
     /// The stored candidate window end, per window scope.
@@ -128,11 +131,14 @@ impl Watch {
             }
         }
 
+        let window_origins = addresses.clone();
+        ownership::retain_owned(conn, params, account_ref, &mut addresses)?;
         let required_from = account.birthday();
         Ok(Some(Watch {
             account,
             required_from,
             addresses,
+            window_origins,
             production_end,
             candidate_end,
             derivable,
@@ -159,19 +165,16 @@ impl Watch {
     ) -> Result<[Option<u32>; 3], SqliteClientError> {
         let mut stmt = conn.prepare_cached(
             "SELECT script FROM tpir_receive_events
-             WHERE account_id = :account_id AND mined_height IS NOT NULL
+             WHERE mined_height IS NOT NULL
              UNION
              SELECT prevout_script FROM tpir_spend_events
-             WHERE account_id = :account_id AND mined_height IS NOT NULL",
+             WHERE mined_height IS NOT NULL",
         )?;
         let used = stmt
-            .query_map(
-                named_params![":account_id": self.account.internal_id().0],
-                |row| row.get::<_, Vec<u8>>(0),
-            )?
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut max_used: [Option<u32>; 3] = [None; 3];
-        for (address, origin) in &self.addresses {
+        for (address, origin) in &self.window_origins {
             let (WatchOrigin::Derived { scope, index }
             | WatchOrigin::CandidateWindow { scope, index }) = origin
             else {

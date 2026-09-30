@@ -33,3 +33,5 @@ mod work;
 
 mod lifecycle;
 
+#[cfg(feature = "transparent-key-import")]
+mod ownership;

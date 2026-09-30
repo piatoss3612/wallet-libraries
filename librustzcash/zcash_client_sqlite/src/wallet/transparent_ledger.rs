@@ -52,6 +52,8 @@ pub(crate) use policy::{
     check_transparent_policy_generation, ensure_policy_generation,
     pending_private_transparent_details, retains_public_authority,
 };
+#[cfg(all(feature = "transparent-inputs", feature = "transparent-key-import"))]
+pub(crate) use recovery::forget_other_candidates;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use recovery::{
     apply_commit, candidate_recovery, forget_reattributed_script, promote, qualify_revision,
