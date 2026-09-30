@@ -204,6 +204,9 @@ pub(crate) fn durable_policy(
             Ok(None)
         };
     }
+    if super::init::legacy_rollback::column_restored(conn)? {
+        return Err(SqliteClientError::LegacyRollbackPrepared);
+    }
     let (mode, generation, min_reader_version) = conn
         .query_row(
             "SELECT applied_mode, policy_generation, min_reader_version FROM tpir_meta WHERE id = 0",

@@ -17,6 +17,8 @@ mod add_transparent_value_index;
 mod add_utxo_account;
 mod addresses_table;
 mod drop_zip318_pool_migration;
+pub(super) use drop_zip318_pool_migration::remove_zip318_column;
+pub(super) const DROP_ZIP318_POOL_MIGRATION_ID: Uuid = drop_zip318_pool_migration::MIGRATION_ID;
 mod ensure_default_transparent_address;
 mod ensure_orchard_ua_receiver;
 mod ephemeral_addresses;

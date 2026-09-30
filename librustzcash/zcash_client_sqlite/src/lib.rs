@@ -1966,6 +1966,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             wallet::transparent_ledger::watch_set(
                 conn,
                 &self.params,
+                &self.gap_limits,
                 self.transparent_ledger_mode,
                 account,
             )
@@ -1982,6 +1983,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             wallet::transparent_ledger::recovery_work(
                 conn,
                 &self.params,
+                &self.gap_limits,
                 self.transparent_ledger_mode,
                 account,
                 limit,

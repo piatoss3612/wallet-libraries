@@ -20,7 +20,8 @@ pub(crate) fn promote<P: consensus::Parameters>(
         {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
         }
-        let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+        let watch = Watch::load(conn, params, gap_limits, account)?
+            .ok_or(SqliteClientError::AccountUnknown)?;
         let account_ref = watch.account.internal_id();
         let ledger = AccountLedger {
             account_ref,
@@ -79,8 +80,8 @@ pub(crate) fn promote<P: consensus::Parameters>(
 
         // Defense in depth: the addresses just written must not have changed what the account
         // is required to cover. Refuse and roll back rather than activate incomplete recovery.
-        let generated =
-            Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+        let generated = Watch::load(conn, params, gap_limits, account)?
+            .ok_or(SqliteClientError::AccountUnknown)?;
         let status = recovery_status(conn, gap_limits, &generated)?;
         if !status.blockers.is_empty() {
             return Err(SqliteClientError::TransparentPromotionBlocked(

@@ -48,7 +48,7 @@ impl schemerz::Migration<Uuid> for Migration {
 const ZIP318_VIEW_COLUMN: &str = "transactions.zip318_kind";
 
 /// `view` with its single [`ZIP318_VIEW_COLUMN`] entry, and the comma that precedes it, removed.
-fn remove_zip318_column(view: &str) -> Option<String> {
+pub(in crate::wallet::init) fn remove_zip318_column(view: &str) -> Option<String> {
     let [(start, _)] = view.match_indices(ZIP318_VIEW_COLUMN).collect::<Vec<_>>()[..] else {
         return None;
     };

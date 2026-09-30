@@ -115,7 +115,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
         ensure_policy_generation(conn, commit.context.policy_generation)?;
 
         let stale = |reason| reject(CommitRejection::Stale(reason));
-        let watch = Watch::load(conn, params, commit.context.account)?
+        let watch = Watch::load(conn, params, gap_limits, commit.context.account)?
             .ok_or_else(|| stale(StaleCommit::AccountUnknown))?;
         let account_ref = watch.account.internal_id();
         if source_quarantined(conn, &commit.revision.source)? {
@@ -240,7 +240,7 @@ fn apply_facts<P: consensus::Parameters>(
         for spend in &commit.spends {
             projection::project_spend(conn, params, gap_limits, spend)?;
         }
-        let after = Watch::load(conn, params, commit.context.account)?
+        let after = Watch::load(conn, params, gap_limits, commit.context.account)?
             .ok_or(SqliteClientError::AccountUnknown)?;
         after.production_end != watch.production_end
     } else {

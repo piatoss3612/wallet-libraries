@@ -61,7 +61,8 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
         grow(&mut st, a, edge);
         assert!(!watch(&st, a).addresses.iter().any(|w| w.address == address));
         assert!(watch(&st, b).addresses.iter().any(|w| w.address == address));
-        let mut a_commit = commit(&watch(&st, a));
+        let a_watch_before_shared_activity = watch(&st, a);
+        let mut a_commit = commit(&a_watch_before_shared_activity);
         a_commit.coverage = full_coverage(&watch(&st, a));
         let mut b_commit = commit(&watch(&st, b));
         b_commit.coverage = full_coverage(&watch(&st, b));
@@ -101,16 +102,20 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
         .unwrap()
         .with_transparent_ledger_mode(PrivateShadow);
         assert_eq!(reopened.transparent_watch_set(a).unwrap(), watch(&st, a));
-        // B's activity at the shared receiver extends A's window on A's next commit. Cover it
-        // until the window stops growing, as a coordinator would.
-        loop {
-            let ws = watch(&st, a);
-            let mut c = commit(&ws);
-            c.coverage = full_coverage(&ws);
-            if !apply(&mut st, c).unwrap().window_grew {
-                break;
-            }
-        }
+        // B's activity extends A's effective window immediately, before A commits again.
+        // Reads schedule the new gaps and remain observational, including across reopen.
+        let effective = watch(&st, a);
+        assert!(effective.addresses.len() > a_watch_before_shared_activity.addresses.len());
+        assert!(!work(&st, a, 256).items.is_empty());
+        assert!(
+            recovery(&st, a)
+                .blockers
+                .contains(&CandidateBlocker::IncompleteCoverage)
+        );
+        assert_eq!(production_dump(conn(&st)), before);
+        let mut c = commit(&effective);
+        c.coverage = full_coverage(&effective);
+        apply(&mut st, c).unwrap();
         qualify(&mut st, &revision(1, true));
         set_policy(&mut st, PrivateRequired);
         let encoded = Address::Transparent(address).encode(st.network());
