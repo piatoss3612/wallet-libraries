@@ -2,8 +2,10 @@
 """Qualify old-writer transaction ingestion against disposable rc5/rc7 wallets.
 
 Separate consumers retain the published dependency families without modifying the workspace
-lockfile. Every run exclusively owns its temporary Cargo target; no user wallet is accepted.
+lockfile. Every run exclusively owns its Cargo target; no user wallet is accepted.
 """
+import argparse
+import fcntl
 import json
 from pathlib import Path
 import sqlite3
@@ -26,7 +28,14 @@ def consumer(root, version):
         source = f'path = {json.dumps(str(ROOT / "librustzcash" / directory))}' if version == "current" else f'version = "=0.1.0-{version}"'
         manifest += f'{alias} = {{ package = "{package}", {source}, features = ["orchard", "transparent-inputs", "test-dependencies"] }}\n'
     manifest += 'zcash_primitives = { package = "zakura-primitives", version = "=1.2.0" }\nzcash_protocol = "=0.10.4"\n' if version == "rc5" else 'zcash_primitives = { package = "zakura-primitives", version = "=2.0.0" }\nzcash_protocol = { package = "zakura-protocol", version = "=2.0.0" }\n'
+    # Pin the PCZT prerelease used by Vizor: caret prerelease resolution otherwise selects
+    # rc4's newer dependency family while testing rc5's published writer.
+    if version == "rc5":
+        manifest += 'pczt = { package = "zakura-pczt", version = "=0.1.0-rc3", default-features = false }\n'
     (dest / "Cargo.toml").write_text(manifest)
+    # Retain this repository's locked common dependency versions instead of floating to a
+    # newer minor release. Cargo adjusts only the legacy families absent from this lockfile.
+    (dest / "Cargo.lock").write_text((ROOT / "Cargo.lock").read_text())
     return dest
 
 
@@ -36,11 +45,17 @@ def snapshot(path):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target-dir", type=Path, default=Path.home() / ".cache/wallet-libraries/legacy-rollback")
+    args = parser.parse_args()
+    args.target_dir.mkdir(parents=True, exist_ok=True)
+    lease = (args.target_dir / "owner.lock").open("w")
+    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
     with tempfile.TemporaryDirectory(prefix="legacy-rollback-") as tmp:
         root = Path(tmp)
         consumers = {v: consumer(root, v) for v in ("current", "rc5", "rc7")}
         def run(version, command, db):
-            argv = ["cargo", "run", "--manifest-path", str(consumers[version] / "Cargo.toml"), "--target-dir", str(root / "target")]
+            argv = ["cargo", "run", "--manifest-path", str(consumers[version] / "Cargo.toml"), "--target-dir", str(args.target_dir)]
             if version == "current":
                 argv += ["--features", "current"]
             subprocess.run(argv + ["--", command, str(db), str(FIXTURE)], cwd=ROOT, check=True)
