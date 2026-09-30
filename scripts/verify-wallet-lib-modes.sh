@@ -238,7 +238,7 @@ fi
 # cannot protect downstream users, and Cargo's prerelease ranges otherwise
 # allow a newer Zakura release with a higher MSRV into their graph.
 consumer="$(mktemp -d "${TMPDIR:-/tmp}/zakura-wallet-lib-consumer.XXXXXX")"
-trap 'rm -rf "$consumer"' EXIT
+trap 'rm -rf "$probe_root" "$consumer"' EXIT
 mkdir -p "$consumer/src"
 cat > "$consumer/Cargo.toml" <<EOF
 [package]
