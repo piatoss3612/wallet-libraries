@@ -48,7 +48,8 @@ use zcash_client_backend::data_api::transparent_ledger::{
 };
 #[cfg(feature = "transparent-inputs")]
 use zcash_client_backend::data_api::transparent_ledger::{
-    CandidateRecovery, CommitOutcome, TransparentLedgerCommit, TransparentWatchSet,
+    CandidateRecovery, CommitOutcome, TransparentLedgerCommit, TransparentRecoveryWorkBatch,
+    TransparentWatchSet,
 };
 
 use std::{
@@ -1968,6 +1969,23 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         &mut self,
         commit: TransparentLedgerCommit<Self::AccountId>,
     ) -> Result<CommitOutcome, Self::Error> {
+    #[cfg(feature = "transparent-inputs")]
+    fn transparent_recovery_work(
+        &self,
+        account: Self::AccountId,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<TransparentRecoveryWorkBatch<Self::AccountId>, Self::Error> {
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            wallet::transparent_ledger::recovery_work(
+                conn,
+                &self.params,
+                self.transparent_ledger_mode,
+                account,
+                limit,
+            )
+        })
+    }
+
         wallet::transparent_ledger::apply_commit(
             self.conn.borrow(),
             &self.params,

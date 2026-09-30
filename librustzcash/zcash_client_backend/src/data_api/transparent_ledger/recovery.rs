@@ -92,6 +92,28 @@ pub struct TransparentWatchSet<AccountId> {
     pub pending_pages: Vec<PendingPage>,
 }
 
+/// A scheduling item derived from durable recovery evidence. It grants no source or
+/// financial authority. The application chooses and verifies sources for missing ranges.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransparentRecoveryWork {
+    /// Resume a page using its exact recorded source revision and target.
+    ResumePage(PendingPage),
+    /// Check an inclusive interval that lacks supported coverage and an open page.
+    CheckRange(AddressRange),
+}
+
+/// A bounded scheduling read from one SQLite snapshot. Requery after committing the batch;
+/// this is neither a persistent cursor nor proof that recovery or source qualification is done.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransparentRecoveryWorkBatch<AccountId> {
+    /// Context to attach to commits; absent before a contiguous local target exists.
+    pub context: Option<TransparentRecoveryContext<AccountId>>,
+    /// Pending pages first, then missing ranges ordered by address and height.
+    pub items: Vec<TransparentRecoveryWork>,
+    /// Additional work existed in this snapshot beyond the returned batch.
+    pub has_more: bool,
+}
+
 impl<AccountId: Copy> TransparentWatchSet<AccountId> {
     /// The context to recover under, or `None` while no local target exists.
     pub fn context(&self) -> Option<TransparentRecoveryContext<AccountId>> {

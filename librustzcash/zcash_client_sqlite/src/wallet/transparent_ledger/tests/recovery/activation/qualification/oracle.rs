@@ -25,7 +25,6 @@ use zcash_primitives::transaction::{Transaction, TransactionData, TxVersion};
 use zcash_protocol::consensus::BranchId;
 
 use transparent::keys::{IncomingViewingKey as _, NonHardenedChildIndex};
-use zcash_client_backend::data_api::transparent_ledger::WatchedAddress;
 
 use super::*;
 
@@ -265,117 +264,104 @@ fn script_of(address: &TransparentAddress) -> Vec<u8> {
     Script::from(address.script()).0.0
 }
 
-/// The scripts `account` holds any coverage for.
-fn covered_scripts(st: &State, account: AccountUuid) -> BTreeSet<Vec<u8>> {
-    conn(st)
-        .prepare(
-            "SELECT DISTINCT c.script FROM tpir_coverage c
-             JOIN accounts a ON a.id = c.account_id WHERE a.uuid = ?1",
-        )
-        .unwrap()
-        .query_map([account.0], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap()
-}
-
-/// Recovers `account` through its target from `chain`, as a coordinator would, repeating while
-/// the watch set grows.
-///
-/// Addresses already covered get one commit extending their coverage. New addresses are
-/// requested in groups, delivered in turn: in one commit and then replayed; spends first and
-/// receives with coverage later; or through a page that a later commit completes.
-///
-/// Returns the number of passes.
+/// Recovers using only bounded public scheduling reads; no private coverage SQL or
+/// application-owned progress survives between passes. Delivery order still exercises
+/// replay, spends before receives, and pages completed by a later commit.
 pub(super) fn recover(
     st: &mut State,
     account: AccountUuid,
     chain: &Chain,
     revision: &RecoveryRevision,
 ) -> usize {
-    let mut pass = 0;
-    loop {
-        pass += 1;
-        assert!(pass <= 10, "the watch set keeps growing");
+    use zcash_client_backend::data_api::transparent_ledger::TransparentRecoveryWork;
+    for pass in 1..=64 {
         let ws = watch(st, account);
-        let target = ws.target.unwrap().height;
-        let covered = covered_scripts(st, account);
-        let (known, fresh): (Vec<&WatchedAddress>, Vec<&WatchedAddress>) = ws
-            .addresses
-            .iter()
-            .partition(|w| covered.contains(&script_of(&w.address)));
-        let range = |w: &WatchedAddress| AddressRange {
-            address: w.address,
-            from: w.required_from,
-            through: target,
-        };
-        let base = || {
-            let mut c = commit(&ws);
-            c.revision = revision.clone();
-            c
-        };
-        let mut grew = false;
-        let mut apply_ok = |st: &mut State, c: TransparentLedgerCommit<AccountUuid>| {
-            grew |= apply(st, c).unwrap().window_grew;
-        };
-
-        if !known.is_empty() {
-            let addresses: BTreeSet<_> = known.iter().map(|w| w.address).collect();
-            let (receives, spends) = source(chain, &addresses, target);
-            let mut c = base();
-            c.receives = receives;
-            c.spends = spends;
-            c.coverage = known.iter().map(|w| range(w)).collect();
-            apply_ok(st, c);
+        let batch = st
+            .wallet()
+            .db()
+            .transparent_recovery_work(account, std::num::NonZeroUsize::new(256).unwrap())
+            .unwrap();
+        if batch.items.is_empty() {
+            assert!(!batch.has_more);
+            return pass;
         }
-        for (group, watched) in fresh.chunks(3).enumerate() {
-            let addresses: BTreeSet<_> = watched.iter().map(|w| w.address).collect();
-            let (receives, spends) = source(chain, &addresses, target);
-            let coverage: Vec<_> = watched.iter().map(|w| range(w)).collect();
-            match group % 3 {
-                0 => {
-                    let mut c = base();
-                    c.receives = receives;
-                    c.spends = spends;
-                    c.coverage = coverage;
-                    apply_ok(st, c.clone());
-                    // A replay changes nothing.
-                    let before = recovery(st, account);
-                    apply_ok(st, c);
-                    assert_eq!(recovery(st, account), before);
+        for (item_index, item) in batch.items.into_iter().enumerate() {
+            let (ranges, resumed) = match item {
+                TransparentRecoveryWork::CheckRange(range) => (vec![range], None),
+                TransparentRecoveryWork::ResumePage(page) => {
+                    assert_eq!(page.revision, *revision);
+                    (
+                        page.request
+                            .addresses
+                            .iter()
+                            .map(|address| AddressRange {
+                                address: *address,
+                                from: page.request.from,
+                                through: page.request.through,
+                            })
+                            .collect(),
+                        Some(page.request.page),
+                    )
                 }
-                1 => {
-                    let mut c = base();
-                    c.spends = spends;
-                    apply_ok(st, c);
-                    let mut c = base();
-                    c.receives = receives;
-                    c.coverage = coverage;
-                    apply_ok(st, c);
-                }
-                _ => {
-                    let page = PageRequest {
-                        page: format!("pass {pass} group {group}").into_bytes(),
-                        addresses: watched.iter().map(|w| w.address).collect(),
-                        from: watched[0].required_from,
-                        through: target,
-                    };
-                    let mut c = base();
-                    c.receives = receives;
-                    c.opened_pages = vec![page.clone()];
-                    apply_ok(st, c);
-                    let mut c = base();
-                    c.spends = spends;
-                    c.coverage = coverage;
-                    c.completed_pages = vec![page.page];
-                    apply_ok(st, c);
+            };
+            let addresses: BTreeSet<_> = ranges.iter().map(|r| r.address).collect();
+            let (receives, spends) = source(chain, &addresses, ws.target.unwrap().height);
+            let base = || {
+                let mut c = commit(&ws);
+                c.revision = revision.clone();
+                c
+            };
+            if let Some(page) = resumed {
+                let mut c = base();
+                c.receives = receives;
+                c.spends = spends;
+                c.coverage = ranges;
+                c.completed_pages.push(page);
+                apply(st, c).unwrap();
+            } else {
+                match item_index % 3 {
+                    0 => {
+                        let mut c = base();
+                        c.receives = receives;
+                        c.spends = spends;
+                        c.coverage = ranges;
+                        apply(st, c.clone()).unwrap();
+                        let before = recovery(st, account);
+                        apply(st, c).unwrap();
+                        assert_eq!(recovery(st, account), before);
+                    }
+                    1 => {
+                        let mut c = base();
+                        c.spends = spends;
+                        apply(st, c).unwrap();
+                        let mut c = base();
+                        c.receives = receives;
+                        c.coverage = ranges;
+                        apply(st, c).unwrap();
+                    }
+                    _ => {
+                        let range = ranges[0];
+                        let page = PageRequest {
+                            page: format!("pass {pass} item {item_index}").into_bytes(),
+                            addresses: vec![range.address],
+                            from: range.from,
+                            through: range.through,
+                        };
+                        let mut c = base();
+                        c.receives = receives;
+                        c.opened_pages.push(page.clone());
+                        apply(st, c).unwrap();
+                        let mut c = base();
+                        c.spends = spends;
+                        c.coverage = ranges;
+                        c.completed_pages.push(page.page);
+                        apply(st, c).unwrap();
+                    }
                 }
             }
         }
-        if !grew && fresh.is_empty() {
-            return pass;
-        }
     }
+    panic!("fixture recovery did not converge within 64 bounded passes")
 }
 
 /// Every derived external and internal address of the test account within reach of the

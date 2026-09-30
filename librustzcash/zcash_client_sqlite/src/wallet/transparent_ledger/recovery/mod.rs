@@ -62,6 +62,8 @@ use {
 #[cfg(feature = "transparent-inputs")]
 mod commit;
 #[cfg(feature = "transparent-inputs")]
+mod coverage;
+#[cfg(feature = "transparent-inputs")]
 mod diagnostics;
 #[cfg(feature = "transparent-inputs")]
 mod events;
@@ -69,10 +71,12 @@ mod lifecycle;
 #[cfg(feature = "transparent-inputs")]
 mod promotion;
 #[cfg(feature = "transparent-inputs")]
-mod watch;
-
 mod revisions;
 #[cfg(feature = "transparent-inputs")]
+mod watch;
+#[cfg(feature = "transparent-inputs")]
+mod work;
+
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use commit::{apply_commit, qualify_revision};
 #[cfg(feature = "transparent-inputs")]
@@ -88,6 +92,8 @@ pub(crate) use lifecycle::{clear_pending_pages, truncate};
 pub(crate) use promotion::promote;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use watch::watch_set;
+#[cfg(feature = "transparent-inputs")]
+pub(crate) use work::recovery_work;
 
 #[cfg(feature = "transparent-inputs")]
 use commit::{account_quarantined, atomically, lifecycle};
