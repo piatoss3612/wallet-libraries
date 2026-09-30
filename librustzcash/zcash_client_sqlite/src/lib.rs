@@ -1741,8 +1741,10 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// recording it first if it is new, exactly as a commit would.
     ///
     /// This is a test and development hook only: production builds cannot qualify a revision,
-    /// and so can never promote an account. Qualification of real sources arrives with source
-    /// verification.
+    /// so nonempty unqualified recovery cannot support promotion. An empty required interval
+    /// can still promote without granting funds; later missing coverage withholds authority.
+    /// This hook also authorizes wallet-wide replacement of older provisional evidence.
+    /// Qualification of real sources arrives with source verification.
     pub fn qualify_transparent_revision(
         &mut self,
         revision: &zcash_client_backend::data_api::transparent_ledger::RecoveryRevision,

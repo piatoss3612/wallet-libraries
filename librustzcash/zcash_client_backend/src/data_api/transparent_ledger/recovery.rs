@@ -117,8 +117,8 @@ pub struct PublicationAnchor {
 /// A source revision that supplied a commit's facts.
 ///
 /// Identifiers are opaque and compared bytewise. Within a source, each replacement revision has
-/// a strictly greater `lineage`. A provisional revision is superseded once a newer revision of
-/// the same source is accepted; a sealed revision never is.
+/// a strictly greater `lineage`. A provisional revision is superseded only by a trusted qualification transition
+/// to a newer revision of the same source; observing a revision does not authorize replacement; a sealed revision never is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryRevision {
     /// The source identifier.

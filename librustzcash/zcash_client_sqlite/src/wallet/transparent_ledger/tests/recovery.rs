@@ -637,10 +637,15 @@ fn provisional_revisions_are_superseded_and_sealed_ones_are_not() {
     let provisional_coverage = count(&st, "tpir_coverage");
     assert!(provisional_coverage > 0);
 
-    // A newer revision supersedes the provisional one and removes its coverage.
+    // Observing a newer revision preserves provisional evidence until explicitly trusted.
     let mut c = commit(&ws);
     c.revision = revision(2, false);
     apply(&mut st, c).unwrap();
+    assert_eq!(count(&st, "tpir_coverage"), provisional_coverage);
+    st.wallet_mut()
+        .db_mut()
+        .qualify_transparent_revision(&revision(2, false))
+        .unwrap();
     assert_eq!(count(&st, "tpir_coverage"), 0);
 
     let mut c = commit(&ws);
@@ -703,6 +708,10 @@ fn supersession_retracts_only_events_without_independent_observations() {
 
     let ws = watch(&st, account);
     let mut c = commit(&ws);
+    st.wallet_mut()
+        .db_mut()
+        .qualify_transparent_revision(&revision(2, false))
+        .unwrap();
     c.revision = revision(2, false);
     c.coverage = full_coverage(&ws);
     apply(&mut st, c).unwrap();
@@ -1402,7 +1411,7 @@ fn the_first_candidate_commit_requires_a_recovery_aware_reader() {
     assert_eq!(reader(&st), before);
 
     apply(&mut st, commit(&ws)).unwrap();
-    assert_eq!(reader(&st), 3);
+    assert_eq!(reader(&st), 6);
     // This build still reads the wallet.
     watch(&st, account);
 }

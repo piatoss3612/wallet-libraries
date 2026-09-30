@@ -11,6 +11,8 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- Revision observations no longer supersede wallet-wide evidence. Only the trusted test/development qualification transition withdraws older provisional evidence. New revision writes require reader version 6; version-5 binaries cannot safely operate those wallets.
+
 - The seedless `transparent_ledger_schema` migration. It adds `tpir_meta`, the
   durable transparent policy recorded as public, and the `tpir_output_origins`
   and `tpir_spend_origins` provenance tables. It classifies every existing

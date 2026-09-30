@@ -71,6 +71,8 @@ mod promotion;
 #[cfg(feature = "transparent-inputs")]
 mod watch;
 
+mod revisions;
+#[cfg(feature = "transparent-inputs")]
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use commit::{apply_commit, qualify_revision};
 #[cfg(feature = "transparent-inputs")]

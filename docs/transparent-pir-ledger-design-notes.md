@@ -47,7 +47,7 @@ follows.
   - integrity quarantine of the source and every account holding its evidence,
     in the rejecting transaction, removing their pending pages;
   - store-held qualification bound to exact revisions (a test and development
-    hook only, so production can never promote);
+    hook only; empty required intervals can promote without granting funds);
   - promotion requiring every revision that contributed coverage or events to be
     qualified, and active commits refusing unqualified revisions;
   - the commit destination by account lifecycle (candidate or active), captured
@@ -128,8 +128,8 @@ follows.
 - **Lineage.** Each revision carries a lineage that strictly increases with
   each replacement. Keep lineage within `i64::MAX` so SQLite can store it and
   order it numerically.
-- **Supersession.** A provisional revision is superseded once the store accepts
-  a newer revision of the same source. Its coverage, pages, and event
+- **Supersession.** A provisional revision is superseded only when a trusted qualification
+  transition authorizes a newer revision of the same source. Its coverage, pages, and event
   observations are removed; an event remains only if another active revision
   observed it. A sealed revision is never superseded.
   Its commits stay acceptable after later revisions, including resumed pages and

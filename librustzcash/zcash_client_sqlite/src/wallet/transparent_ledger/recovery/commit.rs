@@ -1,5 +1,4 @@
 use super::*;
-use rusqlite::OptionalExtension as _;
 
 /// Runs `f` atomically: in a new immediate transaction, or under a savepoint inside the
 /// caller's transaction. Nothing `f` wrote survives its failure, including a failure to
@@ -88,104 +87,6 @@ fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<()
         return Err(InvalidCommit::AboveAnchor);
     }
     Ok(())
-}
-
-/// Returns the stored id of `revision`, recording it if new. Accepting a newer lineage
-/// supersedes the source's older provisional revisions, removing their coverage, pages, and
-/// observations. Events with no remaining observations are removed and their ledger-only
-/// financial authority is withdrawn. Output rows retain independently supported spend links
-/// and reservations. An independent source's observation or a sealed revision keeps an event
-/// alive.
-#[cfg(feature = "transparent-inputs")]
-fn accept_revision(
-    conn: &rusqlite::Connection,
-    revision: &RecoveryRevision,
-) -> Result<i64, SqliteClientError> {
-    let lineage = i64::try_from(revision.lineage).expect("checked by check_well_formed");
-    let accepted: Option<i64> = conn.query_row(
-        "SELECT MAX(lineage) FROM tpir_revisions WHERE source = :source",
-        named_params![":source": revision.source],
-        |row| row.get(0),
-    )?;
-    let superseded = !revision.sealed && accepted.is_some_and(|accepted| lineage < accepted);
-    let existing = conn
-        .query_row(
-            "SELECT id, source, revision, lineage, sealed, publication_height, publication_hash
-             FROM tpir_revisions
-             WHERE source = :source AND (revision = :revision OR lineage = :lineage)",
-            named_params![
-                ":source": revision.source,
-                ":revision": revision.revision,
-                ":lineage": lineage,
-            ],
-            |row| Ok((row.get::<_, i64>(0)?, read_revision(row, 1))),
-        )
-        .optional()?;
-    if let Some((id, stored)) = existing {
-        if stored? != *revision {
-            return Err(reject(CommitRejection::Integrity(
-                IntegrityFailure::RevisionMismatch,
-            )));
-        }
-        if superseded {
-            return Err(reject(CommitRejection::Stale(
-                StaleCommit::SupersededRevision,
-            )));
-        }
-        return Ok(id);
-    }
-    if superseded {
-        return Err(reject(CommitRejection::Stale(
-            StaleCommit::SupersededRevision,
-        )));
-    }
-    let id = conn.query_row(
-        "INSERT INTO tpir_revisions (
-             source, revision, lineage, sealed, publication_height, publication_hash
-         )
-         VALUES (:source, :revision, :lineage, :sealed, :publication_height, :publication_hash)
-         RETURNING id",
-        named_params![
-            ":source": revision.source,
-            ":revision": revision.revision,
-            ":lineage": lineage,
-            ":sealed": revision.sealed,
-            ":publication_height": u32::from(revision.publication.height),
-            ":publication_hash": revision.publication.hash.0.to_vec(),
-        ],
-        |row| row.get(0),
-    )?;
-    if accepted.is_none_or(|accepted| lineage > accepted) {
-        let older_provisional = "SELECT id FROM tpir_revisions
-             WHERE source = :source AND sealed = 0 AND lineage < :lineage";
-        for table in [
-            "tpir_coverage",
-            "tpir_pending_pages",
-            "tpir_receive_observations",
-            "tpir_spend_observations",
-        ] {
-            conn.execute(
-                &format!("DELETE FROM {table} WHERE revision_id IN ({older_provisional})"),
-                named_params![":source": revision.source, ":lineage": lineage],
-            )?;
-        }
-        projection::unproject_unobserved(conn)?;
-        conn.execute(
-            "DELETE FROM tpir_receive_events
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM tpir_receive_observations o WHERE o.receive_id = tpir_receive_events.id
-             )",
-            [],
-        )?;
-        conn.execute(
-            "DELETE FROM tpir_spend_events
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM tpir_spend_observations o WHERE o.spend_id = tpir_spend_events.id
-             )",
-            [],
-        )?;
-    }
-    Ok(id)
 }
 
 /// Validates and applies `commit` to the candidate ledger, atomically.
@@ -291,7 +192,7 @@ fn apply_facts<P: consensus::Parameters>(
     let target = commit.context.target;
     let active = commit.context.lifecycle == AccountLifecycle::Active;
 
-    let revision_id = accept_revision(conn, &commit.revision)?;
+    let revision_id = super::revisions::register_revision(conn, &commit.revision)?;
     if active && !is_qualified(conn, revision_id)? {
         return Err(reject(CommitRejection::Refused(
             RefusedCommit::UnqualifiedRevision,
@@ -467,7 +368,8 @@ fn quarantine(
     super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)
 }
 
-/// Qualifies `revision`, recording it first if it is new, exactly as a commit would.
+/// Authorizes a trusted revision transition: qualify the exact identity and atomically
+/// supersede older provisional evidence across the wallet. Ordinary commits only register it.
 ///
 /// Qualification binds to the exact revision: a stored revision with the same identity and
 /// other lineage, sealing, or publication is an integrity failure, and a superseded provisional
@@ -487,11 +389,12 @@ pub(crate) fn qualify_revision(
     atomically(conn, |conn| {
         // Qualification is ledger state; only a build that interprets the wallet's may add it.
         durable_policy(conn)?;
-        let revision_id = accept_revision(conn, revision)?;
+        let revision_id = super::revisions::register_revision(conn, revision)?;
         conn.execute(
             "INSERT OR IGNORE INTO tpir_qualified_revisions (revision_id) VALUES (:revision_id)",
             named_params![":revision_id": revision_id],
         )?;
-        super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)
+        super::revisions::supersede_provisional(conn, revision)?;
+        super::super::require_reader_version(conn, super::super::REVISION_READER_VERSION)
     })
 }
