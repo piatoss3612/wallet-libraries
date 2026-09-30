@@ -291,10 +291,10 @@ fn low_level_provenance_writes_roll_back_with_the_wallet_transaction() {
     conn(&st)
         .execute_batch("DROP TRIGGER fail_output_origin; DROP TRIGGER fail_spend_link")
         .unwrap();
-    // No metadata was written: low-level provenance retains its recovery-v6 fence.
+    // No metadata was written: source-bound provenance retains its revision-v6 fence.
     assert_eq!(
         reader_version(&st),
-        crate::wallet::transparent_ledger::RECOVERY_READER_VERSION
+        crate::wallet::transparent_ledger::REVISION_READER_VERSION
     );
     st.wallet_mut()
         .db_mut()
