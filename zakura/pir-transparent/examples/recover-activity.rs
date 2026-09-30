@@ -57,6 +57,16 @@ fn metadata(value: Option<TransactionMetadata>) -> Value {
         })
         .unwrap_or(Value::Null)
 }
+fn locking_script(address: TransparentAddress) -> Vec<u8> {
+    match address {
+        TransparentAddress::PublicKeyHash(hash) => {
+            [vec![0x76, 0xa9, 20], hash.to_vec(), vec![0x88, 0xac]].concat()
+        }
+        TransparentAddress::ScriptHash(hash) => {
+            [vec![0xa9, 20], hash.to_vec(), vec![0x87]].concat()
+        }
+    }
+}
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 5 {
@@ -254,9 +264,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("metadata reader fence missing".into());
     }
     let receives:Vec<_> = after.receives.iter().map(|e| json!({"txid":e.outpoint.txid().to_string(),"output_index":e.outpoint.n(),
-        "script":hex::encode(e.address.script().to_bytes()),"value":e.value.into_u64(),"coinbase":e.coinbase,"height":u32::from(e.mined_height),"metadata":metadata(e.metadata)})).collect();
+        "script":hex::encode(locking_script(e.address)),"value":e.value.into_u64(),"coinbase":e.coinbase,"height":u32::from(e.mined_height),"metadata":metadata(e.metadata)})).collect();
     let spends:Vec<_> = after.spends.iter().map(|e| json!({"txid":e.spending_txid.to_string(),"input_index":e.input_index,
-        "prevout_txid":e.prevout.txid().to_string(),"prevout_index":e.prevout.n(),"script":hex::encode(e.prevout_address.script().to_bytes()),
+        "prevout_txid":e.prevout.txid().to_string(),"prevout_index":e.prevout.n(),"script":hex::encode(locking_script(e.prevout_address)),
         "height":u32::from(e.mined_height),"metadata":metadata(e.metadata)})).collect();
     let report = json!({"schema":"activity-library-shadow-recovery-v1","birthday":birthday,"through":through,"fixture_scripts":scripts,
         "independent_headers":headers.len(),"passes":passes,"receives":receives,"spends":spends,
