@@ -47,11 +47,18 @@ def build_identity(config: str, profile: str) -> str:
     rust = capture(["rustc", "-vV"])
     host = re.search(r"^host: (.+)$", rust, re.M).group(1)
     target = os.environ.get("CARGO_BUILD_TARGET", host)
+    # Custom JSON targets can be absolute paths. Keep cache paths below the
+    # configured root, and distinguish targets with identical file names.
+    target_name = re.sub(r"[^A-Za-z0-9_.-]", "_", Path(target).name)
+    if target_name in {"", ".", ".."}:
+        target_name = "custom-target"
+    target_contents = Path(target).read_bytes() if Path(target).is_file() else b""
     # Include flags that make artifacts incompatible. Revisions are provenance,
     # not cache keys: Cargo fingerprints decide what can be reused.
     flags = {k: os.environ.get(k, "") for k in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER")}
-    key = hashlib.sha256((rust + json.dumps(flags, sort_keys=True)).encode()).hexdigest()[:12]
-    return f"{target}/{key}/{config}/{profile}"
+    custom_target = (target.encode() + target_contents) if target.endswith(".json") or Path(target).name != target else b""
+    key = hashlib.sha256((rust + json.dumps(flags, sort_keys=True)).encode() + custom_target).hexdigest()[:12]
+    return f"{target_name}/{key}/{config}/{profile}"
 
 
 class Lease:
@@ -181,6 +188,8 @@ def main(argv=None) -> int:
     parser.add_argument("--exact", action="store_true")
     parser.add_argument("--only", choices=VERIFY, help="one repository verification script")
     args = parser.parse_args(argv)
+    if args.profile and not re.fullmatch(r"[A-Za-z0-9_-]+", args.profile):
+        parser.error("profile names must contain only letters, digits, underscores, or hyphens")
     if (args.filter or args.exact) and args.command != "test":
         parser.error("test filters require the test command")
     if args.exact and not args.filter:

@@ -23,6 +23,17 @@ def acquire(root, ready, release):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_custom_target_stays_under_build_root_and_tracks_json_changes(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / "target.json"
+            target.write_text('{"arch":"x86_64"}')
+            with patch.dict(os.environ, {"CARGO_BUILD_TARGET": str(target)}), patch.object(dev, "capture", return_value="host: x86_64-unknown-linux-gnu"):
+                first = dev.build_identity("default", "test")
+                self.assertFalse(Path(first).is_absolute())
+                self.assertEqual(Path(first).parts[0], "target.json")
+                target.write_text('{"arch":"aarch64"}')
+                self.assertNotEqual(first, dev.build_identity("default", "test"))
+
     def test_parallel_owners_reuse_released_directory(self):
         with tempfile.TemporaryDirectory() as root:
             context = multiprocessing.get_context("fork")

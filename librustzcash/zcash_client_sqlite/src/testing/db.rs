@@ -121,7 +121,7 @@ impl TestDb {
 
     /// Runs a fixture operation against the transaction-bound wallet, committing on
     /// success and rolling back on error just like the public wallet operations.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "transparent-inputs"))]
     pub(crate) fn with_wallet_transaction<T>(
         &mut self,
         operation: impl FnOnce(
