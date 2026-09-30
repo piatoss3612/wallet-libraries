@@ -147,7 +147,7 @@ fn integrity_failure_quarantines_the_source_and_every_affected_account() {
     assert_eq!(quarantined_accounts(&st), vec![first, second]);
     assert_eq!(count(&st, "tpir_quarantined_sources"), 1);
     assert_eq!(count(&st, "tpir_pending_pages"), 0);
-    assert_eq!(reader_version(&st), 4);
+    assert_eq!(reader_version(&st), 5);
 
     // Neither the source nor the accounts accept further commits, whatever their content.
     let ws = watch(&st, third);
@@ -426,7 +426,7 @@ fn qualification_binds_to_the_exact_revision() {
     qualify(&mut st, &fixture);
     qualify(&mut st, &fixture);
     assert_eq!(count(&st, "tpir_qualified_revisions"), 1);
-    assert_eq!(reader_version(&st), 4);
+    assert_eq!(reader_version(&st), 5);
 
     // A new revision is recorded as a commit would record it, superseding older provisional
     // revisions of its source.
@@ -536,7 +536,7 @@ fn promotion_projects_the_ledger_and_grants_private_authority() {
 
     promote(&mut st, account).unwrap();
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Active);
-    assert_eq!(reader_version(&st), 4);
+    assert_eq!(reader_version(&st), 5);
 
     // The window's addresses are now the wallet's own, and its candidate rows are gone.
     assert_eq!(count(&st, "tpir_candidate_windows"), 0);
@@ -781,7 +781,7 @@ fn a_failed_promotion_changes_nothing_across_a_reopen() {
     ));
     assert_eq!(production_dump(conn(&st)), before);
     assert_eq!(count(&st, "tpir_candidate_windows"), windows);
-    assert_eq!(reader_version(&st), 4, "qualification required version 4");
+    assert_eq!(reader_version(&st), 5, "qualification required version 5");
 
     // A fresh connection sees the same pre-promotion state.
     let reopened = crate::WalletDb::for_path(
@@ -1266,10 +1266,11 @@ fn a_superseded_provisional_revision_withdraws_its_projection() {
     c.coverage = full_coverage(&ws);
     apply(&mut st, c).unwrap();
 
-    // The ledger-only output and spend link are withdrawn; the sealed revision's receive stays.
+    // The ledger-only receive loses authority, but its row retains historical provenance.
+    // The unsupported spend link is withdrawn; the sealed revision's receive stays.
     assert_eq!(
         super::super::output_origins(conn(&st), &fresh.outpoint),
-        Vec::<i64>::new()
+        vec![2]
     );
     let outputs: i64 = conn(&st)
         .query_row(
@@ -1280,7 +1281,7 @@ fn a_superseded_provisional_revision_withdraws_its_projection() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(outputs, 0);
+    assert_eq!(outputs, 1);
     assert_eq!(spend_count(&st, &unspent.outpoint), 0);
     assert_eq!(
         super::super::spend_origins(conn(&st), &unspent.outpoint),
@@ -1437,6 +1438,9 @@ fn leaving_private_required_demotes_every_account() {
 }
 
 mod gating {
+    mod coinbase;
+    mod withdrawal;
+
     use std::convert::Infallible;
 
     use zcash_client_backend::{
@@ -1885,7 +1889,7 @@ mod gating {
         set_policy(&mut st, PrivateRequired);
         promote(&mut st, account).unwrap();
         let target = next_target(&st);
-        let [_, by_address, by_addresses, by_account] = <[_; 4]>::try_from(selections(
+        let [by_outpoint, by_address, by_addresses, by_account] = <[_; 4]>::try_from(selections(
             &st,
             account,
             &[coinbase.address],
@@ -1893,7 +1897,7 @@ mod gating {
             target,
         ))
         .unwrap();
-        for selection in [by_address, by_addresses, by_account] {
+        for selection in [by_outpoint, by_address, by_addresses, by_account] {
             assert_eq!(selection.unwrap(), vec![]);
         }
     }

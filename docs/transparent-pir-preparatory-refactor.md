@@ -412,8 +412,12 @@ production can never promote.
    - `tpir_quarantined_sources` and `tpir_quarantined_accounts`: integrity
      quarantine.
 
-   The first write to any of them raises `min_reader_version` to 4, so a
-   build that ignores them fails closed. Epochs are left out: nothing can clear
+   The first write to any of them raises `min_reader_version` to 5, so a
+   build that ignores them or retained-output withdrawal semantics fails closed.
+   Withdrawing a previously projected receive also requires 5 when the account
+   has been demoted to a candidate. Version 4 admitted all stored outputs under
+   public policy and therefore cannot safely read retained withdrawn rows.
+   Epochs are left out: nothing can clear
    a quarantine yet, so there is no revalidation race to guard.
 2. **Contract.**
    - `TransparentAuthority::Private` and `RecoveryCompletion::Complete`.
@@ -471,13 +475,23 @@ production can never promote.
      same transaction confirms.
 
    Each blocks promotion; there is no way to explain one yet.
+   A ledger-only output retained after its receive lost every observation is
+   historical wallet state, not independent evidence of a missing receive, and
+   does not block reactivation. Content conflicts and independent legacy evidence
+   still block; a rewound receive still present in the ledger keeps the existing
+   discrepancy rule.
 6. **Active commits** follow the candidate path, additionally require qualified
    revisions, and project their events in the same transaction. After
    activation, window growth uses LRZ's gap-limit address generation. When a
    higher lineage supersedes a provisional revision, each event that loses its
-   last observation withdraws its projection: a ledger-only output, spend link
-   or pending spend is removed, and a row with another origin keeps only that
-   origin. Leaving `PrivateRequired` demotes every account in the policy
+   last observation withdraws its authority. Unsupported ledger-only spend links
+   and pending spends are removed. A ledger-only output keeps its row and
+   historical origin so independent spend links and reservations survive, but
+   without a placed receive every selector and balance query excludes it under
+   both private and public policy. Replaying the receive updates that same row,
+   preserving its spentness and lock ownership. An output with another origin
+   keeps that independent evidence and loses its ledger origin.
+   Leaving `PrivateRequired` demotes every account in the policy
    transaction.
 7. **Rewind.** LRZ un-mining already makes projected rows above the truncation
    unspendable, and the Phase 3 truncation clips coverage to the retained
@@ -499,7 +513,10 @@ production can never promote.
    accounts, and fail only when no owning account is eligible.
    `store_transactions_to_be_sent` rechecks every transparent input at the
    transaction's target height, which covers proposals, PCZTs and hardware
-   finalization. An input created by an earlier transaction of the same batch
+   finalization. The outpoint lookup enforces the same coinbase maturity rule
+   as the other selectors, including at this final storage gate. Metadata
+   lookups without a spend target can still read immature or withdrawn rows.
+   An input created by an earlier transaction of the same batch
    is allowed. Shielded-funded unshielding spends no transparent input, and
    its own transparent output is spendable only once a ledger commit covers it.
 9. **Snapshot.** Under `PrivateRequired`, an eligible account reports
@@ -548,6 +565,10 @@ consistent projection and authority. Both discovery orders and payload replay
 preserve mixed effects. All transparent selectors and stale proposals reject
 incomplete coverage; coinbase, locks, local chains, shielded-funded unshielding,
 account isolation, and explicit public behavior have focused regression tests.
+Revision withdrawal/replay preserves independently observed and locally
+constructed spends and reservations across reopen; withdrawn rows contribute
+no public funds and do not block reactivation. Coinbase boundary tests reject
+all four selectors and final storage at 99 blocks and admit them at 100.
 
 ## Phase 5 — Integrate complete and partial transaction history
 

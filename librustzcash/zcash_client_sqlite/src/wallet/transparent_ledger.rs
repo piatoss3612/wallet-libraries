@@ -79,8 +79,9 @@ pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
 /// newer reader is refused rather than operated on with semantics this build lacks.
 ///
 /// Version 3 maintains candidate recovery state through rewinds, policy transitions, and
-/// account changes; the first candidate commit requires it. Version 4 honors activation,
-/// qualification, and quarantine; the first write of any of them requires it.
+/// account changes; the first candidate commit requires it. Version 5 honors activation,
+/// qualification, quarantine, and retained outputs whose receive was withdrawn. Version 4
+/// could admit those retained rows under public authority, so activation writes require 5.
 pub(crate) const TPIR_READER_VERSION: i64 = ACTIVATION_READER_VERSION;
 
 /// The reader version candidate recovery state requires.
@@ -88,7 +89,27 @@ pub(crate) const TPIR_READER_VERSION: i64 = ACTIVATION_READER_VERSION;
 pub(crate) const RECOVERY_READER_VERSION: i64 = 3;
 
 /// The reader version activation, qualification, and quarantine state requires.
-pub(crate) const ACTIVATION_READER_VERSION: i64 = 4;
+pub(crate) const ACTIVATION_READER_VERSION: i64 = 5;
+
+/// A SQL condition admitting an output's existence as current evidence. A ledger-only output
+/// whose receive was withdrawn or unplaced is retained to preserve its spend links and locks,
+/// but cannot contribute value or authorize an input under either public or private policy.
+/// Independent origins retain their existing semantics. Rows missing provenance are left in
+/// the counted set so the balance provenance check still reports them as corrupted data.
+pub(crate) fn output_observation_condition(output: &str) -> String {
+    format!(
+        "NOT EXISTS (
+             SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = {output}.id AND oo.origin = 2
+         ) OR EXISTS (
+             SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = {output}.id AND oo.origin != 2
+         ) OR EXISTS (
+             SELECT 1 FROM tpir_receive_events re
+             JOIN transactions rt ON rt.txid = re.txid
+             WHERE rt.id_tx = {output}.transaction_id AND re.output_index = {output}.output_index
+             AND re.account_id = {output}.account_id AND re.mined_height IS NOT NULL
+         )"
+    )
+}
 
 /// Raises `tpir_meta.min_reader_version` to at least `version`, so that builds that cannot
 /// interpret the state about to be written fail closed rather than ignore it.

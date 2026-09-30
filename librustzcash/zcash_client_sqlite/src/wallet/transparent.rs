@@ -1349,12 +1349,16 @@ pub(crate) fn get_wallet_transparent_output(
                  ({}) -- the transaction is unexpired
                  AND u.id NOT IN ({}) -- and the output is unspent
                  AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+                 AND ({}) -- exclude immature coinbase outputs
+                 AND ({}) -- exclude withdrawn ledger-only receives
              )
          )
          AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output",
         tx_unexpired_condition("t"),
         spent_utxos_clause(),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        excluding_immature_coinbase_outputs("t"),
+        super::transparent_ledger::output_observation_condition("u"),
     ))?;
 
     let txid_bytes = outpoint.hash();
@@ -1419,12 +1423,14 @@ fn spendable_transparent_outputs_query(
            -- unknown tx_index defaults to 1 (non-coinbase) to avoid false positives,
            -- so such outputs are excluded by CoinbaseOnly and included by NonCoinbaseOnly
          AND ({lock_eligible_sql}) -- the output is eligible under the lock filter
+         AND ({}) -- exclude withdrawn ledger-only receives
          AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output
          ORDER BY {order_by_sql}",
         tx_unexpired_condition_minconf_0("t"),
         spent_utxos_clause(),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         excluding_immature_coinbase_outputs("t"),
+        super::transparent_ledger::output_observation_condition("u"),
     )
 }
 
@@ -1765,10 +1771,12 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
          AND u.value_zat > 0
          AND ({}) -- the output is mined with sufficient confirmations, or is unexpired and minconf is 0
          AND u.id NOT IN ({}) -- and the output is unspent
-         AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs",
+         AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+         AND ({}) -- exclude withdrawn ledger-only receives",
         tx_unexpired_condition_minconf_0("t"),
         spent_utxos_clause(),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        super::transparent_ledger::output_observation_condition("u"),
     ))?;
 
     let mut rows = stmt_address_balances.query(named_params![
@@ -1826,9 +1834,11 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
                 )
              )
              AND u.id NOT IN ({}) -- and the output is unspent
-             AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs",
+             AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+             AND ({}) -- exclude withdrawn ledger-only receives",
             spent_utxos_clause(),
-            excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts")
+            excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+            super::transparent_ledger::output_observation_condition("u"),
         ))?;
 
         let mut rows = stmt_address_balances.query(named_params![
@@ -1951,6 +1961,7 @@ pub(crate) fn transparent_balance_provenance(
                  AND (({}) OR (:min_confirmations > 0 AND ({})))
                  AND u.id NOT IN ({})
                  AND ({})
+                 AND ({})
              )
              SELECT
                  EXISTS (
@@ -1972,6 +1983,7 @@ pub(crate) fn transparent_balance_provenance(
             tx_unconfirmed_condition("t"),
             spent_utxos_clause(),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+            super::transparent_ledger::output_observation_condition("u"),
         ),
         named_params![
             ":account_uuid": account.0,
@@ -2020,11 +2032,13 @@ pub(crate) fn add_transparent_account_balances(
          AND u.id NOT IN ({}) -- and the received txo is unspent
          AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
          AND ({}) -- the output has the required origin
+         AND ({}) -- exclude withdrawn ledger-only receives
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase, is_mature",
         tx_unexpired_condition_minconf_0("t"),
         spent_utxos_clause(),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         LEDGER_ORIGIN_CONDITION,
+        super::transparent_ledger::output_observation_condition("u"),
     ))?;
 
     let mut rows = stmt_account_spendable_balances.query(named_params![
@@ -2092,11 +2106,13 @@ pub(crate) fn add_transparent_account_balances(
              AND u.id NOT IN ({}) -- and the received txo is unspent
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
              AND ({}) -- the output has the required origin
+             AND ({}) -- exclude withdrawn ledger-only receives
              GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
             tx_unconfirmed_condition("t"),
             spent_utxos_clause(),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             LEDGER_ORIGIN_CONDITION,
+            super::transparent_ledger::output_observation_condition("u"),
         ))?;
 
         let mut rows = stmt_account_unconfirmed_balances.query(named_params![

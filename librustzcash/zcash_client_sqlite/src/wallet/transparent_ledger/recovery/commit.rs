@@ -92,9 +92,10 @@ fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<()
 
 /// Returns the stored id of `revision`, recording it if new. Accepting a newer lineage
 /// supersedes the source's older provisional revisions, removing their coverage, pages, and
-/// observations. Events with no remaining observations are removed, together with what their
-/// projection alone contributed to an active account's wallet; an independent source's
-/// observation or a sealed revision keeps an event alive.
+/// observations. Events with no remaining observations are removed and their ledger-only
+/// financial authority is withdrawn. Output rows retain independently supported spend links
+/// and reservations. An independent source's observation or a sealed revision keeps an event
+/// alive.
 #[cfg(feature = "transparent-inputs")]
 fn accept_revision(
     conn: &rusqlite::Connection,

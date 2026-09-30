@@ -38,7 +38,7 @@ workspace.
     Within one revision, supported coverage and an open page cannot overlap,
     and no range can be reported both checked and unsupported.
   - The first candidate commit raises `tpir_meta.min_reader_version` to 3, the
-    version this build reads, so builds without the recovery lifecycle fail
+    minimum recovery reader version, so builds without the recovery lifecycle fail
     closed on that wallet.
   - A commit extends the candidate window of a derived scope when mined
     activity reaches within a gap limit of its end. Window addresses are
@@ -68,6 +68,11 @@ workspace.
     creation evidence, notes, locks, and other origins. A projected coinbase
     receive records `tx_index = 0`. A placement, coinbase, or content conflict
     with the wallet is an integrity failure.
+  - Withdrawing the last observation of a receive retains its ledger-only output
+    row, historical origin, independently supported spends, and reservations.
+    Without a placed receive it contributes no balance and authorizes no input,
+    including after demotion to public policy. Replaying the receive preserves
+    spend links and lock ownership. Independent output origins remain evidence.
   - An active account's commits require a qualified revision and project their
     events in the same transaction. Window growth then uses the wallet's own
     gap-limit address generation.
@@ -77,7 +82,9 @@ workspace.
     later commits. Quarantine survives rewinds; nothing clears it yet.
   - Leaving `PrivateRequired` demotes every active account.
   - Activation, qualification, and quarantine writes raise
-    `tpir_meta.min_reader_version` to 4.
+    `tpir_meta.min_reader_version` to 5. Withdrawal of a previously projected
+    receive also requires 5, including on a demoted candidate account, so a
+    version 4 reader cannot mistake retained rows for current public funds.
   - `WalletDb::qualify_transparent_revision`, a test and development hook
     behind `test-dependencies`. Production builds cannot qualify a revision.
 - `SqliteClientError::TransparentPromotionBlocked`, behind `transparent-inputs`.
@@ -117,6 +124,10 @@ workspace.
   migration has run, is reported as corrupted data.
 
 ### Changed
+- Transparent outpoint lookup with a spend target now enforces coinbase
+  maturity, matching the other selectors. The final private transaction storage
+  gate therefore rejects an immature coinbase input, including externally
+  finalized transactions. Lookups without a spend target retain metadata access.
 - The following now require an explicitly configured transparent ledger mode;
   they never default to public authority:
   - transparent input selection;

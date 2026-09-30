@@ -314,7 +314,8 @@ fn has_legacy_discrepancy(
     target: BlockHeight,
 ) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
-        "SELECT EXISTS (
+        &format!(
+            "SELECT EXISTS (
              SELECT 1 FROM transparent_received_outputs o
              JOIN transactions t ON t.id_tx = o.transaction_id
              JOIN tpir_receive_events r
@@ -330,6 +331,10 @@ fn has_legacy_discrepancy(
              SELECT 1 FROM transparent_received_outputs o
              JOIN transactions t ON t.id_tx = o.transaction_id
              WHERE o.account_id = :account_id AND t.mined_height <= :target
+             AND (({}) OR EXISTS (
+                 SELECT 1 FROM tpir_receive_events r
+                 WHERE r.txid = t.txid AND r.output_index = o.output_index
+             )) -- a withdrawn ledger-only row is retained state, not legacy evidence
              AND NOT EXISTS (
                  SELECT 1 FROM tpir_receive_events r
                  WHERE r.txid = t.txid AND r.output_index = o.output_index
@@ -356,6 +361,8 @@ fn has_legacy_discrepancy(
                  AND e.mined_height IS NOT NULL
              )
          )",
+            super::super::output_observation_condition("o")
+        ),
         named_params![":account_id": account_ref.0, ":target": u32::from(target)],
         |row| row.get(0),
     )?)

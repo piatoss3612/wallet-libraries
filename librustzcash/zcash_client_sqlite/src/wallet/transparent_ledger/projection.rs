@@ -246,9 +246,11 @@ fn spend_origin(origins: &str) -> String {
 
 /// Withdraws the projection of every event that has lost its last observation, before the
 /// event itself is removed. A superseded provisional revision is no longer evidence, so what
-/// the ledger alone contributed to the wallet goes with it: a spend link or pending spend, or
-/// an output, whose only origin is the ledger. Rows with a public, local, or payload origin stay,
-/// less their ledger origin. Candidate accounts never project, so for them this is a no-op.
+/// the ledger alone contributed to the wallet loses authority. Unsupported spend links and
+/// pending spends are removed. A ledger-only output stays with its historical origin to retain
+/// independently supported spend links and reservations; financial queries exclude it without
+/// a placed receive. Rows with another origin stay, less their ledger origin. This also maintains
+/// previously projected rows when the account has been demoted to a candidate.
 pub(super) fn unproject_unobserved(conn: &rusqlite::Connection) -> Result<(), SqliteClientError> {
     let ledger_only = format!("{} AND NOT {}", spend_origin("= 2"), spend_origin("!= 2"));
     conn.execute(
@@ -312,6 +314,18 @@ pub(super) fn unproject_unobserved(conn: &rusqlite::Connection) -> Result<(), Sq
              SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin != 2
          )"
     );
+    let withdraws_receive: bool = conn.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM transparent_received_outputs o WHERE {unobserved_receive})"
+        ),
+        [],
+        |row| row.get(0),
+    )?;
+    if withdraws_receive {
+        // A demoted account's candidate commit can withdraw previously projected evidence too.
+        // Fence the changed row semantics even when no activation state is written by this call.
+        super::require_reader_version(conn, super::ACTIVATION_READER_VERSION)?;
+    }
     conn.execute(
         &format!(
             "DELETE FROM transparent_spend_search_queue
@@ -324,16 +338,17 @@ pub(super) fn unproject_unobserved(conn: &rusqlite::Connection) -> Result<(), Sq
         ),
         [],
     )?;
-    // Deleting an output also removes its spend links and origins.
-    conn.execute(
-        &format!("DELETE FROM transparent_received_outputs AS o WHERE {ledger_only_output}"),
-        [],
-    )?;
+    // Keep ledger-only rows and their historical origin. Deleting the row would cascade spends
+    // supported by other sources and discard lock ownership; replaying a receive cannot restore
+    // either. The missing receive excludes these rows from every financial query.
     conn.execute(
         &format!(
             "DELETE FROM tpir_output_origins
              WHERE origin = 2 AND output_id IN (
                  SELECT o.id FROM transparent_received_outputs o WHERE {unobserved_receive}
+                 AND EXISTS (
+                     SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin != 2
+                 )
              )"
         ),
         [],
