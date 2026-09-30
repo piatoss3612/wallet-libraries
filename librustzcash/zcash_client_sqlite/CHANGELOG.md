@@ -189,7 +189,9 @@ workspace.
 - A wallet whose `tpir_meta.min_reader_version` exceeds this build's reader
   version now also refuses rewinds (every `truncate_to_height`,
   `truncate_to_chain_state`, and `rewind_to_chain_state`), the re-attribution of
-  an imported receiver, and `qualify_transparent_revision`, with
+  an imported receiver, account deletion, creation-evidence bookkeeping,
+  transparent output and spend writes (including low-level writes), and
+  `qualify_transparent_revision`, with
   `TransparentLedgerIncompatible`, changing nothing. Previously a rewind clipped
   recovery state that a newer reader might maintain differently.
 

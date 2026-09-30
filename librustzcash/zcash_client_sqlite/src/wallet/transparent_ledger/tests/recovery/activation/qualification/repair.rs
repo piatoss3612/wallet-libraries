@@ -3,6 +3,8 @@
 
 use zcash_client_backend::data_api::{
     CoinbaseFilter, InputSource as _,
+    ll::LowLevelWalletWrite as _,
+    status::TransactionStatusWrite as _,
     wallet::{
         TargetHeight,
         input_selection::{LockFilter, LockedInputPolicy},
@@ -131,6 +133,25 @@ fn a_wallet_requiring_a_newer_reader_is_refused_without_changes() {
     let txid = *assert_diagnostics_agree(&st, account, &chain, &owned).receives[0]
         .outpoint
         .txid();
+    let spending = conn(&st)
+        .query_row(
+            "SELECT id_tx FROM transactions WHERE txid = ?1",
+            [txid.as_ref()],
+            |row| row.get::<_, i64>(0).map(crate::TxRef),
+        )
+        .unwrap();
+    let output = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+        OutPoint::new([0xcc; 32], 0),
+        transparent::bundle::TxOut::new(
+            Zatoshis::const_from_u64(1_000),
+            ws.addresses[0].address.script().into(),
+        ),
+        Some(ws.target.unwrap().height),
+        Some(account),
+        Some(TransparentKeyScope::EXTERNAL),
+        None,
+    )
+    .unwrap();
     let newer = TPIR_READER_VERSION + 1;
     conn(&st)
         .execute("UPDATE tpir_meta SET min_reader_version = ?1", [newer])
@@ -188,6 +209,27 @@ fn a_wallet_requiring_a_newer_reader_is_refused_without_changes() {
     refused("commit", db.apply_transparent_ledger_commit(c).map(|_| ()));
     refused("promotion", db.promote_transparent_account(account));
     refused("qualification", db.qualify_transparent_revision(&fixture));
+    refused("account deletion", db.delete_account(account));
+    refused(
+        "creation evidence",
+        db.record_transaction_created(txid, ws.target.unwrap().height),
+    );
+    refused(
+        "public output",
+        db.put_received_transparent_utxo(&output).map(|_| ()),
+    );
+    refused(
+        "low-level output",
+        db.transactionally(|db| {
+            db.put_transparent_output(&output, ws.target.unwrap().height, true)
+        })
+        .map(|_| ()),
+    );
+    refused(
+        "low-level spend",
+        db.transactionally(|db| db.mark_transparent_utxo_spent(output.outpoint(), spending))
+            .map(|_| ()),
+    );
     // Nor can this build rewind state it cannot maintain, or re-attribute a receiver's.
     let floor = ws.target.unwrap().height - 3;
     refused("rewind", db.truncate_to_height(floor).map(|_| ()));
@@ -198,6 +240,74 @@ fn a_wallet_requiring_a_newer_reader_is_refused_without_changes() {
     );
     assert_eq!(full_dump(conn(&st)), before);
     assert_eq!(meta_mode(&st), 2);
+}
+
+#[test]
+fn low_level_provenance_writes_roll_back_with_the_wallet_transaction() {
+    let (mut st, account, chain, owned, _) = promoted_oracle_wallet();
+    let expected = assert_diagnostics_agree(&st, account, &chain, &owned);
+    let receive = expected.unspent.iter().find(|r| !r.coinbase).unwrap();
+    let output = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+        OutPoint::new([0xcd; 32], 0),
+        transparent::bundle::TxOut::new(receive.value, receive.address.script().into()),
+        Some(receive.mined_height),
+        Some(account),
+        Some(TransparentKeyScope::EXTERNAL),
+        None,
+    )
+    .unwrap();
+    let spending = conn(&st)
+        .query_row(
+            "SELECT id_tx FROM transactions WHERE txid = ?1",
+            [receive.outpoint.hash()],
+            |row| row.get::<_, i64>(0).map(crate::TxRef),
+        )
+        .unwrap();
+    conn(&st)
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_output_origin BEFORE INSERT ON tpir_output_origins
+         BEGIN SELECT RAISE(ABORT, 'injected failure'); END;
+         CREATE TEMP TRIGGER fail_spend_link BEFORE INSERT ON transparent_received_output_spends
+         BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+    let before = full_dump(conn(&st));
+    let height = receive.mined_height;
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .transactionally(|db| db.put_transparent_output(&output, height, true))
+            .is_err()
+    );
+    assert_eq!(full_dump(conn(&st)), before);
+    // The origin is written before the injected spend-link failure and must roll back too.
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .transactionally(|db| db.mark_transparent_utxo_spent(&receive.outpoint, spending))
+            .is_err()
+    );
+    assert_eq!(full_dump(conn(&st)), before);
+    conn(&st)
+        .execute_batch("DROP TRIGGER fail_output_origin; DROP TRIGGER fail_spend_link")
+        .unwrap();
+    // A reader exactly at the required version remains usable.
+    assert_eq!(reader_version(&st), TPIR_READER_VERSION);
+    st.wallet_mut()
+        .db_mut()
+        .transactionally(|db| db.put_transparent_output(&output, height, true))
+        .unwrap();
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .transactionally(|db| db.mark_transparent_utxo_spent(output.outpoint(), spending))
+            .unwrap()
+    );
+    st.wallet_mut()
+        .db_mut()
+        .record_transaction_created(*output.outpoint().txid(), height)
+        .unwrap();
+    st.wallet_mut().db_mut().delete_account(account).unwrap();
 }
 
 fn meta_mode(st: &State) -> i64 {

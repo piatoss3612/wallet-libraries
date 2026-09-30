@@ -728,6 +728,9 @@ pub(crate) fn delete_account(
     conn: &rusqlite::Transaction,
     account_uuid: AccountUuid,
 ) -> Result<(), SqliteClientError> {
+    // Account and transaction deletion cascade into ledger evidence and provenance. A reader
+    // that cannot maintain that state must refuse before changing any wallet rows.
+    transparent_ledger::durable_policy(conn)?;
     // Update all `sent_notes` records where `to_account_id` refers to the account to be deleted to
     // have the `to_address` field set instead to the address at which the output was received.
     let mut to_account_tx = conn.prepare(
@@ -5457,6 +5460,8 @@ fn record_transaction_created_in(
     txid: TxId,
     earliest: BlockHeight,
 ) -> Result<(), SqliteClientError> {
+    // Creation evidence also changes transparent provenance; check inside the same transaction.
+    transparent_ledger::durable_policy(conn)?;
     // Read chain context and write evidence in one statement, so a concurrent rewind cannot
     // interleave between reading the tip and inserting an outbox's transaction metadata.
     let updated = conn.execute(
