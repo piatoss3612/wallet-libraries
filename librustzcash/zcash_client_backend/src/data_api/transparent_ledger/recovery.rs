@@ -86,7 +86,9 @@ pub struct TransparentWatchSet<AccountId> {
     pub policy_generation: u64,
     /// The highest contiguously scanned local block; absent before any contiguous scan.
     pub target: Option<ChainPoint>,
-    /// Every address recovery must cover, ordered by address.
+    /// Every address recovery must cover, ordered by address. Receivers owned by another
+    /// account in production are excluded even if this account can derive them in its
+    /// candidate window; only an explicit production ownership transition transfers them.
     pub addresses: Vec<WatchedAddress>,
     /// Pages left open by earlier runs, which a new run should resume.
     pub pending_pages: Vec<PendingPage>,

@@ -978,6 +978,13 @@ fn import_standalone_transparent_pubkey_inner<P: consensus::Parameters>(
         ],
     )?;
 
+    #[cfg(feature = "transparent-inputs")]
+    transparent_ledger::forget_other_candidates(
+        conn,
+        account_id,
+        &TransparentAddress::from_pubkey(&pubkey),
+    )?;
+
     // The account is known (resolved above) and the receiver is not already recorded (checked
     // above), so exactly one row is inserted.
     Ok(rows_affected)

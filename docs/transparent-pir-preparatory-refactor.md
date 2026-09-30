@@ -914,3 +914,16 @@ Orchard) enhancement together. It does not persist policy, capture a generation,
 requests or establish a dispatch fence. The application must cancel and join public work,
 apply the durable policy transition, replace handle configuration and discard stale queued
 work. Existing setters remain available for compatibility.
+
+
+### Overlapping receiver ownership
+
+An existing production owner retains a receiver during candidate recovery. Deriving that
+receiver in another account's candidate window does not transfer it or authorize duplicate
+financial events. Activity observed by the existing owner still informs the deriving key's
+gap expansion. Standalone imports invalidate competing candidate facts and entire pending
+page requests atomically; queued work for a removed receiver is stale, not source corruption.
+Explicit production address generation can reattribute an imported receiver under the existing
+rules. Its new owner must recover fresh coverage. Promotion rechecks completeness after
+generating addresses and rolls the entire transition back if that would introduce uncovered
+receivers; perform the explicit production transfer and recover before retrying promotion.
