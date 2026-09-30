@@ -92,9 +92,7 @@ fn a_candidate_withdrawal_fences_retained_rows_from_version_four_readers() {
     let (mut st, account, _, replacement) = provisional_wallet(false);
     set_policy(&mut st, PrivateShadow);
     // Simulate a wallet last activated by the previous Phase 4 reader.
-    conn(&st)
-        .execute("UPDATE tpir_meta SET min_reader_version = 4", [])
-        .unwrap();
+    st.wallet().set_transparent_reader_version(4);
     cover(&mut st, account, &replacement, vec![]);
     assert_eq!(reader_version(&st), 5);
 }
@@ -102,9 +100,7 @@ fn a_candidate_withdrawal_fences_retained_rows_from_version_four_readers() {
 #[test]
 fn a_failed_withdrawal_preserves_the_projection_and_revision_observations() {
     let (mut st, account, received, replacement) = provisional_wallet(true);
-    conn(&st)
-        .execute("UPDATE tpir_meta SET min_reader_version = 4", [])
-        .unwrap();
+    st.wallet().set_transparent_reader_version(4);
     let before = production_dump(conn(&st));
     let observations = count(&st, "tpir_receive_observations");
     conn(&st)

@@ -5,7 +5,7 @@ use sapling::zip32::ExtendedSpendingKey;
 use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _, WalletWrite as _,
-    testing::{AddressType, TestBuilder},
+    testing::AddressType,
     transparent_ledger::{
         AddressRange, CandidateBlocker, CandidateRecovery, CommitOutcome, CommitRejection,
         IntegrityFailure, InvalidCommit, PageRequest, PublicationAnchor, ReceiveEvent,
@@ -20,21 +20,15 @@ use zcash_protocol::{
     value::{MAX_MONEY, Zatoshis},
 };
 
-use super::{State, conn};
+use super::{State, conn, wallet_state};
 use crate::{
-    AccountUuid,
-    error::SqliteClientError,
-    testing::{BlockCache, db::TestDbFactory},
+    AccountUuid, error::SqliteClientError, testing::db::TestDbFactory,
     wallet::transparent_ledger::forget_reattributed_script,
 };
 
 /// A wallet with one account and ten scanned blocks, under a durable `PrivateShadow` policy.
 fn shadow_wallet() -> (State, AccountUuid) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(TestDbFactory::default())
-        .with_block_cache(BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = wallet_state(TestDbFactory::default());
     scan_new_blocks(&mut st, 10);
     set_policy(&mut st, PrivateShadow);
     let account = st.test_account().unwrap().id();
@@ -42,11 +36,14 @@ fn shadow_wallet() -> (State, AccountUuid) {
 }
 
 fn scan_new_blocks(st: &mut State, count: usize) {
-    let not_our_key = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
+    static NOT_OUR_KEY: std::sync::OnceLock<sapling::zip32::DiversifiableFullViewingKey> =
+        std::sync::OnceLock::new();
+    let not_our_key = NOT_OUR_KEY
+        .get_or_init(|| ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key());
     let value = Zatoshis::const_from_u64(10_000);
-    let (start, _, _) = st.generate_next_block(&not_our_key, AddressType::DefaultExternal, value);
+    let (start, _, _) = st.generate_next_block(not_our_key, AddressType::DefaultExternal, value);
     for _ in 1..count {
-        st.generate_next_block(&not_our_key, AddressType::DefaultExternal, value);
+        st.generate_next_block(not_our_key, AddressType::DefaultExternal, value);
     }
     st.scan_cached_blocks(start, count);
 }

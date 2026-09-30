@@ -119,6 +119,32 @@ impl TestDb {
         &mut self.wallet_db
     }
 
+    /// Runs a fixture operation against the transaction-bound wallet, committing on
+    /// success and rolling back on error just like the public wallet operations.
+    #[cfg(test)]
+    pub(crate) fn with_wallet_transaction<T>(
+        &mut self,
+        operation: impl FnOnce(
+            &mut WalletDb<crate::SqlTransaction<'_>, &LocalNetwork, &FixedClock, &mut TestRng>,
+        ) -> Result<T, crate::error::SqliteClientError>,
+    ) -> Result<T, crate::error::SqliteClientError> {
+        self.wallet_db.transactionally(operation)
+    }
+
+    /// Injects a reader compatibility requirement without debugger manipulation.
+    #[cfg(all(test, feature = "transparent-inputs"))]
+    pub(crate) fn set_transparent_reader_version(&self, version: i64) {
+        assert_eq!(
+            self.conn()
+                .execute(
+                    "UPDATE tpir_meta SET min_reader_version = ?1 WHERE id = 0",
+                    [version]
+                )
+                .unwrap(),
+            1,
+        );
+    }
+
     /// The wallet database's own SQLite connection.
     pub fn conn(&self) -> &Connection {
         &self.wallet_db.conn
