@@ -1610,20 +1610,23 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<TransparentBalances, Self::Error> {
         // Under a required-private policy these legacy public rows are not current balances;
-        // report the absence of authority rather than an empty or public result.
-        if !wallet::transparent_ledger::transparent_funds_current(
-            self.conn.borrow(),
-            self.transparent_ledger_mode,
-        )? {
-            return Err(SqliteClientError::TransparentAuthorityUnavailable);
-        }
-        wallet::transparent::get_transparent_balances(
-            self.conn.borrow(),
-            &self.params,
-            account,
-            target_height,
-            confirmations_policy,
-        )
+        // report the absence of authority rather than an empty or public result. The policy
+        // and the balances come from one snapshot, so a concurrent transition cannot separate them.
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            if !wallet::transparent_ledger::transparent_funds_current(
+                conn,
+                self.transparent_ledger_mode,
+            )? {
+                return Err(SqliteClientError::TransparentAuthorityUnavailable);
+            }
+            wallet::transparent::get_transparent_balances(
+                conn,
+                &self.params,
+                account,
+                target_height,
+                confirmations_policy,
+            )
+        })
     }
 
     #[cfg(feature = "transparent-inputs")]

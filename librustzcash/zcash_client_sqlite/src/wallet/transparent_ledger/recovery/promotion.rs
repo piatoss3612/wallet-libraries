@@ -41,19 +41,18 @@ pub(crate) fn promote<P: consensus::Parameters>(
         }
 
         // Window addresses become the wallet's own, so that their outputs can be projected.
+        // Receivers another account owns stay with it: the watch set excluded them.
         for (slot, scope) in WINDOW_SCOPES.into_iter().enumerate() {
             let (start, end) = (watch.production_end[slot], watch.candidate_end[slot]);
             if start < end {
-                generate_address_range(
+                ownership::generate_unowned_range(
                     conn,
                     params,
-                    account_ref,
+                    &watch.account,
                     scope,
-                    UnifiedAddressRequest::unsafe_custom(Allow, Allow, Require),
                     NonHardenedChildIndex::from_index(start).expect("below WINDOW_LIMIT")
                         ..NonHardenedChildIndex::from_index(end)
                             .expect("a window at WINDOW_LIMIT blocks promotion"),
-                    false,
                 )?;
             }
         }
@@ -65,14 +64,12 @@ pub(crate) fn promote<P: consensus::Parameters>(
                 .checked_add(1)
                 .and_then(NonHardenedChildIndex::from_index)
         {
-            generate_address_range(
+            ownership::generate_unowned_range(
                 conn,
                 params,
-                account_ref,
+                &watch.account,
                 TransparentKeyScope::EXTERNAL,
-                UnifiedAddressRequest::unsafe_custom(Allow, Allow, Require),
                 index..end,
-                false,
             )?;
         }
         conn.execute(
@@ -80,9 +77,8 @@ pub(crate) fn promote<P: consensus::Parameters>(
             named_params![":account_id": account_ref.0],
         )?;
 
-        // Generating the window may transfer an imported receiver. Its new owner has no
-        // coverage for that receiver: refuse and roll back rather than activate incomplete
-        // recovery. An explicit production address transfer followed by recovery resolves it.
+        // Defense in depth: the addresses just written must not have changed what the account
+        // is required to cover. Refuse and roll back rather than activate incomplete recovery.
         let generated =
             Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
         let status = recovery_status(conn, gap_limits, &generated)?;

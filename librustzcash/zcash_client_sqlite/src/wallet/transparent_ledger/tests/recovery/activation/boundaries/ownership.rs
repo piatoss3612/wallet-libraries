@@ -55,7 +55,7 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
     for b_first in [false, true] {
         let (mut st, accounts) = shadow_wallet_with(1);
         let (a, b) = (accounts[0], accounts[1]);
-        let (address, index, key, edge) = future_receiver(&st, a);
+        let (address, _, key, edge) = future_receiver(&st, a);
         import(&mut st, b, key);
         let before = production_dump(conn(&st));
         grow(&mut st, a, edge);
@@ -101,37 +101,43 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
         .unwrap()
         .with_transparent_ledger_mode(PrivateShadow);
         assert_eq!(reopened.transparent_watch_set(a).unwrap(), watch(&st, a));
+        // B's activity at the shared receiver extends A's window on A's next commit. Cover it
+        // until the window stops growing, as a coordinator would.
+        loop {
+            let ws = watch(&st, a);
+            let mut c = commit(&ws);
+            c.coverage = full_coverage(&ws);
+            if !apply(&mut st, c).unwrap().window_grew {
+                break;
+            }
+        }
         qualify(&mut st, &revision(1, true));
         set_policy(&mut st, PrivateRequired);
-        // Promotion must not silently transfer ownership and authorize an uncovered receiver.
-        let intact = production_dump(conn(&st));
-        assert!(matches!(
-            promote(&mut st, a),
-            Err(SqliteClientError::TransparentPromotionBlocked(_))
-        ));
-        assert_eq!(production_dump(conn(&st)), intact);
-        assert!(watch(&st, b).addresses.iter().any(|w| w.address == address));
-        // Explicit production generation resolves ownership. A must then recover the new gap.
-        let params = *st.network();
-        let account_ref = st.test_account().unwrap().account().internal_id();
-        st.wallet_mut()
-            .db_mut()
-            .transactionally::<_, _, SqliteClientError>(|db| {
-                crate::wallet::transparent::store_address_range(
-                    db.conn.0,
-                    &params,
-                    account_ref,
-                    TransparentKeyScope::EXTERNAL,
-                    vec![(Address::Transparent(address), address, index)],
+        let encoded = Address::Transparent(address).encode(st.network());
+        let owner = |st: &State| -> i64 {
+            conn(st)
+                .query_row(
+                    "SELECT account_id FROM addresses WHERE cached_transparent_receiver_address = ?1",
+                    [&encoded],
+                    |row| row.get(0),
                 )
-            })
-            .unwrap();
-        assert!(
-            recovery(&st, a)
-                .blockers
-                .contains(&CandidateBlocker::IncompleteCoverage)
-        );
+                .unwrap()
+        };
+        let importer = owner(&st);
+        // Promotion succeeds instead of refusing and rolling back on every retry. Writing the
+        // window leaves the receiver with its owner; projecting A's receive at the window edge then
+        // runs the wallet's gap-limit generation, which transfers the adjacent receiver under the
+        // existing rule. A is active, and recovery work asks it to cover the receiver before its
+        // authority returns.
+        promote(&mut st, a).unwrap();
+        assert_ne!(owner(&st), importer);
+        assert!(watch(&st, a).addresses.iter().any(|w| w.address == address));
         assert!(!watch(&st, b).addresses.iter().any(|w| w.address == address));
+        assert_ne!(snapshot(&st, a).authority, TransparentAuthority::Private);
+        assert!(work(&st, a, 256).items.iter().any(|item| matches!(
+            item,
+            TransparentRecoveryWork::CheckRange(range) if range.address == address
+        )));
         let mut c = commit(&watch(&st, a));
         c.coverage = full_coverage(&watch(&st, a));
         c.receives = vec![receive(
@@ -143,7 +149,7 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
         apply(&mut st, c).unwrap();
         // New activity may grow the derivation window; complete the freshly scheduled gaps.
         for _ in 0..3 {
-            if recovery(&st, a).blockers.is_empty() {
+            if snapshot(&st, a).authority == TransparentAuthority::Private {
                 break;
             }
             let ws = watch(&st, a);
@@ -151,8 +157,6 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
             c.coverage = full_coverage(&ws);
             apply(&mut st, c).unwrap();
         }
-        assert!(recovery(&st, a).blockers.is_empty());
-        promote(&mut st, a).unwrap();
         assert_eq!(snapshot(&st, a).authority, TransparentAuthority::Private);
     }
 }

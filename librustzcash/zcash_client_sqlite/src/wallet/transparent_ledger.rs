@@ -491,6 +491,10 @@ struct PrivateView {
 }
 
 /// Reads `account`'s private ledger for a snapshot targeting the block after `tip`.
+///
+/// Authority, last-known amounts and blockers are read only when `authoritative`, that is under
+/// `PrivateRequired`. A shadow snapshot reports public authority and only the recovery progress,
+/// so a diagnostic it would discard cannot fail the public amount.
 #[cfg(feature = "transparent-inputs")]
 fn private_view<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -499,6 +503,7 @@ fn private_view<P: consensus::Parameters>(
     account: AccountUuid,
     tip: BlockHeight,
     confirmations_policy: ConfirmationsPolicy,
+    authoritative: bool,
 ) -> Result<PrivateView, SqliteClientError> {
     let ledger = recovery::account_ledger(conn, params, gap_limits, account)?;
     let target = TargetHeight::from(tip + 1);
@@ -508,7 +513,9 @@ fn private_view<P: consensus::Parameters>(
         }
         None => None,
     };
-    let (authority, last_known, blockers) = if ledger.authorizes_after(tip) {
+    let (authority, last_known, blockers) = if !authoritative {
+        (None, None, vec![])
+    } else if ledger.authorizes_after(tip) {
         (
             transparent_balance(conn, account, target, confirmations_policy, true)?,
             None,
@@ -631,7 +638,15 @@ pub(crate) fn snapshot<P: consensus::Parameters>(
         TransparentLedgerMode::Public => None,
         TransparentLedgerMode::PrivateShadow | TransparentLedgerMode::PrivateRequired => {
             #[cfg(feature = "transparent-inputs")]
-            let view = private_view(conn, params, gap_limits, account, tip, confirmations_policy)?;
+            let view = private_view(
+                conn,
+                params,
+                gap_limits,
+                account,
+                tip,
+                confirmations_policy,
+                mode == TransparentLedgerMode::PrivateRequired,
+            )?;
             #[cfg(not(feature = "transparent-inputs"))]
             let view = private_view(conn, account, tip, confirmations_policy)?;
             Some(view)

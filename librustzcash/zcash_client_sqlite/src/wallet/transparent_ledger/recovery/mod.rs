@@ -23,10 +23,8 @@ use {
     crate::{
         AccountRef, AccountUuid,
         wallet::{
-            Account, chain_tip_height,
-            encoding::KeyScope,
-            fully_scanned_height, get_account, get_block_hash,
-            transparent::{generate_address_range, get_legacy_transparent_address},
+            Account, chain_tip_height, encoding::KeyScope, fully_scanned_height, get_account,
+            get_block_hash, transparent::get_legacy_transparent_address,
         },
     },
     std::collections::{BTreeMap, BTreeSet},
