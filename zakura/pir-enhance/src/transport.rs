@@ -190,7 +190,13 @@ pub struct Client {
     expired: bool,
     accepted_at: std::time::Instant,
     // Private time source: production uses Instant, tests advance their own clock.
-    monotonic_now: Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
+    monotonic_now: Arc<
+        dyn Fn() -> std::time::Instant
+            + Send
+            + Sync
+            + std::panic::RefUnwindSafe
+            + std::panic::UnwindSafe,
+    >,
 }
 /// Persist expiration on completion or cancellation without interrupting cover
 /// dispatch within a round after a query rejection.

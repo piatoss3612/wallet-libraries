@@ -183,6 +183,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if (args.filter or args.exact) and args.command != "test":
         parser.error("test filters require the test command")
+    if args.exact and not args.filter:
+        parser.error("--exact requires a test-name filter")
     if args.only and args.command != "verify":
         parser.error("--only requires verify")
     if args.package and args.command in {"doctor", "verify"}:

@@ -22,7 +22,9 @@ use zcash_protocol::{
 
 use super::{State, conn, wallet_state};
 use crate::{
-    AccountUuid, error::SqliteClientError, testing::{BlockCache, db::TestDbFactory},
+    AccountUuid,
+    error::SqliteClientError,
+    testing::{BlockCache, db::TestDbFactory},
     wallet::transparent_ledger::forget_reattributed_script,
 };
 

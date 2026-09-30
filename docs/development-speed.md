@@ -15,13 +15,19 @@ Reported one-second tool calls are not total build-lock wait durations.
 | Build ownership | Concurrent processes get separate reusable directories; killed owners release OS leases | Python multiprocessing regressions pass; child commands inherit the lease descriptor |
 | Empty focused checks | Listing must select at least one test | Positive and empty-selection regressions pass |
 | Changing source | Validate HEAD and source-input digest before/after | A simulated changing-input run is invalidated |
-| CI serialization | Six parallel feature configurations, caches, final result, PR cancellation | Live CI validation and timing pending |
-| Protobuf side effects | Explicit check/write generation; ordinary builds consume checked-in bindings | Pinned protoc 34.1 comparison passed in 20.85 seconds on this machine |
-| PIR real-time waiting | Private monotonic clock advances during dispatch | Two tests previously shared the 31-second delay; focused Rust validation pending |
+| CI serialization | Six parallel feature configurations, caches, final result, PR cancellation | First superseded run was cancelled after a push; final CI and timing pending |
+| Protobuf side effects | Explicit check/write generation; ordinary builds consume checked-in bindings | Pinned comparison passed; deliberate stale binding rejected in 4.95 seconds; ordinary builds with/without protoc leave it unchanged |
+| PIR real-time waiting | Private monotonic clock advances during dispatch | Two tests previously shared the 31-second delay; 13 cover tests executed in 3.81 seconds, but source changes invalidated that run; final checks pending |
 | Fixture friction | Transaction-bound operations and reader-version injection helpers; shared immutable key preparation | Focused Rust validation pending |
-| Formatting permissions | Formatting is read-only with `--check`; no compilation or Cargo target lock | Current check passes; historical environment rejection not reproduced |
+| Formatting permissions | Formatting is read-only with `--check`; no compilation or Cargo target lock | Recovered operational event is a rustfmt diff failure, misclassified as permissions; current formatting check passes |
 | Iteration profile | Optional profile in Cargo configuration; final test profile preserved | Repeated measurements pending; no default profile change |
 
 Completion requires the corresponding checks to pass on the implementation
 revision. CI cancellation and sustained cache savings need real GitHub runs.
 Do not infer these from configuration inspection or local unit tests.
+
+The shared CI monitor initially accepted two Socket checks before wallet Actions
+registered. It was re-armed after the expected jobs appeared. Always require
+this workflow's final `tests` check for the current head; an unrelated completed
+check is not wallet validation. The shared monitor implementation is outside
+this repository's scope.
