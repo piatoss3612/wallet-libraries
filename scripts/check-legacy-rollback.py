@@ -67,6 +67,9 @@ def main():
             run(version, "init", db)
             run("current", "init", db)
             before = snapshot(db)
+            with sqlite3.connect(db) as conn:
+                accounts = conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
+                assert len(accounts) == 1
             run(version, "expect-failure", db)
             with sqlite3.connect(db) as conn:
                 assert conn.execute("SELECT count(*) FROM transactions").fetchone()[0] == 0
@@ -80,6 +83,7 @@ def main():
                 assert len(old_outputs) == 2
             run("current", "init", db)
             with sqlite3.connect(db) as conn:
+                assert conn.execute("SELECT * FROM accounts ORDER BY id").fetchall() == accounts
                 assert conn.execute("SELECT txid, raw, min_observed_height, mined_height FROM transactions ORDER BY txid").fetchall() == old_rows
                 assert conn.execute("SELECT * FROM transparent_received_outputs ORDER BY id").fetchall() == old_outputs
                 assert conn.execute("SELECT output_id, origin FROM tpir_output_origins ORDER BY output_id,origin").fetchall() == [(row[0], 0) for row in old_outputs]
