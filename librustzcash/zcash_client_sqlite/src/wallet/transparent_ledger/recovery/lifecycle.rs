@@ -14,6 +14,10 @@ pub(crate) fn truncate(
     conn: &rusqlite::Connection,
     floor: BlockHeight,
 ) -> Result<(), SqliteClientError> {
+    // A build that cannot interpret the wallet's ledger state cannot rewind it either: it would
+    // leave whatever a newer reader maintains anchored on replaced blocks. Refusing fails the
+    // whole rewind.
+    super::super::durable_policy(conn)?;
     let height = u32::from(floor);
     conn.execute(
         "UPDATE tpir_receive_events SET mined_height = NULL WHERE mined_height > :height",
@@ -88,6 +92,8 @@ pub(crate) fn forget_reattributed_script(
     if !has_tables {
         return Ok(());
     }
+    // Only a build that interprets the wallet's ledger state may change it.
+    durable_policy(conn)?;
     let params = named_params![":account_id": from_account.0, ":script": script_bytes(address)];
     conn.execute(
         "DELETE FROM tpir_receive_events WHERE account_id = :account_id AND script = :script",

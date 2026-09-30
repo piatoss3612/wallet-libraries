@@ -2,9 +2,9 @@
 
 Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
 its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64).
-Phase 3's is in review, with Phase 4's and then Phase 5's stacked on it. The
-Vizor halves of Phases 2–5 and all of Phase 6 remain to be implemented and
-qualified. Production transparent authority stays public during preparation.
+Phases 3–5 are merged (#68–#70); Phase 6 is in review. The Vizor halves
+of Phases 2–6 are in draft review or in progress. Production transparent
+authority stays public during preparation.
 
 ## Objective and fixed boundaries
 
@@ -709,6 +709,124 @@ public enrichment.
 4. Validate forward repair and the designated privacy-aware rollback release.
    Preserve local evidence and applied private policy; arbitrary historical
    binaries are not supported rollback targets.
+
+**What the wallet-libraries half adds**
+
+Phase 6 is qualification. It adds tests under
+`sqlite/wallet/transparent_ledger/tests/recovery/activation/qualification/`,
+one production fix they exposed, and no API or table.
+
+1. **Block-derived oracle** (`oracle.rs`). A fixture chain of real transactions
+   with transparent bundles, placed at local heights. The oracle walks it block
+   by block with only the account's keys, and derives the exact receives,
+   spends, unspent outputs, and balances. A fixture source indexes the same
+   chain by address, as a server would. A driver delivers it the way a
+   coordinator might: in groups, reordered, with spends before their receives,
+   through pages, and replayed, repeating while the watch set grows. The chain
+   extends both derived windows several times and holds a coinbase output, a
+   spend in its receive's block, a spend mixing owned and foreign inputs, and
+   foreign-only activity. The candidate diagnostics, the projection, the
+   snapshot, and the selectors equal the oracle after shadow recovery,
+   promotion, active commits, and a rewind that re-mines transactions at the
+   same and at other heights and orphans one payment. Legacy rows take part
+   only through the promotion discrepancy check.
+2. **Migration fixtures** (`migration.rs`). Wallets created at the migration
+   state before the ledger schema, with real keys and addresses, and with
+   transparent history written the way older builds wrote it:
+   - fresh;
+   - long-lived: legacy receives and spends, a coinbase output, a send in
+     flight, a reserved output, and a transaction un-mined by an earlier
+     rewind;
+   - multi-seed, with a cross-account transfer;
+   - imported-only;
+   - hardware-first, without a spending key.
+
+   Each upgrades without a seed, with every existing row unchanged, then is
+   recovered, qualified, and promoted. The send in flight, the reservation, and
+   the local details survive, and only outputs the ledger authorizes are
+   spendable.
+3. **Failure injection** (`failpoints.rs`, `lifecycle.rs`).
+   - A full disk fails a candidate commit, a promotion, and an active commit;
+     aborted writes fail a rewind and a demotion. Each leaves every table
+     unchanged, and a retry reaches the oracle's state.
+   - WAL copies before and after commit recover the prior and committed state
+     for candidate commits, promotion, active commits, rewind, and demotion.
+     Promotion is held open explicitly; the other operations use a SQLite
+     commit hook to copy before their internally owned transaction commits.
+   - A reorg clips sealed and provisional coverage alike and makes older work
+     stale. Deleting an active account removes its ledger and keeps another
+     account's shared transaction and authority. Lowering an active account's
+     birthday pauses its authority until recovery covers the new bound. A
+     policy round trip makes captured work stale and demotes the account.
+4. **Repair and rollback** (`repair.rs`).
+   - A projection whose ledger provenance and spends are lost fails closed, and
+     demoting and promoting again rebuilds it exactly from durable evidence.
+   - Applying a policy needs no newer reader, and nothing lowers
+     `min_reader_version`.
+   - A wallet requiring a newer reader is refused by ledger reads and writes,
+     rewinds, re-attribution, account deletion, outbox creation evidence, and
+     transparent output/spend ingestion, including low-level writes. Each
+     rejected operation keeps every table and the applied private policy unchanged.
+5. **Fix: lifecycle and provenance writes respect the reader version.**
+   Truncation, re-attributing an imported receiver, qualification, account
+   deletion, outbox creation evidence, and transparent output/spend ingestion
+   check the durable policy before writing, inside the caller's transaction.
+   Before, these paths could change recovery state or provenance that a newer
+   reader might maintain differently.
+
+**Deviations from the plan**
+
+- **Rollback targets.** The schema migrator does not refuse a database that
+  carries migrations it does not know, so `min_reader_version` is the only
+  guard between an older build and newer ledger state. A supported rollback
+  target is a build that contains the fix above and whose reader version
+  meets the wallet's requirement. Earlier builds, including every build before
+  this phase, rewind without checking it, so they are not supported rollback
+  targets once a wallet holds recovery state.
+- **Disk full.** Rewinds and demotions only delete or update rows, so a size
+  cap cannot fail them; aborted writes cover them instead. The crash
+  simulation covers all five operations above. A commit hook observes the
+  internally owned transactions without adding a production failpoint. These
+  are WAL recovery simulations, not power-loss or filesystem fault tests.
+- **Lowered birthday.** No API lowers a birthday within the scanned range; the
+  test edits the account row, as a restore with an earlier birthday would
+  leave it.
+- **Privileged verification and epochs** are not added. Clearing a
+  quarantine, requalifying a source, and explaining a legacy discrepancy need
+  real source verification, which belongs to the next stage.
+
+**Pinned library revisions and release gates**
+
+| Repository | Phase | PR | Reviewed source revision |
+| --- | --- | --- | --- |
+| wallet-libraries | 3 | #68 (merged) | `89ba66297202a9b9f3efa50733615ad715f67111` |
+| wallet-libraries | 4 | #69 (merged) | `8dab5c8ff34b5ed3ee6e7fa0f4572207335ef958` |
+| wallet-libraries | 5 | #70 (merged) | `0c7adf4f245107363a92f0facabb0e65ddc33b34` |
+| wallet-libraries | 6 compatibility/rollback candidate | #71 | `3ea93c4e9912d5721dcda8b8014bb77c048af259` |
+| Vizor | 3 | chainapsis/vizor-wallet#787 | Consumer release qualification outstanding |
+| Vizor | 4 | chainapsis/vizor-wallet#790 | Consumer release qualification outstanding |
+| Vizor | 5–6 | Consumer qualification stage | Exact release revision and results required |
+
+The pinned Phase 6 commit contains the compatibility fix and regression tests.
+It is a source rollback candidate, not a published or deployed rollback release.
+The final qualification head is the head of #71, including the commit-hook tests.
+Production release remains blocked until the release process records:
+
+1. The exact released library artifact built from this fix (or a descendant),
+   its build features, and seedless open/read/write/rewind results on a copy of
+   the release's wallet fixture. Test requirements above the rollback reader's
+   version must refuse without changes; supported requirements must retain
+   balances, local evidence, reservations, and private policy. A release whose
+   new state requires an older reader to interpret unknown semantics cannot
+   designate that reader as its rollback target.
+2. The exact Vizor consumer revision and library revision, with the cross-repository
+   exit-gate results below. The library fixtures alone do not qualify Vizor.
+3. Real-source verification and the privileged qualification operation. The
+   current `qualify_transparent_revision` hook exists only under `test` or
+   `test-dependencies`; production cannot qualify a fresh source. Release
+   builds must not enable `test-dependencies` to bypass this gate. Quarantine
+   clearing, requalification, and trust epochs remain owned by the source-
+   verification stage; incomplete recovery never authorizes public fallback.
 
 **Vizor steps**
 

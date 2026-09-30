@@ -78,7 +78,9 @@ pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
 }
 
 /// The highest `tpir_meta.min_reader_version` this build can interpret. A wallet requiring a
-/// newer reader is refused rather than operated on with semantics this build lacks.
+/// newer reader is refused rather than operated on with semantics this build lacks: every
+/// ledger read and write fails, and so does a rewind, which would otherwise leave state this
+/// build cannot maintain anchored on replaced blocks.
 ///
 /// Version 3 maintains candidate recovery state through rewinds, policy transitions, and
 /// account changes; the first candidate commit requires it. Version 5 honors activation,

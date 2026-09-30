@@ -485,6 +485,8 @@ pub(crate) fn qualify_revision(
         return Err(reject(CommitRejection::Invalid(InvalidCommit::Lineage)));
     }
     atomically(conn, |conn| {
+        // Qualification is ledger state; only a build that interprets the wallet's may add it.
+        durable_policy(conn)?;
         let revision_id = accept_revision(conn, revision)?;
         conn.execute(
             "INSERT OR IGNORE INTO tpir_qualified_revisions (revision_id) VALUES (:revision_id)",

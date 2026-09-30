@@ -7,7 +7,7 @@
 //! evidence. Promotion and an active account's commits also project events into those tables.
 //!
 //! Rewinds and policy transitions maintain recovery state in every build, because another
-//! build may have written it.
+//! build may have written it. A build refuses both when the wallet requires a newer reader.
 
 use rusqlite::named_params;
 use zcash_protocol::consensus::BlockHeight;

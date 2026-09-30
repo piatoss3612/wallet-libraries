@@ -2155,12 +2155,14 @@ pub(crate) fn add_transparent_account_balances(
 /// Marks the given UTXO as having been spent.
 ///
 /// Returns `true` if the UTXO was known to the wallet.
+/// Rejects an incompatible ledger reader before changing outputs or provenance.
 pub(crate) fn mark_transparent_utxo_spent(
     conn: &rusqlite::Connection,
     spent_in_tx: TxRef,
     outpoint: &OutPoint,
     origin: Option<ProjectionOrigin>,
 ) -> Result<bool, SqliteClientError> {
+    super::transparent_ledger::durable_policy(conn)?;
     if let Some(origin) = origin {
         record_spend_origin(conn, spent_in_tx, outpoint, origin)?;
     }
@@ -2856,6 +2858,7 @@ pub(crate) fn find_account_uuid_for_transparent_address<P: consensus::Parameters
 ///
 /// `output_height` may be None if this is an ephemeral output from a
 /// transaction we created, that we do not yet know to have been mined.
+/// Rejects an incompatible ledger reader before changing outputs or provenance.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put_transparent_output<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -2866,6 +2869,7 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
     known_unspent: bool,
     origin: ProjectionOrigin,
 ) -> Result<(AccountRef, AccountUuid, KeyScope, UtxoId), SqliteClientError> {
+    super::transparent_ledger::durable_policy(conn)?;
     let addr_str = output.recipient_address().encode(params);
 
     // Unlike the shielded pools, we only can receive transparent outputs on addresses for which we

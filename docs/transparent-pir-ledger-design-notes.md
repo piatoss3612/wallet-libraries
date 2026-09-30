@@ -94,6 +94,33 @@ under "Readiness and blockers" as follows.
     unlinked, in balances as in history. Completeness trusts the current key,
     as balances do.
 
+## Phase 6 outcome
+
+Phase 6 qualifies the library against a block-derived oracle, pre-ledger
+upgrade fixtures, failure injection, and repair, and settles these notes as
+follows.
+
+- **Implemented:** the qualification suite, including WAL recovery before and
+  after commit for candidate commits, promotion, active commits, rewind, and
+  demotion. Compatibility checks also cover account deletion, outbox creation
+  evidence, and transparent output/spend ingestion, alongside rewinds,
+  re-attribution, and qualification. These operations refuse an incompatible
+  reader before writing; provenance checks run in the same transaction as the
+  wallet writes.
+- **Revised:**
+  - **Rollback.** The schema migrator accepts a database carrying migrations it
+    does not know, so the reader version is the only guard between an older
+    build and newer ledger state. Supported rollback targets are builds with
+    the fix whose reader version meets the wallet's requirement; earlier
+    builds rewind without checking it. The plan pins a source rollback candidate;
+    a published artifact and the exact library/Vizor revision pair must pass the
+    documented release gates before production activation.
+- **Still open:**
+  - privileged verification and trust and quarantine epochs, which need real
+    source verification (next stage);
+  - verifying coverage anchors against local blocks when reading, as defense
+    in depth against a build that rewinds without clipping coverage.
+
 ## Recovery sources and revisions
 
 - **Opaque identifiers.** Sources, revisions, and pages are opaque byte strings,
@@ -156,7 +183,7 @@ under "Readiness and blockers" as follows.
     revisions.
 - **Privileged verification.** Qualifying a revision, clearing a quarantine, and
   advancing the trust epoch need a privileged verification operation separate
-  from commits. It is added with source verification in Phase 6.
+  from commits. It is added with real source verification, after this plan.
 
 ## Readiness and blockers
 
