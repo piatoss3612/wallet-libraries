@@ -384,6 +384,97 @@ grouping needs validated transaction links and sufficient details, not matching
 amounts or timestamps alone. Individual transactions remain visible when
 grouping cannot be established.
 
+### Proposed compact transaction metadata for activity
+
+This is a proposed extension, not a claim that the current script-history
+response contains fees or that private authority is enabled. It permits an
+accurate activity summary for the cases below without eager full-payload recovery.
+"Fully displayed" means accurate title, amount semantics, pool label, date, and
+status, not complete transaction details. Confirmation remains independent of
+detail completeness.
+
+This proposed extension adds only:
+
+| Transaction metadata | Meaning | Proposed encoding |
+| --- | --- | --- |
+| Optional exact fee | Actual whole-transaction fee calculated by the publisher; unknown, zero, and not applicable remain distinct | Canonical unsigned base-128 variable-length integer when present; a presence bit |
+| Transparent input count | Complete count of non-coinbase transparent inputs, not merely inputs discovered for this wallet; zero for coinbase | Canonical unsigned base-128 variable-length integer |
+| Has shielded components | Presence of any supported shielded transaction component, including historical Sprout, Sapling, Orchard, and Ironwood; not proof of real input/output roles or ownership | One versioned flag bit |
+
+Reuse spare event flag bits only in a newly versioned codec. Do not reinterpret
+existing v10 bytes. A 10,000-zatoshi fee takes two bytes and an input count below
+128 takes one byte: typically **three additional bytes per event**, with no
+additional flag byte. For today's 51/79/43-byte compact receive/spend/local-spend
+forms, that example becomes 54/82/46 bytes. Larger values take more bytes.
+This is encoding arithmetic, not a measured storage, page-count, or latency claim.
+
+Metadata belongs to the creating transaction for a receive and the spending
+transaction for a spend. Initially repeat it on events, verifying agreement for
+one transaction identity across scripts and pages. An adjacent receive/local-spend
+pair generally refers to two transactions and must not share their fee. Defer
+fragment-local metadata deduplication until measurement justifies its complexity.
+
+Exclude transparent output counts/totals, separate or aggregate shielded value
+balances, and per-pool presence flags from this minimum proposal. Obtain dates
+from wallet-accepted block data using event height; do not repeat timestamps in
+events. Keep recipient addresses, memos, and external output breakdowns in detail
+recovery. Counts are bounded by the decoded type and supported transaction rules;
+monetary values must preserve exact zatoshis and protocol bounds, not a fixed u16
+or rounded-unit approximation. Reject noncanonical, overflowing, or truncated
+variable-length encodings and unknown version/flag combinations.
+
+The publisher supplies these facts under the existing trusted-indexer accuracy
+and completeness model. A txid, publication digest, or successful note decryption
+does not authenticate an asserted fee or count. Preserve independently known
+local fees; contradictory metadata is an integrity failure, not permission to
+overwrite local facts or silently choose one assertion.
+
+#### Activity calculation and explicit acceptance
+
+Group spend events by spending txid and deduplicate by input index and consumed
+outpoint. Join owned receives under that transaction identity. Grouping collects
+known inputs; it does not prove the absence of another party's input.
+
+For a non-coinbase transaction, derive the amount leaving the selected account
+only when the exact fee is known, there are no shielded components, required
+owned-effect coverage and input values are complete, and the number of distinct
+inputs owned by that account equals the published complete transparent input
+count. Conflicting identities or metadata invalidate the calculation.
+
+`amount leaving account = owned input total - owned output total - fee`
+
+For a 1 ZEC input, 0.5999 ZEC owned change, and 0.0001 ZEC fee, this is
+0.4 ZEC. A positive amount supports an aggregate outgoing payment in the ordinary
+case; it does not identify recipients. Preserve local intent and ownership/scope
+evidence for explicit self-transfers and gross payment presentation. Do not
+assign the whole fee to one account in a shared-funding transaction or apply this
+formula to mixed transactions. Coinbase is not an ordinary fee-paying send.
+
+When classification or attribution is unresolved, keep a tappable transaction
+row with explicit incomplete details. A complete known account movement may be
+shown as a debit/credit, including fees, rather than labeled as the payment
+amount. If owned recovery itself is incomplete, the movement is also partial or
+unavailable. Keep payment amount, account movement, fee availability, detail
+completeness, and chain status separate. Do not use missing outgoing output rows
+to suppress a known spend. Existing locally constructed transaction details take
+precedence over a reconstructed summary.
+
+| Case | Covered before txid enrichment | Explicitly accepted limitation |
+| --- | --- | --- |
+| Transparent-only send funded entirely by the selected account | Aggregate amount leaving the account, fee, transparent classification, chain status/date, after complete owned-effect recovery | Recipient addresses and individual external outputs wait until opening |
+| Several owned transparent inputs or external recipients | Group events by spending txid; show the aggregate outgoing amount under the same complete-recovery and ownership conditions | No per-recipient breakdown |
+| Ordinary transparent-only receive | Owned received amount, transparent classification, chain status/date | Sender/input details are deferred |
+| Locally created transaction with retained records | Preserve its existing payment details and classification | Do not replace rich records with partial summaries |
+| Shared funding across accounts or parties | Known selected-account movement and whole-transaction fee | Do not infer that account's payment amount or fee share |
+| Self-transfer or cross-account transfer | Ownership/scope-based presentation where supported | Net movement alone does not reproduce gross self-payment presentation |
+| Shielding or unshielding involving owned outputs | Combine transparent and shielded recovery | Classification stays provisional when other effects could change it |
+| Shielded send to an external transparent address | Preserve facts from existing shielded recovery | Owned-script TPIR does not supply the external output; the new metadata alone cannot complete this case |
+| Other mixed-pool transaction | Known owned effects and independent chain status | Exact payment breakdown and pool classification may remain incomplete |
+| TEX or another multi-transaction operation | Individual recovered transactions | Original grouping and combined operation fee are not guaranteed |
+| Restored swap/gift-card operation | Underlying recovered financial activity | Application intent and labels require retained records or separate evidence |
+| Pending, expired, or conflicted transaction | Existing local-send and status paths | Confirmed TPIR does not provide pending history |
+| Incomplete ledger coverage | Visible known activity marked partial | No final account movement, payment amount, or spendability claim from incomplete evidence |
+
 ### History completeness and storage contract
 
 The library/consumer boundary must expose the following distinctions, using
@@ -424,13 +515,44 @@ already safe.
 
 ### Capability and rollout boundary
 
-Full private reconstruction of external unshielding recipients requires an
-additional payload capability: a privately retrieved transaction, or a complete
-enough transaction summary including transparent outputs. Define its identity
-binding, completeness/trust model, size limits, and fee evidence explicitly.
-Raw transaction bytes alone need not supply transparent prevout values required
-for fee computation; any supplementary retrieval must obey the same privacy
-policy. Display metadata never establishes ledger coverage or spendability.
+A future **txid PIR** capability retrieves private transaction details separately
+from owned-script history discovery. This proposal does not implement that
+service or assert that current Enhance PIR is a generic txid payload store.
+
+Opening a transaction prioritizes its missing detail obligation. Render cached
+facts immediately after navigation; do not block opening the screen on a network
+request. One durable enrichment path can serve both explicitly scheduled
+background work and on-demand priority, deduplicated by transaction identity.
+The initial policy does not require eager enrichment of every historical row.
+
+Retrieve canonical transaction data privately and validate its identity with the
+version-aware transaction library. A txid binds transaction effects according to
+its format; do not claim that matching it authenticates all authorizing bytes or
+proves mining. Maintain independent accepted-chain placement evidence. Fetch
+missing parent information privately only when independent exact-fee calculation
+requires prevout values not already known. Verify the parent identity and referenced
+output; resolving that output does not require calculating the parent's fee or
+recursively recovering its ancestors.
+
+Persist validated facts and bounded, resumable obligations; reuse caches and
+refresh the detail screen and activity row after commits. Keep an incomplete,
+retryable or explicitly unsupported state on failure. Under `PrivateRequired`,
+never fall back to public txid, script, address, outpoint, or parent lookups.
+Query identity and protected locators remain private across paging and retries;
+variable request counts/timing still require a composed privacy assessment.
+
+Transaction data does not guarantee recovery of contact names, original payment
+intent, collaborative payment attribution, or swap/gift-card/TEX grouping. Keep
+payload work necessary to recover owned financial effects independent of optional
+display enrichment, so closing a detail screen never stops financial recovery.
+Recipient, fee-verification, and ledger completion remain distinct capabilities.
+
+Display metadata never establishes ledger coverage or spendability. The compact
+metadata extension and future txid PIR have separate compatibility and
+qualification gates. Implement the metadata through a new journal/shard
+publication lineage and explicit consumer migration; preserve existing
+journals/publications rather than reinterpret them. Measure packing and query
+counts before accepting the extension.
 
 Preparation must preserve existing history and support honest partial history,
 including fixtures for mixed transactions and both discovery orders. Production
@@ -736,6 +858,17 @@ Projection supports known wallet activity in history without raw transaction
 bytes; it does not promise a complete external-recipient list. Join transparent
 effects to existing shielded effects by transaction identity and expose missing
 details under the [history contract](#history-completeness-and-storage-contract).
+
+The proposed compact activity metadata projects an optional fee, complete
+transparent input count, and shielded-components bit with source provenance.
+Apply it in the same database transaction as the associated source facts, keeping
+known local fees immutable and rejecting contradictory assertions. Rewind only
+the invalidated source contribution. A supplied fee is not independently verified
+merely because a transaction row exists. Derive account movement and payment
+amount as distinct history values under the
+[activity calculation](#activity-calculation-and-explicit-acceptance); incomplete
+display details do not advance ledger coverage or change input eligibility.
+
 Preserve explicit coinbase classification in the existing balance and
 input-selection queries: a missing transaction index must not make a PIR-created
 output non-coinbase. Unknown fee, time, or other unavailable metadata stays
@@ -860,6 +993,18 @@ spend, UTXO, balance, and coverage results. Include:
 - incomplete external outputs with shielded change, unknown fees/memos, mixed
   self-transfers and payments, and missing TEX grouping evidence; known debits
   remain visible without fabricated payment amounts or double-counted transfers;
+- compact metadata versus an independent block-derived oracle: actual fee,
+  complete input count, shielded-component presence, creating/spending transaction
+  attribution, unknown/zero/non-applicable fees, and conflicting assertions;
+- several owned inputs and external recipients, shared funding, and complete
+  versus incomplete owned-effect coverage; fee metadata alone must require no
+  txid lookup and must not assign a whole fee to one shared-funding account;
+- canonical variable-length boundaries, overflow/truncation, unknown flags and
+  versions, inline/page equivalence, fragment resumption, new publication lineage,
+  and measured directory/page packing and query-count changes;
+- future on-demand txid retrieval, validated cache reuse, bounded parent-output
+  resolution, failure/cancellation without public fallback, and enrichment updates
+  to the same visible history identity;
 - same-height and sealed/provisional reorgs, re-mining, actual rewind heights,
   and concurrent import/deletion/policy changes;
 - proof that shadow cannot alter public balances, selection, locks, address-use,
