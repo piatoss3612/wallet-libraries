@@ -710,6 +710,50 @@ public enrichment.
    Preserve local evidence and applied private policy; arbitrary historical
    binaries are not supported rollback targets.
 
+**Library plan**
+
+Phase 6 is qualification. It adds tests, and production changes only where a
+test exposes a defect. It adds no API or table unless a test needs one.
+
+1. **Block-derived oracle.** A test-only fixture chain of real transactions with
+   transparent bundles, placed at local heights. The oracle walks it block by
+   block and derives, per watched script, the exact receives, spends, UTXO set,
+   balance (with coinbase maturity) and coverage, without the ledger's code. A
+   fixture source indexes the same chain by script, as a server would, and
+   delivers it in pages and split commits, out of order, with spends before
+   their receives and duplicate replays. The candidate diagnostics, the
+   projection, the snapshot and the selectors must equal the oracle after
+   recovery, promotion, active commits, rewind, and re-mining. Legacy rows are
+   compared only as the promotion discrepancy check.
+2. **Migration fixtures.** Raw-SQL wallets at the migration state before the
+   ledger schema, with real keys and addresses:
+   - fresh;
+   - long-lived: legacy receives and spends, a coinbase output, a pending local
+     send holding a lock, and a transaction un-mined by an earlier rewind;
+   - multi-seed, with a cross-account transfer;
+   - imported-only;
+   - hardware-first, without a spending key.
+
+   Each upgrades without a seed, then recovers, is qualified, and is promoted.
+   Local sends, locks, and local history are preserved.
+3. **Failure injection.**
+   - Trigger aborts and a disk-full limit (`PRAGMA max_page_count`) during
+     candidate and active commits, promotion, demotion, and rewind. Each leaves
+     the prior state; a retry reaches the state of an uninterrupted run.
+   - A crash before `COMMIT`, simulated by copying the database and its WAL
+     while the transaction is open, and reopening the copy.
+   - Same-height reorgs, sealed and provisional coverage across a reorg,
+     re-mining at another height, account deletion, a lowered birthday, and a
+     stale policy generation, for active accounts as well as candidates.
+4. **Repair and rollback.**
+   - The projection is rebuildable from durable evidence: demoting and
+     promoting again restores lost ledger-origin rows exactly.
+   - Each kind of ledger state raises `min_reader_version` to the first reader
+     that interprets it. A wallet that requires a newer reader is refused by
+     every entry point, without changes, and keeps its applied private policy.
+     The designated rollback targets are builds whose reader version meets the
+     requirement; older builds fail closed.
+
 **Vizor steps**
 
 1. Run the fixture coordinator through the integrated Rust/Flutter interfaces:
