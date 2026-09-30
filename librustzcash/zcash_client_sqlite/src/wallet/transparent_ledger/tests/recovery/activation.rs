@@ -36,11 +36,7 @@ fn import_account(st: &mut State, seed: u8) -> AccountUuid {
 /// A file-backed wallet like [`shadow_wallet`] with `extra` imported accounts, returned after
 /// the test account.
 fn shadow_wallet_with(extra: u8) -> (State, Vec<AccountUuid>) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = wallet_state(TestDbFactory::file_backed());
     let mut accounts = vec![st.test_account().unwrap().id()];
     for seed in 0..extra {
         accounts.push(import_account(&mut st, 7 + seed));
@@ -1976,4 +1972,52 @@ mod gating {
             Err(SqliteClientError::TransparentAuthorityUnavailable)
         ));
     }
+}
+
+#[test]
+fn a_fixture_can_inject_and_clear_a_future_reader_requirement() {
+    let (st, account) = shadow_wallet();
+    let current = reader_version(&st);
+    let future = crate::wallet::transparent_ledger::TPIR_READER_VERSION + 1;
+    st.wallet().set_transparent_reader_version(future);
+    assert!(matches!(
+        st.wallet().db().transparent_ledger_snapshot(account, ConfirmationsPolicy::MIN),
+        Err(SqliteClientError::TransparentLedgerIncompatible { required }) if required == future
+    ));
+    st.wallet().set_transparent_reader_version(current);
+    assert_eq!(reader_version(&st), current);
+    snapshot(&st, account);
+}
+
+#[test]
+fn transaction_fixture_commits_and_rolls_back_wallet_writes() {
+    let (mut st, account) = shadow_wallet();
+    let ws = watch(&st, account);
+    let outpoint = OutPoint::new([0x91; 32], 0);
+    let utxo = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+        outpoint,
+        transparent::bundle::TxOut::new(
+            Zatoshis::const_from_u64(70_000),
+            external(&ws).script().into(),
+        ),
+        Some(ws.target.unwrap().height),
+        Some(account),
+        Some(TransparentKeyScope::EXTERNAL),
+        None,
+    )
+    .unwrap();
+    let before = count(&st, "transparent_received_outputs");
+    let rolled_back: Result<(), SqliteClientError> =
+        st.wallet_mut().with_wallet_transaction(|db| {
+            db.put_received_transparent_utxo(&utxo)?;
+            Err(SqliteClientError::CorruptedData(
+                "injected fixture failure".into(),
+            ))
+        });
+    assert!(rolled_back.is_err());
+    assert_eq!(count(&st, "transparent_received_outputs"), before);
+    st.wallet_mut()
+        .with_wallet_transaction(|db| db.put_received_transparent_utxo(&utxo))
+        .unwrap();
+    assert_eq!(count(&st, "transparent_received_outputs"), before + 1);
 }

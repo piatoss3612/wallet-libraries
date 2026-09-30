@@ -31,13 +31,18 @@ const LOCAL_CONSTRUCTION: i64 = 1;
 
 type State = TestState<BlockCache, crate::testing::db::TestDb, LocalNetwork>;
 
-/// A wallet with one account whose only funds are a publicly discovered transparent UTXO.
-fn funded_wallet() -> (State, TransparentAddress, OutPoint) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(TestDbFactory::default())
+/// A fresh wallet state, preserving real migrations and independent database ownership.
+fn wallet_state(factory: TestDbFactory) -> State {
+    TestBuilder::new()
+        .with_data_store_factory(factory)
         .with_block_cache(BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+        .build()
+}
+
+/// A wallet with one account whose only funds are a publicly discovered transparent UTXO.
+fn funded_wallet() -> (State, TransparentAddress, OutPoint) {
+    let mut st = wallet_state(TestDbFactory::default());
     let account = st.test_account().cloned().unwrap();
     let taddr = *st
         .wallet()

@@ -43,16 +43,16 @@ because Vizor's own migration depends on it. See `docs/zip318_removal.md`.
 Three directories:
 
 ```text
-librustzcash/   forked upstream crates   generated; sync deletes and rewrites it
+librustzcash/   forked upstream crates   edited directly; upstream arrives as merges
 wallet-lib/     the backend selector     hand-written
 zakura/         new Zakura work          hand-written; includes Enhance PIR
 ```
 
-Only `librustzcash/` and the root `Cargo.toml` are generated. Anything
-hand-written goes in `wallet-lib/` or `zakura/` and is listed in
-`layout.extra_members` in `manifests/sources.toml`, which the workspace
-generator appends to the members it produces — a crate placed under
-`librustzcash/` would be deleted by the next sync.
+The root `Cargo.toml` is generated; vendored Rust sources are edited directly
+and maintained through vendor-branch merges. New crates belong in `wallet-lib/`
+or `zakura/` and are listed in `layout.extra_members` in
+`manifests/sources.toml`. Checked-in protobuf bindings have an explicit
+regeneration command, separate from ordinary builds.
 
 ## How the rewiring works
 
@@ -73,6 +73,12 @@ obsolete ZIP 233 feature that Common no longer provides.
 There is no `[patch.crates-io]` anywhere in this design. Package names differ
 from their upstream originals, so consumers declare these crates directly and
 every edge is explicit — the same reasoning `libraries` documents.
+
+## Development
+
+See [docs/development.md](docs/development.md) for focused checks, build ownership,
+explicit protobuf generation, and final validation. Agent guidance lives in
+[AGENTS.md](AGENTS.md).
 
 ## Verify
 

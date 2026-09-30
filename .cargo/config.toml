@@ -1,0 +1,8 @@
+# Opt-in candidate for iteration measurements. Final CI uses the test profile.
+[profile.iteration]
+inherits = "test"
+opt-level = 1
+debug = 1
+
+[profile.iteration.package."*"]
+opt-level = 3
