@@ -585,6 +585,72 @@ all four selectors and final storage at 99 blocks and admit them at 100.
    rewind, promotion, account changes, and later enhancement. Preserve richer
    independently recorded local-send details when partial discoveries arrive.
 
+**Library plan**
+
+Phase 5 adds one read, and no tables or stored markers:
+`TransparentLedgerRead::transaction_history_details(account, txids)`. It returns
+`TransactionHistoryDetails` for each requested transaction in which the account
+has a recorded output or spend, from one read. A spend an active ledger
+recovered before its output counts, so a debit is never hidden; a candidate
+ledger stays isolated from history. Everything it reports is derived
+from facts the wallet already holds: `v_received_outputs` and its spends, the
+`transactions` row, the scan queue, the account's ledger coverage, and the
+queued follow-on work. So rewinds, promotion, account changes, and later
+enhancement change the result as soon as they change those facts, and there is
+nothing to invalidate.
+
+- **Owned effects.** A `PoolEffect` for every pool the build supports:
+  transparent (with `transparent-inputs`), Sapling, and Orchard and Ironwood
+  (with `orchard`). Each carries the known amounts received and spent by the
+  account, and an `EffectCompleteness`:
+  - `Complete`: no owned effect in the pool can be missing;
+    - for a transaction the wallet constructed and stored, while its funding
+      account's recorded outputs remain, every pool, except
+      a shielded pool with an output the wallet sent to an external address
+      without recording a receipt, until the transaction is scanned: local
+      construction defers the receipt of a payment to one of the wallet's own
+      external shielded addresses. Creation evidence alone, such as an
+      outbox's, is not enough;
+    - for a shielded pool of an account with a full viewing key, a mined
+      transaction at or below the fully scanned height, or an unmined one whose
+      full data is stored while the fully scanned height is the chain tip,
+      since its spends link only to notes already found. An account imported
+      from an incoming viewing key never detects its spends, so its shielded
+      effects stay incomplete;
+    - for the transparent pool under `PrivateRequired`, a mined transaction of
+      an active, unquarantined account covered through its height, with no
+      unresolved spend in that transaction;
+  - `PublicDiscovery`: the transparent pool while public discovery holds
+    authority (`Public`, `PrivateShadow`) and no parent of the transaction's
+    unresolved inputs is queued for retrieval. Its completeness is not
+    verified;
+  - `Incomplete`: anything else. The known amounts are partial, not final.
+- **Payment details.** `Complete` when the wallet constructed and stored the
+  transaction. Otherwise every effect must be settled, every shielded memo of
+  the account's outputs retrieved, and either the account only received, or
+  the value it spent equals what it received back, plus its recorded outputs to
+  others, plus the recorded fee. Full data alone is not enough: outputs the
+  wallet cannot decrypt, such as one sent with its outgoing viewing key
+  discarded, are never recorded. One recovered memo does not complete a
+  transaction.
+- **Fee.** `Known(fee)` when the account spent something and the fee is
+  recorded; `NotApplicable` when the account provably spent nothing (every pool
+  complete or public, no known spend, and no creation evidence without stored
+  details); otherwise `Unknown`. Unknown is never zero.
+- **Classification.** `LocalIntent` for a transaction the wallet created;
+  `Reconstructed` when every pool is complete or public and either the account
+  only received or its spent value is accounted for; otherwise `Provisional`.
+  A missing memo alone never makes a transaction provisional.
+- **Pending private details.** The `PrivateTransparentDetail`s withheld for this
+  transaction under the current policy: a queued parent retrieval for one of
+  its inputs, or its own mixed-transaction marker. The queue keeps only the
+  latest dependent of a parent, so a transaction's parents are also found
+  through its unresolved inputs in `transparent_spend_map`.
+
+Local construction details are kept when discovery arrives in either order,
+because projection and payload ingestion upsert the shared `transactions` row;
+tests check this through the new read.
+
 **Vizor steps**
 
 1. Update `rust/src/wallet/sync/transactions.rs`: make
