@@ -83,8 +83,7 @@ fn reject_dependents(transaction: &rusqlite::Transaction) -> Result<(), WalletMi
             .prepare(
                 "SELECT name FROM sqlite_master WHERE type = 'trigger'
                  AND (instr(sql, 'orchard_ironwood_migration') > 0
-                      OR instr(sql, 'zip318_kind') > 0
-                      OR instr(sql, 'v_transactions') > 0)",
+                      OR instr(sql, 'zip318_kind') > 0)",
             )?
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?,
@@ -129,9 +128,11 @@ impl RusqliteMigration for Migration {
             )
         })?;
         transaction.execute_batch("DROP VIEW v_transactions")?;
+        // Install the retained projection before validating dependent application views. A view
+        // selecting retained fields must continue to resolve throughout SQLite's DROP COLUMN.
+        transaction.execute_batch(&updated)?;
         reject_dependents(transaction)?;
         transaction.execute_batch("ALTER TABLE transactions DROP COLUMN zip318_kind")?;
-        transaction.execute_batch(&updated)?;
         Ok(())
     }
 
@@ -283,6 +284,7 @@ mod tests {
             .conn
             .execute_batch(
                 "CREATE VIEW ext_app_history AS SELECT txid FROM v_transactions;
+                 CREATE VIEW ext_zip318_history AS SELECT zip318_kind FROM v_transactions;
                  CREATE VIEW ext_app_migrations AS SELECT * FROM orchard_ironwood_migrations;",
             )
             .unwrap();
@@ -297,7 +299,7 @@ mod tests {
                 Err(MigratorError::Migration {
                     error: WalletMigrationError::CorruptedData(reason),
                     ..
-                }) if reason.contains("ext_app_history") && reason.contains("ext_app_migrations")
+                }) if !reason.contains("ext_app_history") && reason.contains("ext_zip318_history") && reason.contains("ext_app_migrations")
             ),
             "{result:?}"
         );
@@ -308,7 +310,7 @@ mod tests {
 
         db_data
             .conn
-            .execute_batch("DROP VIEW ext_app_history; DROP VIEW ext_app_migrations;")
+            .execute_batch("DROP VIEW ext_zip318_history; DROP VIEW ext_app_migrations;")
             .unwrap();
         WalletMigrator::new()
             .with_seed(Secret::new(seed.to_vec()))
@@ -316,5 +318,9 @@ mod tests {
             .init_or_migrate_to(&mut db_data, &[MIGRATION_ID])
             .unwrap();
         assert!(!has_column(&db_data.conn, "transactions", "zip318_kind"));
+        db_data
+            .conn
+            .prepare("SELECT * FROM ext_app_history")
+            .unwrap();
     }
 }
