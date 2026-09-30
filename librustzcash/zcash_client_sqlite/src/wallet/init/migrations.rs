@@ -679,6 +679,11 @@ pub(crate) mod tests {
     };
     use schemerz::Migration;
 
+    /// The migration state just before the transparent ledger schema, for upgrade fixtures.
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) const BEFORE_TRANSPARENT_LEDGER: &[Uuid] =
+        super::transparent_ledger_schema::DEPENDENCIES;
+
     /// `CURRENT_LEAF_MIGRATIONS` must list exactly the leaves of the migration dependency graph
     /// (the migrations that no other migration depends on), so that migrating to the current
     /// state reaches every migration. This recomputes the leaves from the graph and checks them

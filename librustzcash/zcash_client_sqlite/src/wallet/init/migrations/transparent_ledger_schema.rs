@@ -21,7 +21,7 @@ pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x8f290af0_eb5a_4f1e_88d4_3550fc0
 // The ledger tables reference `accounts`, `addresses`, `transactions`, and
 // `transparent_received_outputs`, whose current shapes are established by earlier migrations.
 // Depending on every current leaf keeps this migration last in the DAG.
-const DEPENDENCIES: &[Uuid] = &[
+pub(super) const DEPENDENCIES: &[Uuid] = &[
     drop_zip318_pool_migration::MIGRATION_ID,
     v_tx_outputs_transparent_addresses::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
