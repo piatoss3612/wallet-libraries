@@ -33,3 +33,10 @@ transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "
 [dev-dependencies]
 tempfile = "3"
 serde_json.workspace = true
+zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "transparent-inputs", "test-dependencies", "unstable"] }
+zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
+zcash_keys = { workspace = true, features = ["transparent-inputs"] }
+
+[[example]]
+name = "recover-activity"
+required-features = ["wallet"]

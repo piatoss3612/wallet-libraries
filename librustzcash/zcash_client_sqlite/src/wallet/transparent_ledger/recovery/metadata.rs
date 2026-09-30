@@ -4,6 +4,70 @@ use zcash_client_backend::data_api::transparent_ledger::{
     TransactionMetadata, WholeTransactionFee,
 };
 
+/// Candidate assertions observed at the event's current placement. These remain
+/// unqualified diagnostics and never grant financial authority.
+pub(super) fn candidate_metadata(
+    conn: &rusqlite::Connection,
+    account: AccountRef,
+    txid: TxId,
+    mined_height: BlockHeight,
+) -> Result<Option<TransactionMetadata>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT m.fee_state, m.fee_zat, m.input_count, m.shielded
+         FROM tpir_transaction_metadata m
+         WHERE m.account_id = :account AND m.txid = :txid AND m.mined_height = :height
+         AND (EXISTS (SELECT 1 FROM tpir_receive_events e
+              JOIN tpir_receive_observations o ON o.receive_id = e.id
+              WHERE e.account_id = m.account_id AND e.txid = m.txid
+              AND e.mined_height = m.mined_height AND o.revision_id = m.revision_id)
+           OR EXISTS (SELECT 1 FROM tpir_spend_events e
+              JOIN tpir_spend_observations o ON o.spend_id = e.id
+              WHERE e.account_id = m.account_id AND e.spending_txid = m.txid
+              AND e.mined_height = m.mined_height AND o.revision_id = m.revision_id))",
+    )?;
+    let mut rows = stmt.query(named_params![":account": account.0, ":txid": txid.as_ref(),
+        ":height": u32::from(mined_height)])?;
+    let mut result = None;
+    while let Some(row) = rows.next()? {
+        let state: i64 = row.get(0)?;
+        let value: Option<i64> = row.get(1)?;
+        let fee = match (state, value) {
+            (0, Some(value)) => {
+                WholeTransactionFee::Exact(Zatoshis::from_nonnegative_i64(value).map_err(|_| {
+                    SqliteClientError::CorruptedData("invalid candidate transaction fee".into())
+                })?)
+            }
+            (1, None) => WholeTransactionFee::Unknown,
+            (2, None) => WholeTransactionFee::NotApplicable,
+            _ => {
+                return Err(SqliteClientError::CorruptedData(
+                    "invalid candidate fee state".into(),
+                ));
+            }
+        };
+        let inputs: u32 = row.get(2)?;
+        let shielded: i64 = row.get(3)?;
+        if !matches!(shielded, 0 | 1) || (fee == WholeTransactionFee::NotApplicable && inputs != 0)
+        {
+            return Err(SqliteClientError::CorruptedData(
+                "invalid candidate transaction metadata".into(),
+            ));
+        }
+        let metadata = TransactionMetadata {
+            fee,
+            transparent_input_count: inputs,
+            has_shielded_components: shielded == 1,
+        };
+        if result.is_some_and(|prior| prior != metadata) {
+            return Err(SqliteClientError::CorruptedData(
+                "conflicting candidate transaction metadata".into(),
+            ));
+        }
+        result = Some(metadata);
+    }
+    Ok(result)
+}
+
 pub(super) fn apply_metadata(
     conn: &rusqlite::Connection,
     account: AccountRef,

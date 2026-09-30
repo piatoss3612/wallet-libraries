@@ -8021,6 +8021,8 @@ dependencies = [
  "transparent-wallet-store",
  "url",
  "zakura-client-backend",
+ "zakura-client-sqlite",
+ "zakura-keys",
  "zakura-primitives",
  "zakura-protocol",
  "zakura-transparent",

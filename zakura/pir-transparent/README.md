@@ -22,3 +22,26 @@ publication lineage changes fail closed and require a compatible companion store
 This is recovery plumbing; sending, Vizor and public transaction-details fetching
 are outside its scope. The headless real-source harness and final qualification
 are tracked with the activity metadata implementation plan.
+
+`recover-activity` is a bounded headless harness for real HTTP retrieval into
+library SQLite candidate evidence, followed by a durable reopen comparison:
+
+```sh
+cargo run --locked -p zakura-pir-transparent --features wallet \
+  --example recover-activity -- independent-snapshot.json new-evidence-directory \
+  http://127.0.0.1:18192 http://127.0.0.1:18193
+```
+
+The snapshot supplies `birthday`, `through`, up to 64 public locking `scripts`,
+and consecutive independently collected RPC `headers` from birthday minus one
+through the target. Each header has `height`, display-order `hash`, `time`, and
+`previousblockhash`. Keep the raw RPC responses beside this snapshot. Never derive
+accepted headers from a publisher manifest. The endpoints should be controlled
+capture proxies so every HTTP attempt can be checked for public lookup fallback.
+
+This harness inserts public scripts as controlled fixture watches and uses empty
+shielded scan fixtures. It proves transparent metadata delivery and SQLite
+persistence, not ownership of those public funds or shielded scan correctness.
+It requires nonempty metadata recovery and reader version 7, reopens both stores,
+and refuses qualification or account activation. Its output directory must be
+new; failed runs and partial stores remain available for diagnosis.

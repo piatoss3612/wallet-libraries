@@ -312,6 +312,55 @@ fn conflicting_metadata_rejects_the_commit_and_preserves_existing_evidence() {
 }
 
 #[test]
+fn candidate_metadata_survives_reopen_without_granting_authority() {
+    let (mut st, account) = shadow_wallet();
+    let ws = watch(&st, account);
+    let at = below_target(&ws, 0);
+    let metadata = TransactionMetadata {
+        fee: WholeTransactionFee::Exact(zat(0)),
+        transparent_input_count: 1,
+        has_shielded_components: false,
+    };
+    let legacy = receive(81, external(&ws), 40_000, at - 1);
+    let mut change = receive(82, external(&ws), 15_000, at);
+    change.metadata = Some(metadata);
+    let mut payment = spend(82, &legacy, at);
+    payment.metadata = Some(metadata);
+    let mut c = commit(&ws);
+    c.receives = vec![legacy, change];
+    c.spends = vec![payment];
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    let before = recovery(&st, account);
+    assert_eq!(before.receives[0].metadata, None);
+    assert_eq!(before.receives[1].metadata, Some(metadata));
+    assert_eq!(before.spends[0].metadata, Some(metadata));
+    assert_eq!(count(&st, "tpir_qualified_revisions"), 0);
+    assert_eq!(count(&st, "tpir_active_accounts"), 0);
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reopened.sqlite");
+    conn(&st)
+        .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+        .unwrap();
+    let reopened = crate::WalletDb::from_connection(
+        Connection::open(path).unwrap(),
+        *st.network(),
+        crate::util::SystemClock,
+        zcash_client_backend::data_api::testing::TestRng::seed_from_u64(0),
+    )
+    .with_transparent_ledger_mode(PrivateShadow);
+    assert_eq!(
+        reopened.transparent_candidate_recovery(account).unwrap(),
+        before
+    );
+    assert_eq!(
+        reopened.transparent_watch_set(account).unwrap().lifecycle,
+        zcash_client_backend::data_api::transparent_ledger::AccountLifecycle::Candidate
+    );
+}
+
+#[test]
 fn a_spend_of_an_unrecovered_output_is_incomplete() {
     let (mut st, account, _) = active_wallet();
     let ws = watch(&st, account);
