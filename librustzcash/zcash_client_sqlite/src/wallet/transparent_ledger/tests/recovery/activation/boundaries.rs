@@ -26,6 +26,7 @@ fn active_and_candidate() -> (State, AccountUuid, AccountUuid, ReceiveEvent) {
     (st, accounts[0], accounts[1], receive)
 }
 
+mod configuration;
 mod financial;
 mod revisions;
 mod work;

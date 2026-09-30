@@ -894,3 +894,22 @@ These revision writes require reader version 6 through the existing durable read
 Version-5 binaries, including the earlier #71 source rollback candidate, are not suitable
 rollback readers for version-6 wallets. There is no new table or automatic release designation;
 a published version-6-aware rollback artifact still requires the release evidence above.
+
+`transparent_recovery_work(account, limit)` returns at most 256 work items, with pending
+pages first and missing supported-coverage intervals second. The batch includes the current
+recovery context and `has_more`; requery after committing it. Unsupported ranges are missing
+work, not completion evidence. Page intervals suppress duplicate range scheduling. The item
+bound does not bound a pending page's address list or total database-read cost. Applications
+continue to choose sources, verify their results and control network concurrency.
+
+Consumers can compose `get_wallet_summary` and `transparent_ledger_snapshot` inside
+`WalletDb::transactionally`; both reuse that database snapshot. Required-private summary
+amounts still withhold transparent funds; the authority snapshot supplies only eligible
+transparent amounts. Do not combine separate reads across a promotion, rewind or mixed spend.
+
+Use `WalletHandleModes` with `with_handle_modes` when opening handles, including exceptional
+and background paths. It explicitly configures status, transparent discovery and (with
+Orchard) enhancement together. It does not persist policy, capture a generation, cancel
+requests or establish a dispatch fence. The application must cancel and join public work,
+apply the durable policy transition, replace handle configuration and discard stale queued
+work. Existing setters remain available for compatibility.

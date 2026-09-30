@@ -319,6 +319,23 @@ pub struct WalletDb<C, P, CL, R> {
     gap_limits: GapLimits,
 }
 
+/// Explicit disclosure modes for every lane supported by a wallet handle.
+///
+/// This is handle configuration, not a durable policy transition or dispatch authorization.
+/// Reopened handles must configure again. Before tightening policy, the application must
+/// cancel and join outstanding public work, apply the durable transition, and discard stale
+/// work. Each lane retains its distinct semantics; required-private durable policy dominates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalletHandleModes {
+    /// Status lookup disclosure policy.
+    pub status: TransactionStatusMode,
+    /// Transparent discovery and financial authority policy.
+    pub transparent_ledger: TransparentLedgerMode,
+    /// Payload enhancement policy.
+    #[cfg(feature = "orchard")]
+    pub enhancement: EnhancementMode,
+}
+
 /// A wrapper for a SQLite transaction affecting the wallet database.
 pub struct SqlTransaction<'conn>(&'conn rusqlite::Transaction<'conn>);
 
@@ -519,6 +536,23 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
 }
 
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Configures all supported lanes together. See [`WalletHandleModes`] for transition
+    /// responsibilities. This does not persist policy or capture a database generation.
+    pub fn set_handle_modes(&mut self, modes: WalletHandleModes) {
+        self.status_mode = Some(modes.status);
+        self.transparent_ledger_mode = Some(modes.transparent_ledger);
+        #[cfg(feature = "orchard")]
+        {
+            self.enhancement_mode = Some(modes.enhancement);
+        }
+    }
+
+    /// Configures every supported lane on a newly opened or existing handle.
+    pub fn with_handle_modes(mut self, modes: WalletHandleModes) -> Self {
+        self.set_handle_modes(modes);
+        self
+    }
+
     /// Selects status disclosure policy. Discard outstanding work snapshots when changing it.
     /// This is not persisted; each reopened handle must select a mode explicitly.
     /// SQLite status dispatch also requires [`Self::set_transparent_ledger_mode`]: an
@@ -662,6 +696,9 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
 impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// Performs several wallet database operations atomically.
     ///
+    /// Wallet summaries and transparent authority snapshots reuse this transaction, so
+    /// callers can compose shielded and transparent amounts from one database state.
+    ///
     /// This has two main uses:
     /// - Ensuring that several [`WalletRead`] and/or [`WalletWrite`] operations either
     ///   all succeed, or nothing happens. If an error occurs inside the given function,
@@ -695,9 +732,6 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
 
     /// Performs wallet database operations and writes to application-owned extension tables
     /// atomically within a single database transaction.
-    ///
-    /// Wallet summaries and transparent authority snapshots reuse this transaction, so
-    /// callers can compose shielded and transparent amounts from one database state.
     ///
     /// This behaves like [`WalletDb::transactionally`], but additionally provides an
     /// [`ExtensionTransaction`] handle sharing the same transaction. This allows an
@@ -1936,6 +1970,23 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
     }
 
     #[cfg(feature = "transparent-inputs")]
+    fn transparent_recovery_work(
+        &self,
+        account: Self::AccountId,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<TransparentRecoveryWorkBatch<Self::AccountId>, Self::Error> {
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            wallet::transparent_ledger::recovery_work(
+                conn,
+                &self.params,
+                self.transparent_ledger_mode,
+                account,
+                limit,
+            )
+        })
+    }
+
+    #[cfg(feature = "transparent-inputs")]
     fn transparent_candidate_recovery(
         &self,
         account: Self::AccountId,
@@ -1971,23 +2022,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
         &mut self,
         commit: TransparentLedgerCommit<Self::AccountId>,
     ) -> Result<CommitOutcome, Self::Error> {
-    #[cfg(feature = "transparent-inputs")]
-    fn transparent_recovery_work(
-        &self,
-        account: Self::AccountId,
-        limit: std::num::NonZeroUsize,
-    ) -> Result<TransparentRecoveryWorkBatch<Self::AccountId>, Self::Error> {
-        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
-            wallet::transparent_ledger::recovery_work(
-                conn,
-                &self.params,
-                self.transparent_ledger_mode,
-                account,
-                limit,
-            )
-        })
-    }
-
         wallet::transparent_ledger::apply_commit(
             self.conn.borrow(),
             &self.params,
@@ -4530,6 +4564,59 @@ extern crate assert_matches;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn combined_handle_modes_configure_every_supported_lane_and_transaction_handle() {
+        use super::{WalletDb, WalletHandleModes};
+        use zcash_client_backend::data_api::{
+            status::TransactionStatusMode, transparent_ledger::TransparentLedgerMode,
+        };
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db = WalletDb::for_path(
+            file.path(),
+            zcash_protocol::consensus::Network::MainNetwork,
+            crate::testing::db::test_clock(),
+            crate::testing::db::test_rng(),
+        )
+        .unwrap();
+        assert_eq!(db.status_mode, None);
+        assert_eq!(db.transparent_ledger_mode, None);
+        #[cfg(feature = "orchard")]
+        assert_eq!(db.enhancement_mode, None);
+        for transparent_ledger in [
+            TransparentLedgerMode::Public,
+            TransparentLedgerMode::PrivateShadow,
+            TransparentLedgerMode::PrivateRequired,
+        ] {
+            for status in [
+                TransactionStatusMode::Public,
+                TransactionStatusMode::Private,
+            ] {
+                let modes = WalletHandleModes { status, transparent_ledger,
+                    #[cfg(feature = "orchard")]
+                    enhancement: zcash_client_backend::data_api::enhance_pir::EnhancementMode::PrivateIronwood,
+                };
+                db = db.with_handle_modes(modes);
+                db.transactionally::<_, _, super::error::SqliteClientError>(|tx| {
+                    assert_eq!(tx.status_mode, Some(status));
+                    assert_eq!(tx.transparent_ledger_mode, Some(transparent_ledger));
+                    #[cfg(feature = "orchard")]
+                    assert_eq!(tx.enhancement_mode, Some(modes.enhancement));
+                    Ok(())
+                })
+                .unwrap();
+            }
+        }
+        let reopened = WalletDb::for_path(
+            file.path(),
+            zcash_protocol::consensus::Network::MainNetwork,
+            crate::testing::db::test_clock(),
+            crate::testing::db::test_rng(),
+        )
+        .unwrap();
+        assert_eq!(reopened.status_mode, None);
+        assert_eq!(reopened.transparent_ledger_mode, None);
+    }
+
     use std::time::{Duration, SystemTime};
 
     use secrecy::{ExposeSecret, Secret, SecretVec};
