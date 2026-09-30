@@ -42,6 +42,8 @@ impl RusqliteMigration for Migration {
                 ))?;
             }
         }
+        conn.execute_batch("CREATE INDEX idx_tpir_receive_mined_script ON tpir_receive_events(script) WHERE mined_height IS NOT NULL;
+            CREATE INDEX idx_tpir_spend_mined_script ON tpir_spend_events(prevout_script) WHERE mined_height IS NOT NULL;")?;
         conn.execute(
             "UPDATE tpir_meta SET min_reader_version = MAX(min_reader_version, 7) WHERE id = 0",
             [],

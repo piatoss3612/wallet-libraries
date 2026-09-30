@@ -8,14 +8,17 @@ pub(super) fn retain_owned<P: consensus::Parameters>(
     account: AccountRef,
     addresses: &mut BTreeMap<TransparentAddress, WatchOrigin>,
 ) -> Result<(), SqliteClientError> {
-    let mut stmt = conn.prepare_cached("SELECT cached_transparent_receiver_address FROM addresses WHERE account_id != ?1 AND cached_transparent_receiver_address IS NOT NULL")?;
-    for encoded in stmt.query_map([account.0], |row| row.get::<_, String>(0))? {
-        let encoded = encoded?;
-        let address = Address::decode(params, &encoded)
-            .and_then(|a| a.to_transparent_address())
-            .ok_or_else(|| {
-                SqliteClientError::CorruptedData("invalid transparent owner receiver".into())
-            })?;
+    let mut stmt = conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM addresses WHERE cached_transparent_receiver_address = ?1 AND account_id != ?2)")?;
+    let mut excluded = vec![];
+    for address in addresses.keys() {
+        let encoded = Address::Transparent(*address).encode(params);
+        if stmt.query_row(rusqlite::params![encoded, account.0], |row| {
+            row.get::<_, bool>(0)
+        })? {
+            excluded.push(*address);
+        }
+    }
+    for address in excluded {
         addresses.remove(&address);
     }
     Ok(())

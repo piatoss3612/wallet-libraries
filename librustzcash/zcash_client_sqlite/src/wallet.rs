@@ -4240,6 +4240,8 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     truncation_height: BlockHeight,
     rescan_floor: BlockHeight,
 ) -> Result<BlockHeight, SqliteClientError> {
+    // Preserve the typed refusal before any chain mutation, including tree truncation.
+    transparent_ledger::durable_policy(conn)?;
     let last_scanned_height = conn.query_row("SELECT MAX(height) FROM blocks", [], |row| {
         let h = row.get::<_, Option<u32>>(0)?;
 

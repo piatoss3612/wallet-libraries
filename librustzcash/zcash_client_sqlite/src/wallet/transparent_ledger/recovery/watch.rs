@@ -164,15 +164,9 @@ impl Watch {
         gap_limits: &GapLimits,
     ) -> Result<[Option<u32>; 3], SqliteClientError> {
         let mut stmt = conn.prepare_cached(
-            "SELECT script FROM tpir_receive_events
-             WHERE mined_height IS NOT NULL
-             UNION
-             SELECT prevout_script FROM tpir_spend_events
-             WHERE mined_height IS NOT NULL",
+            "SELECT EXISTS(SELECT 1 FROM tpir_receive_events WHERE script = ?1 AND mined_height IS NOT NULL)
+             OR EXISTS(SELECT 1 FROM tpir_spend_events WHERE prevout_script = ?1 AND mined_height IS NOT NULL)"
         )?;
-        let used = stmt
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
-            .collect::<Result<BTreeSet<_>, _>>()?;
         let mut max_used: [Option<u32>; 3] = [None; 3];
         for (address, origin) in &self.window_origins {
             let (WatchOrigin::Derived { scope, index }
@@ -181,7 +175,7 @@ impl Watch {
                 continue;
             };
             if let Some(slot) = scope_slot(*scope)
-                && used.contains(&script_bytes(address))
+                && stmt.query_row([script_bytes(address)], |row| row.get::<_, bool>(0))?
             {
                 max_used[slot] =
                     Some(max_used[slot].map_or(index.index(), |m| m.max(index.index())));
