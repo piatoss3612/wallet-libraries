@@ -1,5 +1,5 @@
 //! Qualification: an independent block-derived oracle, upgrades of representative wallets,
-//! failure injection, and chain and account lifecycle.
+//! failure injection, chain and account lifecycle, and repair and rollback.
 
 use super::*;
 
@@ -7,6 +7,7 @@ mod failpoints;
 mod lifecycle;
 mod migration;
 mod oracle;
+mod repair;
 
 /// Every row of every table, the ledger's included, in a canonical order.
 fn full_dump(conn: &Connection) -> Vec<(String, Vec<String>)> {
