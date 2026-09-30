@@ -518,6 +518,7 @@ impl<P, CL, R> WalletDb<rusqlite::Connection, P, CL, R> {
     ) -> Result<Self, rusqlite::Error> {
         rusqlite::Connection::open(path).and_then(move |conn| {
             rusqlite::vtab::array::load_module(&conn)?;
+            wallet::transparent_ledger::writer_guard::register(&conn)?;
             Ok(WalletDb {
                 conn,
                 params,
@@ -676,6 +677,8 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// and transparent input selection likewise require that ledger mode; see
     /// `set_transparent_ledger_mode`. Modes are not persisted; reopened handles must be
     /// configured again.
+    /// Compatible writer capability is registered before migration or transactional writes;
+    /// construction alone does not grant a supplied connection permission to mutate SQL directly.
     pub fn from_connection(conn: C, params: P, clock: CL, rng: R) -> Self {
         WalletDb {
             conn,
@@ -711,6 +714,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     where
         F: FnOnce(&mut WalletDb<SqlTransaction<'_>, &P, &CL, &mut R>) -> Result<A, E>,
     {
+        wallet::transparent_ledger::writer_guard::register(self.conn.borrow())?;
         let tx = self.conn.borrow_mut().transaction()?;
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
@@ -773,6 +777,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             &ExtensionTransaction<'_>,
         ) -> Result<A, E>,
     {
+        wallet::transparent_ledger::writer_guard::register(self.conn.borrow())?;
         let tx = self.conn.borrow_mut().transaction()?;
         let mut wdb = WalletDb {
             conn: SqlTransaction(&tx),
@@ -2137,6 +2142,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     ) -> Result<zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult, Self::Error>
     {
         use zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult;
+        wallet::transparent_ledger::writer_guard::register(self.conn.borrow())?;
         let tx = self.conn.borrow_mut().transaction()?;
         let result = wallet::enhance_pir::apply_records(
             &tx,

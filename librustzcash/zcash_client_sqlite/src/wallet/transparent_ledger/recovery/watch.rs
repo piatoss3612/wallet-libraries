@@ -277,6 +277,18 @@ fn pending_pages(
             })?
             .map(|script| address_from_script(script?))
             .collect::<Result<_, _>>()?;
+        let target_height: u32 = row.get(4)?;
+        let target_hash: Vec<u8> = row.get(5)?;
+        let accepted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM blocks WHERE height = ?1 AND hash = ?2)",
+            rusqlite::params![target_height, &target_hash],
+            |row| row.get(0),
+        )?;
+        if !accepted {
+            return Err(SqliteClientError::CorruptedData(
+                "transparent pending page target is not accepted".into(),
+            ));
+        }
         result.push(PendingPage {
             request: PageRequest {
                 page: row.get(1)?,

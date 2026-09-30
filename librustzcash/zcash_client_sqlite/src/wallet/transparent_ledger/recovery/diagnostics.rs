@@ -27,6 +27,15 @@ pub(super) fn recovery_status(
 ) -> Result<RecoveryStatus, SqliteClientError> {
     let account_ref = watch.account.internal_id();
     let target = local_target(conn)?;
+    let missing_placement: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM tpir_receive_events e WHERE e.account_id = ?1 AND e.mined_height IS NOT NULL AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.height = e.mined_height)) OR EXISTS (SELECT 1 FROM tpir_spend_events e WHERE e.account_id = ?1 AND e.mined_height IS NOT NULL AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.height = e.mined_height))",
+        [account_ref.0], |row| row.get(0),
+    )?;
+    if missing_placement {
+        return Err(SqliteClientError::CorruptedData(
+            "transparent event placement is not accepted; rewind and recover before use".into(),
+        ));
+    }
 
     let coverage::Coverage {
         supported,

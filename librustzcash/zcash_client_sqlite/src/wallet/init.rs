@@ -614,6 +614,8 @@ fn init_wallet_db_internal<
     target_migrations: &[Uuid],
     verify_seed_relevance: bool,
 ) -> Result<(), MigratorError<Uuid, WalletMigrationError>> {
+    super::transparent_ledger::writer_guard::register(wdb.conn.borrow())
+        .map_err(|e| MigratorError::Adapter(WalletMigrationError::from(e)))?;
     let seed = seed.map(Rc::new);
 
     verify_sqlite_version_compatibility(wdb.conn.borrow()).map_err(MigratorError::Adapter)?;

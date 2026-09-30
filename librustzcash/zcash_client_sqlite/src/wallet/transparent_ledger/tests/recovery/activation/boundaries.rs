@@ -30,3 +30,6 @@ mod configuration;
 mod financial;
 mod revisions;
 mod work;
+
+mod lifecycle;
+
