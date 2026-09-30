@@ -1,10 +1,10 @@
 //! Functions for initializing the various databases.
 
-use std::{borrow::BorrowMut, fmt, rc::Rc};
+use std::{borrow::BorrowMut, collections::HashSet, fmt, rc::Rc};
 
 use rand_core::Rng;
 use regex::Regex;
-use schemerz::{Migrator, MigratorError};
+use schemerz::{Migration as _, Migrator, MigratorError};
 use schemerz_rusqlite::{RusqliteAdapter, RusqliteMigration};
 use secrecy::SecretVec;
 use shardtree::error::ShardTreeError;
@@ -65,6 +65,13 @@ pub enum WalletMigrationError {
 
     /// Reverting the specified migration is not supported.
     CannotRevert(Uuid),
+
+    /// The database records applied migrations that this build does not know.
+    ///
+    /// A newer build, or a build whose migrations were later withdrawn, wrote the database. This
+    /// build cannot interpret its schema, so it refuses to open it rather than read or write state
+    /// whose meaning it does not know. External migrations must be supplied on every call.
+    UnknownMigrations(Vec<Uuid>),
 
     /// Some other unexpected violation of database business rules occurred
     Other(Box<SqliteClientError>),
@@ -143,6 +150,14 @@ impl fmt::Display for WalletMigrationError {
             }
             WalletMigrationError::CannotRevert(uuid) => {
                 write!(f, "Reverting migration {uuid} is not supported")
+            }
+            WalletMigrationError::UnknownMigrations(ids) => {
+                let ids: Vec<_> = ids.iter().map(Uuid::to_string).collect();
+                write!(
+                    f,
+                    "The wallet database was written by a newer or incompatible build; unknown migrations: {}",
+                    ids.join(", ")
+                )
             }
             WalletMigrationError::Other(err) => {
                 write!(f, "Unexpected violation of database business rules: {err}")
@@ -641,9 +656,23 @@ fn init_wallet_db_internal<
         adapter.init().expect("Migrations table setup succeeds.");
     }
 
-    // Now that we are certain that the migrations table exists, verify that if the database
-    // already contains account data, any stored UFVKs correspond to the same network that the
-    // migrations are being run for.
+    // Now that we are certain that the migrations table exists, refuse a database written by a
+    // build whose migrations this one does not know, before reading any of its schema.
+    let internal_migrations = migrations::all_migrations(
+        &wdb.params,
+        wdb.clock.clone(),
+        wdb.rng.clone(),
+        seed.clone(),
+    );
+    let known = internal_migrations
+        .iter()
+        .chain(external_migrations.iter().flatten())
+        .map(|migration| migration.id())
+        .collect();
+    verify_no_unknown_migrations(wdb.conn.borrow(), &known).map_err(MigratorError::Adapter)?;
+
+    // Verify that if the database already contains account data, any stored UFVKs correspond to
+    // the same network that the migrations are being run for.
     verify_network_compatibility(wdb.conn.borrow(), &wdb.params).map_err(MigratorError::Adapter)?;
 
     // Now create the adapter that we're actually going to use to perform the migrations, and
@@ -651,15 +680,7 @@ fn init_wallet_db_internal<
     let adapter = RusqliteAdapter::new(wdb.conn.borrow_mut(), Some(MIGRATIONS_TABLE.to_string()));
     let mut migrator = Migrator::new(adapter);
     migrator
-        .register_multiple(
-            migrations::all_migrations(
-                &wdb.params,
-                wdb.clock.clone(),
-                wdb.rng.clone(),
-                seed.clone(),
-            )
-            .into_iter(),
-        )
+        .register_multiple(internal_migrations.into_iter())
         .expect("Wallet migration registration should have been successful.");
     if let Some(migrations) = external_migrations {
         migrator.register_multiple(migrations.into_iter())?;
@@ -698,6 +719,27 @@ fn init_wallet_db_internal<
     }
 
     Ok(())
+}
+
+/// Refuses a database whose migrations table records migrations outside `known`.
+///
+/// The migrator skips applied migrations it does not know, so without this check an older build
+/// would open a database a newer build migrated, and read or write schema it cannot interpret.
+fn verify_no_unknown_migrations(
+    conn: &rusqlite::Connection,
+    known: &HashSet<Uuid>,
+) -> Result<(), WalletMigrationError> {
+    let mut stmt = conn.prepare(&format!("SELECT id FROM {MIGRATIONS_TABLE}"))?;
+    let mut unknown = stmt
+        .query_map([], |row| row.get::<_, [u8; 16]>(0).map(Uuid::from_bytes))?
+        .filter(|id| !matches!(id, Ok(id) if known.contains(id)))
+        .collect::<Result<Vec<_>, _>>()?;
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        unknown.sort();
+        Err(WalletMigrationError::UnknownMigrations(unknown))
+    }
 }
 
 /// Verify that the sqlite version in use supports the features required by this library.
@@ -1017,6 +1059,74 @@ mod tests {
             let name: String = row.get(0).unwrap();
             assert!(!name.starts_with("ext_"));
         }
+    }
+
+    /// A database carrying a migration this build does not know was written by a newer or
+    /// withdrawn build. It is refused before any schema is read or written, and external
+    /// migrations supplied by the caller count as known.
+    #[test]
+    fn unknown_applied_migrations_are_refused() {
+        use schemerz::MigratorError;
+        use schemerz_rusqlite::RusqliteMigration;
+        use std::collections::HashSet;
+        use uuid::Uuid;
+
+        use super::{WalletMigrationError, WalletMigrator};
+
+        // The `ironwood_compact_encryption` migration published in zakura-client-sqlite 0.1.0-rc6
+        // and withdrawn in 0.1.0-rc7.
+        const WITHDRAWN: Uuid = Uuid::from_u128(0x2eac815d_67ca_4fb4_b534_066102a0fba2);
+
+        struct External;
+        impl schemerz::Migration<Uuid> for External {
+            fn id(&self) -> Uuid {
+                WITHDRAWN
+            }
+            fn dependencies(&self) -> HashSet<Uuid> {
+                HashSet::new()
+            }
+            fn description(&self) -> &'static str {
+                "An external migration that reuses the withdrawn identifier."
+            }
+        }
+        impl RusqliteMigration for External {
+            type Error = WalletMigrationError;
+            fn up(&self, _: &rusqlite::Transaction) -> Result<(), WalletMigrationError> {
+                Ok(())
+            }
+            fn down(&self, _: &rusqlite::Transaction) -> Result<(), WalletMigrationError> {
+                Ok(())
+            }
+        }
+
+        let data_file = NamedTempFile::new().unwrap();
+        let mut db = WalletDb::for_path(
+            data_file.path(),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO schemer_migrations (id) VALUES (?1)",
+                [WITHDRAWN.as_bytes().to_vec()],
+            )
+            .unwrap();
+        let schema = describe_tables(&db.conn).unwrap();
+
+        assert!(matches!(
+            WalletMigrator::new().init_or_migrate(&mut db),
+            Err(MigratorError::Adapter(WalletMigrationError::UnknownMigrations(ids)))
+                if ids == vec![WITHDRAWN]
+        ));
+        assert_eq!(describe_tables(&db.conn).unwrap(), schema);
+
+        WalletMigrator::new()
+            .with_external_migrations(vec![Box::new(External)])
+            .init_or_migrate(&mut db)
+            .unwrap();
     }
 
     #[test]

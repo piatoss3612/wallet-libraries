@@ -436,6 +436,7 @@ const PUBLIC_MIGRATION_STATES: &[&[Uuid]] = &[
     V_0_22_0_RC1,
     V_0_22_0_RC2,
     V_ZAKURA_0_1_0_RC5,
+    V_ZAKURA_0_1_0_RC7,
 ];
 
 /// Leaf migrations in the 0.4.0 release.
@@ -603,6 +604,18 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
     tree_retained_checkpoints::MIGRATION_ID,
     tx_status_observation_intent::MIGRATION_ID,
     v_transactions_zip318_kind::MIGRATION_ID,
+];
+
+/// Leaf migrations in the published zakura-client-sqlite 0.1.0-rc7 release.
+///
+/// 0.1.0-rc6 is omitted: its `ironwood_compact_encryption` migration was withdrawn in rc7, so
+/// no later build can open a database that applied it.
+pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
+    status_inclusion_evidence::MIGRATION_ID,
+    v_tx_outputs_transparent_addresses::MIGRATION_ID,
+    ivk_item_cache::MIGRATION_ID,
+    add_transparent_receiver_address_index::MIGRATION_ID,
+    add_transparent_value_index::MIGRATION_ID,
 ];
 
 /// The migration that creates the transparent ledger schema.

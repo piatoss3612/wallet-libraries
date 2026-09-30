@@ -60,6 +60,45 @@ fn remove_zip318_column(view: &str) -> Option<String> {
     ))
 }
 
+/// Fails, naming them, if views or triggers outside this library's schema still depend on the
+/// objects this migration removes.
+///
+/// SQLite rejects `DROP COLUMN` while any view or trigger in the schema fails to resolve, with an
+/// error that does not say which one. An application view over `v_transactions`, or one left by a
+/// build this fork never shipped, would otherwise make the upgrade fail without explanation.
+fn reject_dependents(transaction: &rusqlite::Transaction) -> Result<(), WalletMigrationError> {
+    let mut dependents = vec![];
+    let views: Vec<String> = transaction
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'view'")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for view in views {
+        let query = format!("SELECT * FROM \"{}\" LIMIT 0", view.replace('"', "\"\""));
+        if transaction.prepare(&query).is_err() {
+            dependents.push(view);
+        }
+    }
+    dependents.extend(
+        transaction
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'
+                 AND (instr(sql, 'orchard_ironwood_migration') > 0
+                      OR instr(sql, 'zip318_kind') > 0
+                      OR instr(sql, 'v_transactions') > 0)",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    if dependents.is_empty() {
+        Ok(())
+    } else {
+        Err(WalletMigrationError::CorruptedData(format!(
+            "views or triggers depend on the ZIP 318 schema this upgrade removes: {}",
+            dependents.join(", ")
+        )))
+    }
+}
+
 impl RusqliteMigration for Migration {
     type Error = WalletMigrationError;
 
@@ -90,6 +129,7 @@ impl RusqliteMigration for Migration {
             )
         })?;
         transaction.execute_batch("DROP VIEW v_transactions")?;
+        reject_dependents(transaction)?;
         transaction.execute_batch("ALTER TABLE transactions DROP COLUMN zip318_kind")?;
         transaction.execute_batch(&updated)?;
         Ok(())
@@ -216,5 +256,65 @@ mod tests {
             })
             .unwrap();
         assert_eq!(txid, vec![1]);
+    }
+
+    /// A view that depends on the removed schema is named, and the wallet is left exactly as it
+    /// was, instead of SQLite failing the upgrade with an anonymous error.
+    #[test]
+    fn dependent_views_are_named_and_the_upgrade_rolls_back() {
+        use crate::wallet::init::WalletMigrationError;
+        use schemerz::MigratorError;
+
+        let data_file = NamedTempFile::new().unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap();
+        let seed = [0xab; 32];
+        WalletMigrator::new()
+            .with_seed(Secret::new(seed.to_vec()))
+            .ignore_seed_relevance()
+            .init_or_migrate_to(&mut db_data, DEPENDENCIES)
+            .unwrap();
+        db_data
+            .conn
+            .execute_batch(
+                "CREATE VIEW ext_app_history AS SELECT txid FROM v_transactions;
+                 CREATE VIEW ext_app_migrations AS SELECT * FROM orchard_ironwood_migrations;",
+            )
+            .unwrap();
+
+        let result = WalletMigrator::new()
+            .with_seed(Secret::new(seed.to_vec()))
+            .ignore_seed_relevance()
+            .init_or_migrate_to(&mut db_data, &[MIGRATION_ID]);
+        assert!(
+            matches!(
+                &result,
+                Err(MigratorError::Migration {
+                    error: WalletMigrationError::CorruptedData(reason),
+                    ..
+                }) if reason.contains("ext_app_history") && reason.contains("ext_app_migrations")
+            ),
+            "{result:?}"
+        );
+        let conn = &db_data.conn;
+        assert!(has_column(conn, "transactions", "zip318_kind"));
+        assert!(has_column(conn, "v_transactions", "zip318_kind"));
+        assert!(table_exists(conn, "orchard_ironwood_migrations"));
+
+        db_data
+            .conn
+            .execute_batch("DROP VIEW ext_app_history; DROP VIEW ext_app_migrations;")
+            .unwrap();
+        WalletMigrator::new()
+            .with_seed(Secret::new(seed.to_vec()))
+            .ignore_seed_relevance()
+            .init_or_migrate_to(&mut db_data, &[MIGRATION_ID])
+            .unwrap();
+        assert!(!has_column(&db_data.conn, "transactions", "zip318_kind"));
     }
 }
