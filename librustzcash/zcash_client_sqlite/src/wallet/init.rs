@@ -869,6 +869,7 @@ mod tests {
             db::TABLE_SCHEMERZ_MIGRATIONS,
             db::TABLE_SENT_NOTES,
             db::TABLE_SQLITE_SEQUENCE,
+            db::TABLE_TPIR_TRANSACTION_METADATA,
             db::TABLE_TPIR_ACTIVE_ACCOUNTS,
             db::TABLE_TPIR_CANDIDATE_WINDOWS,
             db::TABLE_TPIR_COVERAGE,

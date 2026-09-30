@@ -1,8 +1,9 @@
 //! History completeness: owned effects, payment details, fees, and classification.
 
 use zcash_client_backend::data_api::transparent_ledger::{
-    DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification, PoolEffect,
-    PrivateTransparentDetail, TransactionHistoryDetails,
+    AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification,
+    PoolEffect, PrivateTransparentDetail, TransactionHistoryDetails, TransactionMetadata,
+    WholeTransactionFee,
 };
 use zcash_protocol::PoolType;
 
@@ -185,6 +186,132 @@ fn a_debit_with_change_and_no_known_recipient_stays_visible() {
 }
 
 #[test]
+fn transaction_metadata_establishes_payment_only_for_complete_sole_funding() {
+    for (inputs, shielded, fee, expected) in [
+        (
+            1,
+            false,
+            WholeTransactionFee::Exact(zat(1_000)),
+            AggregatePayment::Exact(zat(24_000)),
+        ),
+        (
+            1,
+            false,
+            WholeTransactionFee::Exact(zat(0)),
+            AggregatePayment::Exact(zat(25_000)),
+        ),
+        (
+            2,
+            false,
+            WholeTransactionFee::Exact(zat(1_000)),
+            AggregatePayment::Unknown,
+        ),
+        (
+            1,
+            true,
+            WholeTransactionFee::Exact(zat(1_000)),
+            AggregatePayment::Unknown,
+        ),
+        (
+            1,
+            false,
+            WholeTransactionFee::Unknown,
+            AggregatePayment::Unknown,
+        ),
+    ] {
+        let (mut st, account, unspent) = active_wallet();
+        let ws = watch(&st, account);
+        let at = below_target(&ws, 0);
+        let metadata = TransactionMetadata {
+            fee,
+            transparent_input_count: inputs,
+            has_shielded_components: shielded,
+        };
+        let mut payment = spend(6, &unspent, at);
+        payment.metadata = Some(metadata);
+        let change = ReceiveEvent {
+            outpoint: OutPoint::new([6; 32], 1),
+            metadata: Some(metadata),
+            ..receive(6, external(&ws), 15_000, at)
+        };
+        let mut c = commit(&ws);
+        c.receives = vec![change];
+        c.spends = vec![payment.clone()];
+        c.coverage = full_coverage(&ws);
+        apply(&mut st, c).unwrap();
+        let entry = history(&st, account, payment.spending_txid);
+        assert_eq!(entry.aggregate_payment, expected);
+        let evidence = entry.transaction_metadata.unwrap();
+        assert_eq!(evidence.metadata, metadata);
+        assert_eq!(evidence.provenance.len(), 1);
+        assert_eq!(evidence.provenance[0].source, b"fixture");
+        assert_eq!(evidence.provenance[0].revision, b"r1");
+        assert_eq!(entry.account_movement.net(), -25_000);
+        assert!(entry.account_movement.complete);
+        assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+        assert_eq!(
+            entry.fee,
+            if inputs == 1 && !shielded {
+                match fee {
+                    WholeTransactionFee::Exact(f) => FeeState::Known(f),
+                    _ => FeeState::Unknown,
+                }
+            } else {
+                FeeState::Unknown
+            }
+        );
+        assert_eq!(
+            conn(&st)
+                .query_row(
+                    "SELECT min_reader_version FROM tpir_meta WHERE id = 0",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            7
+        );
+    }
+}
+
+#[test]
+fn conflicting_metadata_rejects_the_commit_and_preserves_existing_evidence() {
+    let (mut st, account, unspent) = active_wallet();
+    let ws = watch(&st, account);
+    let at = below_target(&ws, 0);
+    let metadata = TransactionMetadata {
+        fee: WholeTransactionFee::Exact(zat(1_000)),
+        transparent_input_count: 1,
+        has_shielded_components: false,
+    };
+    let mut payment = spend(6, &unspent, at);
+    payment.metadata = Some(metadata);
+    let mut c = commit(&ws);
+    c.spends = vec![payment.clone()];
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    let original = history(&st, account, payment.spending_txid);
+    let mut c = commit(&watch(&st, account));
+    let mut contradiction = payment;
+    contradiction.metadata.as_mut().unwrap().fee = WholeTransactionFee::Exact(zat(2_000));
+    c.spends = vec![contradiction];
+    c.receives = vec![receive(77, external(&ws), 5_000, at)];
+    assert_eq!(
+        rejected(&mut st, c),
+        CommitRejection::Integrity(IntegrityFailure::TransactionMetadata(TxId::from_bytes(
+            [6; 32]
+        )))
+    );
+    assert_eq!(history(&st, account, TxId::from_bytes([6; 32])), original);
+    assert!(
+        st.wallet()
+            .db()
+            .transaction_history_details(account, &[TxId::from_bytes([77; 32])])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn a_spend_of_an_unrecovered_output_is_incomplete() {
     let (mut st, account, _) = active_wallet();
     let ws = watch(&st, account);
@@ -286,6 +413,7 @@ fn local_intent_survives_discovery_of_the_same_transaction() {
     let fixture = revision(1, true);
     let ws = watch(&st, account);
     let recovered = ReceiveEvent {
+        metadata: None,
         outpoint: OutPoint::new(*txid.as_ref(), output_index),
         address: taddr,
         value: zat(50_000),

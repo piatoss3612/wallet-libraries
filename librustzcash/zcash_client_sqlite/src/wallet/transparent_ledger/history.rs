@@ -9,8 +9,9 @@ use std::rc::Rc;
 
 use rusqlite::{OptionalExtension as _, named_params, types::Value};
 use zcash_client_backend::data_api::transparent_ledger::{
-    DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification, PoolEffect,
-    TransactionHistoryDetails, TransparentLedgerMode,
+    AccountMovement, AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState,
+    HistoryClassification, MetadataProvenance, PoolEffect, TransactionHistoryDetails,
+    TransactionMetadata, TransactionMetadataEvidence, TransparentLedgerMode, WholeTransactionFee,
 };
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
@@ -80,6 +81,80 @@ fn transparent_discovery<P: consensus::Parameters>(
         .then_some(ledger.status.covered_through)
         .flatten();
     Ok(TransparentDiscovery::Private { covered_through })
+}
+
+/// Current qualified facts, kept separate from independently stored local-send records.
+fn metadata_evidence(
+    conn: &rusqlite::Connection,
+    account: i64,
+    txid: &TxId,
+) -> Result<Option<TransactionMetadataEvidence>, SqliteClientError> {
+    let mut stmt = conn.prepare_cached("SELECT m.fee_state, m.fee_zat, m.input_count, m.shielded,
+        r.source, r.revision, r.lineage
+        FROM tpir_transaction_metadata m
+        JOIN tpir_revisions r ON r.id = m.revision_id
+        JOIN tpir_qualified_revisions q ON q.revision_id = r.id
+        JOIN tpir_active_accounts a ON a.account_id = m.account_id
+        WHERE m.account_id = :account AND m.txid = :txid
+        AND NOT EXISTS (SELECT 1 FROM tpir_quarantined_sources s WHERE s.source = r.source)
+        AND NOT EXISTS (SELECT 1 FROM tpir_quarantined_accounts a WHERE a.account_id = m.account_id)
+        AND (EXISTS (SELECT 1 FROM tpir_receive_events e JOIN tpir_receive_observations o ON o.receive_id = e.id
+            WHERE e.account_id = m.account_id AND e.txid = m.txid AND e.mined_height = m.mined_height
+            AND o.revision_id = m.revision_id)
+        OR EXISTS (SELECT 1 FROM tpir_spend_events e JOIN tpir_spend_observations o ON o.spend_id = e.id
+            WHERE e.account_id = m.account_id AND e.spending_txid = m.txid AND e.mined_height = m.mined_height
+            AND o.revision_id = m.revision_id)) ORDER BY r.source, r.lineage")?;
+    let mut rows = stmt.query(named_params![":account": account, ":txid": txid.as_ref()])?;
+    let mut evidence: Option<TransactionMetadataEvidence> = None;
+    while let Some(row) = rows.next()? {
+        let fee = match row.get::<_, i64>(0)? {
+            0 => WholeTransactionFee::Exact(zatoshis(row.get(1)?)?),
+            1 => WholeTransactionFee::Unknown,
+            2 => WholeTransactionFee::NotApplicable,
+            _ => {
+                return Err(SqliteClientError::CorruptedData(
+                    "invalid transaction fee state".into(),
+                ));
+            }
+        };
+        let metadata = TransactionMetadata {
+            fee,
+            transparent_input_count: row.get(2)?,
+            has_shielded_components: row.get(3)?,
+        };
+        let provenance = MetadataProvenance {
+            source: row.get(4)?,
+            revision: row.get(5)?,
+            lineage: row.get(6)?,
+        };
+        if let Some(existing) = &mut evidence {
+            if existing.metadata != metadata {
+                return Err(SqliteClientError::CorruptedData(
+                    "conflicting transaction metadata".into(),
+                ));
+            }
+            existing.provenance.push(provenance);
+        } else {
+            evidence = Some(TransactionMetadataEvidence {
+                metadata,
+                provenance: vec![provenance],
+            });
+        }
+    }
+    Ok(evidence)
+}
+
+fn published_owned_inputs(
+    conn: &rusqlite::Connection,
+    account: i64,
+    txid: &TxId,
+) -> Result<u32, SqliteClientError> {
+    Ok(conn.query_row("SELECT COUNT(DISTINCT s.input_index) FROM tpir_spend_events s
+        WHERE s.account_id = :account AND s.spending_txid = :txid AND s.mined_height IS NOT NULL
+        AND EXISTS (SELECT 1 FROM tpir_spend_observations o JOIN tpir_qualified_revisions q ON q.revision_id = o.revision_id
+            JOIN tpir_revisions r ON r.id = o.revision_id WHERE o.spend_id = s.id
+            AND NOT EXISTS (SELECT 1 FROM tpir_quarantined_sources qs WHERE qs.source = r.source))",
+        named_params![":account": account, ":txid": txid.as_ref()], |row| row.get(0))?)
 }
 
 /// The `transactions` row facts a history entry depends on.
@@ -500,6 +575,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 completeness: completeness(pool)?,
             });
         }
+        let transaction_metadata = metadata_evidence(conn, account_id, txid)?;
         let settled = effects.iter().all(|e| e.completeness.is_settled());
         let spent: u64 = known.iter().map(|(_, _, spent)| spent.into_u64()).sum();
         let received: u64 = known
@@ -532,8 +608,56 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         } else {
             DetailCompleteness::Incomplete
         };
+        let owned_inputs = published_owned_inputs(conn, account_id, txid)?;
+        let transparent_effect = effects.iter().find(|e| e.pool == PoolType::Transparent);
+        let sole_transparent_funding = transaction_metadata.as_ref().is_some_and(|e| {
+            !e.metadata.has_shielded_components
+                && owned_inputs > 0
+                && owned_inputs == e.metadata.transparent_input_count
+        });
+        let inferred_payment = transaction_metadata.as_ref().and_then(|e| {
+            let WholeTransactionFee::Exact(fee) = e.metadata.fee else {
+                return None;
+            };
+            let effect = transparent_effect?;
+            if !sole_transparent_funding || effect.completeness != EffectCompleteness::Complete {
+                return None;
+            }
+            effect
+                .spent
+                .into_u64()
+                .checked_sub(effect.received.into_u64())?
+                .checked_sub(fee.into_u64())
+                .and_then(|v| Zatoshis::from_u64(v).ok())
+        });
+        let recorded_sent = sent_elsewhere(conn, account_id, tx.id)?;
+        let aggregate_payment = if tx.constructed {
+            AggregatePayment::Exact(
+                Zatoshis::from_u64(recorded_sent)
+                    .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
+            )
+        } else if let Some(amount) = inferred_payment {
+            AggregatePayment::Exact(amount)
+        } else if recorded_sent > 0 {
+            AggregatePayment::Partial(
+                Zatoshis::from_u64(recorded_sent)
+                    .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?,
+            )
+        } else {
+            AggregatePayment::Unknown
+        };
         let fee = match tx.fee {
-            Some(fee) if spent > 0 => FeeState::Known(fee),
+            Some(fee)
+                if spent > 0 && (transaction_metadata.is_none() || sole_transparent_funding) =>
+            {
+                FeeState::Known(fee)
+            }
+            _ if sole_transparent_funding && inferred_payment.is_some() => {
+                match transaction_metadata.as_ref().unwrap().metadata.fee {
+                    WholeTransactionFee::Exact(fee) => FeeState::Known(fee),
+                    _ => FeeState::Unknown,
+                }
+            }
             _ if received_only => FeeState::NotApplicable,
             _ => FeeState::Unknown,
         };
@@ -541,13 +665,22 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         // can.
         let classification = if tx.created_locally {
             HistoryClassification::LocalIntent
-        } else if received_only || payments_accounted {
+        } else if received_only || payments_accounted || inferred_payment.is_some() {
             HistoryClassification::Reconstructed
         } else {
             HistoryClassification::Provisional
         };
 
         entries.push(TransactionHistoryDetails {
+            transaction_metadata,
+            aggregate_payment,
+            account_movement: AccountMovement {
+                received,
+                spent,
+                complete: effects
+                    .iter()
+                    .all(|e| e.completeness == EffectCompleteness::Complete),
+            },
             txid: *txid,
             mined_height: tx.mined_height,
             effects,

@@ -395,6 +395,7 @@ pub(super) fn placed_receives(
     )?;
     stmt.query_and_then(named_params![":account_id": account_ref.0], |row| {
         Ok::<_, SqliteClientError>(ReceiveEvent {
+            metadata: None,
             outpoint: OutPoint::new(row.get(0)?, row.get(1)?),
             address: address_from_script(row.get(2)?)?,
             value: Zatoshis::from_nonnegative_i64(row.get(3)?)
@@ -421,6 +422,7 @@ pub(super) fn placed_spends(
     )?;
     stmt.query_and_then(named_params![":account_id": account_ref.0], |row| {
         Ok::<_, SqliteClientError>(SpendEvent {
+            metadata: None,
             spending_txid: TxId::from_bytes(row.get(0)?),
             input_index: row.get(1)?,
             prevout: OutPoint::new(row.get(2)?, row.get(3)?),
