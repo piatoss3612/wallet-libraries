@@ -3,6 +3,7 @@
 //! The stored policy is what dispatch trusts. A mode change increments
 //! `policy_generation` in the same SQLite transaction; same-mode reapplication does not.
 
+use rusqlite::named_params;
 use zcash_client_backend::data_api::transparent_ledger::{
     AppliedTransparentPolicy, PrivateTransparentDetail, TransparentLedgerMode,
 };
@@ -155,7 +156,18 @@ pub(crate) fn pending_private_transparent_details(
     conn: &rusqlite::Connection,
     configured: Option<TransparentLedgerMode>,
 ) -> Result<Vec<PrivateTransparentDetail>, SqliteClientError> {
-    let mode = resolve_mode(conn, configured)?;
+    pending_details(conn, resolve_mode(conn, configured)?, None)
+}
+
+/// The details withheld under `mode`, restricted to those of the transaction with internal id
+/// `transaction` when one is given: a parent retrieval for one of its inputs, or its own
+/// mixed-transaction marker. A queued parent records only its latest dependent, so the parents of
+/// a transaction's unresolved inputs are found through the spend map as well.
+pub(super) fn pending_details(
+    conn: &rusqlite::Connection,
+    mode: TransparentLedgerMode,
+    transaction: Option<i64>,
+) -> Result<Vec<PrivateTransparentDetail>, SqliteClientError> {
     if mode.retains_public_authority() {
         // Public authority dispatches matching-generation work; nothing is withheld as private.
         return Ok(vec![]);
@@ -166,9 +178,19 @@ pub(crate) fn pending_private_transparent_details(
         "SELECT q.txid FROM tx_retrieval_queue q
          WHERE q.query_type = 1
            AND q.dependent_transaction_id IS NOT NULL
+           AND (
+               :transaction IS NULL
+               OR q.dependent_transaction_id = :transaction
+               OR q.txid IN (
+                   SELECT m.prevout_txid FROM transparent_spend_map m
+                   WHERE m.spending_transaction_id = :transaction
+               )
+           )
          ORDER BY q.txid",
     )?;
-    for txid in parents.query_map([], |row| row.get::<_, [u8; 32]>(0))? {
+    for txid in parents.query_map(named_params![":transaction": transaction], |row| {
+        row.get::<_, [u8; 32]>(0)
+    })? {
         details.push(PrivateTransparentDetail::ParentTransaction {
             txid: TxId::from_bytes(txid?),
         });
@@ -180,9 +202,12 @@ pub(crate) fn pending_private_transparent_details(
         "SELECT t.txid FROM ironwood_enhance_routing r
          JOIN transactions t ON t.id_tx = r.transaction_id
          WHERE r.route IN (1, 2) AND t.raw IS NULL
+           AND (:transaction IS NULL OR r.transaction_id = :transaction)
          ORDER BY t.txid",
     )?;
-    for txid in mixed.query_map([], |row| row.get::<_, [u8; 32]>(0))? {
+    for txid in mixed.query_map(named_params![":transaction": transaction], |row| {
+        row.get::<_, [u8; 32]>(0)
+    })? {
         details.push(PrivateTransparentDetail::MixedTransaction {
             txid: TxId::from_bytes(txid?),
         });

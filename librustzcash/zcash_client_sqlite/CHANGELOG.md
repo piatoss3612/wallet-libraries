@@ -122,6 +122,10 @@ workspace.
 
   A `tpir_meta` table without its policy row, or a missing `tpir_meta` after the
   migration has run, is reported as corrupted data.
+- `WalletDb` implements `transaction_history_details`. Every result is derived
+  from stored facts in one read (the transaction row, the account's outputs and
+  spends, the scan queue, ledger coverage, and queued follow-on work); no
+  completion marker is stored.
 
 ### Changed
 - Transparent outpoint lookup with a spend target now enforces coinbase

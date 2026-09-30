@@ -9,6 +9,7 @@
 //! (`projection`) and makes the account active; under `PrivateRequired`, only active accounts
 //! whose ledger is complete through the chain tip can authorize transparent inputs.
 
+mod history;
 mod policy;
 #[cfg(feature = "transparent-inputs")]
 mod projection;
@@ -44,6 +45,7 @@ use {
     zcash_client_backend::data_api::AccountBalance,
 };
 
+pub(crate) use history::transaction_history_details;
 pub(crate) use policy::{
     applied_transparent_policy, apply_transparent_policy, capture_policy_generation,
     check_transparent_policy_generation, ensure_policy_generation,

@@ -61,6 +61,14 @@ workspace.
   `Quarantined`, `UnqualifiedRevision`, `LegacyDiscrepancy`, and
   `ChainBehindTip`. `CandidateBlocker` moved to `data_api::transparent_ledger`
   and is available in every build.
+- History completeness: `TransparentLedgerRead::transaction_history_details`
+  returns an account's `TransactionHistoryDetails` for requested transactions:
+  a `PoolEffect` with `EffectCompleteness` (`Complete`, `PublicDiscovery`,
+  `Incomplete`) for every supported pool, `DetailCompleteness` for recipients,
+  payment amounts, and memos, a `FeeState` that keeps unknown distinct from
+  zero and from not applicable, a `HistoryClassification` (`LocalIntent`,
+  `Reconstructed`, `Provisional`), and the transaction's pending private
+  details.
 
 ### Changed
 - `sync::run` requires `TransparentLedgerRead` and refreshes UTXOs only when the
