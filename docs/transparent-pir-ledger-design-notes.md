@@ -48,7 +48,9 @@ Phase 3 implements candidate recovery and settles these notes as follows.
   each replacement. Keep lineage within `i64::MAX` so SQLite can store it and
   order it numerically.
 - **Supersession.** A provisional revision is superseded once the store accepts
-  a newer revision of the same source. A sealed revision is never superseded.
+  a newer revision of the same source. Its coverage, pages, and event
+  observations are removed; an event remains only if another active revision
+  observed it. A sealed revision is never superseded.
   Its commits stay acceptable after later revisions, including resumed pages and
   recovery for newly added accounts.
 - **Accepted revision.** Store the complete accepted revision per source:

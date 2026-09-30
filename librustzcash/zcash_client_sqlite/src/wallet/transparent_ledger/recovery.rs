@@ -634,7 +634,9 @@ fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<()
 }
 
 /// Returns the stored id of `revision`, recording it if new. Accepting a newer lineage
-/// supersedes the source's older provisional revisions, removing their coverage and pages.
+/// supersedes the source's older provisional revisions, removing their coverage, pages, and
+/// observations. Events with no remaining observations are removed; an independent source's
+/// observation or a sealed revision keeps an event alive.
 #[cfg(feature = "transparent-inputs")]
 fn accept_revision(
     conn: &rusqlite::Connection,
@@ -697,12 +699,31 @@ fn accept_revision(
     if accepted.is_none_or(|accepted| lineage > accepted) {
         let older_provisional = "SELECT id FROM tpir_revisions
              WHERE source = :source AND sealed = 0 AND lineage < :lineage";
-        for table in ["tpir_coverage", "tpir_pending_pages"] {
+        for table in [
+            "tpir_coverage",
+            "tpir_pending_pages",
+            "tpir_receive_observations",
+            "tpir_spend_observations",
+        ] {
             conn.execute(
                 &format!("DELETE FROM {table} WHERE revision_id IN ({older_provisional})"),
                 named_params![":source": revision.source, ":lineage": lineage],
             )?;
         }
+        conn.execute(
+            "DELETE FROM tpir_receive_events
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM tpir_receive_observations o WHERE o.receive_id = tpir_receive_events.id
+             )",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM tpir_spend_events
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM tpir_spend_observations o WHERE o.spend_id = tpir_spend_events.id
+             )",
+            [],
+        )?;
     }
     Ok(id)
 }

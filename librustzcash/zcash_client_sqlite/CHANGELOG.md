@@ -33,6 +33,8 @@ workspace.
     still exist, the target and anchor must still be local blocks, and every
     named address must still be watched by the account.
   - Events are idempotent: contradictory content or placement is refused.
+    Superseding a provisional revision retracts its observations and removes
+    events that no other active revision observed.
     Within one revision, supported coverage and an open page cannot overlap,
     and no range can be reported both checked and unsupported.
   - The first candidate commit raises `tpir_meta.min_reader_version` to 3, the

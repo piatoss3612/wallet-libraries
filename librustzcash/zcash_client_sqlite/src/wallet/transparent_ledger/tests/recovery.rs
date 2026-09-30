@@ -661,6 +661,54 @@ fn provisional_revisions_are_superseded_and_sealed_ones_are_not() {
 }
 
 #[test]
+fn supersession_retracts_only_events_without_independent_observations() {
+    let (mut st, account) = shadow_wallet();
+    let ws = watch(&st, account);
+    let address = external(&ws);
+    let shared = receive(1, address, 5_000, below_target(&ws, 2));
+    let retracted = receive(2, address, 6_000, below_target(&ws, 2));
+    let retracted_spend = spend(3, &shared, below_target(&ws, 1));
+
+    let mut c = commit(&ws);
+    c.revision = revision(1, false);
+    c.receives = vec![shared.clone(), retracted.clone()];
+    c.spends = vec![retracted_spend];
+    apply(&mut st, c).unwrap();
+
+    let mut c = commit(&watch(&st, account));
+    c.revision = RecoveryRevision {
+        source: b"independent".to_vec(),
+        ..revision(1, true)
+    };
+    c.receives = vec![shared.clone()];
+    apply(&mut st, c).unwrap();
+
+    let ws = watch(&st, account);
+    let mut c = commit(&ws);
+    c.revision = revision(2, false);
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+
+    let recovered = recovery(&st, account);
+    assert!(recovered.blockers.is_empty());
+    assert_eq!(recovered.receives, vec![shared.clone()]);
+    assert!(recovered.spends.is_empty());
+    assert_eq!(recovered.unspent, vec![shared.outpoint.clone()]);
+    assert_eq!(count(&st, "tpir_receive_observations"), 1);
+    assert_eq!(count(&st, "tpir_spend_observations"), 0);
+
+    // A corrected receive may reuse an outpoint whose only old observation was retracted.
+    let mut c = commit(&watch(&st, account));
+    c.revision = revision(2, false);
+    c.receives = vec![ReceiveEvent {
+        value: Zatoshis::const_from_u64(7_000),
+        ..retracted
+    }];
+    apply(&mut st, c).unwrap();
+    assert_eq!(recovery(&st, account).receives.len(), 2);
+}
+
+#[test]
 fn pending_pages_block_their_addresses_and_resume() {
     let (mut st, account) = shadow_wallet();
     let ws = watch(&st, account);

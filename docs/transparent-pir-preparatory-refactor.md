@@ -301,8 +301,9 @@ receiving-address allocation, and history read.
      placement on the local chain, and two mined spends of one output.
    - Each revision that reports an event is recorded as an observation.
    - Within a source, a higher lineage replaces a lower one. Accepting it
-     removes the coverage and pages of the source's older provisional
-     revisions; sealed revisions are never superseded.
+     removes the coverage, pages, and event observations of the source's older
+     provisional revisions. Events without another active observation are
+     removed; sealed revisions are never superseded.
    - Within one revision, supported coverage and an open page cannot overlap
      for the same address, in either order, and no range can be both checked
      and unsupported. Other revisions' pages and coverage
