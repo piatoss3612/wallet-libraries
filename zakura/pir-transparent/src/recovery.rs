@@ -361,7 +361,8 @@ impl ReferenceRecovery {
             filters = filters.with_observer(observer.clone());
             transport = transport.with_observer(observer);
         }
-        let (map, map_bytes) = filters.shard_map().map_err(failure)?;
+        let (raw_map, map_bytes) = filters.shard_map().map_err(failure)?;
+        let map: ShardMap = serde_json::from_slice(&raw_map).map_err(failure)?;
         require(
             map.shards.len() <= self.config.shards,
             "publication shard limit exceeded",
@@ -401,7 +402,8 @@ impl ReferenceRecovery {
         .map_err(failure)?;
         // A refresh may have replaced the first map. Export only provenance still
         // named in an independently validated current map; stale facts fail closed.
-        let (current_map, _) = filters.shard_map().map_err(failure)?;
+        let (raw_map, _) = filters.shard_map().map_err(failure)?;
+        let current_map: ShardMap = serde_json::from_slice(&raw_map).map_err(failure)?;
         require(
             current_map.shards.len() <= self.config.shards,
             "publication shard limit exceeded",

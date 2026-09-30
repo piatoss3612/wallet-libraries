@@ -12,7 +12,7 @@ keywords = ["zcash", "privacy", "pir"]
 
 [features]
 default = []
-wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-wallet", "dep:transparent-wallet-store", "dep:transparent-events", "dep:transparent-filter", "dep:rusqlite", "dep:hex"]
+wallet = ["dep:zcash_client_backend", "dep:zcash_primitives", "dep:zcash_protocol", "dep:transparent", "dep:transparent-wallet", "dep:transparent-wallet-store", "dep:transparent-events", "dep:transparent-filter", "dep:rusqlite", "dep:hex", "dep:serde_json"]
 
 [dependencies]
 zcash_client_backend = { workspace = true, optional = true, features = ["transparent-inputs"] }
@@ -22,6 +22,7 @@ transparent = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 sha2.workspace = true
+serde_json = { workspace = true, optional = true }
 thiserror = "2"
 url = "2"
 transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "3cfbc4848b92b1385b9215174251f8e51fbfa804", optional = true, features = ["reqwest"] }
