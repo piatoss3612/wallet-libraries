@@ -8011,7 +8011,9 @@ version = "0.0.1-rc0"
 dependencies = [
  "hex",
  "rusqlite",
+ "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.21",
  "transparent-events",
  "transparent-filter",
