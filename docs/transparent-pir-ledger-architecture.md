@@ -3,6 +3,10 @@
 Status: proposed design; production private authority is not enabled by the
 [preparatory refactor](transparent-pir-preparatory-refactor.md).
 
+The [history testing and qualification plan](transparent-pir-history-qualification.md)
+defines the proposed 13-case fixture suite at the wallet-libraries and Vizor
+layers, including accepted incomplete activity and future txid PIR tests.
+
 ## Reader's guide
 
 The transparent ledger gives the wallet a durable answer to three questions:
@@ -961,6 +965,10 @@ a previously complete account marked current. Summary caches must invalidate
 on these changes and on policy, promotion, and ledger writes.
 
 ## Failure semantics and qualification
+
+The [two-layer history qualification plan](transparent-pir-history-qualification.md)
+turns the activity cases into fixture expectations and client acceptance gates.
+It is a future test specification, not evidence that those tests have run.
 
 Timeout, overload, publication lag, cancellation, and budget exhaustion preserve
 committed progress and leave recovery incomplete. Stale operation context
