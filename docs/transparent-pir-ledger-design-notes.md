@@ -94,6 +94,27 @@ under "Readiness and blockers" as follows.
     unlinked, in balances as in history. Completeness trusts the current key,
     as balances do.
 
+## Phase 6 outcome
+
+Phase 6 qualifies the library against a block-derived oracle, pre-ledger
+upgrade fixtures, failure injection, and repair, and settles these notes as
+follows.
+
+- **Implemented:** the qualification suite, and one fix: rewinds,
+  re-attribution, and qualification refuse a wallet that requires a newer
+  reader, as every other ledger read and write already did.
+- **Revised:**
+  - **Rollback.** The schema migrator accepts a database carrying migrations it
+    does not know, so the reader version is the only guard between an older
+    build and newer ledger state. Supported rollback targets are builds with
+    the fix whose reader version meets the wallet's requirement; earlier
+    builds rewind without checking it.
+- **Still open:**
+  - privileged verification and trust and quarantine epochs, which need real
+    source verification (next stage);
+  - verifying coverage anchors against local blocks when reading, as defense
+    in depth against a build that rewinds without clipping coverage.
+
 ## Recovery sources and revisions
 
 - **Opaque identifiers.** Sources, revisions, and pages are opaque byte strings,
@@ -156,7 +177,7 @@ under "Readiness and blockers" as follows.
     revisions.
 - **Privileged verification.** Qualifying a revision, clearing a quarantine, and
   advancing the trust epoch need a privileged verification operation separate
-  from commits. It is added with source verification in Phase 6.
+  from commits. It is added with real source verification, after this plan.
 
 ## Readiness and blockers
 

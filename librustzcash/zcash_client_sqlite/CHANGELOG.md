@@ -186,6 +186,12 @@ workspace.
 - Transparent address-history request enumeration reads public authority, the
   chain tip, and request rows from one SQLite snapshot, so a concurrent policy
   transition cannot expose private-era rows under stale public authority.
+- A wallet whose `tpir_meta.min_reader_version` exceeds this build's reader
+  version now also refuses rewinds (every `truncate_to_height`,
+  `truncate_to_chain_state`, and `rewind_to_chain_state`), the re-attribution of
+  an imported receiver, and `qualify_transparent_revision`, with
+  `TransparentLedgerIncompatible`, changing nothing. Previously a rewind clipped
+  recovery state that a newer reader might maintain differently.
 
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`

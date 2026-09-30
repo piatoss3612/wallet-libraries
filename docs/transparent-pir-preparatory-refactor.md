@@ -2,9 +2,9 @@
 
 Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
 its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64).
-Phase 3's is in review, with Phase 4's and then Phase 5's stacked on it. The
-Vizor halves of Phases 2–5 and all of Phase 6 remain to be implemented and
-qualified. Production transparent authority stays public during preparation.
+Phase 3's is in review, with Phases 4, 5, and 6 stacked on it. The Vizor halves
+of Phases 2–6 are in draft review or in progress. Production transparent
+authority stays public during preparation.
 
 ## Objective and fixed boundaries
 
@@ -710,49 +710,99 @@ public enrichment.
    Preserve local evidence and applied private policy; arbitrary historical
    binaries are not supported rollback targets.
 
-**Library plan**
+**What the wallet-libraries half adds**
 
-Phase 6 is qualification. It adds tests, and production changes only where a
-test exposes a defect. It adds no API or table unless a test needs one.
+Phase 6 is qualification. It adds tests under
+`sqlite/wallet/transparent_ledger/tests/recovery/activation/qualification/`,
+one production fix they exposed, and no API or table.
 
-1. **Block-derived oracle.** A test-only fixture chain of real transactions with
-   transparent bundles, placed at local heights. The oracle walks it block by
-   block and derives, per watched script, the exact receives, spends, UTXO set,
-   balance (with coinbase maturity) and coverage, without the ledger's code. A
-   fixture source indexes the same chain by script, as a server would, and
-   delivers it in pages and split commits, out of order, with spends before
-   their receives and duplicate replays. The candidate diagnostics, the
-   projection, the snapshot and the selectors must equal the oracle after
-   recovery, promotion, active commits, rewind, and re-mining. Legacy rows are
-   compared only as the promotion discrepancy check.
-2. **Migration fixtures.** Raw-SQL wallets at the migration state before the
-   ledger schema, with real keys and addresses:
+1. **Block-derived oracle** (`oracle.rs`). A fixture chain of real transactions
+   with transparent bundles, placed at local heights. The oracle walks it block
+   by block with only the account's keys, and derives the exact receives,
+   spends, unspent outputs, and balances. A fixture source indexes the same
+   chain by address, as a server would. A driver delivers it the way a
+   coordinator might: in groups, reordered, with spends before their receives,
+   through pages, and replayed, repeating while the watch set grows. The chain
+   extends both derived windows several times and holds a coinbase output, a
+   spend in its receive's block, a spend mixing owned and foreign inputs, and
+   foreign-only activity. The candidate diagnostics, the projection, the
+   snapshot, and the selectors equal the oracle after shadow recovery,
+   promotion, active commits, and a rewind that re-mines transactions at the
+   same and at other heights and orphans one payment. Legacy rows take part
+   only through the promotion discrepancy check.
+2. **Migration fixtures** (`migration.rs`). Wallets created at the migration
+   state before the ledger schema, with real keys and addresses, and with
+   transparent history written the way older builds wrote it:
    - fresh;
-   - long-lived: legacy receives and spends, a coinbase output, a pending local
-     send holding a lock, and a transaction un-mined by an earlier rewind;
+   - long-lived: legacy receives and spends, a coinbase output, a send in
+     flight, a reserved output, and a transaction un-mined by an earlier
+     rewind;
    - multi-seed, with a cross-account transfer;
    - imported-only;
    - hardware-first, without a spending key.
 
-   Each upgrades without a seed, then recovers, is qualified, and is promoted.
-   Local sends, locks, and local history are preserved.
-3. **Failure injection.**
-   - Trigger aborts and a disk-full limit (`PRAGMA max_page_count`) during
-     candidate and active commits, promotion, demotion, and rewind. Each leaves
-     the prior state; a retry reaches the state of an uninterrupted run.
-   - A crash before `COMMIT`, simulated by copying the database and its WAL
-     while the transaction is open, and reopening the copy.
-   - Same-height reorgs, sealed and provisional coverage across a reorg,
-     re-mining at another height, account deletion, a lowered birthday, and a
-     stale policy generation, for active accounts as well as candidates.
-4. **Repair and rollback.**
-   - The projection is rebuildable from durable evidence: demoting and
-     promoting again restores lost ledger-origin rows exactly.
-   - Each kind of ledger state raises `min_reader_version` to the first reader
-     that interprets it. A wallet that requires a newer reader is refused by
-     every entry point, without changes, and keeps its applied private policy.
-     The designated rollback targets are builds whose reader version meets the
-     requirement; older builds fail closed.
+   Each upgrades without a seed, with every existing row unchanged, then is
+   recovered, qualified, and promoted. The send in flight, the reservation, and
+   the local details survive, and only outputs the ledger authorizes are
+   spendable.
+3. **Failure injection** (`failpoints.rs`, `lifecycle.rs`).
+   - A full disk fails a candidate commit, a promotion, and an active commit;
+     aborted writes fail a rewind and a demotion. Each leaves every table
+     unchanged, and a retry reaches the oracle's state.
+   - A crash before `COMMIT`, simulated by copying the database and its log
+     while promotion's transaction is open, recovers the prior state; a copy
+     after the commit recovers the promoted one.
+   - A reorg clips sealed and provisional coverage alike and makes older work
+     stale. Deleting an active account removes its ledger and keeps another
+     account's shared transaction and authority. Lowering an active account's
+     birthday pauses its authority until recovery covers the new bound. A
+     policy round trip makes captured work stale and demotes the account.
+4. **Repair and rollback** (`repair.rs`).
+   - A projection whose ledger provenance and spends are lost fails closed, and
+     demoting and promoting again rebuilds it exactly from durable evidence.
+   - Applying a policy needs no newer reader, and nothing lowers
+     `min_reader_version`.
+   - A wallet requiring a newer reader is refused by every ledger read and
+     write, a rewind, and a re-attribution, with every table unchanged and its
+     applied private policy kept.
+5. **Fix: rewinds respect the reader version.** Truncation, re-attributing an
+   imported receiver, and the qualification hook now read the durable policy
+   first, so a build that cannot interpret the wallet's ledger state refuses
+   them. Before, a rewind still clipped recovery state that a newer reader
+   might maintain differently.
+
+**Deviations from the plan**
+
+- **Rollback targets.** The schema migrator does not refuse a database that
+  carries migrations it does not know, so `min_reader_version` is the only
+  guard between an older build and newer ledger state. A supported rollback
+  target is a build that contains the fix above and whose reader version
+  meets the wallet's requirement. Earlier builds, including every build before
+  this phase, rewind without checking it, so they are not supported rollback
+  targets once a wallet holds recovery state.
+- **Disk full.** Rewinds and demotions only delete or update rows, so a size
+  cap cannot fail them; aborted writes cover them instead. The crash
+  simulation covers promotion, the largest single transaction; the rewind
+  API opens its own transaction, so it cannot be held open from outside.
+- **Lowered birthday.** No API lowers a birthday within the scanned range; the
+  test edits the account row, as a restore with an earlier birthday would
+  leave it.
+- **Privileged verification and epochs** are not added. Clearing a
+  quarantine, requalifying a source, and explaining a legacy discrepancy need
+  real source verification, which belongs to the next stage.
+
+**Revision pair** (filled in when the stack is final)
+
+| Repository | Phase | PR | Head |
+| --- | --- | --- | --- |
+| wallet-libraries | 3 | #68 | _pending_ |
+| wallet-libraries | 4 | #69 | _pending_ |
+| wallet-libraries | 5 | #70 | _pending_ |
+| wallet-libraries | 6 | _this PR_ | _pending_ |
+| Vizor | 3 | chainapsis/vizor-wallet#787 | _pending_ |
+| Vizor | 4 | chainapsis/vizor-wallet#790 | _pending_ |
+| Vizor | 5 | _pending_ | _pending_ |
+| Vizor | 6 | _pending_ | _pending_ |
 
 **Vizor steps**
 
