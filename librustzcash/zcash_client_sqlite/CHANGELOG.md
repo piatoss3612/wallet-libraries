@@ -169,7 +169,7 @@ payload enhancement work.
   reservations, recovered-index tracking, and persistent incoming lookahead keys.
   Persist incoming quote attempts before provider requests and reuse the lowest
   verified empty slot after 48 hours and successful provider reconciliation.
-  Limit unfunded reservations to three and issuance to a 50-slot recovery gap.
+  Limit unfunded reservations to three and issuance to a 30-slot recovery gap.
   Persist canonical empty-address verification independently of recovery closeout.
   Reuse it with continuous per-key scanning, or verify at most five missing recent
   blocks before address exposure. Recheck ownership and coverage atomically at quote issuance.

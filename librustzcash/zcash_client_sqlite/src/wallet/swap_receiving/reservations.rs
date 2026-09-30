@@ -11,7 +11,7 @@ use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 /// Incoming seed recovery must search at least this many consecutive empty indices.
-pub const RECEIVE_GAP_LIMIT: u64 = 50;
+pub const RECEIVE_GAP_LIMIT: u64 = 30;
 /// Grace after the last deposit deadline before an unpaid reservation can be recycled.
 pub const RECEIVE_RECLAIM_SECONDS: i64 = 48 * 60 * 60;
 /// Maximum number of distinct addresses held by unfunded drafts or swaps per account.
