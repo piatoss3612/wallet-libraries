@@ -2,7 +2,7 @@
 
 Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
 its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64).
-Phase 3's is in review, with Phases 4, 5, and 6 stacked on it. The Vizor halves
+Phases 3–5 are merged (#68–#70); Phase 6 is in review. The Vizor halves
 of Phases 2–6 are in draft review or in progress. Production transparent
 authority stays public during preparation.
 
@@ -749,9 +749,10 @@ one production fix they exposed, and no API or table.
    - A full disk fails a candidate commit, a promotion, and an active commit;
      aborted writes fail a rewind and a demotion. Each leaves every table
      unchanged, and a retry reaches the oracle's state.
-   - A crash before `COMMIT`, simulated by copying the database and its log
-     while promotion's transaction is open, recovers the prior state; a copy
-     after the commit recovers the promoted one.
+   - WAL copies before and after commit recover the prior and committed state
+     for candidate commits, promotion, active commits, rewind, and demotion.
+     Promotion is held open explicitly; the other operations use a SQLite
+     commit hook to copy before their internally owned transaction commits.
    - A reorg clips sealed and provisional coverage alike and makes older work
      stale. Deleting an active account removes its ledger and keeps another
      account's shared transaction and authority. Lowering an active account's
@@ -762,14 +763,16 @@ one production fix they exposed, and no API or table.
      demoting and promoting again rebuilds it exactly from durable evidence.
    - Applying a policy needs no newer reader, and nothing lowers
      `min_reader_version`.
-   - A wallet requiring a newer reader is refused by every ledger read and
-     write, a rewind, and a re-attribution, with every table unchanged and its
-     applied private policy kept.
-5. **Fix: rewinds respect the reader version.** Truncation, re-attributing an
-   imported receiver, and the qualification hook now read the durable policy
-   first, so a build that cannot interpret the wallet's ledger state refuses
-   them. Before, a rewind still clipped recovery state that a newer reader
-   might maintain differently.
+   - A wallet requiring a newer reader is refused by ledger reads and writes,
+     rewinds, re-attribution, account deletion, outbox creation evidence, and
+     transparent output/spend ingestion, including low-level writes. Each
+     rejected operation keeps every table and the applied private policy unchanged.
+5. **Fix: lifecycle and provenance writes respect the reader version.**
+   Truncation, re-attributing an imported receiver, qualification, account
+   deletion, outbox creation evidence, and transparent output/spend ingestion
+   check the durable policy before writing, inside the caller's transaction.
+   Before, these paths could change recovery state or provenance that a newer
+   reader might maintain differently.
 
 **Deviations from the plan**
 
@@ -782,8 +785,9 @@ one production fix they exposed, and no API or table.
   targets once a wallet holds recovery state.
 - **Disk full.** Rewinds and demotions only delete or update rows, so a size
   cap cannot fail them; aborted writes cover them instead. The crash
-  simulation covers promotion, the largest single transaction; the rewind
-  API opens its own transaction, so it cannot be held open from outside.
+  simulation covers all five operations above. A commit hook observes the
+  internally owned transactions without adding a production failpoint. These
+  are WAL recovery simulations, not power-loss or filesystem fault tests.
 - **Lowered birthday.** No API lowers a birthday within the scanned range; the
   test edits the account row, as a restore with an earlier birthday would
   leave it.
@@ -791,18 +795,38 @@ one production fix they exposed, and no API or table.
   quarantine, requalifying a source, and explaining a legacy discrepancy need
   real source verification, which belongs to the next stage.
 
-**Revision pair** (filled in when the stack is final)
+**Pinned library revisions and release gates**
 
-| Repository | Phase | PR | Head |
+| Repository | Phase | PR | Reviewed source revision |
 | --- | --- | --- | --- |
-| wallet-libraries | 3 | #68 | _pending_ |
-| wallet-libraries | 4 | #69 | _pending_ |
-| wallet-libraries | 5 | #70 | _pending_ |
-| wallet-libraries | 6 | _this PR_ | _pending_ |
-| Vizor | 3 | chainapsis/vizor-wallet#787 | _pending_ |
-| Vizor | 4 | chainapsis/vizor-wallet#790 | _pending_ |
-| Vizor | 5 | _pending_ | _pending_ |
-| Vizor | 6 | _pending_ | _pending_ |
+| wallet-libraries | 3 | #68 (merged) | `89ba66297202a9b9f3efa50733615ad715f67111` |
+| wallet-libraries | 4 | #69 (merged) | `8dab5c8ff34b5ed3ee6e7fa0f4572207335ef958` |
+| wallet-libraries | 5 | #70 (merged) | `0c7adf4f245107363a92f0facabb0e65ddc33b34` |
+| wallet-libraries | 6 compatibility/rollback candidate | #71 | `3ea93c4e9912d5721dcda8b8014bb77c048af259` |
+| Vizor | 3 | chainapsis/vizor-wallet#787 | Consumer release qualification outstanding |
+| Vizor | 4 | chainapsis/vizor-wallet#790 | Consumer release qualification outstanding |
+| Vizor | 5–6 | Consumer qualification stage | Exact release revision and results required |
+
+The pinned Phase 6 commit contains the compatibility fix and regression tests.
+It is a source rollback candidate, not a published or deployed rollback release.
+The final qualification head is the head of #71, including the commit-hook tests.
+Production release remains blocked until the release process records:
+
+1. The exact released library artifact built from this fix (or a descendant),
+   its build features, and seedless open/read/write/rewind results on a copy of
+   the release's wallet fixture. Test requirements above the rollback reader's
+   version must refuse without changes; supported requirements must retain
+   balances, local evidence, reservations, and private policy. A release whose
+   new state requires an older reader to interpret unknown semantics cannot
+   designate that reader as its rollback target.
+2. The exact Vizor consumer revision and library revision, with the cross-repository
+   exit-gate results below. The library fixtures alone do not qualify Vizor.
+3. Real-source verification and the privileged qualification operation. The
+   current `qualify_transparent_revision` hook exists only under `test` or
+   `test-dependencies`; production cannot qualify a fresh source. Release
+   builds must not enable `test-dependencies` to bypass this gate. Quarantine
+   clearing, requalification, and trust epochs remain owned by the source-
+   verification stage; incomplete recovery never authorizes public fallback.
 
 **Vizor steps**
 

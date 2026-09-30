@@ -2,7 +2,11 @@
 //! crash before commit. Each failure leaves the prior state, and a retry reaches the state an
 //! uninterrupted run reaches, checked against the oracle.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use super::oracle::{
     Chain, assert_authority_agrees, assert_diagnostics_agree, external_at, promoted_oracle_wallet,
@@ -181,6 +185,80 @@ fn a_crash_before_commit_leaves_the_prior_state() {
     assert_ne!(after, before);
     let (_dir, restarted) = crash_copy(&path);
     assert_eq!(full_dump(&restarted), after);
+    let expected = assert_diagnostics_agree(&st, account, &chain, &owned);
+    assert_authority_agrees(&st, account, &expected);
+}
+
+/// Copies the WAL immediately before the public operation commits its own transaction, and
+/// again after it returns. The first copy must recover the prior state and the second the new
+/// state. No production failpoint or externally held transaction is needed.
+fn assert_recovery_at_commit(st: &mut State, operation: impl FnOnce(&mut State)) {
+    let mode: String = conn(st)
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    let path = st.wallet().data_file_path().to_owned();
+    let before = full_dump(conn(st));
+    let copied = Arc::new(Mutex::new(None));
+    let during_commit = Arc::clone(&copied);
+    let uncommitted_path = path.clone();
+    conn(st).commit_hook(Some(move || {
+        let (_dir, crashed) = crash_copy(&uncommitted_path);
+        *during_commit.lock().unwrap() = Some(full_dump(&crashed));
+        false
+    }));
+    operation(st);
+    conn(st).commit_hook(None::<fn() -> bool>);
+    assert_eq!(copied.lock().unwrap().take(), Some(before.clone()));
+    let after = full_dump(conn(st));
+    assert_ne!(after, before);
+    let (_dir, restarted) = crash_copy(&path);
+    assert_eq!(full_dump(&restarted), after);
+}
+
+#[test]
+fn rewind_and_demotion_recover_atomically_before_and_after_commit() {
+    let (mut st, account, _, _, _) = promoted_oracle_wallet();
+    let floor = st.test_account().unwrap().birthday().height() + 6;
+    assert_recovery_at_commit(&mut st, |st| {
+        st.wallet_mut().db_mut().truncate_to_height(floor).unwrap();
+    });
+    assert_eq!(
+        snapshot(&st, account).covered_through.map(|c| c.height),
+        Some(floor)
+    );
+
+    let (mut st, account, chain, owned, _) = promoted_oracle_wallet();
+    // Start from the same pre-demotion state as an uninterrupted run.
+    assert_authority_agrees(
+        &st,
+        account,
+        &super::oracle::oracle(&chain, &owned, st.wallet().chain_height().unwrap().unwrap()),
+    );
+    assert_recovery_at_commit(&mut st, |st| set_policy(st, PrivateShadow));
+    assert_eq!(lifecycle(&st, account), AccountLifecycle::Candidate);
+}
+
+#[test]
+fn candidate_and_active_commits_recover_atomically_before_and_after_commit() {
+    let (mut st, account, chain, owned, _) = shadow_oracle_wallet();
+    let fixture = revision(1, true);
+    let c = whole_commit(&st, account, &chain, &fixture);
+    assert_recovery_at_commit(&mut st, |st| {
+        apply(st, c).unwrap();
+    });
+    recover(&mut st, account, &chain, &fixture);
+    assert_diagnostics_agree(&st, account, &chain, &owned);
+
+    let (mut st, account, mut chain, owned, fixture) = promoted_oracle_wallet();
+    scan_new_blocks(&mut st, 2);
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    chain.fund(tip, &[(external_at(&st, 30), 10_000)]);
+    let c = whole_commit(&st, account, &chain, &fixture);
+    assert_recovery_at_commit(&mut st, |st| {
+        apply(st, c).unwrap();
+    });
+    recover(&mut st, account, &chain, &fixture);
     let expected = assert_diagnostics_agree(&st, account, &chain, &owned);
     assert_authority_agrees(&st, account, &expected);
 }
