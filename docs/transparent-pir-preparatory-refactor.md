@@ -613,7 +613,10 @@ nothing to invalidate.
     - for a shielded pool of an account with a full viewing key, a mined
       transaction at or below the fully scanned height, or an unmined one whose
       full data is stored while the fully scanned height is the chain tip,
-      since its spends link only to notes already found. An account imported
+      and every known owned nullifier in that payload has a recorded spend
+      link. Ingestion links only notes already found; later scanning can find a
+      funding note without linking an unmined spender. Until reingestion repairs
+      that link, the pool stays incomplete. An account imported
       from an incoming viewing key never detects its spends, so its shielded
       effects stay incomplete;
     - for the transparent pool under `PrivateRequired`, a mined transaction of

@@ -5,15 +5,17 @@
 //! so a rewind, promotion, account change, or later enhancement changes the result as soon as it
 //! changes those facts.
 
-use rusqlite::{OptionalExtension as _, named_params};
+use std::rc::Rc;
+
+use rusqlite::{OptionalExtension as _, named_params, types::Value};
 use zcash_client_backend::data_api::transparent_ledger::{
     DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification, PoolEffect,
     TransactionHistoryDetails, TransparentLedgerMode,
 };
-use zcash_primitives::transaction::TxId;
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
-    PoolType,
-    consensus::{self, BlockHeight},
+    PoolType, ShieldedPool,
+    consensus::{self, BlockHeight, BranchId},
     value::Zatoshis,
 };
 
@@ -22,6 +24,7 @@ use crate::{
     error::SqliteClientError,
     wallet::{
         chain_tip_height,
+        common::table_constants,
         encoding::{parse_pool_code, pool_code},
         fully_scanned_height,
     },
@@ -171,6 +174,65 @@ fn known_amounts(
         ));
     }
     Ok(amounts)
+}
+
+/// Payload ingestion links only notes whose nullifiers are already known. Later compact scanning
+/// can discover a funding note without linking its unmined spender, since the reverse nullifier
+/// map contains mined transactions only. A scanned chain tip therefore does not suffice: every
+/// currently known owned nullifier in the payload must also have its spend link.
+fn has_unlinked_shielded_spend(
+    conn: &rusqlite::Connection,
+    account_id: i64,
+    transaction_id: i64,
+    tx: &Transaction,
+    pool: ShieldedPool,
+) -> Result<bool, SqliteClientError> {
+    let nullifiers: Vec<Value> = match pool {
+        ShieldedPool::Sapling => tx
+            .sapling_bundle()
+            .iter()
+            .flat_map(|bundle| bundle.shielded_spends())
+            .map(|spend| Value::Blob(spend.nullifier().0.to_vec()))
+            .collect(),
+        #[cfg(feature = "orchard")]
+        ShieldedPool::Orchard | ShieldedPool::Ironwood => {
+            let bundle = match pool {
+                ShieldedPool::Orchard => tx.orchard_bundle(),
+                _ => tx.ironwood_bundle(),
+            };
+            bundle
+                .iter()
+                .flat_map(|bundle| bundle.actions().iter())
+                .map(|action| Value::Blob(action.nullifier().to_bytes().to_vec()))
+                .collect()
+        }
+        #[cfg(not(feature = "orchard"))]
+        _ => {
+            return Err(SqliteClientError::UnsupportedPoolType(PoolType::Shielded(
+                pool,
+            )));
+        }
+    };
+    let prefix = table_constants::<SqliteClientError>(pool)?.table_prefix;
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS (
+                 SELECT 1 FROM {prefix}_received_notes n
+                 WHERE n.account_id = :account_id AND n.nf IN rarray(:nullifiers)
+                 AND NOT EXISTS (
+                     SELECT 1 FROM {prefix}_received_note_spends s
+                     WHERE s.{prefix}_received_note_id = n.id
+                     AND s.transaction_id = :transaction_id
+                 )
+             )"
+        ),
+        named_params![
+            ":account_id": account_id,
+            ":transaction_id": transaction_id,
+            ":nullifiers": Rc::new(nullifiers),
+        ],
+        |row| row.get(0),
+    )?)
 }
 
 /// Whether a shielded output the account received or sent in the transaction lacks its memo.
@@ -349,6 +411,23 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         let scanned = tx
             .mined_height
             .is_some_and(|mined| fully_scanned.is_some_and(|scanned| mined <= scanned));
+        let unmined_data = if !tx.constructed
+            && tx.mined_height.is_none()
+            && tx.has_full_data
+            && detects_shielded_spends
+            && fully_scanned.is_some_and(|scanned| Some(scanned) >= tip)
+        {
+            let raw: Vec<u8> = conn.query_row(
+                "SELECT raw FROM transactions WHERE id_tx = ?1",
+                [tx.id],
+                |row| row.get(0),
+            )?;
+            // Only inspect nullifiers. The pre-v5 branch ID affects the decoded transaction's
+            // identity, which is unused here, so even a zero-expiry payload can be inspected.
+            Some(Transaction::read(&raw[..], BranchId::Sprout)?)
+        } else {
+            None
+        };
         let completeness = |pool: PoolType| -> Result<EffectCompleteness, SqliteClientError> {
             if tx.constructed {
                 // The wallet built and stored it, recording every input it spent and every
@@ -394,12 +473,12 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 // Scanning a block finds every owned output and every spend of an output found
                 // earlier, so everything through the contiguously scanned height is known. An
                 // unmined transaction's full data reveals its owned outputs, but its spends are
-                // linked only to notes already found: every note it could spend is known only once
-                // the scanned chain reaches the tip.
-                PoolType::Shielded(_) => match tx.mined_height {
-                    Some(_) if scanned => EffectCompleteness::Complete,
-                    None if tx.has_full_data
-                        && fully_scanned.is_some_and(|scanned| Some(scanned) >= tip) =>
+                // linked only to notes already found. Once scanning reaches the tip, verify that
+                // notes discovered after payload ingestion have their spend links too.
+                PoolType::Shielded(pool) => match (tx.mined_height, unmined_data.as_ref()) {
+                    (Some(_), _) if scanned => EffectCompleteness::Complete,
+                    (None, Some(data))
+                        if !has_unlinked_shielded_spend(conn, account_id, tx.id, data, pool)? =>
                     {
                         EffectCompleteness::Complete
                     }

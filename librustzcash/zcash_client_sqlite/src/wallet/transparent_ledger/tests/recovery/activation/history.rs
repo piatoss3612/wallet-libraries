@@ -529,6 +529,230 @@ fn unmined_shielded_spends_are_incomplete_until_the_scanned_chain_reaches_the_ti
     assert_eq!(entry.classification, HistoryClassification::Provisional);
 }
 
+fn check_unlinked_unmined_spend(pool: zcash_protocol::ShieldedPool) {
+    use zcash_protocol::ShieldedPool;
+
+    let mut network = TestBuilder::<(), ()>::DEFAULT_NETWORK;
+    if pool == ShieldedPool::Ironwood {
+        let activation = Some(BlockHeight::from_u32(100_000));
+        network.nu6 = activation;
+        network.nu6_1 = activation;
+        network.nu6_2 = activation;
+        network.nu6_3 = activation;
+    }
+    let mut st = TestBuilder::new()
+        .with_network(network)
+        .with_data_store_factory(TestDbFactory::file_backed())
+        .with_block_cache(BlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+    scan_new_blocks(&mut st, 10);
+    set_policy(&mut st, PrivateShadow);
+    let test_account = st.test_account().cloned().unwrap();
+    let account = test_account.id();
+    let height = match pool {
+        ShieldedPool::Sapling => {
+            st.generate_next_block(
+                &test_account
+                    .usk()
+                    .sapling()
+                    .to_diversifiable_full_viewing_key(),
+                AddressType::DefaultExternal,
+                zat(200_000),
+            )
+            .0
+        }
+        #[cfg(feature = "orchard")]
+        ShieldedPool::Orchard | ShieldedPool::Ironwood => {
+            let fvk = orchard::keys::FullViewingKey::from(test_account.usk().orchard());
+            if pool == ShieldedPool::Orchard {
+                st.generate_next_block(&fvk, AddressType::DefaultExternal, zat(200_000))
+                    .0
+            } else {
+                st.generate_next_block(
+                    &zcash_client_backend::data_api::testing::IronwoodFvk(fvk),
+                    AddressType::DefaultExternal,
+                    zat(200_000),
+                )
+                .0
+            }
+        }
+        #[cfg(not(feature = "orchard"))]
+        _ => unreachable!("the tests request only supported pools"),
+    };
+    st.scan_cached_blocks(height, 1);
+    let to = zcash_keys::address::Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]));
+    let request = zip321::TransactionRequest::new(vec![zip321::Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        zat(50_000),
+    )])
+    .unwrap();
+    let change = zcash_client_backend::data_api::testing::single_output_change_strategy(
+        zcash_client_backend::fees::StandardFeeRule::Zip317,
+        None,
+        pool,
+    );
+    let proposal = st
+        .propose_transfer_with_policy(
+            account,
+            &zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector::new(),
+            &change,
+            request,
+            ConfirmationsPolicy::MIN,
+            &Default::default(),
+        )
+        .unwrap();
+    let txid = st
+        .create_proposed_transactions::<std::convert::Infallible, _, std::convert::Infallible, _>(
+            test_account.usk(),
+            zcash_client_backend::wallet::OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap()[0];
+    conn(&st)
+        .execute(
+            "UPDATE transactions SET created = NULL, target_height = NULL WHERE txid = ?1",
+            [txid.as_ref()],
+        )
+        .unwrap();
+    let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
+    let funding_height = st.wallet().chain_height().unwrap().unwrap();
+    let params = *st.network();
+
+    // Restore the pre-funding scan state, retaining the cached block for the later scan. Remove
+    // construction details and the funding note to model a restored wallet seeing this payload
+    // before its funding block. The spend link goes with the removed note.
+    st.truncate_to_height_retaining_cache(funding_height - 1);
+    conn(&st)
+        .execute("DELETE FROM sent_notes WHERE transaction_id = (SELECT id_tx FROM transactions WHERE txid = ?1)", [txid.as_ref()])
+        .unwrap();
+    conn(&st)
+        .execute(
+            &format!(
+                "DELETE FROM {}_received_notes WHERE value = 200000",
+                crate::wallet::common::table_constants::<SqliteClientError>(pool)
+                    .unwrap()
+                    .table_prefix
+            ),
+            [],
+        )
+        .unwrap();
+    zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+        &params,
+        st.wallet_mut(),
+        &tx,
+        None,
+    )
+    .unwrap();
+    st.wallet_mut().update_chain_tip(funding_height).unwrap();
+    assert_eq!(
+        effect(&history(&st, account, txid), PoolType::Shielded(pool)).spent,
+        Zatoshis::ZERO
+    );
+
+    // Scanning catches up and recovers the spent note, but cannot link an unmined spender through
+    // the block nullifier map. Its change must not become a certified receive-only transaction.
+    st.scan_cached_blocks(funding_height, 1);
+    let entry = history(&st, account, txid);
+    assert_eq!(entry.mined_height, None);
+    assert_eq!(
+        effect(&entry, PoolType::Shielded(pool)).spent,
+        Zatoshis::ZERO
+    );
+    assert_eq!(
+        effect(&entry, PoolType::Shielded(pool)).completeness,
+        EffectCompleteness::Incomplete
+    );
+    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+    assert_eq!(entry.classification, HistoryClassification::Provisional);
+
+    // Reingestion can now link the known funding note; completeness and fee attribution recover.
+    zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+        &params,
+        st.wallet_mut(),
+        &tx,
+        None,
+    )
+    .unwrap();
+    let entry = history(&st, account, txid);
+    assert_eq!(effect(&entry, PoolType::Shielded(pool)).spent, zat(200_000));
+    assert_eq!(
+        effect(&entry, PoolType::Shielded(pool)).completeness,
+        EffectCompleteness::Complete
+    );
+    assert!(matches!(entry.fee, FeeState::Known(_)));
+    assert_eq!(entry.payment_details, DetailCompleteness::Complete);
+    assert_eq!(entry.classification, HistoryClassification::Reconstructed);
+}
+
+#[test]
+fn scanning_a_funding_note_does_not_complete_an_unlinked_unmined_sapling_spend() {
+    check_unlinked_unmined_spend(zcash_protocol::ShieldedPool::Sapling);
+}
+
+#[cfg(feature = "orchard")]
+#[test]
+fn scanning_a_funding_note_does_not_complete_an_unlinked_unmined_orchard_spend() {
+    check_unlinked_unmined_spend(zcash_protocol::ShieldedPool::Orchard);
+}
+
+#[cfg(feature = "orchard")]
+#[test]
+fn scanning_a_funding_note_does_not_complete_an_unlinked_unmined_ironwood_spend() {
+    check_unlinked_unmined_spend(zcash_protocol::ShieldedPool::Ironwood);
+}
+
+#[test]
+fn unmined_spend_inspection_accepts_zero_expiry_and_rejects_malformed_data() {
+    let (mut st, accounts) = shadow_wallet_with(0);
+    let account = accounts[0];
+    let txid = discovered_payment(&mut st);
+    let data = st
+        .wallet()
+        .get_transaction(txid)
+        .unwrap()
+        .unwrap()
+        .into_data();
+    // Inspecting nullifiers needs neither a mined height nor a nonzero expiry height.
+    let tx = zcash_primitives::transaction::TransactionData::from_parts(
+        data.version(),
+        data.consensus_branch_id(),
+        data.lock_time(),
+        BlockHeight::from_u32(0),
+        data.transparent_bundle().cloned(),
+        data.sprout_bundle().cloned(),
+        data.sapling_bundle().cloned(),
+        data.orchard_bundle().cloned(),
+    )
+    .freeze()
+    .unwrap();
+    let params = *st.network();
+    zcash_client_backend::data_api::wallet::decrypt_and_store_transaction(
+        &params,
+        st.wallet_mut(),
+        &tx,
+        None,
+    )
+    .unwrap();
+    let entry = history(&st, account, tx.txid());
+    assert_eq!(sapling(&entry).spent, zat(200_000));
+    assert_eq!(sapling(&entry).completeness, EffectCompleteness::Complete);
+
+    conn(&st)
+        .execute(
+            "UPDATE transactions SET raw = X'01' WHERE txid = ?1",
+            [tx.txid().as_ref()],
+        )
+        .unwrap();
+    assert!(matches!(
+        st.wallet()
+            .db()
+            .transaction_history_details(account, &[tx.txid()]),
+        Err(SqliteClientError::Io(_))
+    ));
+}
+
 #[test]
 fn creation_evidence_alone_does_not_certify_effects_or_details() {
     let (mut st, accounts) = shadow_wallet_with(0);

@@ -128,6 +128,11 @@ workspace.
   completion marker is stored.
 
 ### Changed
+- Unmined shielded history remains incomplete when scanning discovers a funding
+  note whose spend was not linked at payload ingestion. A scanned chain tip and
+  stored raw data certify completeness only once all known owned nullifiers
+  have their spend links, preventing a debit's change from being classified as
+  a complete receive with no applicable fee.
 - Transparent outpoint lookup with a spend target now enforces coinbase
   maturity, matching the other selectors. The final private transaction storage
   gate therefore rejects an immature coinbase input, including externally

@@ -81,7 +81,10 @@ under "Readiness and blockers" as follows.
   an undiscovered effect is explicit. Unknown, zero, and not-applicable fees
   are distinct. Public discovery is reported as its own completeness state.
 - **Revised:** completeness is derived on every read from stored facts. There
-  is no stored completion marker.
+  is no stored completion marker. Unmined shielded effects require scanning
+  through the tip and a spend link for every known owned nullifier in the
+  stored payload; finding a funding note after ingestion does not itself
+  reconcile its unmined spender.
 - **Still open:**
   - per-output recipient completeness for external payments, which needs the
     payload capability in the architecture's capability gate;
