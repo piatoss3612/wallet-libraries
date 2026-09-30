@@ -269,3 +269,41 @@ fn empty_interval_promotion_grants_no_funds_and_missing_coverage_revokes_authori
     );
     assert!(!work(&st, account, 1).items.is_empty());
 }
+
+#[test]
+fn a_pending_page_retains_its_revision_and_target_when_the_tip_advances() {
+    let (mut st, account) = shadow_wallet();
+    let ws = watch(&st, account);
+    let original_context = ws.context().unwrap();
+    let mut c = commit(&ws);
+    let rev = c.revision.clone();
+    let page = PageRequest {
+        page: b"older-target".to_vec(),
+        addresses: vec![external(&ws)],
+        from: below_target(&ws, 2),
+        through: ws.target.unwrap().height,
+    };
+    c.opened_pages.push(page.clone());
+    apply(&mut st, c).unwrap();
+    scan_new_blocks(&mut st, 1);
+    let batch = work(&st, account, 1);
+    assert!(batch.context.unwrap().target.height > original_context.target.height);
+    let TransparentRecoveryWork::ResumePage(pending) = &batch.items[0] else {
+        panic!("pending page must precede gaps")
+    };
+    assert_eq!(pending.target, original_context.target);
+    assert_eq!(pending.revision, rev);
+    assert_eq!(pending.request, page);
+    let mut c = commit(&watch(&st, account));
+    c.revision = pending.revision.clone();
+    c.anchor = pending.target;
+    c.completed_pages.push(pending.request.page.clone());
+    c.coverage.push(AddressRange {
+        address: pending.request.addresses[0],
+        from: pending.request.from,
+        through: pending.request.through,
+    });
+    apply(&mut st, c).unwrap();
+    assert!(watch(&st, account).pending_pages.is_empty());
+    assert!(work(&st, account, 256).items.iter().any(|item| matches!(item, TransparentRecoveryWork::CheckRange(r) if r.address == page.addresses[0] && r.from == original_context.target.height + 1)));
+}

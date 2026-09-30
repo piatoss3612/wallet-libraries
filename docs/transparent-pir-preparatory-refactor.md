@@ -805,13 +805,14 @@ one production fix they exposed, and no API or table.
 | wallet-libraries | 3 | #68 (merged) | `89ba66297202a9b9f3efa50733615ad715f67111` |
 | wallet-libraries | 4 | #69 (merged) | `8dab5c8ff34b5ed3ee6e7fa0f4572207335ef958` |
 | wallet-libraries | 5 | #70 (merged) | `0c7adf4f245107363a92f0facabb0e65ddc33b34` |
-| wallet-libraries | 6 compatibility/rollback candidate | #71 | `3ea93c4e9912d5721dcda8b8014bb77c048af259` |
+| wallet-libraries | 6 historical version-5 rollback candidate | #71 | `3ea93c4e9912d5721dcda8b8014bb77c048af259` |
 | Vizor | 3 | chainapsis/vizor-wallet#787 | Consumer release qualification outstanding |
 | Vizor | 4 | chainapsis/vizor-wallet#790 | Consumer release qualification outstanding |
 | Vizor | 5–6 | Consumer qualification stage | Exact release revision and results required |
 
 The pinned Phase 6 commit contains the compatibility fix and regression tests.
-It is a source rollback candidate, not a published or deployed rollback release.
+It is a historical version-5 source rollback candidate, not a published or deployed
+rollback release. It cannot read the version-6 state written by the hardening below.
 The final qualification head is the head of #71, including the commit-hook tests.
 Production release remains blocked until the release process records:
 
