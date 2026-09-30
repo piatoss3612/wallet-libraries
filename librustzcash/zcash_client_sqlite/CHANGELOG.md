@@ -14,6 +14,7 @@ workspace.
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 
 ### Added
+- `WalletDb::check_transparent_transaction_inputs` authorizes finalized submissions and exact-byte retries without permitting competing spends or weakening transparent authority.
 - `WalletHandleModes`, `set_handle_modes`, and `with_handle_modes` configure every supported disclosure lane together without persisting policy.
 - Revision observations no longer supersede wallet-wide evidence. Only the trusted test/development qualification transition withdraws older provisional evidence. New revision writes require reader version 6; version-5 binaries cannot safely operate those wallets.
 - `get_wallet_summary` reuses existing transactions, allowing summary and transparent authority reads in one snapshot. Per-account transparent balances use an account-scoped query.
