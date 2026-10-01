@@ -67,10 +67,13 @@ compared case-insensitively and including comments and symlinks, keeps that
 page an input. Computed or unresolved references fall back to every file and
 record `fallback_reason`: non-literal `include_*!`, any `docs` segment that does
 not name an existing file, literals that concatenation could join into `docs`,
-parent paths naming the checkout root, directory walks, manifest-relative
-parent paths, any process launch except audited `sqlite3`, symlinked
-documentation directories, unreadable sources, and path dependencies outside
-the checkout. Package Markdown, doctests, fixtures and assets of any
+parent paths naming the checkout root, placeholder file names there,
+directory walks, manifest-relative parent paths, checkout-relative Cargo
+`[env]` values, any process launch (including aliases, `duct`, and
+`cc`/`cmake` build tools) except audited `sqlite3`, symlinked documentation
+directories, unreadable sources, and path dependencies outside the checkout.
+Only known data formats (JSON, hex, lockfiles, protobuf, images) skip the
+computed-reference checks. Package Markdown, doctests, fixtures and assets of any
 extension, build-script inputs, manifests, and `Cargo.lock` always remain
 inputs. `verify` and other commands hash every file. Paths supplied at run time
 (environment variables, arguments) or spelled character by character are not

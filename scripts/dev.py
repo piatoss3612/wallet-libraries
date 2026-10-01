@@ -36,13 +36,13 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 3
+POLICY_VERSION = 4
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
 COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{]\s*(?![bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
 TRAVERSAL = re.compile(r"\b(?:read_dir|WalkDir|walkdir|glob|rglob|iterdir|listdir|scandir|os\.walk|CARGO_WORKSPACE_DIR)\b|\.(?:parents?|ancestors)\b")
 # Any launched program may read the checkout; only audited programs are exempt.
-SPAWN = re.compile(r'\bCommand::new\(\s*(?:"([^"]*)"\s*\))?|\bcmd!\s*[(\[{]')
+SPAWN = re.compile(r'\bCommand::new\(\s*(?:"([^"]*)"\s*\))?|\bcmd!\s*[(\[{]|\b(?:duct|xshell|cmake|cc|autotools|meson|subprocess)::|\bCommand\s+as\b')
 AUDITED_PROGRAMS = {"sqlite3"}  # reads only the database and SQL it is given
 PATH_TOKEN = re.compile(r"[\w.:/\\-]+")
 WORD = re.compile(r"""[^\s'"`<>|;&()]+""")
@@ -62,7 +62,11 @@ DOCS_TAIL = re.compile(r"^(?:ocs|cs|s)(?:/|$)", re.I)
 PARENT = re.compile(r"(?:^|/)\.\.(?:/|$)")
 BUILD_OUTPUT = {"target", ".vscode", ".git"}
 # Files that can compute a path: Rust and doctests, scripts, and executables.
-CODE_SUFFIXES = {".rs", ".md", ".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts", ".pl", ".rb"}
+# Everything else, including `include!` targets of any suffix and build-tool
+# inputs such as CMakeLists.txt, is treated as code that may compute a path.
+DATA_SUFFIXES = {".json", ".hex", ".lock", ".csv", ".svg", ".proto", ".bin", ".sql", ".yml", ".yaml", ".png", ".jpg"}
+# Literals whose file name is a placeholder may name any file in their folder.
+PLACEHOLDER = set("{}$*?%<>")
 
 
 def excludable(name: str) -> bool:
@@ -93,7 +97,9 @@ def ignored_files() -> set[str]:
             found.add(entry)
             continue
         for directory, subdirectories, names in os.walk(ROOT / entry):
-            subdirectories[:] = [d for d in subdirectories if d not in BUILD_OUTPUT]
+            # Directory symlinks are not descended; record them for the symlink audit.
+            names += [d for d in subdirectories if (Path(directory) / d).is_symlink()]
+            subdirectories[:] = [d for d in subdirectories if d not in BUILD_OUTPUT and not (Path(directory) / d).is_symlink()]
             found.update((Path(directory) / name).relative_to(ROOT).as_posix() for name in names)
     return found
 
@@ -213,6 +219,11 @@ def follow(name: str, literal: str, package: str, index: Index) -> tuple[set[str
     reached = set()
     for base in {str(Path(name).parent), package}:
         target = os.path.normpath(os.path.join(base, literal.lstrip("/")))
+        folder, _, leaf = target.rpartition("/")
+        # Only a parent path, or a root package's own code, runs from the root.
+        from_root = PARENT.search(literal) or package == "" and not name.endswith(".toml")
+        if from_root and not re.search(r"\s", literal) and PLACEHOLDER & set(leaf) and (not folder.strip("./") or PLACEHOLDER & set(folder)):
+            return reached, f"computed file name {literal!r} at the checkout root"
         if target in {".", ""} or not target.strip("./"):
             if PARENT.search(literal):
                 return reached, f"parent path {literal!r} reaches the checkout root"
@@ -249,7 +260,11 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
     for name in sorted(known - candidates):
         path = ROOT / name
         if path.is_symlink():
-            target = path.resolve()
+            try:
+                target = path.resolve(strict=False)
+            except (OSError, RuntimeError):
+                reasons.append(f"unresolvable symlink {name}")
+                continue
             relative = target.relative_to(root).as_posix() if target.is_relative_to(root) else None
             if relative and relative.casefold() in folded_candidates:
                 protected.add(folded_candidates[relative.casefold()])
@@ -281,19 +296,28 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
                 found = {s.replace("\\", "/") for s in toml_strings(document)}
                 # Only Cargo reads path dependencies; generator inputs may name other roots.
                 for dependency in toml_paths(document) if path.name == "Cargo.toml" or path.parent.name == ".cargo" else ():
-                    target = (path.parent / dependency).resolve()
-                    if not target.is_relative_to(root) or not target.exists():
+                    try:
+                        target = (path.parent / dependency).resolve()
+                        missing = not target.is_relative_to(root) or not target.exists()
+                    except (OSError, RuntimeError, ValueError):
+                        missing = True
+                    if missing:
                         reasons.append(f"unresolved path dependency {dependency!r} in {name}")
+                # Relative `[env]` values let tests walk from the checkout root.
+                for key, value in (document.get("env", {}) if path.parent.name == ".cargo" else {}).items():
+                    text_value = value.get("value", "") if isinstance(value, dict) else str(value)
+                    if isinstance(value, dict) and value.get("relative") or not text_value.strip("./") or PARENT.search(text_value):
+                        reasons.append(f"checkout-relative Cargo environment {key!r} in {name}")
             else:
                 found = literals(name, text)
-                if path.suffix in CODE_SUFFIXES or text.startswith("#!") or os.access(path, os.X_OK):
+                if path.suffix not in DATA_SUFFIXES:
                     reasons.extend(f"{reason} in {name}" for reason in computed(text, found))
                     heads.update(name for literal in found if DOCS_HEAD.search(literal))
                     tails.update(name for literal in found if DOCS_TAIL.search(literal))
                     if path.suffix not in {".rs", ".md"}:
                         # Scripts may name paths without quotes.
                         found |= set(WORD.findall(text))
-        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
             reasons.append(f"unreadable reference source {name}: {type(error).__name__}")
             continue
         # Comments and prose can only protect a file; literals may also be

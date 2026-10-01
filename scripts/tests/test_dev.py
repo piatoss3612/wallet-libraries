@@ -314,10 +314,26 @@ class InputPolicyTests(unittest.TestCase):
             "process launch  ": {"pkg/build.rs": 'fn main() { std::process::Command::new("../scripts/gen.py").status().unwrap(); }\n', "scripts/gen.py": "#!/usr/bin/env python3\nprint(open('../docs/guide.md').read())\n"},
             "process launch ": {"pkg/build.rs": 'fn main() { std::process::Command::new("git").args(["status", "--porcelain"]).status().unwrap(); }\n'},
             "reaches the checkout root": {"pkg/tests/links.rs": '#[test]\nfn links() { for entry in ignore::Walk::new("..") { drop(entry); } }\n'},
+            "computed file name": {"pkg/tests/top.rs": '#[test]\nfn notes() { for page in ["README", "CHANGELOG"] { std::fs::read_to_string(format!("../{page}.md")).unwrap(); } }\n'},
+            "process launch   ": {"pkg/build.rs": 'use std::process::Command as Cmd;\nfn main() { Cmd::new("git").status().unwrap(); }\n'},
+            "process launch    ": {"pkg/build.rs": 'include!("build/git.rs.in");\n', "pkg/build/git.rs.in": 'fn main() { std::process::Command::new("git").status().unwrap(); }\n'},
+            "process launch     ": {"pkg/build.rs": 'fn main() { cmake::build("native"); }\n', "pkg/native/CMakeLists.txt": "file(GLOB PAGES ${PROJECT_SOURCE_DIR}/../../docs/*.md)\n"},
+            "symlinked directory": {".gitignore": "/pkg/assets/\n", "pkg/assets/keep": "", "pkg/src/embed.rs": '#[derive(rust_embed::Embed)]\n#[folder = "assets/pages"]\npub struct Pages;\n'},
+            "checkout-relative Cargo environment": {".cargo/config.toml": '[env]\nREPO_ROOT = { value = "", relative = true }\n'},
+            "unresolvable symlink": {},
+            "unresolved path dependency": {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[dependencies]\nx = { path = "a\\u0000b" }\n'},
         }
+        links = {"symlinked directory": [("pkg/assets/pages", "../../docs")], "unresolvable symlink": [("pkg/loop", "loop")]}
         for reason, files in fallback.items():
             with self.subTest(reason=reason):
-                self.assertIn(reason.strip(), self.scenario(files, ["scripts/gen.py"] if "scripts/gen.py" in files else ())["fallback_reason"] or "")
+                self.assertIn(reason.strip(), self.scenario(files, ["scripts/gen.py"] if "scripts/gen.py" in files else (), links.get(reason, ()))["fallback_reason"] or "")
+
+    def test_unreadable_ignored_package_file_falls_back(self):
+        self.write(".gitignore", "/pkg/.data/\n")
+        self.write("pkg/.data/volume", "private\n")
+        (self.root / "pkg/.data/volume").chmod(0)
+        self.addCleanup((self.root / "pkg/.data/volume").chmod, 0o644)
+        self.assertIn("unreadable reference source pkg/.data/volume", dev.source_state("test")["policy"]["fallback_reason"])
 
     def test_unreached_files_and_data_do_not_force_fallback(self):
         policy = self.scenario({
