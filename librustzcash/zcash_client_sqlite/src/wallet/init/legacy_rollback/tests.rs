@@ -174,6 +174,98 @@ fn legacy_rollback_refuses_recovery_state_even_with_public_metadata() {
     assert!(!column_restored(&db.conn).unwrap());
 }
 
+#[test]
+fn legacy_rollback_resumes_before_shared_derivation_migration() {
+    let mut db = db();
+    prepare_legacy_rollback(&mut db).unwrap();
+    // The preceding build could prepare a rollback wallet without this additive table.
+    db.conn
+        .execute_batch("DROP TABLE tpir_shared_derivations")
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM schemer_migrations WHERE id = ?1",
+            [migrations::TRANSPARENT_SHARED_DERIVATIONS_ID
+                .as_bytes()
+                .to_vec()],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO transactions(txid, min_observed_height) VALUES (X'01', 42)",
+            [],
+        )
+        .unwrap();
+    WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+    assert!(!column_restored(&db.conn).unwrap());
+    assert_eq!(
+        db.conn
+            .query_row("SELECT count(*) FROM tpir_shared_derivations", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.conn
+            .query_row("SELECT count(*) FROM transactions", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn legacy_rollback_refuses_missing_recorded_shared_table() {
+    let mut db = db();
+    prepare_legacy_rollback(&mut db).unwrap();
+    db.conn
+        .execute_batch("DROP TABLE tpir_shared_derivations")
+        .unwrap();
+    assert!(WalletMigrator::new().init_or_migrate(&mut db).is_err());
+    assert!(column_restored(&db.conn).unwrap());
+    assert_eq!(
+        db.conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[cfg(feature = "transparent-inputs")]
+#[test]
+fn legacy_rollback_refuses_shared_derivations_even_with_public_metadata() {
+    use secrecy::SecretVec;
+    use zcash_client_backend::data_api::{AccountBirthday, WalletWrite, chain::ChainState};
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::consensus::BlockHeight;
+    let mut db = db();
+    db.create_account(
+        "shared fixture",
+        &SecretVec::new(vec![7; 32]),
+        &AccountBirthday::from_parts(
+            ChainState::empty(BlockHeight::from_u32(1_200_000), BlockHash([0; 32])),
+            None,
+        ),
+        None,
+    )
+    .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO tpir_shared_derivations SELECT id, 0, 10 FROM accounts",
+            [],
+        )
+        .unwrap();
+    assert!(prepare_legacy_rollback(&mut db).is_err());
+    assert!(!column_restored(&db.conn).unwrap());
+    assert_eq!(
+        db.conn
+            .query_row("SELECT count(*) FROM tpir_shared_derivations", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
 #[cfg(feature = "transparent-inputs")]
 #[test]
 fn legacy_rollback_reconciles_old_public_outputs_and_spends_without_authority() {

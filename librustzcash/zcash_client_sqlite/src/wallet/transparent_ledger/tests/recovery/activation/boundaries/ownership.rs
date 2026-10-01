@@ -51,6 +51,145 @@ fn import(st: &mut State, owner: AccountUuid, key: secp256k1::PublicKey) {
 }
 
 #[test]
+fn shared_activity_after_promotion_extends_discovery_across_reopen() {
+    let (mut st, accounts) = shadow_wallet_with(1);
+    let (a, b) = (accounts[0], accounts[1]);
+    let gap = st.wallet().db().gap_limits.external();
+    let high = 5 * gap;
+    let shared_index = high + gap / 2;
+    let ufvk = st
+        .test_account()
+        .unwrap()
+        .usk()
+        .to_unified_full_viewing_key();
+    let derive_key = |index| {
+        ufvk.transparent()
+            .unwrap()
+            .derive_address_pubkey(
+                TransparentKeyScope::EXTERNAL,
+                NonHardenedChildIndex::from_index(index).unwrap(),
+            )
+            .unwrap()
+    };
+    let address = |index| TransparentAddress::from_pubkey(&derive_key(index));
+    let shared = address(shared_index);
+    // A has allocated a distant address, but the first unused gap remains after index zero.
+    crate::wallet::transparent::generate_address_range(
+        conn(&st),
+        st.network(),
+        st.test_account().unwrap().account().internal_id(),
+        TransparentKeyScope::EXTERNAL,
+        zcash_keys::keys::UnifiedAddressRequest::unsafe_custom(
+            zcash_keys::keys::ReceiverRequirement::Allow,
+            zcash_keys::keys::ReceiverRequirement::Allow,
+            zcash_keys::keys::ReceiverRequirement::Require,
+        ),
+        NonHardenedChildIndex::ZERO..NonHardenedChildIndex::from_index(high + 1).unwrap(),
+        true,
+    )
+    .unwrap();
+    import(&mut st, b, derive_key(shared_index));
+    let ws = watch(&st, a);
+    let mut c = commit(&ws);
+    c.receives = vec![
+        receive(220, address(0), 1_000, below_target(&ws, 2)),
+        receive(221, address(high), 1_000, below_target(&ws, 1)),
+    ];
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    let ws = watch(&st, a);
+    let mut c = commit(&ws);
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    qualify(&mut st, &revision(1, true));
+    set_policy(&mut st, PrivateRequired);
+    promote(&mut st, a).unwrap();
+    assert_eq!(reader_version(&st), 7);
+    assert_eq!(snapshot(&st, a).authority, TransparentAuthority::Private);
+    assert!(!watch(&st, a).addresses.iter().any(|w| w.address == shared));
+    assert!(watch(&st, b).addresses.iter().any(|w| w.address == shared));
+    let before = watch(&st, a);
+    let ws = watch(&st, b);
+    let mut c = commit(&ws);
+    c.receives = vec![receive(222, shared, 20_000, below_target(&ws, 1))];
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    let effective = watch(&st, a);
+    assert!(effective.addresses.len() > before.addresses.len());
+    assert_eq!(
+        snapshot(&st, a).authority,
+        TransparentAuthority::Unavailable
+    );
+    assert!(
+        recovery(&st, a)
+            .blockers
+            .contains(&CandidateBlocker::IncompleteCoverage)
+    );
+    let reopened = crate::WalletDb::for_path(
+        st.wallet().data_file_path(),
+        *st.network(),
+        crate::testing::db::test_clock(),
+        crate::testing::db::test_rng(),
+    )
+    .unwrap()
+    .with_transparent_ledger_mode(PrivateRequired);
+    assert_eq!(reopened.transparent_watch_set(a).unwrap(), effective);
+    for index in high + gap + 1..shared_index + gap + 1 {
+        assert!(work(&st, a, 256).items.iter().any(|item| matches!(item,
+            TransparentRecoveryWork::CheckRange(range) if range.address == address(index))));
+    }
+    let mut c = commit(&effective);
+    c.coverage = full_coverage(&effective);
+    // Failing materialization must roll back coverage too, keeping authority unavailable.
+    let before_materialization = production_dump(conn(&st));
+    conn(&st).execute_batch("CREATE TEMP TRIGGER fail_materialization BEFORE INSERT ON addresses BEGIN SELECT RAISE(ABORT, 'injected materialization failure'); END;").unwrap();
+    assert!(apply(&mut st, c.clone()).is_err());
+    assert_eq!(production_dump(conn(&st)), before_materialization);
+    assert_eq!(
+        snapshot(&st, a).authority,
+        TransparentAuthority::Unavailable
+    );
+    conn(&st)
+        .execute_batch("DROP TRIGGER fail_materialization")
+        .unwrap();
+    apply(&mut st, c).unwrap();
+    assert_eq!(snapshot(&st, a).authority, TransparentAuthority::Private);
+    assert!(watch(&st, b).addresses.iter().any(|w| w.address == shared));
+    // A receive in the newly discovered range is projectable, including when the wallet's
+    // ordinary first-gap generation still chooses the earlier gap at index one.
+    let ws = watch(&st, a);
+    let mut c = commit(&ws);
+    c.receives = vec![receive(
+        223,
+        address(high + gap + 1),
+        30_000,
+        below_target(&ws, 1),
+    )];
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    let ws = watch(&st, a);
+    let mut c = commit(&ws);
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    assert_eq!(snapshot(&st, a).authority, TransparentAuthority::Private);
+    // Removing B releases the retained receiver; A must recover it before regaining authority.
+    st.wallet_mut().delete_account(b).unwrap();
+    let ws = watch(&st, a);
+    assert!(ws.addresses.iter().any(|w| w.address == shared));
+    assert_eq!(
+        snapshot(&st, a).authority,
+        TransparentAuthority::Unavailable
+    );
+    let mut c = commit(&ws);
+    c.receives = vec![receive(222, shared, 20_000, below_target(&ws, 1))];
+    c.coverage = full_coverage(&ws);
+    apply(&mut st, c).unwrap();
+    assert_eq!(snapshot(&st, a).authority, TransparentAuthority::Private);
+    st.wallet_mut().delete_account(a).unwrap();
+    assert_eq!(count(&st, "tpir_shared_derivations"), 0);
+}
+
+#[test]
 fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
     for b_first in [false, true] {
         let (mut st, accounts) = shadow_wallet_with(1);
@@ -248,6 +387,34 @@ fn imported_ownership_filters_all_derivable_scopes() {
                 .iter()
                 .any(|w| w.address == address)
         );
+        let ws = watch(&st, accounts[0]);
+        let mut c = commit(&ws);
+        c.coverage = full_coverage(&ws);
+        apply(&mut st, c).unwrap();
+        qualify(&mut st, &revision(1, true));
+        set_policy(&mut st, PrivateRequired);
+        // Refusing metadata persistence rolls back promotion and every address it generated.
+        let before = production_dump(conn(&st));
+        conn(&st).execute_batch("CREATE TEMP TRIGGER fail_shared_origin BEFORE INSERT ON tpir_shared_derivations BEGIN SELECT RAISE(ABORT, 'injected shared origin failure'); END;").unwrap();
+        assert!(promote(&mut st, accounts[0]).is_err());
+        assert_eq!(production_dump(conn(&st)), before);
+        assert_eq!(count(&st, "tpir_shared_derivations"), 0);
+        conn(&st)
+            .execute_batch("DROP TRIGGER fail_shared_origin")
+            .unwrap();
+        promote(&mut st, accounts[0]).unwrap();
+        assert_eq!(reader_version(&st), 7);
+        assert_eq!(count(&st, "tpir_shared_derivations"), 1);
+        let ws = watch(&st, accounts[1]);
+        let mut c = commit(&ws);
+        c.receives = vec![receive(224, address, 10_000, below_target(&ws, 1))];
+        c.coverage = full_coverage(&ws);
+        apply(&mut st, c).unwrap();
+        assert_eq!(
+            snapshot(&st, accounts[0]).authority,
+            TransparentAuthority::Unavailable
+        );
+        assert!(!work(&st, accounts[0], 256).items.is_empty());
     }
 }
 

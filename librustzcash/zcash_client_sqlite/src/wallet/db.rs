@@ -836,6 +836,17 @@ CREATE TABLE tpir_candidate_windows (
     end_index INTEGER NOT NULL CHECK (end_index >= 0 AND end_index <= 2147483648),
     PRIMARY KEY (account_id, key_scope)
 )"#;
+/// Derivation origins retained when materialization skips another account's receiver.
+///
+/// These indices supply gap-expansion evidence only. They grant neither address ownership nor
+/// coverage, survive rewind and reopen, and disappear when the deriving account is deleted.
+pub(super) const TABLE_TPIR_SHARED_DERIVATIONS: &str = r#"
+CREATE TABLE tpir_shared_derivations (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    key_scope INTEGER NOT NULL CHECK (key_scope IN (0, 1, 2)),
+    child_index INTEGER NOT NULL CHECK (child_index >= 0 AND child_index < 2147483648),
+    PRIMARY KEY (account_id, key_scope, child_index)
+)"#;
 /// Source revisions that supplied candidate evidence.
 ///
 /// Identifiers are opaque. Within a source, a higher `lineage` replaces a lower one; the

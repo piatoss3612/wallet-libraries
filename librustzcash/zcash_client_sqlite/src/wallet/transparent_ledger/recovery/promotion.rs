@@ -41,38 +41,8 @@ pub(crate) fn promote<P: consensus::Parameters>(
             return Err(SqliteClientError::TransparentPromotionBlocked(blockers));
         }
 
-        // Window addresses become the wallet's own, so that their outputs can be projected.
-        // Receivers another account owns stay with it: the watch set excluded them.
-        for (slot, scope) in WINDOW_SCOPES.into_iter().enumerate() {
-            let (start, end) = (watch.production_end[slot], watch.candidate_end[slot]);
-            if start < end {
-                ownership::generate_unowned_range(
-                    conn,
-                    params,
-                    &watch.account,
-                    scope,
-                    NonHardenedChildIndex::from_index(start).expect("below WINDOW_LIMIT")
-                        ..NonHardenedChildIndex::from_index(end)
-                            .expect("a window at WINDOW_LIMIT blocks promotion"),
-                )?;
-            }
-        }
-        // So does the legacy external receiver, which the watch set includes without a row.
-        // Storing an index that already has a row is a no-op.
-        if let Some((_, index)) = get_legacy_transparent_address(params, conn, account)?
-            && let Some(end) = index
-                .index()
-                .checked_add(1)
-                .and_then(NonHardenedChildIndex::from_index)
-        {
-            ownership::generate_unowned_range(
-                conn,
-                params,
-                &watch.account,
-                TransparentKeyScope::EXTERNAL,
-                index..end,
-            )?;
-        }
+        // Skipped receiver origins survive materialization independently of ownership.
+        ownership::materialize_watch(conn, params, &watch)?;
         conn.execute(
             "DELETE FROM tpir_candidate_windows WHERE account_id = :account_id",
             named_params![":account_id": account_ref.0],

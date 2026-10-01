@@ -142,6 +142,31 @@ impl Watch {
             candidate_end,
             derivable,
         };
+        // Promotion retains only the indices it skipped, rather than re-deriving every address
+        // below a possibly distant production_end. These origins confer no financial ownership.
+        let mut stmt = conn.prepare_cached(
+            "SELECT key_scope, child_index FROM tpir_shared_derivations WHERE account_id = ?1",
+        )?;
+        let mut rows = stmt.query([account_ref.0])?;
+        while let Some(row) = rows.next()? {
+            let scope = KeyScope::decode(row.get(0)?)?
+                .as_transparent()
+                .ok_or_else(|| {
+                    SqliteClientError::CorruptedData("invalid shared derivation scope".into())
+                })?;
+            let index =
+                NonHardenedChildIndex::from_index(row.get::<_, u32>(1)?).ok_or_else(|| {
+                    SqliteClientError::CorruptedData("invalid shared derivation index".into())
+                })?;
+            let address = derive(&watch.account, scope, Some(index)).ok_or_else(|| {
+                SqliteClientError::CorruptedData("underivable shared receiver".into())
+            })?;
+            note_origin(
+                &mut watch.window_origins,
+                address,
+                WatchOrigin::CandidateWindow { scope, index },
+            );
+        }
         // Activity at a receiver owned by another account can extend this account's discovery
         // window between commits. Derive the effective window before scheduling or checking
         // completeness; reads must not need an otherwise unnecessary commit to expose gaps.

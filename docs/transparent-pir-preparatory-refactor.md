@@ -963,7 +963,16 @@ not an application release designation or whole-wallet sync qualification; Vizor
 must wire the handover and run its own release probes against the eventual pin.
 
 Recovery reads derive the effective discovery window from all recorded mined
-candidate activity, including receivers owned by another account. The expanded
+candidate activity, including receivers owned by another account. Recovery retains
+skipped derivation indices in `tpir_shared_derivations` when addresses
+are materialized. These indices survive promotion, rewind and reopen, grant no
+ownership or coverage, and are deleted with the deriving account. Their writes require
+reader version 7; earlier readers must refuse those wallets. The seedless additive
+migration creates an empty table without changing policy or authority. Active commits
+materialize newly discovered addresses before projecting events, retaining other
+accounts' ownership and withholding private authority until the new ranges are covered.
+
+The expanded
 window exposes missing coverage immediately without an extra commit. Ownership
 filtering still excludes the other account's receiver. Promotion generates only
 unowned window receivers and rechecks coverage before activation; any ownership

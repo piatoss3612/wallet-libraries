@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+- Shared derivation origins survive promotion and reopen without transferring receiver ownership.
+  Activity at those receivers schedules new gaps and withholds private authority until coverage
+  completes. Active recovery materializes its discovered addresses before projecting receipts.
+  The additive `transparent_shared_derivations` migration creates empty bookkeeping; recording
+  a shared origin requires reader version 7 and excludes public legacy-writer handover.
+
 - Candidate windows respect existing receiver ownership; imports discard competing candidate
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 

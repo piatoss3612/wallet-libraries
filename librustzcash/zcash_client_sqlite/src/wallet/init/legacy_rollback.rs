@@ -123,6 +123,31 @@ fn require_public_baseline(conn: &Connection) -> Result<(), WalletMigrationError
             return Err(WalletMigrationError::LegacyRollbackNotSupported);
         }
     }
+    // A prepared wallet from the preceding build resumes before the new additive migration
+    // runs. Absence is valid only if that migration has not been recorded yet.
+    let has_shared_derivations: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tpir_shared_derivations')",
+        [], |r| r.get(0),
+    )?;
+    if has_shared_derivations {
+        if conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tpir_shared_derivations)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(WalletMigrationError::LegacyRollbackNotSupported);
+        }
+    } else if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schemer_migrations WHERE id = ?1)",
+        [migrations::TRANSPARENT_SHARED_DERIVATIONS_ID
+            .as_bytes()
+            .to_vec()],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Err(WalletMigrationError::CorruptedData(
+            "missing shared derivation table after migration".into(),
+        ));
+    }
     let private_evidence: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM tpir_output_origins WHERE origin IN (2, 3))
              OR EXISTS(SELECT 1 FROM tpir_spend_origins WHERE origin IN (2, 3))
