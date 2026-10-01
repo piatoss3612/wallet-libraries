@@ -984,4 +984,3 @@ line = "let block_path = block_meta.block_file_path(&blocks_dir);"
 reason = "Block file under the FsBlockCache tempdir."
 caller_input = "Tainted input is `self`, the FsBlockCache whose blocks directory is a tempdir created by its constructor in this file."
 context = "362bd83d21718009c7ab66c2becace7bf42b40cf1563dd1f018a0b076b8bca0a"
-
