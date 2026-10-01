@@ -35,6 +35,25 @@ impl Client {
         endpoint: Uri,
         allow_onion_services: bool,
     ) -> Result<CompactTxStreamerClient<Channel>, Error> {
+        self.connect_lightwalletd_channel(endpoint, allow_onion_services)
+            .await
+            .map(CompactTxStreamerClient::new)
+    }
+
+    /// Connects to the `lightwalletd` server at the given endpoint and returns the
+    /// underlying transport channel.
+    ///
+    /// This is the transport [`Self::connect_to_lightwalletd`] wraps, with the same Tor
+    /// routing, onion-service, TLS, and [`Timeouts`] behavior. Use it to layer additional
+    /// `tower` services over the channel, for example to observe when a request body
+    /// has been handed to the connection.
+    ///
+    /// [`Timeouts`]: super::Timeouts
+    pub async fn connect_lightwalletd_channel(
+        &self,
+        endpoint: Uri,
+        allow_onion_services: bool,
+    ) -> Result<Channel, Error> {
         self.ensure_bootstrapped().await?;
 
         let is_https = http::url_is_https(&endpoint)?;
@@ -64,7 +83,7 @@ impl Client {
             .await
             .map_err(GrpcError::Tonic)?;
 
-        Ok(CompactTxStreamerClient::new(conn))
+        Ok(conn)
     }
 }
 

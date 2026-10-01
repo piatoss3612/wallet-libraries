@@ -11,6 +11,8 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `tor::Client::connect_lightwalletd_channel` returns the Tor-routed `tonic` channel that
+  `connect_to_lightwalletd` wraps, so callers can layer `tower` services over it.
 - `TransparentLedgerRead::transparent_recovery_work` and typed bounded batches of pending pages and missing coverage ranges. Requery after committing each batch; scheduling grants no source or financial authority.
 
 - `data_api::transparent_ledger`: the storage-neutral contract for transparent
