@@ -381,6 +381,11 @@ class InputPolicyTests(unittest.TestCase):
             "run-time file access with a computed path ": {"pkg/tests/a.rs": read.format('std::fs::read_to_string("../CHANGE".to_owned() + "LOG.md").unwrap();')},
             "run-time file access with a computed path  ": {"pkg/tests/a.rs": read.format('let p: std::path::PathBuf = ("../CHANGE".to_owned() + "LOG.md").into(); assert!(p.exists());')},
             "run-time file access with a computed path   ": {"pkg/build.rs": "mod helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": 'pub fn check() { std::fs::read_to_string(concat!("../CHANGE", "LOG.md")).unwrap(); }\n'},
+            "run-time file access with a computed path    ": {"pkg/tests/a.rs": read.format('std :: fs :: read(format!("{}{}", "CHANGE", "LOG.md")).unwrap();')},
+            "run-time file access with a computed path     ": {"pkg/tests/a.rs": read.format('std::fs::/* x */read(format!("{}{}", "CHANGE", "LOG.md")).unwrap();')},
+            "run-time file access with a computed path      ": {"pkg/tests/a.rs": read.format('std::fs:: // x\nread(format!("{}{}", "CHANGE", "LOG.md")).unwrap();')},
+            "aliased file access import    ": {"pkg/tests/a.rs": "use std::fs::/* x */read as load;\n" + read.format('load(format!("{}{}", "CHANGE", "LOG.md")).unwrap();')},
+            "aliased file access import     ": {"pkg/src/doc.rs": "/// ```\n/// use std::{\n///     fs::read as load,\n/// };\n/// load(format!(\"{}{}\", \"../CHANGE\", \"LOG.md\")).unwrap();\n/// ```\npub fn doc() {}\n"},
             "aliased include_str macro": {"pkg/src/inc.rs": 'use std::include_str as inc;\npub const P: &str = inc!(concat!("../../CHANGE", "LOG.md"));\n'},
         }
         for reason, files in cases.items():

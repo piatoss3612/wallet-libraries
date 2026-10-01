@@ -101,6 +101,8 @@ CASES = {
     "reader as a value": {"pkg/src/lib.rs": TEST.format(body=f'let load = std::fs::read_to_string; assert!(load({CHANGELOG}).unwrap().contains("ORIGINAL"));')},
     "reader with turbofish": {"pkg/src/lib.rs": TEST.format(body=f'assert!(std::fs::read_to_string::<&str>({CHANGELOG}).unwrap().contains("ORIGINAL"));')},
     "literal-prefixed path": {"pkg/src/lib.rs": TEST.format(body='assert!(std::fs::read_to_string("../CHANGE".to_owned() + "LOG.md").unwrap().contains("ORIGINAL"));')},
+    "spaced path tokens": {"pkg/src/lib.rs": TEST.format(body=f'assert!(String::from_utf8(std :: fs :: read({CHANGELOG}).unwrap()).unwrap().contains("ORIGINAL"));')},
+    "comment in a path": {"pkg/src/lib.rs": TEST.format(body=f'assert!(String::from_utf8(std::fs::/* x */read({CHANGELOG}).unwrap()).unwrap().contains("ORIGINAL"));')},
     "aliased include macro": {"pkg/src/lib.rs": f'use std::include_str as inc;\npub const PAGE: &str = inc!(concat!("../../CHANGE", "LOG.md"));\n{TEST.format(body=CHECK)}'},
     "build script helper module": {"pkg/build.rs": "mod helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": f'pub fn check() {{ assert!(std::fs::read_to_string({CHANGELOG}).unwrap().contains("ORIGINAL")); }}\n', "pkg/src/lib.rs": ""},
     # A reviewed run-time reader of a temporary file keeps the exclusion.
@@ -127,6 +129,7 @@ CHECK_CASES = {
         "pkg/Cargo.toml": PACKAGE + '\n[dependencies]\nmac = { path = "../mac" }\n',
         "pkg/src/lib.rs": "pub const ONE: u8 = mac::page!();\n",
     },
+    "spaced build-script reader": {"pkg/build.rs": f"fn main() {{ assert!(String::from_utf8(std :: fs :: read(std::path::Path::new(&std::env::var(\"CARGO_MANIFEST_DIR\").unwrap()).join({CHANGELOG})).unwrap()).unwrap().contains(\"ORIGINAL\")); }}\n", "pkg/src/lib.rs": ""},
     "build dependency": {
         "Cargo.toml": '[workspace]\nmembers = ["pkg", "gen"]\nresolver = "2"\n',
         "gen/Cargo.toml": '[package]\nname = "gen"\nversion = "0.1.0"\nedition = "2021"\n',

@@ -37,7 +37,7 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 10
+POLICY_VERSION = 11
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
 COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{](?!\s*[bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
@@ -63,15 +63,18 @@ FUNCTION = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+
 # followed by `+ "…"` or `.to_owned()` is computed) may reach any file, so it
 # is an unknown reader (the policy cannot prove where it points).
 WHOLE_LITERAL = r'(?:[bc]?"(?:[^"\\]|\\.)*"|[bc]?r(#*)".*?"\1)\s*[,)]'
-TURBOFISH = r"(?:\s*::\s*<[^()]*>)?"
-RUNTIME_READER = re.compile(r'(?:\b(?:fs|fs_err|File|Connection|OpenOptions|Path|PathBuf|Dir|tokio::fs)::(?:\w+)|\.open(?:_with_flags)?|\bread_to_string|(?<!fn )\b(?:f?open(?:at)?(?:64)?))' + TURBOFISH + r'\s*\(\s*(?!' + WHOLE_LITERAL + r')(?!\))', re.S)
+# Whitespace and comments may separate path tokens (`std :: fs :: read`, `fs::/* */read`).
+GAP = r"(?:\s|/\*.*?\*/|//[^\n]*\n)*"
+PATH_SEP = GAP + "::" + GAP
+TURBOFISH = r"(?:" + PATH_SEP + r"<[^()]*>)?"
+RUNTIME_READER = re.compile(r'(?:\b(?:fs|fs_err|File|Connection|OpenOptions|Path|PathBuf|Dir)' + PATH_SEP + r'(?:r#)?\w+|\.' + GAP + r'open(?:_with_flags)?|\bread_to_string|(?<!fn )\b(?:f?open(?:at)?(?:64)?))' + TURBOFISH + GAP + r'\(\s*(?!' + WHOLE_LITERAL + r')(?!\))', re.S)
 # Path methods that probe the file system: their receiver may be any path.
-PATH_PROBE = re.compile(r"\.(?:exists|try_exists|is_file|is_dir|is_symlink|metadata|symlink_metadata|canonicalize|read_link)\s*\(")
+PATH_PROBE = re.compile(r"\.\s*(?:exists|try_exists|is_file|is_dir|is_symlink|metadata|symlink_metadata|canonicalize|read_link)\s*\(")
 # File access hidden behind another name: a file-system function or opener
 # used as a value (`let r = fs::read;`, `.map(File::open)`), or imported by
 # `use` under an alias, as a glob, or as a bare function (`use std::fs::read;`).
 FILE_ROOTS = {"fs", "fs_err", "File", "OpenOptions", "DirBuilder", "Path", "PathBuf", "Connection", "Mmap", "MmapOptions", "Command"}
-FILE_VALUE = re.compile(r"\b(?:fs|fs_err)\s*::\s*[a-z_]\w*\b(?!\s*(?:\(|::|!))|\b(?:File|OpenOptions|DirBuilder|Connection|Mmap|MmapOptions|Path|PathBuf)\s*::\s*(?:open\w*|create\w*|new|from|options|map\w*)\b(?!\s*(?:\(|::))")
+FILE_VALUE = re.compile(r"\b(?:fs|fs_err)" + PATH_SEP + r"(?:r#)?[a-z_]\w*\b(?!" + GAP + r"(?:\(|::|!))|\b(?:File|OpenOptions|DirBuilder|Connection|Mmap|MmapOptions|Path|PathBuf)" + PATH_SEP + r"(?:open\w*|create\w*|new|from|options|map\w*)\b(?!" + GAP + r"(?:\(|::))", re.S)
 INCLUDE_MACROS = {"include", "include_str", "include_bytes"}
 USE_TOKEN = re.compile(r"::|[{},*]|r#\w+|[A-Za-z_]\w*")
 USE_DELIMITER = re.compile(r"[{};]")
@@ -329,6 +332,9 @@ def use_tree(declaration: str) -> str | None:
     code that does not parse as a use tree cannot compile either.
     """
     tree = declaration.split(None, 1)[1] if len(declaration.split(None, 1)) > 1 else ""
+    # Doctest lines keep their code; other comments are dropped.
+    tree = re.sub(r"\n[ \t]*//[/!]", "\n", tree)
+    tree = re.sub(r"/\*.*?\*/|//[^\n]*", " ", tree, flags=re.S)
     if not re.fullmatch(r"[\w\s:{},*#]*", tree):
         return None
     tokens = USE_TOKEN.findall(tree)
@@ -587,12 +593,12 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
         sites, calls = {}, []
     # Qualified calls (`crate::tor::create_with_timeouts(…)`) are call sites too;
     # renaming a wrapper or passing it as a value hides its calls.
-    wrappers = "|".join(re.escape(call) for call in calls)
+    wrappers = "|".join(PATH_SEP.join(map(re.escape, call.split("::"))) for call in calls)
     reviewed = {
         "sites": sites,
         "used": set(),
-        "wrappers": re.compile(r"(?<!fn )(?<!\w)(?:" + wrappers + r")" + TURBOFISH + r"\s*\(") if calls else None,
-        "wrapper_values": re.compile(r"(?<!fn )(?<!\w)(?:" + wrappers + r")\b(?!\s*(?:\(|::|!))") if calls else None,
+        "wrappers": re.compile(r"(?<!fn )(?<!\w)(?:" + wrappers + r")" + TURBOFISH + GAP + r"\(", re.S) if calls else None,
+        "wrapper_values": re.compile(r"(?<!fn )(?<!\w)(?:" + wrappers + r")\b(?!" + GAP + r"(?:\(|::|!))", re.S) if calls else None,
         "heads": {call.split("::")[0] for call in calls},
     }
     def package_of(name: str) -> str | None:
