@@ -28,7 +28,7 @@ pub(super) struct Watch {
     window_origins: BTreeMap<TransparentAddress, WatchOrigin>,
     /// One past the highest index in the wallet's own address table, per window scope.
     pub(super) production_end: [u32; 3],
-    /// The stored candidate window end, per window scope.
+    /// The effective candidate window end, including activity recorded by other accounts.
     pub(super) candidate_end: [u32; 3],
     /// Whether the account's keys can derive further addresses, per window scope.
     pub(super) derivable: [bool; 3],
@@ -39,6 +39,7 @@ impl Watch {
     pub(super) fn load<P: consensus::Parameters>(
         conn: &rusqlite::Connection,
         params: &P,
+        gap_limits: &GapLimits,
         account_uuid: AccountUuid,
     ) -> Result<Option<Self>, SqliteClientError> {
         let Some(account) = get_account(conn, params, account_uuid)? else {
@@ -131,18 +132,72 @@ impl Watch {
             }
         }
 
-        let window_origins = addresses.clone();
-        ownership::retain_owned(conn, params, account_ref, &mut addresses)?;
         let required_from = account.birthday();
-        Ok(Some(Watch {
+        let mut watch = Watch {
             account,
             required_from,
+            window_origins: addresses.clone(),
             addresses,
-            window_origins,
             production_end,
             candidate_end,
             derivable,
-        }))
+        };
+        // Promotion retains only the indices it skipped, rather than re-deriving every address
+        // below a possibly distant production_end. These origins confer no financial ownership.
+        let mut stmt = conn.prepare_cached(
+            "SELECT key_scope, child_index FROM tpir_shared_derivations WHERE account_id = ?1",
+        )?;
+        let mut rows = stmt.query([account_ref.0])?;
+        while let Some(row) = rows.next()? {
+            let scope = KeyScope::decode(row.get(0)?)?
+                .as_transparent()
+                .ok_or_else(|| {
+                    SqliteClientError::CorruptedData("invalid shared derivation scope".into())
+                })?;
+            let index =
+                NonHardenedChildIndex::from_index(row.get::<_, u32>(1)?).ok_or_else(|| {
+                    SqliteClientError::CorruptedData("invalid shared derivation index".into())
+                })?;
+            let address = derive(&watch.account, scope, Some(index)).ok_or_else(|| {
+                SqliteClientError::CorruptedData("underivable shared receiver".into())
+            })?;
+            note_origin(
+                &mut watch.window_origins,
+                address,
+                WatchOrigin::CandidateWindow { scope, index },
+            );
+        }
+        // Activity at a receiver owned by another account can extend this account's discovery
+        // window between commits. Derive the effective window before scheduling or checking
+        // completeness; reads must not need an otherwise unnecessary commit to expose gaps.
+        loop {
+            let needs = watch.window_needs(conn, gap_limits)?;
+            let mut grew = false;
+            for (slot, needed) in needs.into_iter().enumerate() {
+                if let Some(end) = needed.filter(|_| watch.derivable[slot]) {
+                    let scope = WINDOW_SCOPES[slot];
+                    let start = watch.production_end[slot].max(watch.candidate_end[slot]);
+                    for index in start..end {
+                        let index =
+                            NonHardenedChildIndex::from_index(index).expect("below WINDOW_LIMIT");
+                        if let Some(address) = derive(&watch.account, scope, Some(index)) {
+                            watch
+                                .window_origins
+                                .entry(address)
+                                .or_insert(WatchOrigin::CandidateWindow { scope, index });
+                        }
+                    }
+                    watch.candidate_end[slot] = end;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        watch.addresses = watch.window_origins.clone();
+        ownership::retain_owned(conn, params, account_ref, &mut watch.addresses)?;
+        Ok(Some(watch))
     }
 
     fn watched_addresses(&self) -> Vec<WatchedAddress> {
@@ -301,11 +356,13 @@ fn pending_pages(
 pub(crate) fn watch_set<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
+    gap_limits: &GapLimits,
     configured: Option<TransparentLedgerMode>,
     account: AccountUuid,
 ) -> Result<TransparentWatchSet<AccountUuid>, SqliteClientError> {
     resolve_mode(conn, configured)?;
-    let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    let watch =
+        Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
     Ok(TransparentWatchSet {
         account,
         lifecycle: lifecycle(conn, watch.account.internal_id())?,

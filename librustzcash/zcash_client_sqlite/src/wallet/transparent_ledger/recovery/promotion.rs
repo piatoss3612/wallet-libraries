@@ -20,7 +20,8 @@ pub(crate) fn promote<P: consensus::Parameters>(
         {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
         }
-        let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+        let watch = Watch::load(conn, params, gap_limits, account)?
+            .ok_or(SqliteClientError::AccountUnknown)?;
         let account_ref = watch.account.internal_id();
         let ledger = AccountLedger {
             account_ref,
@@ -40,51 +41,17 @@ pub(crate) fn promote<P: consensus::Parameters>(
             return Err(SqliteClientError::TransparentPromotionBlocked(blockers));
         }
 
-        // Window addresses become the wallet's own, so that their outputs can be projected.
-        for (slot, scope) in WINDOW_SCOPES.into_iter().enumerate() {
-            let (start, end) = (watch.production_end[slot], watch.candidate_end[slot]);
-            if start < end {
-                generate_address_range(
-                    conn,
-                    params,
-                    account_ref,
-                    scope,
-                    UnifiedAddressRequest::unsafe_custom(Allow, Allow, Require),
-                    NonHardenedChildIndex::from_index(start).expect("below WINDOW_LIMIT")
-                        ..NonHardenedChildIndex::from_index(end)
-                            .expect("a window at WINDOW_LIMIT blocks promotion"),
-                    false,
-                )?;
-            }
-        }
-        // So does the legacy external receiver, which the watch set includes without a row.
-        // Storing an index that already has a row is a no-op.
-        if let Some((_, index)) = get_legacy_transparent_address(params, conn, account)?
-            && let Some(end) = index
-                .index()
-                .checked_add(1)
-                .and_then(NonHardenedChildIndex::from_index)
-        {
-            generate_address_range(
-                conn,
-                params,
-                account_ref,
-                TransparentKeyScope::EXTERNAL,
-                UnifiedAddressRequest::unsafe_custom(Allow, Allow, Require),
-                index..end,
-                false,
-            )?;
-        }
+        // Skipped receiver origins survive materialization independently of ownership.
+        ownership::materialize_watch(conn, params, &watch)?;
         conn.execute(
             "DELETE FROM tpir_candidate_windows WHERE account_id = :account_id",
             named_params![":account_id": account_ref.0],
         )?;
 
-        // Generating the window may transfer an imported receiver. Its new owner has no
-        // coverage for that receiver: refuse and roll back rather than activate incomplete
-        // recovery. An explicit production address transfer followed by recovery resolves it.
-        let generated =
-            Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+        // Defense in depth: the addresses just written must not have changed what the account
+        // is required to cover. Refuse and roll back rather than activate incomplete recovery.
+        let generated = Watch::load(conn, params, gap_limits, account)?
+            .ok_or(SqliteClientError::AccountUnknown)?;
         let status = recovery_status(conn, gap_limits, &generated)?;
         if !status.blockers.is_empty() {
             return Err(SqliteClientError::TransparentPromotionBlocked(

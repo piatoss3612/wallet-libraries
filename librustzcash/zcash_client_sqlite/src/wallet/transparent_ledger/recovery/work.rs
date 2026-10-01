@@ -11,12 +11,14 @@ use zcash_client_backend::data_api::transparent_ledger::{
 pub(crate) fn recovery_work<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
+    gap_limits: &GapLimits,
     configured: Option<TransparentLedgerMode>,
     account: AccountUuid,
     limit: NonZeroUsize,
 ) -> Result<TransparentRecoveryWorkBatch<AccountUuid>, SqliteClientError> {
-    let ws = watch_set(conn, params, configured, account)?;
-    let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    let ws = watch_set(conn, params, gap_limits, configured, account)?;
+    let watch =
+        Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
     if account_quarantined(conn, watch.account.internal_id())? {
         return Err(reject(CommitRejection::Refused(
             RefusedCommit::AccountQuarantined,

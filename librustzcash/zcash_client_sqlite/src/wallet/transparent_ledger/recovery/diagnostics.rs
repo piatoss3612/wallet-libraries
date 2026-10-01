@@ -185,7 +185,8 @@ pub(crate) fn account_ledger<P: consensus::Parameters>(
     gap_limits: &GapLimits,
     account: AccountUuid,
 ) -> Result<AccountLedger, SqliteClientError> {
-    let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    let watch =
+        Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
     let account_ref = watch.account.internal_id();
     Ok(AccountLedger {
         account_ref,
@@ -349,7 +350,8 @@ pub(crate) fn candidate_recovery<P: consensus::Parameters>(
     account: AccountUuid,
 ) -> Result<CandidateRecovery<AccountUuid>, SqliteClientError> {
     resolve_mode(conn, configured)?;
-    let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    let watch =
+        Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
     let account_ref = watch.account.internal_id();
     let status = recovery_status(conn, gap_limits, &watch)?;
 

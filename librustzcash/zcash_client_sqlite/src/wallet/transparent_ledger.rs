@@ -89,7 +89,12 @@ pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
 /// qualification, quarantine, and retained outputs whose receive was withdrawn. Version 4
 /// could admit those retained rows under public authority, so activation writes require 5.
 /// Version 6 separates observed revisions from trusted replacement; revision writes require 6.
-pub(crate) const TPIR_READER_VERSION: i64 = METADATA_READER_VERSION;
+/// Version 7 maintains source-bound transaction facts through withdrawals and rewinds.
+/// Version 8 retains shared derivation origins after address materialization.
+pub(crate) const TPIR_READER_VERSION: i64 = SHARED_DERIVATION_READER_VERSION;
+
+/// The reader version retained shared derivation origins require.
+pub(crate) const SHARED_DERIVATION_READER_VERSION: i64 = 8;
 
 /// Maintains source-bound transaction facts through withdrawals and rewinds.
 pub(crate) const METADATA_READER_VERSION: i64 = 7;
@@ -206,6 +211,9 @@ pub(crate) fn durable_policy(
         } else {
             Ok(None)
         };
+    }
+    if super::init::legacy_rollback::column_restored(conn)? {
+        return Err(SqliteClientError::LegacyRollbackPrepared);
     }
     let (mode, generation, min_reader_version) = conn
         .query_row(
@@ -494,6 +502,10 @@ struct PrivateView {
 }
 
 /// Reads `account`'s private ledger for a snapshot targeting the block after `tip`.
+///
+/// Authority, last-known amounts and blockers are read only when `authoritative`, that is under
+/// `PrivateRequired`. A shadow snapshot reports public authority and only the recovery progress,
+/// so a diagnostic it would discard cannot fail the public amount.
 #[cfg(feature = "transparent-inputs")]
 fn private_view<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -502,6 +514,7 @@ fn private_view<P: consensus::Parameters>(
     account: AccountUuid,
     tip: BlockHeight,
     confirmations_policy: ConfirmationsPolicy,
+    authoritative: bool,
 ) -> Result<PrivateView, SqliteClientError> {
     let ledger = recovery::account_ledger(conn, params, gap_limits, account)?;
     let target = TargetHeight::from(tip + 1);
@@ -511,7 +524,9 @@ fn private_view<P: consensus::Parameters>(
         }
         None => None,
     };
-    let (authority, last_known, blockers) = if ledger.authorizes_after(tip) {
+    let (authority, last_known, blockers) = if !authoritative {
+        (None, None, vec![])
+    } else if ledger.authorizes_after(tip) {
         (
             transparent_balance(conn, account, target, confirmations_policy, true)?,
             None,
@@ -634,7 +649,15 @@ pub(crate) fn snapshot<P: consensus::Parameters>(
         TransparentLedgerMode::Public => None,
         TransparentLedgerMode::PrivateShadow | TransparentLedgerMode::PrivateRequired => {
             #[cfg(feature = "transparent-inputs")]
-            let view = private_view(conn, params, gap_limits, account, tip, confirmations_policy)?;
+            let view = private_view(
+                conn,
+                params,
+                gap_limits,
+                account,
+                tip,
+                confirmations_policy,
+                mode == TransparentLedgerMode::PrivateRequired,
+            )?;
             #[cfg(not(feature = "transparent-inputs"))]
             let view = private_view(conn, account, tip, confirmations_policy)?;
             Some(view)

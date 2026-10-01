@@ -245,6 +245,14 @@ fn a_wallet_requiring_a_newer_reader_is_refused_without_changes() {
 #[test]
 fn low_level_provenance_writes_roll_back_with_the_wallet_transaction() {
     let (mut st, account, chain, owned, _) = promoted_oracle_wallet();
+    assert_eq!(reader_version(&st), REVISION_READER_VERSION);
+    // Exercise the highest supported reader boundary even without shared-origin state.
+    conn(&st)
+        .execute(
+            "UPDATE tpir_meta SET min_reader_version = ?1",
+            [TPIR_READER_VERSION],
+        )
+        .unwrap();
     let expected = assert_diagnostics_agree(&st, account, &chain, &owned);
     let receive = expected.unspent.iter().find(|r| !r.coinbase).unwrap();
     let output = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
@@ -291,11 +299,8 @@ fn low_level_provenance_writes_roll_back_with_the_wallet_transaction() {
     conn(&st)
         .execute_batch("DROP TRIGGER fail_output_origin; DROP TRIGGER fail_spend_link")
         .unwrap();
-    // No metadata was written: source-bound provenance retains its revision-v6 fence.
-    assert_eq!(
-        reader_version(&st),
-        crate::wallet::transparent_ledger::REVISION_READER_VERSION
-    );
+    // A reader exactly at the highest supported version remains usable.
+    assert_eq!(reader_version(&st), TPIR_READER_VERSION);
     st.wallet_mut()
         .db_mut()
         .transactionally(|db| db.put_transparent_output(&output, height, true))
