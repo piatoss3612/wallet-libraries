@@ -44,7 +44,6 @@ BUILD_COPY = 'fn main() {{ let text = {read}; std::fs::write(std::path::Path::ne
 CONTEXT = getattr(dev, "source_context", lambda text, position: ("", ""))
 REVIEWED = '#[test]\nfn oracle() {\n    let path = std::env::current_exe().unwrap();\n    assert!(!String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains(&["MUT", "ATED"].concat()));\n}\n'
 REVIEWED_LINE = 'assert!(!String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains(&["MUT", "ATED"].concat()));'
-REVIEWED_REGISTRY = f'[[reader]]\nfile = "pkg/src/lib.rs"\nfunction = "fn oracle() {{"\nline = {json.dumps(REVIEWED_LINE)}\nreason = "the test binary itself"\ncontext = "{CONTEXT(REVIEWED, REVIEWED.index("std::fs::read"))[1]}"\n'
 
 
 
@@ -63,6 +62,8 @@ def reviewed(files: dict[str, str], *readers: tuple[str, str]) -> str:
         text += f'[[reader]]\nfile = "{name}"\nfunction = {json.dumps(function)}\nline = {json.dumps(line)}\nreason = "reviewed"\ncontext = "{digest}"\n\n'
     return text
 
+
+REVIEWED_REGISTRY = reviewed({"pkg/src/lib.rs": REVIEWED}, ("pkg/src/lib.rs", "std::fs::read"))
 
 # Reviewed readers whose sources change after review in ways the call line does not show.
 LITERAL = f'const KIND: &str = "temporary  file";\n#[test]\nfn oracle() {{\n    let path: std::path::PathBuf = if KIND == "temporary  file" {{ std::env::current_exe().unwrap() }} else {{ {CHANGELOG}.into() }};\n    {REVIEWED_LINE}\n}}\n'
