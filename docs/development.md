@@ -62,22 +62,24 @@ file. The audit scans every package file (including Git-ignored ones and a
 root package), every manifest including `metadata` values and path-shaped
 keys, and Cargo configuration, then follows each string literal (escapes
 decoded, spaces allowed, each line also lexed alone) to the files it may name,
-so Markdown doctests and included modules are scanned in turn. A file-name
-mention, compared case-insensitively and including comments and symlinks,
-keeps that page an input. Computed or unresolved references fall back to
+so Markdown doctests and included modules are scanned in turn; a reached Rust
+file also reaches the modules beside and below it. A file-name mention,
+compared case-insensitively and including comments and symlinks, or a literal
+naming the page without its extension, keeps that page an input. Computed or unresolved references fall back to
 every file and record `fallback_reason`:
 
 - non-literal `include_*!`, any `docs` segment that does not name an existing
   file, and literals that concatenation could join into `docs`;
 - upward navigation: parent paths or placeholder file names at the checkout
-  root, pure `..` literals, `.parent()`/`.ancestors()`, and `current_dir` or
-  `CARGO_MANIFEST_DIR` combined with `.pop()` or `..`;
+  root, pure `..` literals, `Component::ParentDir`, `.parent()`/`.ancestors()`,
+  and `current_dir` or `CARGO_MANIFEST_DIR` combined with `.pop()` or `..`;
 - directory walkers (`read_dir`, `walkdir`, `ignore`, `glob`, `globwalk`, and
   similar) and checkout-relative Cargo `[env]` values;
-- any process launch (including aliases, `duct`, `libc` exec, and `cc`/`cmake`
-  build tools) except audited `sqlite3`, and work-tree readers (`git2`, `gix`,
-  `vergen`);
-- symlinked documentation directories, untracked nested repositories,
+- any process launch (including aliases, `duct`, `libc`/`nix` exec, Python
+  `subprocess`, `cc`/`cmake` build tools, and Cargo `runner` settings) except
+  audited `sqlite3` and the package's own `CARGO_BIN_EXE_*` binaries, and
+  work-tree readers (`git2`, `gix`, `vergen`);
+- symlinked documentation directories, nested repositories and submodules,
   unreadable sources, and path dependencies outside the checkout.
 
 Only known data formats (JSON, hex, lockfiles, protobuf, images) skip the

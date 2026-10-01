@@ -295,13 +295,16 @@ class InputPolicyTests(unittest.TestCase):
             "metadata read by a build script": {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[package.metadata.embed]\npages = ["../docs/guide.md"]\n'},
             "case-insensitive file system": {"pkg/src/case.rs": 'const G: &str = include_str!("../../Docs/Guide.md");\n'},
             "ignored symlink": {".gitignore": "/pkg/assets/\n", "pkg/src/link.rs": 'const P: &str = include_str!("../assets/page.md");\n'},
+            "extensionless page name": {"pkg/tests/cl.rs": '#[test]\nfn cl() { std::fs::read_to_string(std::path::Path::new("../CHANGELOG").with_extension("md")).unwrap(); }\n'},
+            "implicit module outside the package": {"pkg/src/shared.rs": '#[path = "../../shared/mod.rs"]\nmod shared;\n', "shared/mod.rs": "mod pages;\n", "shared/pages.rs": 'const G: &str = include_str!("../docs/guide.md");\n'},
             "metadata key": {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[package.metadata.embed-pages]\n"../docs/guide.md" = "guide"\n'},
         }
         for case, files in protected.items():
             with self.subTest(case=case):
                 policy = self.scenario(files, ["scripts/gen.py"] if "scripts/gen.py" in files else (), [("pkg/assets/page.md", "../../docs/guide.md")] if case == "ignored symlink" else ())
                 self.assertIsNone(policy["fallback_reason"])
-                self.assertIn("docs/my guide.md" if case == "path with spaces" else "docs/guide.md", policy["protected"])
+                page = {"path with spaces": "docs/my guide.md", "extensionless page name": "CHANGELOG.md"}.get(case, "docs/guide.md")
+                self.assertIn(page, policy["protected"])
         fallback = {
             "computed include": {"README.md": readme.format("x").replace("std::fs::read_to_string(\"x\")", 'include_str!(concat!("../docs/", "guide.md"))'), "pkg/src/root.rs": '#![doc = include_str!("../../README.md")]\n'},
             "documentation path fragments": {"pkg/src/split.rs": 'fn p(n: &str) -> String { format!("{}{}/{n}.md", "../../do", "cs") }\n'},
@@ -322,6 +325,8 @@ class InputPolicyTests(unittest.TestCase):
             "symlinked directory": {".gitignore": "/pkg/assets/\n", "pkg/assets/keep": "", "pkg/src/embed.rs": '#[derive(rust_embed::Embed)]\n#[folder = "assets/pages"]\npub struct Pages;\n'},
             "checkout-relative Cargo environment": {".cargo/config.toml": '[env]\nREPO_ROOT = { value = "", relative = true }\n'},
             "unresolvable symlink": {},
+            "parent directory navigation ": {"pkg/tests/up.rs": 'use std::path::{Component, PathBuf};\n#[test]\nfn up() { let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); root.push(Component::ParentDir); drop(root); }\n'},
+            "custom Cargo runner": {".cargo/config.toml": '[target.x86_64-unknown-linux-gnu]\nrunner = ["python3", "scripts/runner.py"]\n'},
             "computed directory traversal ": {"pkg/tests/top.rs": '#[test]\nfn notes() { let mut root = std::env::current_dir().unwrap(); root.pop(); std::fs::read_to_string(root.join("CHANGELOG").with_extension("md")).unwrap(); }\n'},
             "computed directory traversal  ": {"pkg/tests/links.rs": '#[test]\nfn links() { for entry in globwalk::GlobWalkerBuilder::new(".", "*.md").build().unwrap() { drop(entry); } }\n'},
             "parent directory navigation": {"crates/pkg/Cargo.toml": '[package]\nname = "nested"\n', "crates/pkg/tests/top.rs": '#[test]\nfn notes() { let root = std::path::Path::new("..").join(".."); std::fs::read_to_string(root.join(format!("{}.md", "CHANGELOG"))).unwrap(); }\n'},
@@ -337,18 +342,22 @@ class InputPolicyTests(unittest.TestCase):
     def test_untracked_nested_repository_falls_back(self):
         self.write("pkg/vendor/helper/src/lib.rs", 'const G: &str = include_str!("../../../../docs/guide.md");\n')
         subprocess.run(["git", "init", "-q"], cwd=self.root / "pkg/vendor/helper", check=True)
-        self.assertIn("untracked nested repository pkg/vendor/helper/", dev.source_state("test")["policy"]["fallback_reason"])
+        self.assertIn("nested repository or submodule pkg/vendor/helper/", dev.source_state("test")["policy"]["fallback_reason"])
 
     def test_malformed_or_unreadable_inputs_do_not_crash(self):
         cases = {
             "invalid TOML fixture": ({"pkg/tests/fixtures/invalid.toml": 'key = = "broken"\n'}, None),
             "env is not a table": ({".cargo/config.toml": 'env = "x"\n'}, None),
             "env value is not a string": ({".cargo/config.toml": "[env]\nX = { value = 1 }\n"}, None),
+            "rustfmt-wrapped literal include": ({"pkg/src/wrapped.rs": '#[doc = include_str!(\n    "../README.md"\n)]\npub fn f() {}\n'}, None),
+            "package binary launch": ({"pkg/tests/cli.rs": '#[test]\nfn cli() { std::process::Command::new(env!("CARGO_BIN_EXE_pkg")).status().unwrap(); }\n'}, None),
         }
         for case, (files, reason) in cases.items():
             with self.subTest(case=case):
                 fallback = self.scenario(files)["fallback_reason"]
                 self.assertIn(reason, fallback) if reason else self.assertIsNone(fallback)
+        (self.root / os.fsdecode(b"pkg/caf\xe9.txt")).write_text("x")
+        self.assertIsNone(dev.source_state("test")["policy"]["fallback_reason"])
         self.write("scratch.log", "private\n")
         (self.root / "scratch.log").chmod(0)
         self.addCleanup((self.root / "scratch.log").chmod, 0o644)

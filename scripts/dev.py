@@ -36,16 +36,16 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 5
+POLICY_VERSION = 6
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
-COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{]\s*(?![bc]?r?#*\")")
+COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{](?!\s*[bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
 TRAVERSAL = re.compile(r"\b(?:read_dir|iterdir|listdir|scandir|os\.walk|walkdir|jwalk|glob|globwalk|globset|rglob|GlobWalker\w*|WalkBuilder|WalkDir|CARGO_WORKSPACE_DIR|workspace_root)\b|\b(?:ignore|Walk|walk)::|\.(?:parents?|ancestors)\b")
 # A run-time base directory combined with any upward step may reach the root.
 BASE_DIRECTORY = re.compile(r"\bcurrent_dir\b|\bCARGO_MANIFEST_DIR\b|__file__|\$0\b|BASH_SOURCE")
-UPWARD = re.compile(r"\.pop\(\)|\.\.|\bdirname\b")
+UPWARD = re.compile(r"\.pop\(\)|\.\.|\bdirname\b|\bParentDir\b")
 # Any launched program may read the checkout; only audited programs are exempt.
-SPAWN = re.compile(r'\bCommand::new\(\s*(?:"([^"]*)"\s*\))?|\bcmd!\s*[(\[{]|\b(?:duct|xshell|cmake|cc|autotools|meson|subprocess)::|\bCommand\s+as\b|\blibc::(?:system|exec\w*|posix_spawn\w*)\b')
+SPAWN = re.compile(r'\bCommand\s*::\s*new\s*\(\s*(?:"([^"]*)"\s*\)|(env!\(\s*"CARGO_BIN_EXE_\w+"\s*\)))?|\bcmd!\s*[(\[{]|\b(?:duct|xshell|cmake|cc|autotools|meson|subprocess)::|\bCommand\s+as\b|\b(?:libc|unistd)::(?:system|exec\w*|posix_spawn\w*|fork)\b|\bsubprocess\.|\bos\.(?:system|exec\w*|spawn\w*|popen)\b')
 # Libraries that read the whole work tree, such as Git status for build info.
 WORKTREE_READERS = re.compile(r"\b(?:git2|gix|vergen\w*|built)::")
 AUDITED_PROGRAMS = {"sqlite3"}  # reads only the database and SQL it is given
@@ -216,11 +216,12 @@ def computed(text: str, found: set[str]) -> list[str]:
         reasons.append("computed directory traversal")
     if WORKTREE_READERS.search(text):
         reasons.append("work-tree reader")
-    if any(spawn[1] not in AUDITED_PROGRAMS for spawn in SPAWN.finditer(text)):
+    # The package's own binaries (`CARGO_BIN_EXE_*`) are built from scanned sources.
+    if any(spawn[1] not in AUDITED_PROGRAMS and not spawn[2] for spawn in SPAWN.finditer(text)):
         reasons.append("process launch that may read any file")
     # Pure upward navigation such as `Path::new("..").join("..")` can reach the root
     # from any package depth.
-    if any(re.fullmatch(r"[./]*\.\.[./]*", literal) for literal in found):
+    if any(re.fullmatch(r"[./]*\.\.[./]*", literal) for literal in found) or re.search(r"\bParentDir\b", text):
         reasons.append("parent directory navigation")
     return reasons
 
@@ -242,7 +243,8 @@ def follow(name: str, literal: str, package: str, index: Index) -> tuple[set[str
         folder, _, leaf = target.rpartition("/")
         # Only a parent path, or a root package's own code, runs from the root.
         from_root = PARENT.search(literal) or package == "" and not name.endswith(".toml")
-        if from_root and not re.search(r"\s", literal) and PLACEHOLDER & set(leaf) and (not folder.strip("./") or PLACEHOLDER & set(folder)):
+        path_like = "/" in literal or re.search(r"\.\w+$", literal)
+        if from_root and path_like and not re.search(r"\s", literal) and PLACEHOLDER & set(leaf) and (not folder.strip("./") or PLACEHOLDER & set(folder)):
             return reached, f"computed file name {literal!r} at the checkout root"
         if target in {".", ""} or not target.strip("./"):
             if PARENT.search(literal):
@@ -278,7 +280,7 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
     heads, tails = set(), set()
     root, docs = ROOT.resolve(), (ROOT / "docs").resolve()
     # Git lists an untracked nested checkout as one directory it does not hash.
-    reasons += [f"untracked nested repository {name}" for name in sorted(files) if name.endswith("/")]
+    reasons += [f"nested repository or submodule {name}" for name in sorted(files) if name.endswith("/") or (ROOT / name).is_dir()]
     for name in sorted(known - candidates):
         path = ROOT / name
         if path.is_symlink():
@@ -296,7 +298,7 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
     packages = []
     for manifest in manifests:
         try:
-            if "package" in tomllib.loads((ROOT / manifest).read_text()):
+            if {"package", "project"} & set(tomllib.loads((ROOT / manifest).read_text())):
                 packages.append("" if manifest == "Cargo.toml" else str(Path(manifest).parent))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             pass  # reported when the manifest is scanned below
@@ -333,6 +335,8 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
                     if missing:
                         reasons.append(f"unresolved path dependency {dependency!r} in {name}")
                 # Relative `[env]` values let tests walk from the checkout root.
+                if path.parent.name == ".cargo" and re.search(r"(?m)^\s*runner\s*=", text):
+                    reasons.append(f"custom Cargo runner in {name}")
                 environment = document.get("env", {}) if path.parent.name == ".cargo" else {}
                 for key, value in environment.items() if isinstance(environment, dict) else [("env", environment)]:
                     text_value = str(value.get("value", "")) if isinstance(value, dict) else str(value)
@@ -356,6 +360,18 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
         for token in tokens:
             parts = token.replace("\\", "/").strip().rstrip(".:").casefold().split("/")
             protected.update(index.names.get(parts[-1], set()) & candidates)
+        # A literal naming a page without its extension (`"../CHANGELOG"` plus
+        # `.with_extension("md")`) protects it too; comments do not.
+        for literal in found:
+            stem = literal.strip().rstrip("/").rsplit("/", 1)[-1].casefold()
+            protected.update(page for page in candidates if stem and page.rsplit("/", 1)[-1].casefold().removesuffix(".md") == stem)
+        # `mod name;` reaches sibling and child modules without a literal.
+        if path.suffix == ".rs":
+            folder = str(Path(name).parent)
+            modules = {other for other in known if other.endswith(".rs")} if folder == "." else index.under(folder)
+            for item in {m for m in modules if m.endswith(".rs")} - scanned:
+                scanned.add(item)
+                pending.append(item)
         package = package_of(name) or ""
         for literal in found:
             named, reason = documentation(literal, index)
@@ -410,7 +426,7 @@ def source_state(command: str = "verify") -> dict:
     digest = hashlib.sha256()
     for name, value in files.items():
         if not ignored(policy, name):
-            digest.update(f"{name}\0{value}\0".encode())
+            digest.update(os.fsencode(f"{name}\0{value}\0"))
     return {"sha": capture(["git", "rev-parse", "HEAD"]), "inputs": digest.hexdigest(), "policy": policy, "files": files}
 
 
