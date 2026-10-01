@@ -39,10 +39,12 @@ OUT = 'include_str!(concat!(env!("OUT_DIR"), "/page.md"))'
 CHANGELOG = 'concat!("../CHANGE", "LOG.md")'
 BUILD_COPY = 'fn main() {{ let text = {read}; std::fs::write(std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("page.md"), text).unwrap(); }}\n'
 
-# A reviewed reader of the test's own executable, bound to its source context.
+# A reviewed reader of the test's own executable, bound to its source context
+# (earlier policy versions without context binding ignore the digest).
+CONTEXT = getattr(dev, "source_context", lambda text, position: ("", ""))
 REVIEWED = '#[test]\nfn oracle() {\n    let path = std::env::current_exe().unwrap();\n    assert!(!String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains(&["MUT", "ATED"].concat()));\n}\n'
 REVIEWED_LINE = 'assert!(!String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains(&["MUT", "ATED"].concat()));'
-REVIEWED_REGISTRY = f'[[reader]]\nfile = "pkg/src/lib.rs"\nfunction = "fn oracle() {{"\nline = {json.dumps(REVIEWED_LINE)}\nreason = "the test binary itself"\ncontext = "{dev.source_context(REVIEWED, REVIEWED.index("std::fs::read"))[1]}"\n'
+REVIEWED_REGISTRY = f'[[reader]]\nfile = "pkg/src/lib.rs"\nfunction = "fn oracle() {{"\nline = {json.dumps(REVIEWED_LINE)}\nreason = "the test binary itself"\ncontext = "{CONTEXT(REVIEWED, REVIEWED.index("std::fs::read"))[1]}"\n'
 
 CASES = {
     # Literal compile-time references, including spaces, raw strings and escapes.
