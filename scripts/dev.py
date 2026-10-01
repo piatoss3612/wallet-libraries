@@ -36,13 +36,18 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 4
+POLICY_VERSION = 5
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
 COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{]\s*(?![bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
-TRAVERSAL = re.compile(r"\b(?:read_dir|WalkDir|walkdir|glob|rglob|iterdir|listdir|scandir|os\.walk|CARGO_WORKSPACE_DIR)\b|\.(?:parents?|ancestors)\b")
+TRAVERSAL = re.compile(r"\b(?:read_dir|iterdir|listdir|scandir|os\.walk|walkdir|jwalk|glob|globwalk|globset|rglob|GlobWalker\w*|WalkBuilder|WalkDir|CARGO_WORKSPACE_DIR|workspace_root)\b|\b(?:ignore|Walk|walk)::|\.(?:parents?|ancestors)\b")
+# A run-time base directory combined with any upward step may reach the root.
+BASE_DIRECTORY = re.compile(r"\bcurrent_dir\b|\bCARGO_MANIFEST_DIR\b|__file__|\$0\b|BASH_SOURCE")
+UPWARD = re.compile(r"\.pop\(\)|\.\.|\bdirname\b")
 # Any launched program may read the checkout; only audited programs are exempt.
-SPAWN = re.compile(r'\bCommand::new\(\s*(?:"([^"]*)"\s*\))?|\bcmd!\s*[(\[{]|\b(?:duct|xshell|cmake|cc|autotools|meson|subprocess)::|\bCommand\s+as\b')
+SPAWN = re.compile(r'\bCommand::new\(\s*(?:"([^"]*)"\s*\))?|\bcmd!\s*[(\[{]|\b(?:duct|xshell|cmake|cc|autotools|meson|subprocess)::|\bCommand\s+as\b|\blibc::(?:system|exec\w*|posix_spawn\w*)\b')
+# Libraries that read the whole work tree, such as Git status for build info.
+WORKTREE_READERS = re.compile(r"\b(?:git2|gix|vergen\w*|built)::")
 AUDITED_PROGRAMS = {"sqlite3"}  # reads only the database and SQL it is given
 PATH_TOKEN = re.compile(r"[\w.:/\\-]+")
 WORD = re.compile(r"""[^\s'"`<>|;&()]+""")
@@ -82,7 +87,10 @@ def repository_files() -> dict[str, str]:
         path = ROOT / os.fsdecode(name)
         if path.parts[len(ROOT.parts)] in {".vscode", "target"}:
             continue
-        files[os.fsdecode(name)] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "<missing>"
+        try:
+            files[os.fsdecode(name)] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "<missing>"
+        except OSError as error:
+            files[os.fsdecode(name)] = f"<unreadable {type(error).__name__}>"
     return files
 
 
@@ -105,11 +113,17 @@ def ignored_files() -> set[str]:
 
 
 def toml_strings(value):
-    """Every string value, including `metadata` tables build scripts may read."""
+    """Every string key and value, including `metadata` tables build scripts read."""
     if isinstance(value, str):
         yield value
-    elif isinstance(value, (list, dict)):
-        for item in value.values() if isinstance(value, dict) else value:
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            # Path-shaped keys only: `[package.metadata.docs.rs]` is not a path.
+            if re.search(r"[/\\]|\.\w+$", key):
+                yield key
+            yield from toml_strings(item)
+    elif isinstance(value, list):
+        for item in value:
             yield from toml_strings(item)
 
 
@@ -198,10 +212,16 @@ def computed(text: str, found: set[str]) -> list[str]:
     reasons = []
     if COMPUTED_INCLUDE.search(text):
         reasons.append("computed include")
-    if TRAVERSAL.search(text) or "CARGO_MANIFEST_DIR" in text and any(PARENT.search(l) for l in found):
+    if TRAVERSAL.search(text) or BASE_DIRECTORY.search(text) and UPWARD.search(text):
         reasons.append("computed directory traversal")
+    if WORKTREE_READERS.search(text):
+        reasons.append("work-tree reader")
     if any(spawn[1] not in AUDITED_PROGRAMS for spawn in SPAWN.finditer(text)):
         reasons.append("process launch that may read any file")
+    # Pure upward navigation such as `Path::new("..").join("..")` can reach the root
+    # from any package depth.
+    if any(re.fullmatch(r"[./]*\.\.[./]*", literal) for literal in found):
+        reasons.append("parent directory navigation")
     return reasons
 
 
@@ -257,6 +277,8 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
     reasons = []
     heads, tails = set(), set()
     root, docs = ROOT.resolve(), (ROOT / "docs").resolve()
+    # Git lists an untracked nested checkout as one directory it does not hash.
+    reasons += [f"untracked nested repository {name}" for name in sorted(files) if name.endswith("/")]
     for name in sorted(known - candidates):
         path = ROOT / name
         if path.is_symlink():
@@ -291,11 +313,18 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
             continue
         try:
             text = path.read_bytes().decode("utf-8", errors="strict" if path.suffix in {".rs", ".toml"} else "replace")
-            if path.suffix == ".toml":
-                document = tomllib.loads(text)
+            cargo_file = path.name == "Cargo.toml" or path.parent.name == ".cargo"
+            try:
+                document = tomllib.loads(text) if path.suffix == ".toml" or cargo_file else None
+            except tomllib.TOMLDecodeError:
+                # Cargo rejects its own invalid files; other TOML is scanned as text.
+                if cargo_file:
+                    raise
+                document = None
+            if document is not None:
                 found = {s.replace("\\", "/") for s in toml_strings(document)}
                 # Only Cargo reads path dependencies; generator inputs may name other roots.
-                for dependency in toml_paths(document) if path.name == "Cargo.toml" or path.parent.name == ".cargo" else ():
+                for dependency in toml_paths(document) if cargo_file else ():
                     try:
                         target = (path.parent / dependency).resolve()
                         missing = not target.is_relative_to(root) or not target.exists()
@@ -304,8 +333,9 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
                     if missing:
                         reasons.append(f"unresolved path dependency {dependency!r} in {name}")
                 # Relative `[env]` values let tests walk from the checkout root.
-                for key, value in (document.get("env", {}) if path.parent.name == ".cargo" else {}).items():
-                    text_value = value.get("value", "") if isinstance(value, dict) else str(value)
+                environment = document.get("env", {}) if path.parent.name == ".cargo" else {}
+                for key, value in environment.items() if isinstance(environment, dict) else [("env", environment)]:
+                    text_value = str(value.get("value", "")) if isinstance(value, dict) else str(value)
                     if isinstance(value, dict) and value.get("relative") or not text_value.strip("./") or PARENT.search(text_value):
                         reasons.append(f"checkout-relative Cargo environment {key!r} in {name}")
             else:
@@ -322,7 +352,7 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
             continue
         # Comments and prose can only protect a file; literals may also be
         # computed or unresolved references that force full inputs.
-        tokens = {t for t in PATH_TOKEN.findall(text if path.suffix != ".toml" else "\n".join(found)) if "://" not in t} | found
+        tokens = {t for t in PATH_TOKEN.findall(text if document is None else "\n".join(found)) if "://" not in t} | found
         for token in tokens:
             parts = token.replace("\\", "/").strip().rstrip(".:").casefold().split("/")
             protected.update(index.names.get(parts[-1], set()) & candidates)

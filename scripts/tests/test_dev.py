@@ -295,6 +295,7 @@ class InputPolicyTests(unittest.TestCase):
             "metadata read by a build script": {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[package.metadata.embed]\npages = ["../docs/guide.md"]\n'},
             "case-insensitive file system": {"pkg/src/case.rs": 'const G: &str = include_str!("../../Docs/Guide.md");\n'},
             "ignored symlink": {".gitignore": "/pkg/assets/\n", "pkg/src/link.rs": 'const P: &str = include_str!("../assets/page.md");\n'},
+            "metadata key": {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[package.metadata.embed-pages]\n"../docs/guide.md" = "guide"\n'},
         }
         for case, files in protected.items():
             with self.subTest(case=case):
@@ -321,12 +322,37 @@ class InputPolicyTests(unittest.TestCase):
             "symlinked directory": {".gitignore": "/pkg/assets/\n", "pkg/assets/keep": "", "pkg/src/embed.rs": '#[derive(rust_embed::Embed)]\n#[folder = "assets/pages"]\npub struct Pages;\n'},
             "checkout-relative Cargo environment": {".cargo/config.toml": '[env]\nREPO_ROOT = { value = "", relative = true }\n'},
             "unresolvable symlink": {},
+            "computed directory traversal ": {"pkg/tests/top.rs": '#[test]\nfn notes() { let mut root = std::env::current_dir().unwrap(); root.pop(); std::fs::read_to_string(root.join("CHANGELOG").with_extension("md")).unwrap(); }\n'},
+            "computed directory traversal  ": {"pkg/tests/links.rs": '#[test]\nfn links() { for entry in globwalk::GlobWalkerBuilder::new(".", "*.md").build().unwrap() { drop(entry); } }\n'},
+            "parent directory navigation": {"crates/pkg/Cargo.toml": '[package]\nname = "nested"\n', "crates/pkg/tests/top.rs": '#[test]\nfn notes() { let root = std::path::Path::new("..").join(".."); std::fs::read_to_string(root.join(format!("{}.md", "CHANGELOG"))).unwrap(); }\n'},
+            "work-tree reader": {"pkg/build.rs": 'fn main() { let repo = git2::Repository::discover(".").unwrap(); drop(repo); }\n'},
+            "checkout-relative Cargo environment ": {".cargo/config": '[env]\nREPO_ROOT = { value = ".", relative = true }\n'},
             "unresolved path dependency": {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[dependencies]\nx = { path = "a\\u0000b" }\n'},
         }
         links = {"symlinked directory": [("pkg/assets/pages", "../../docs")], "unresolvable symlink": [("pkg/loop", "loop")]}
         for reason, files in fallback.items():
             with self.subTest(reason=reason):
                 self.assertIn(reason.strip(), self.scenario(files, ["scripts/gen.py"] if "scripts/gen.py" in files else (), links.get(reason, ()))["fallback_reason"] or "")
+
+    def test_untracked_nested_repository_falls_back(self):
+        self.write("pkg/vendor/helper/src/lib.rs", 'const G: &str = include_str!("../../../../docs/guide.md");\n')
+        subprocess.run(["git", "init", "-q"], cwd=self.root / "pkg/vendor/helper", check=True)
+        self.assertIn("untracked nested repository pkg/vendor/helper/", dev.source_state("test")["policy"]["fallback_reason"])
+
+    def test_malformed_or_unreadable_inputs_do_not_crash(self):
+        cases = {
+            "invalid TOML fixture": ({"pkg/tests/fixtures/invalid.toml": 'key = = "broken"\n'}, None),
+            "env is not a table": ({".cargo/config.toml": 'env = "x"\n'}, None),
+            "env value is not a string": ({".cargo/config.toml": "[env]\nX = { value = 1 }\n"}, None),
+        }
+        for case, (files, reason) in cases.items():
+            with self.subTest(case=case):
+                fallback = self.scenario(files)["fallback_reason"]
+                self.assertIn(reason, fallback) if reason else self.assertIsNone(fallback)
+        self.write("scratch.log", "private\n")
+        (self.root / "scratch.log").chmod(0)
+        self.addCleanup((self.root / "scratch.log").chmod, 0o644)
+        self.assertTrue(dev.source_state("verify")["files"]["scratch.log"].startswith("<unreadable"))
 
     def test_unreadable_ignored_package_file_falls_back(self):
         self.write(".gitignore", "/pkg/.data/\n")

@@ -59,24 +59,33 @@ Source inputs follow a versioned policy recorded in each receipt. `check`,
 `test`, and `lint` use `rust-check`: it ignores only root `docs/**/*.md` prose
 and a root `CHANGELOG.md`, and only when nothing Cargo can reach mentions the
 file. The audit scans every package file (including Git-ignored ones and a
-root package), every manifest including `metadata` tables, and Cargo
-configuration, then follows each string literal (escapes decoded, spaces
-allowed, each line also lexed alone) to the files it may name, so Markdown
-doctests and included modules are scanned in turn. A file-name mention,
-compared case-insensitively and including comments and symlinks, keeps that
-page an input. Computed or unresolved references fall back to every file and
-record `fallback_reason`: non-literal `include_*!`, any `docs` segment that does
-not name an existing file, literals that concatenation could join into `docs`,
-parent paths naming the checkout root, placeholder file names there,
-directory walks, manifest-relative parent paths, checkout-relative Cargo
-`[env]` values, any process launch (including aliases, `duct`, and
-`cc`/`cmake` build tools) except audited `sqlite3`, symlinked documentation
-directories, unreadable sources, and path dependencies outside the checkout.
+root package), every manifest including `metadata` values and path-shaped
+keys, and Cargo configuration, then follows each string literal (escapes
+decoded, spaces allowed, each line also lexed alone) to the files it may name,
+so Markdown doctests and included modules are scanned in turn. A file-name
+mention, compared case-insensitively and including comments and symlinks,
+keeps that page an input. Computed or unresolved references fall back to
+every file and record `fallback_reason`:
+
+- non-literal `include_*!`, any `docs` segment that does not name an existing
+  file, and literals that concatenation could join into `docs`;
+- upward navigation: parent paths or placeholder file names at the checkout
+  root, pure `..` literals, `.parent()`/`.ancestors()`, and `current_dir` or
+  `CARGO_MANIFEST_DIR` combined with `.pop()` or `..`;
+- directory walkers (`read_dir`, `walkdir`, `ignore`, `glob`, `globwalk`, and
+  similar) and checkout-relative Cargo `[env]` values;
+- any process launch (including aliases, `duct`, `libc` exec, and `cc`/`cmake`
+  build tools) except audited `sqlite3`, and work-tree readers (`git2`, `gix`,
+  `vergen`);
+- symlinked documentation directories, untracked nested repositories,
+  unreadable sources, and path dependencies outside the checkout.
+
 Only known data formats (JSON, hex, lockfiles, protobuf, images) skip the
-computed-reference checks. Package Markdown, doctests, fixtures and assets of any
-extension, build-script inputs, manifests, and `Cargo.lock` always remain
+computed-reference checks. Package Markdown, doctests, fixtures and assets of
+any extension, build-script inputs, manifests, and `Cargo.lock` always remain
 inputs. `verify` and other commands hash every file. Paths supplied at run time
-(environment variables, arguments) or spelled character by character are not
+(environment variables, arguments), strings spelled character by character,
+and third-party libraries that read the checkout with no textual hint are not
 audited. Bump `POLICY_VERSION` with any rule change. OS locks
 release on exit or process death; a stale owner file is replaced on reuse.
 Doctor reports recorded owners, which may be stale after a killed process.
