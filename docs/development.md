@@ -116,14 +116,28 @@ wallet's temporary database, and build-script output. Each entry is bound to
 its file, enclosing function, and exact call text, through the call's closing
 parenthesis, with the reason it is safe. Its `context` digest also covers the
 whole enclosing function (every path initializer), everything in the file
-outside function bodies (imports, constants, statics, macros), and the bodies
-of functions in the same file that it calls, transitively. Any change there,
-or a missing digest, makes the entry stale. A parameter that flows into a
+outside function bodies (imports, constants, statics, macros), and every
+function or `macro_rules!` it calls that is defined anywhere in the checkout,
+transitively, with those files' outside-function text. Calls resolve by name,
+so every same-named definition counts; in this workspace that reaches most
+sources, and most Rust edits stale most entries until they are reviewed again.
+String and character literals and doc comments are bound byte for byte; only
+whitespace and ordinary comments elsewhere are ignored. Any change, or a
+missing digest, makes the entry stale. A parameter that flows into a
 reviewed reader (by assignment, binding, receiver mutation, or match arm) is a
 caller input: the function must be a `[[wrapper]]`, so every caller is
 reviewed, or the entry must state in `caller_input` why the input cannot carry
-a path. That statement is bound by the same digest. Functions in other files
-that build a path are not bound; that is a known limitation. `[[wrapper]]` names reviewed APIs
+a path. That statement is bound by the same digest. Every identifier in a
+parameter pattern (`P: String`, `(p,): (String,)`) is a parameter; a parameter
+list that does not parse counts as a caller input.
+
+The audit reads Rust through a lexer: comments cannot split a path, a `use`,
+or a `mod` (`use/*x*/std::fs as f;`), raw identifiers read as their names
+(`std::r#fs`), and a `macro_rules!` template that substitutes a path segment
+after file access, a path prefix, or a callee (`std::fs::$reader($path)`)
+falls back. Full inputs (`verify`, or any fallback) hash every Git-ignored
+file except build output (`target`, `.git`, `.vscode`, `__pycache__`), so an
+unknown reader of an ignored file outside every package still invalidates. `[[wrapper]]` names reviewed APIs
 that open a caller's path, and every call site of one, qualified or not
 (`crate::WalletDb::for_path(…)`), needs its own entry. An
 edited call, a new reader, or a stale entry falls back until the registry is

@@ -46,6 +46,31 @@ REVIEWED = '#[test]\nfn oracle() {\n    let path = std::env::current_exe().unwra
 REVIEWED_LINE = 'assert!(!String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains(&["MUT", "ATED"].concat()));'
 REVIEWED_REGISTRY = f'[[reader]]\nfile = "pkg/src/lib.rs"\nfunction = "fn oracle() {{"\nline = {json.dumps(REVIEWED_LINE)}\nreason = "the test binary itself"\ncontext = "{CONTEXT(REVIEWED, REVIEWED.index("std::fs::read"))[1]}"\n'
 
+
+
+def reviewed(files: dict[str, str], *readers: tuple[str, str]) -> str:
+    """Registry entries for `readers` (file, needle) bound to the given sources,
+    with whatever context binding the policy under test implements."""
+    sources = {name: text for name, text in files.items() if name.endswith(".rs")}
+    text = ""
+    for name, needle in readers:
+        position = files[name].index(needle)
+        _, function, line = dev.site(name, files[name], position)
+        if hasattr(dev, "definition_index"):
+            digest = dev.source_context(files[name], position, name, sources, dev.definition_index(sources))[1]
+        else:
+            digest = CONTEXT(files[name], position)[1]
+        text += f'[[reader]]\nfile = "{name}"\nfunction = {json.dumps(function)}\nline = {json.dumps(line)}\nreason = "reviewed"\ncontext = "{digest}"\n\n'
+    return text
+
+
+# Reviewed readers whose sources change after review in ways the call line does not show.
+LITERAL = f'const KIND: &str = "temporary  file";\n#[test]\nfn oracle() {{\n    let path: std::path::PathBuf = if KIND == "temporary  file" {{ std::env::current_exe().unwrap() }} else {{ {CHANGELOG}.into() }};\n    {REVIEWED_LINE}\n}}\n'
+HELPER = "pub mod helper;\n#[test]\nfn oracle() {\n    let path = crate::helper::page_path();\n    " + REVIEWED_LINE + "\n}\n"
+HELPER_SAFE = "pub fn page_path() -> std::path::PathBuf { std::env::current_exe().unwrap() }\n"
+UPPER = f'#[allow(non_snake_case)]\npub fn load(P: String) -> String {{\n    std::fs::read_to_string(&P).unwrap()\n}}\n#[test]\nfn oracle() {{ assert!(load({CHANGELOG}.to_string()).contains("ORIGINAL")); }}\n'
+DESTRUCTURED = f'pub fn load((p,): (String,)) -> String {{\n    std::fs::read_to_string(&p).unwrap()\n}}\n#[test]\nfn oracle() {{ assert!(load(({CHANGELOG}.to_string(),)).contains("ORIGINAL")); }}\n'
+
 CASES = {
     # Literal compile-time references, including spaces, raw strings and escapes.
     "spaced include": {"pkg/src/lib.rs": f'pub const PAGE: &str = include_str!("../../docs/user guide.md");\n{TEST.format(body=CHECK)}'},
@@ -117,6 +142,19 @@ CASES = {
     # The reviewed reader's path initializer now names the changelog: the
     # registry entry still matches its call line but not its source context.
     "edited reviewed reader": {"pkg/src/lib.rs": REVIEWED.replace("let path = std::env::current_exe().unwrap();", f"let path: std::path::PathBuf = {CHANGELOG}.into();"), "scripts/audited-readers.toml": REVIEWED_REGISTRY},
+    # Lexical forms that hid readers from v12 (comments, raw identifiers, macro templates).
+    "comment-separated use": {"pkg/src/lib.rs": "use/*audit*/std::fs as f;\n" + TEST.format(body=f'assert!(String::from_utf8(f::read({CHANGELOG}).unwrap()).unwrap().contains("ORIGINAL"));')},
+    "raw identifier import": {"pkg/src/lib.rs": "use std::r#fs as f;\n" + TEST.format(body=f'assert!(String::from_utf8(f::read({CHANGELOG}).unwrap()).unwrap().contains("ORIGINAL"));')},
+    "raw identifier include alias": {"pkg/src/lib.rs": f'use std::r#include_str as load;\npub const PAGE: &str = load!(concat!("../../CHANGE", "LOG.md"));\n{TEST.format(body=CHECK)}'},
+    "macro template reader": {"pkg/src/lib.rs": "macro_rules! via { ($reader:ident, $path:expr) => { std::fs::$reader($path) }; }\n" + TEST.format(body=f'assert!(via!(read_to_string, {CHANGELOG}).unwrap().contains("ORIGINAL"));')},
+    # Reviewed readers whose provenance changed after review (v12 kept them reviewed).
+    "literal whitespace in a reviewed reader": {"pkg/src/lib.rs": LITERAL.replace('const KIND: &str = "temporary  file";', 'const KIND: &str = "temporary file";'), "scripts/audited-readers.toml": reviewed({"pkg/src/lib.rs": LITERAL}, ("pkg/src/lib.rs", "std::fs::read"))},
+    "helper in another file": {"pkg/src/lib.rs": HELPER, "pkg/src/helper.rs": f"pub fn page_path() -> std::path::PathBuf {{ {CHANGELOG}.into() }}\n", "scripts/audited-readers.toml": reviewed({"pkg/src/lib.rs": HELPER, "pkg/src/helper.rs": HELPER_SAFE}, ("pkg/src/lib.rs", "std::fs::read"))},
+    # Controls: the same reviewed readers before the change keep the exclusion.
+    "reviewed literal control": {"pkg/src/lib.rs": LITERAL, "scripts/audited-readers.toml": reviewed({"pkg/src/lib.rs": LITERAL}, ("pkg/src/lib.rs", "std::fs::read"))},
+    "reviewed helper control": {"pkg/src/lib.rs": HELPER, "pkg/src/helper.rs": HELPER_SAFE, "scripts/audited-readers.toml": reviewed({"pkg/src/lib.rs": HELPER, "pkg/src/helper.rs": HELPER_SAFE}, ("pkg/src/lib.rs", "std::fs::read"))},
+    "uppercase reviewed parameter": {"pkg/src/lib.rs": UPPER, "scripts/audited-readers.toml": reviewed({"pkg/src/lib.rs": UPPER}, ("pkg/src/lib.rs", "std::fs::read"))},
+    "destructured reviewed parameter": {"pkg/src/lib.rs": DESTRUCTURED, "scripts/audited-readers.toml": reviewed({"pkg/src/lib.rs": DESTRUCTURED}, ("pkg/src/lib.rs", "std::fs::read"))},
     # An example with `test = true` runs under `cargo test`.
     "tested example": {
         "pkg/Cargo.toml": PACKAGE + '\n[[example]]\nname = "tool"\ntest = true\n',
@@ -132,6 +170,7 @@ CASES = {
 READ_PAGE = 'assert!(std::fs::read_to_string(std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join(concat!("../CHANGE", "LOG.md"))).unwrap().contains("ORIGINAL"));'
 CHECK_CASES = {
     "build script helper module": {"pkg/build.rs": "mod helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": f"pub fn check() {{ {READ_PAGE} }}\n", "pkg/src/lib.rs": ""},
+    "comment-separated build module": {"pkg/build.rs": "mod/*audit*/helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": f"pub fn check() {{ {READ_PAGE} }}\n", "pkg/src/lib.rs": ""},
     "proc macro": {
         "Cargo.toml": '[workspace]\nmembers = ["pkg", "mac"]\nresolver = "2"\n',
         "mac/Cargo.toml": '[package]\nname = "mac"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\nproc-macro = true\n',
@@ -188,7 +227,7 @@ class CargoOracleTests(unittest.TestCase):
                         self.assertEqual(cargo_test(root, Path(targets) / page.replace("/", "_")), baseline, f"{case}: excluded {page} changed the result ({policy})")
                     finally:
                         (root / page).write_text(original)
-                if case in {"unrelated control", "reviewed reader"}:
+                if case in {"unrelated control", "reviewed reader", "reviewed literal control", "reviewed helper control"} and hasattr(dev, "definition_index"):
                     self.assertIsNone(policy["fallback_reason"])
                     self.assertIn("docs/guide.md", policy["excluded"])
 
@@ -242,6 +281,20 @@ class CargoOracleTests(unittest.TestCase):
     def test_consumed_ignored_edits_change_the_digest_when_cargo_results_change(self):
         # An ignored generated module whose value a test checks (review case
         # 42 -> 43), loaded by `include!` or by an implicit `mod` declaration.
+        # An unknown reader (full inputs) loading an ignored file outside every
+        # package that nothing names must still see the edit.
+        root = self.fixture({
+            ".gitignore": "/target/\n/notes/\n",
+            "notes/reader.input": "42\n",
+            "pkg/src/lib.rs": TEST.format(body='assert_eq!(std::fs::read_to_string(["../notes/reader", ".input"].concat()).unwrap().trim(), "42");'),
+        })
+        with tempfile.TemporaryDirectory() as targets, patch.object(dev, "ROOT", root):
+            self.assertTrue(cargo_test(root, Path(targets) / "before"))
+            before = dev.source_state("test")
+            self.assertIsNotNone(before["policy"]["fallback_reason"])
+            (root / "notes/reader.input").write_text("43\n")
+            self.assertFalse(cargo_test(root, Path(targets) / "after"))
+            self.assertEqual(dev.compare(before, dev.source_state("test"))[0], ["other"])
         for case, lib in {"include": 'include!("generated.rs");\n', "implicit module": "mod generated;\nuse generated::VALUE;\n"}.items():
             with self.subTest(case=case), tempfile.TemporaryDirectory() as targets:
                 root = self.fixture({

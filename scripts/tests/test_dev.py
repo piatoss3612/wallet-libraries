@@ -352,7 +352,7 @@ class InputPolicyTests(unittest.TestCase):
     def test_consumed_ignored_inputs_invalidate_and_unconsumed_do_not(self):
         # Ignored files in a built package may be read by any reader there, and
         # `mod implicit;` loads an ignored module without naming it in a literal.
-        self.write(".gitignore", "/pkg/src/generated.rs\n/pkg/src/implicit.rs\n/pkg/tests/fixtures/local.hex\n/pkg/scratch.txt\n/notes/\n")
+        self.write(".gitignore", "/pkg/src/generated.rs\n/pkg/src/implicit.rs\n/pkg/tests/fixtures/local.hex\n/pkg/scratch.txt\n/notes/\n__pycache__/\n")
         self.write("pkg/src/generated.rs", "pub const G: u8 = 1;\n")
         self.write("pkg/src/implicit.rs", "pub const I: u8 = 1;\n")
         self.write("pkg/tests/fixtures/local.hex", "00\n")
@@ -360,11 +360,21 @@ class InputPolicyTests(unittest.TestCase):
         self.write("notes/scratch.txt", "outside every package\n")
         self.write("pkg/src/lib.rs", FIXTURE["pkg/src/lib.rs"] + 'include!("generated.rs");\nmod implicit;\npub const H: &str = include_str!("../tests/fixtures/local.hex");\n')
         self.commit()
-        cases = {"pkg/src/generated.rs": ["rust-source"], "pkg/src/implicit.rs": ["rust-source"], "pkg/tests/fixtures/local.hex": ["fixture-or-asset"], "pkg/scratch.txt": ["other"], "notes/scratch.txt": []}
+        cases = {"pkg/src/generated.rs": ["rust-source"], "pkg/src/implicit.rs": ["rust-source"], "pkg/tests/fixtures/local.hex": ["fixture-or-asset"], "pkg/scratch.txt": ["other"]}
         for name, expected in cases.items():
             with self.subTest(name=name):
                 for command in ("test", "verify"):
                     self.assertEqual(self.change(lambda: self.edit(name, f"changed {command}\n"), command)[0], expected)
+        # Nothing names notes/: rust-check leaves it out, but full inputs
+        # (verify, or any fallback) cover every ignored file.
+        self.assertEqual(self.change(lambda: self.edit("notes/scratch.txt", "changed\n"), "test")[0], [])
+        self.assertEqual(self.change(lambda: self.edit("notes/scratch.txt", "changed again\n"), "verify")[0], ["other"])
+        self.write("pkg/tests/notes.rs", '#[test]\nfn notes() { std::fs::read_to_string(["../notes/scratch", ".txt"].concat()).unwrap(); }\n')
+        changed, _, before, _ = self.change(lambda: self.edit("notes/scratch.txt", "changed a third time\n"), "test")
+        self.assertIsNotNone(before["policy"]["fallback_reason"])
+        self.assertEqual(changed, ["other"])
+        # Python bytecode is build output, never an input.
+        self.assertEqual(self.change(lambda: self.write("scripts/__pycache__/x.pyc", "bytecode\n"), "verify")[0], [])
 
     def test_hidden_file_access_falls_back(self):
         """File access behind an alias, an import, a value, or a computed
@@ -387,6 +397,11 @@ class InputPolicyTests(unittest.TestCase):
             "run-time file access with a computed path      ": {"pkg/tests/a.rs": read.format('std::fs:: // x\nread(format!("{}{}", "CHANGE", "LOG.md")).unwrap();')},
             "aliased file access import    ": {"pkg/tests/a.rs": "use std::fs::/* x */read as load;\n" + read.format('load(format!("{}{}", "CHANGE", "LOG.md")).unwrap();')},
             "aliased file access import     ": {"pkg/src/doc.rs": "/// ```\n/// use std::{\n///     fs::read as load,\n/// };\n/// load(format!(\"{}{}\", \"../CHANGE\", \"LOG.md\")).unwrap();\n/// ```\npub fn doc() {}\n"},
+            "aliased file access import      ": {"pkg/tests/a.rs": "use/*audit*/std::fs as f;\n" + read.format('f::read(format!("{}{}", "../CHANGE", "LOG.md")).unwrap();')},
+            "aliased file access import       ": {"pkg/tests/a.rs": "use std::r#fs as f;\n" + read.format('f::read(format!("{}{}", "../CHANGE", "LOG.md")).unwrap();')},
+            "macro template with a substituted path or callee": {"pkg/tests/a.rs": "macro_rules! via { ($reader:ident, $path:expr) => { std::fs::$reader($path) }; }\n" + read.format('via!(read, format!("{}{}", "../CHANGE", "LOG.md")).unwrap();')},
+            "aliased include_str macro ": {"pkg/src/inc.rs": 'use std::r#include_str as load;\npub const P: &str = load!(concat!("../../CHANGE", "LOG.md"));\n'},
+            "run-time file access with a computed path       ": {"pkg/build.rs": "mod/*audit*/helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": 'pub fn check() { std::fs::read_to_string(concat!("../CHANGE", "LOG.md")).unwrap(); }\n'},
             "aliased include_str macro": {"pkg/src/inc.rs": 'use std::include_str as inc;\npub const P: &str = inc!(concat!("../../CHANGE", "LOG.md"));\n'},
         }
         for reason, files in cases.items():
@@ -420,30 +435,47 @@ class InputPolicyTests(unittest.TestCase):
     def test_reader_registry_binds_reviewed_sites(self):
         reader = 'pub fn open(path: &std::path::Path) -> String {\n    std::fs::read_to_string(path).unwrap()\n}\n'
         caller = '#[test]\nfn opens() {\n    let file = tempfile::NamedTempFile::new().unwrap();\n    crate::io::open(file.path());\n}\n'
-        context = lambda text, needle: dev.source_context(text, text.index(needle))[1]
-        registry = (
-            '[[wrapper]]\ncall = "io::open"\n\n'
-            f'[[reader]]\nfile = "pkg/src/io.rs"\nfunction = "pub fn open(path: &std::path::Path) -> String {{"\nline = "std::fs::read_to_string(path).unwrap()"\nreason = "caller path; every io::open call is reviewed"\ncontext = "{context(reader, "std::fs")}"\n\n'
-            f'[[reader]]\nfile = "pkg/tests/io.rs"\nfunction = "fn opens() {{"\nline = "crate::io::open(file.path());"\nreason = "NamedTempFile"\ncontext = "{context(caller, "crate::io")}"\n'
-        )
-        base = {"pkg/src/io.rs": reader, "pkg/tests/io.rs": caller, dev.READER_REGISTRY: registry}
+        base = {"pkg/src/io.rs": reader, "pkg/tests/io.rs": caller}
+
+        def registry_for(files, wrapper=True, attest=False):
+            """Entries for the reader and its call (itself an `open(` reader) bound to these sources."""
+            sources = {name: text for name, text in {**FIXTURE, **files}.items() if name.endswith(".rs")}
+            index = dev.definition_index(sources)
+            text = '[[wrapper]]\ncall = "io::open"\n\n' if wrapper else ""
+            for name, needle in [("pkg/src/io.rs", "std::fs"), ("pkg/tests/io.rs", "crate::io")]:
+                position = files[name].index(needle)
+                _, function, line = dev.site(name, files[name], position)
+                digest = dev.source_context(files[name], position, name, sources, index)[1]
+                text += f'[[reader]]\nfile = "{name}"\nfunction = {json.dumps(function)}\nline = {json.dumps(line)}\nreason = "reviewed"\n' + ('caller_input = "callers pass temporary files"\n' if attest and name == "pkg/src/io.rs" else "") + f'context = "{digest}"\n\n'
+            return text
+
+        registry = registry_for(base)
+        literal = {**base, "pkg/tests/io.rs": caller.replace("NamedTempFile::new()", 'NamedTempFile::with_prefix("a  b")')}
+        upper = {**base, "pkg/src/io.rs": reader.replace("(path: &std::path::Path)", "(P: &std::path::Path)").replace("(path)", "(P)")}
+        destructured = {**base, "pkg/src/io.rs": reader.replace("(path: &std::path::Path)", "((path,): (&std::path::Path,))")}
         cases = {
-            "reviewed": (base, None),
+            "reviewed": ({**base, dev.READER_REGISTRY: registry}, None),
             "unreviewed registry absent": ({**base, dev.READER_REGISTRY: ""}, "run-time file access with a computed path in pkg/src/io.rs"),
-            "edited reviewed call": ({**base, "pkg/src/io.rs": reader.replace("(path)", "(path.with_extension(\"md\"))")}, "run-time file access with a computed path in pkg/src/io.rs"),
-            "new wrapper call": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    crate::io::open(std::path::Path::new(&std::env::var("PAGE").unwrap()));\n}\n'}, "run-time file access with a computed path in pkg/tests/io.rs"),
-            "moved to another function": ({**base, "pkg/src/io.rs": reader.replace("pub fn open", "pub fn load")}, "run-time file access with a computed path in pkg/src/io.rs"),
+            "edited reviewed call": ({**base, "pkg/src/io.rs": reader.replace("(path)", "(path.with_extension(\"md\"))"), dev.READER_REGISTRY: registry}, "run-time file access with a computed path in pkg/src/io.rs"),
+            "new wrapper call": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    crate::io::open(std::path::Path::new(&std::env::var("PAGE").unwrap()));\n}\n', dev.READER_REGISTRY: registry}, "run-time file access with a computed path in pkg/tests/io.rs"),
+            "moved to another function": ({**base, "pkg/src/io.rs": reader.replace("pub fn open", "pub fn load"), dev.READER_REGISTRY: registry}, "run-time file access with a computed path in pkg/src/io.rs"),
             # The call line is unchanged, but the path it reads is not.
-            "edited path initializer": ({**base, "pkg/tests/io.rs": caller.replace("tempfile::NamedTempFile::new().unwrap()", 'std::env::var("PAGE").unwrap()')}, "stale audited reader pkg/tests/io.rs"),
-            "edited file-level constant": ({**base, "pkg/tests/io.rs": "const ROOT: &str = \"..\";\n" + caller}, "stale audited reader pkg/tests/io.rs"),
-            "edited helper the reader calls": ({**base, "pkg/tests/io.rs": caller.replace("tempfile::NamedTempFile::new().unwrap()", "scratch()") + "fn scratch() -> tempfile::NamedTempFile { tempfile::NamedTempFile::new().unwrap() }\n"}, "stale audited reader pkg/tests/io.rs"),
-            "unrelated function edited": ({**base, "pkg/tests/io.rs": caller + "fn other() -> u8 { 1 }\n"}, None),
-            "reader without a wrapper takes a caller path": ({**base, dev.READER_REGISTRY: registry.replace('[[wrapper]]\ncall = "io::open"\n\n', "")}, "reviewed reader takes a caller input without a wrapper in pkg/src/io.rs: fn open"),
-            "attested caller input": ({**base, dev.READER_REGISTRY: registry.replace('[[wrapper]]\ncall = "io::open"\n\n', "").replace('reason = "caller path; every io::open call is reviewed"', 'reason = "x"\ncaller_input = "reviewed: callers pass temporary files"')}, None),
+            "edited path initializer": ({**base, "pkg/tests/io.rs": caller.replace("tempfile::NamedTempFile::new().unwrap()", 'std::env::var("PAGE").unwrap()'), dev.READER_REGISTRY: registry}, "stale audited reader pkg/tests/io.rs"),
+            "edited file-level constant": ({**base, "pkg/tests/io.rs": "const KIND: &str = \"page\";\n" + caller, dev.READER_REGISTRY: registry}, "stale audited reader pkg/tests/io.rs"),
+            "edited helper the reader calls": ({**base, "pkg/tests/io.rs": caller.replace("tempfile::NamedTempFile::new().unwrap()", "scratch()") + "fn scratch() -> tempfile::NamedTempFile { tempfile::NamedTempFile::new().unwrap() }\n", dev.READER_REGISTRY: registry}, "stale audited reader pkg/tests/io.rs"),
+            # Exact bytes: whitespace inside a string literal is meaningful.
+            "string literal whitespace": ({**literal, dev.READER_REGISTRY: registry_for({**base, "pkg/tests/io.rs": literal["pkg/tests/io.rs"].replace("a  b", "a b")})}, "stale audited reader pkg/tests/io.rs"),
+            # A helper in another file that builds the path is bound too.
+            "edited helper in another file": ({**base, "pkg/src/paths.rs": "pub fn scratch() -> tempfile::NamedTempFile { tempfile::NamedTempFile::new().unwrap() }\n", "pkg/tests/io.rs": caller.replace("tempfile::NamedTempFile::new().unwrap()", "pkg::paths::scratch()"), dev.READER_REGISTRY: registry_for({**base, "pkg/src/paths.rs": "pub fn scratch() -> tempfile::NamedTempFile { tempfile::NamedTempFile::with_prefix(\"tmp\").unwrap() }\n", "pkg/tests/io.rs": caller.replace("tempfile::NamedTempFile::new().unwrap()", "pkg::paths::scratch()")})}, "stale audited reader pkg/tests/io.rs"),
+            "unrelated function edited": ({**base, "pkg/tests/io.rs": caller + "fn other() -> u8 { 1 }\n", dev.READER_REGISTRY: registry}, None),
+            "reader without a wrapper takes a caller path": ({**base, dev.READER_REGISTRY: registry_for(base, wrapper=False)}, "reviewed reader takes a caller input without a wrapper in pkg/src/io.rs: fn open"),
+            "uppercase parameter": ({**upper, dev.READER_REGISTRY: registry_for(upper, wrapper=False)}, "reviewed reader takes a caller input without a wrapper in pkg/src/io.rs: fn open"),
+            "destructured parameter": ({**destructured, dev.READER_REGISTRY: registry_for(destructured, wrapper=False)}, "reviewed reader takes a caller input without a wrapper in pkg/src/io.rs: fn open"),
+            "attested caller input": ({**base, dev.READER_REGISTRY: registry_for(base, wrapper=False, attest=True)}, None),
             "missing context": ({**base, dev.READER_REGISTRY: re.sub(r'context = ".*"\n', "", registry)}, "stale audited reader"),
-            "qualified wrapper call": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    pkg::io::open(std::path::Path::new(&std::env::var("PAGE").unwrap()));\n}\n'}, "run-time file access with a computed path in pkg/tests/io.rs"),
-            "wrapper as a value": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    let f = crate::io::open;\n    drop(f);\n}\n'}, "file access used as a value in pkg/tests/io.rs"),
-            "aliased wrapper": ({**base, "pkg/tests/io.rs": "use crate::io::open as load;\n" + caller}, "aliased file access import in pkg/tests/io.rs"),
+            "qualified wrapper call": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    pkg::io::open(std::path::Path::new(&std::env::var("PAGE").unwrap()));\n}\n', dev.READER_REGISTRY: registry}, "run-time file access with a computed path in pkg/tests/io.rs"),
+            "wrapper as a value": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    let f = crate::io::open;\n    drop(f);\n}\n', dev.READER_REGISTRY: registry}, "file access used as a value in pkg/tests/io.rs"),
+            "aliased wrapper": ({**base, "pkg/tests/io.rs": "use crate::io::open as load;\n" + caller, dev.READER_REGISTRY: registry}, "aliased file access import in pkg/tests/io.rs"),
             "stale entry": ({**base, dev.READER_REGISTRY: registry + '\n[[reader]]\nfile = "pkg/src/gone.rs"\nfunction = "fn gone() {"\nline = "std::fs::read(p)"\nreason = "removed"\n'}, "stale audited reader pkg/src/gone.rs"),
             "malformed registry": ({**base, dev.READER_REGISTRY: "[[reader]]\nfile = 1\n"}, "unreadable reader registry"),
         }

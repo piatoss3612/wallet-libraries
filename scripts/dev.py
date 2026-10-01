@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import fcntl
 import functools
 import hashlib
@@ -37,7 +38,7 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 12
+POLICY_VERSION = 13
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
 COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{](?!\s*[bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
@@ -63,8 +64,9 @@ FUNCTION = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+
 # followed by `+ "…"` or `.to_owned()` is computed) may reach any file, so it
 # is an unknown reader (the policy cannot prove where it points).
 WHOLE_LITERAL = r'(?:[bc]?"(?:[^"\\]|\\.)*"|[bc]?r(#*)".*?"\1)\s*[,)]'
-# Whitespace and comments may separate path tokens (`std :: fs :: read`, `fs::/* */read`).
-GAP = r"(?:\s|/\*.*?\*/|//[^\n]*\n)*"
+# Whitespace may separate path tokens (`std :: fs :: read`); patterns run on
+# the code view, where comments (`fs::/* */read`) are already blanks.
+GAP = r"\s*"
 PATH_SEP = GAP + "::" + GAP
 TURBOFISH = r"(?:" + PATH_SEP + r"<[^()]*>)?"
 RUNTIME_READER = re.compile(r'(?:\b(?:fs|fs_err|File|Connection|OpenOptions|Path|PathBuf|Dir)' + PATH_SEP + r'(?:r#)?\w+|\.' + GAP + r'open(?:_with_flags)?|\bread_to_string|(?<!fn )\b(?:f?open(?:at)?(?:64)?))' + TURBOFISH + GAP + r'\(\s*(?!' + WHOLE_LITERAL + r')(?!\))', re.S)
@@ -97,7 +99,8 @@ TERMINATOR = re.compile(r"[\s.,;:)\]`'\"#?]")
 DOCS_HEAD = re.compile(r"(?:^|/)(?:d|do|doc)$", re.I)
 DOCS_TAIL = re.compile(r"^(?:ocs|cs|s)(?:/|$)", re.I)
 PARENT = re.compile(r"(?:^|/)\.\.(?:/|$)")
-BUILD_OUTPUT = {"target", ".vscode", ".git"}
+# Established build output (Python bytecode included); never a source input.
+BUILD_OUTPUT = {"target", ".vscode", ".git", "__pycache__"}
 # Files that can compute a path: Rust and doctests, scripts, and executables.
 # Everything else, including `include!` targets of any suffix and build-tool
 # inputs such as CMakeLists.txt, is treated as code that may compute a path.
@@ -249,14 +252,23 @@ def audited_sqlite(name: str, text: str, spawn: re.Match) -> bool:
     return start >= 0 and "\nfn " not in text[start:spawn.start()] and following.startswith(chain + " ")
 
 
+@functools.lru_cache(maxsize=None)
+def function_headers(text: str) -> list[tuple[int, int, str]]:
+    """Start, end, and normalized text of every function header line."""
+    return [(m.start(), m.end(), " ".join(m[0].split())) for m in FUNCTION.finditer(text)]
+
+
 def site(name: str, text: str, position: int) -> tuple[str, str, str]:
     """A source-bound reader identity: file, enclosing function, and the call.
 
     The call runs from the start of its line through the balanced parentheses
     of its arguments, so a changed argument on a later line is a new site.
     """
-    functions = [m for m in FUNCTION.finditer(text, 0, position)]
-    function = " ".join(functions[-1][0].split()) if functions else ""
+    headers = function_headers(text)
+    index = bisect.bisect_right(headers, (position,)) - 1
+    while index >= 0 and headers[index][1] > position:
+        index -= 1
+    function = headers[index][2] if index >= 0 else ""
     start = text.rfind("\n", 0, position) + 1
     opening = text.find("(", position)
     end = text.find("\n", position)
@@ -270,13 +282,53 @@ def site(name: str, text: str, position: int) -> tuple[str, str, str]:
     return name, function, " ".join(text[start:end if end >= 0 else len(text)].split())
 
 
-@functools.lru_cache(maxsize=64)
+# Rust lexing. The code view blanks comments (doctest content in `///`,
+# `//!`, `/** */`, and `/*! */` stays code) and turns raw identifiers `r#fs`
+# into `  fs`; the skeleton also blanks string and character contents. Both
+# keep every offset, so matches map back to the source unchanged.
+RUST_LEX = re.compile(r'''(?P<doc>///(?!/)[^\n]*|//![^\n]*)|(?P<line>//[^\n]*)|(?P<blockdoc>/\*[*!](?![*/]).*?\*/)|(?P<block>/\*.*?\*/)|(?P<raw>(?<!\w)[bc]?r(?P<hashes>\#*)".*?"(?P=hashes))|(?P<string>(?<!\w)[bc]?"(?:[^"\\]|\\.)*")|(?P<char>'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,8}\}|.)|[^'\\\n])')|(?P<rawid>(?<![\w#])r\#(?=[A-Za-z_]))''', re.S)
+
+
+def blank(text: str) -> str:
+    return re.sub(r"[^\n]", " ", text)
+
+
+@functools.lru_cache(maxsize=None)
+def rust_views(text: str) -> tuple[str, str]:
+    """The code view and the skeleton of Rust source (same length as `text`)."""
+    code, skeleton, cursor = [], [], 0
+    for match in RUST_LEX.finditer(text):
+        code.append(text[cursor:match.start()])
+        skeleton.append(text[cursor:match.start()])
+        token = match[0]
+        if match["doc"] is not None or match["blockdoc"] is not None:
+            tail = 2 if match["blockdoc"] is not None else 0
+            inner_code, inner_skeleton = rust_views(token[3:len(token) - tail])
+            code.append("   " + inner_code + " " * tail)
+            skeleton.append("   " + inner_skeleton + " " * tail)
+        elif match["line"] is not None or match["block"] is not None:
+            code.append(blank(token))
+            skeleton.append(blank(token))
+        elif match["rawid"] is not None:
+            code.append("  ")
+            skeleton.append("  ")
+        else:
+            code.append(token)
+            skeleton.append(token[0] + blank(token[1:-1]) + token[-1] if len(token) > 1 else token)
+        cursor = match.end()
+    code.append(text[cursor:])
+    skeleton.append(text[cursor:])
+    return "".join(code), "".join(skeleton)
+
+
+@functools.lru_cache(maxsize=None)
 def use_statements(text: str) -> list[tuple[int, int]]:
-    """Spans of `use …;` declarations, ending at the first `;` outside braces."""
+    """Spans of `use …;` declarations (in the skeleton), ending at the first `;` outside braces."""
+    skeleton = rust_views(text)[1]
     spans = []
-    for match in re.finditer(r"(?<![\w:])use\s", text):
-        depth, end = 0, len(text)
-        for delimiter in USE_DELIMITER.finditer(text, match.end()):
+    for match in re.finditer(r"(?<![\w:])use(?=[\s{:])", skeleton):
+        depth, end = 0, len(skeleton)
+        for delimiter in USE_DELIMITER.finditer(skeleton, match.end()):
             depth += {"{": 1, "}": -1}.get(delimiter[0], 0)
             if delimiter[0] == ";" and depth == 0 or depth < 0:
                 end = delimiter.start()
@@ -332,9 +384,6 @@ def use_tree(declaration: str) -> str | None:
     code that does not parse as a use tree cannot compile either.
     """
     tree = declaration.split(None, 1)[1] if len(declaration.split(None, 1)) > 1 else ""
-    # Doctest lines keep their code; other comments are dropped.
-    tree = re.sub(r"\n[ \t]*//[/!]", "\n", tree)
-    tree = re.sub(r"/\*.*?\*/|//[^\n]*", " ", tree, flags=re.S)
     if not re.fullmatch(r"[\w\s:{},*#]*", tree):
         return None
     tokens = USE_TOKEN.findall(tree)
@@ -347,8 +396,9 @@ def use_tree(declaration: str) -> str | None:
 def hidden_access(text: str, heads: set[str]) -> list[str]:
     """Imports that rename, glob, or bare-import file access or `include` macros."""
     reasons = []
+    skeleton = rust_views(text)[1]
     for start, end in use_statements(text):
-        tree = use_tree(text[start:end])
+        tree = use_tree(skeleton[start:end])
         if tree is None:
             continue
         try:
@@ -374,124 +424,204 @@ def hidden_access(text: str, heads: set[str]) -> list[str]:
     return reasons
 
 
-def skip_token(text: str, index: int) -> int:
-    """End of a string, character literal, or comment starting at `index`, else `index`."""
-    if text.startswith("//", index):
-        end = text.find("\n", index)
-        return len(text) if end < 0 else end
-    if text.startswith("/*", index):
-        end = text.find("*/", index + 2)
-        return len(text) if end < 0 else end + 2
-    raw = re.match(r'[bc]?r(#*)"', text[index:index + 260])
-    if raw and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_")):
-        end = text.find('"' + raw[1], index + raw.end())
-        return len(text) if end < 0 else end + 1 + len(raw[1])
-    if text[index] == '"':
-        position = index + 1
-        while position < len(text) and text[position] != '"':
-            position += 2 if text[position] == "\\" else 1
-        return position + 1
-    char = re.match(r"'(?:\\.[^']*|[^'\\\n])'", text[index:index + 12])
-    return index + char.end() if char else index
-
-
-@functools.lru_cache(maxsize=64)
+@functools.lru_cache(maxsize=None)
 def function_spans(text: str) -> list[tuple[int, int]]:
     """Each Rust function from its header to its closing brace (or `;`)."""
+    skeleton = rust_views(text)[1]
+    delimiters = [(m.start(), m[0]) for m in re.finditer(r"[{};]", skeleton)]
+    closing, stack = {}, []
+    for position, character in delimiters:
+        if character == "{":
+            stack.append(position)
+        elif character == "}" and stack:
+            closing[stack.pop()] = position
+    positions = [position for position, _ in delimiters]
     spans = []
-    for header in FUNCTION.finditer(text):
-        position, depth = header.start(), 0
-        while position < len(text):
-            skipped = skip_token(text, position)
-            if skipped != position:
-                position = skipped
-                continue
-            character = text[position]
-            if character == "{":
-                depth += 1
-            elif character == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            elif character == ";" and depth == 0:
-                break
-            position += 1
-        spans.append((header.start(), min(position + 1, len(text))))
+    for header in FUNCTION.finditer(skeleton):
+        index = bisect.bisect_left(positions, header.start())
+        while index < len(delimiters) and delimiters[index][1] == "}":
+            index += 1
+        if index == len(delimiters):
+            spans.append((header.start(), len(text)))
+        elif delimiters[index][1] == ";":
+            spans.append((header.start(), delimiters[index][0] + 1))
+        else:
+            spans.append((header.start(), closing.get(delimiters[index][0], len(text) - 1) + 1))
     return spans
 
 
-def source_context(text: str, position: int) -> tuple[str, str]:
-    """A reviewed reader's enclosing function and a digest of its whole context.
+@functools.lru_cache(maxsize=None)
+def macro_spans(text: str) -> list[tuple[str, int, int]]:
+    """Each `macro_rules!` definition: name and span."""
+    skeleton = rust_views(text)[1]
+    found = []
+    for match in re.finditer(r"\bmacro_rules!\s*(\w+)\s*([{(\[])", skeleton):
+        depth, opening = 0, match[2]
+        pair = {"{": "}", "(": ")", "[": "]"}[opening]
+        for index in range(match.end() - 1, len(skeleton)):
+            depth += 1 if skeleton[index] == opening else -1 if skeleton[index] == pair else 0
+            if depth == 0:
+                break
+        found.append((match[1], match.start(), index + 1))
+    return found
 
-    The digest covers the complete enclosing function (every path initializer,
-    not only the reader call) and everything in the file outside function
-    bodies: imports, constants, statics, macros, and impl or module headers.
-    Without an enclosing function it covers the whole file.
+
+def canonical(text: str) -> str:
+    """Rust source with only meaningless differences removed.
+
+    String, character, and raw literals and doc comments (doctests) keep their
+    exact bytes; other comments are dropped and whitespace runs elsewhere
+    become one space, so formatting does not stale a reviewed reader but any
+    change inside a literal does.
     """
+    pieces, cursor = [], 0
+    def code(part: str):
+        part = re.sub(r"\s+", " ", part)
+        if pieces and pieces[-1].endswith(" ") and part.startswith(" "):
+            part = part[1:]
+        if part:
+            pieces.append(part)
+    for match in RUST_LEX.finditer(text):
+        code(text[cursor:match.start()])
+        if match["line"] is not None or match["block"] is not None:
+            code(" ")
+        elif match["rawid"] is not None:
+            code("r#")
+        else:
+            pieces.append(match[0])
+        cursor = match.end()
+    code(text[cursor:])
+    return "".join(pieces).strip()
+
+
+def outside_functions(text: str) -> str:
+    """The exact bytes of a file outside its outermost function bodies."""
     spans = function_spans(text)
-    enclosing = [span for span in spans if span[0] <= position < span[1]]
-    normalize = lambda part: " ".join(part.split())
-    if not enclosing:
-        return "", hashlib.sha256(normalize(text).encode()).hexdigest()
-    start, end = max(enclosing)
     outside, cursor = [], 0
-    for span_start, span_end in sorted(span for span in spans if not any(o[0] < span[0] and span[1] <= o[1] for o in spans)):
+    for span_start, span_end in sorted(spans):
         if span_start >= cursor:
             outside.append(text[cursor:span_start])
             cursor = span_end
     outside.append(text[cursor:])
-    # Functions of this file the reader's function calls, transitively, can
-    # build its path too (`let path = page_path();`).
-    defined: dict[str, list[tuple[int, int]]] = {}
-    for span in spans:
-        named = re.search(r"\bfn\s+(\w+)", text[span[0]:span[1]])
-        if named:
-            defined.setdefault(named[1], []).append(span)
-    included, frontier = {(start, end)}, [(start, end)]
+    return "".join(outside)
+
+
+def definition_index(sources: dict[str, str]) -> dict[str, list[tuple[str, int, int]]]:
+    """Every Rust function and `macro_rules!` in the given sources, by name."""
+    index: dict[str, list[tuple[str, int, int]]] = {}
+    for name, text in sources.items():
+        skeleton = rust_views(text)[1]
+        for start, end in function_spans(text):
+            named = re.search(r"\bfn\s+(\w+)", skeleton[start:end])
+            if named:
+                index.setdefault(named[1], []).append((name, start, end))
+        for macro, start, end in macro_spans(text):
+            index.setdefault(macro + "!", []).append((name, start, end))
+    return index
+
+
+CALLED = re.compile(r"(?<!fn )\b([A-Za-z_]\w*)\s*(?:::\s*<[^()]*>\s*)?\(|\b(\w+!)")
+
+
+def source_context(text: str, position: int, name: str = "", sources: dict[str, str] | None = None, index: dict | None = None, cache: dict | None = None) -> tuple[str, str]:
+    """A reviewed reader's enclosing function and a digest of its provenance.
+
+    The digest covers exact bytes (no normalization, so string literals are
+    bound byte for byte): the enclosing function, its file outside function
+    bodies (imports, constants, statics, macros), and every function or macro
+    it calls that is defined in the scanned sources, transitively and in any
+    file, with those files' own outside-function bytes. Calls resolve by name,
+    so every same-named definition is included. Without an enclosing function
+    the whole file is bound.
+    """
+    sources = dict(sources or {})
+    sources[name] = text
+    index = index if index is not None else definition_index({name: text})
+    cache = cache if cache is not None else {}
+    enclosing = [span for span in function_spans(text) if span[0] <= position < span[1]]
+    if not enclosing:
+        return "", hashlib.sha256(canonical(text).encode()).hexdigest()
+    start, end = max(enclosing)
+    calls = cache.setdefault("calls", {})
+    def callees(definition):
+        if definition not in calls:
+            file, a, b = definition
+            skeleton = rust_views(sources[file])[1]
+            calls[definition] = {callee for call in CALLED.finditer(skeleton, a, b) for callee in index.get(call[1] or call[2], ()) if callee[0] in sources}
+        return calls[definition]
+    included, frontier = {(name, start, end)}, [(name, start, end)]
     while frontier:
-        span = frontier.pop()
-        for called in set(re.findall(r"(?<!fn )\b(\w+)\s*(?:::\s*<[^()]*>\s*)?\(", text[span[0]:span[1]])):
-            for callee in defined.get(called, ()):
-                if callee not in included:
-                    included.add(callee)
-                    frontier.append(callee)
-    callees = "\0".join(normalize(text[a:b]) for a, b in sorted(included - {(start, end)}))
+        for callee in callees(frontier.pop()) - included:
+            included.add(callee)
+            frontier.append(callee)
+    hashes = cache.setdefault("hashes", {})
+    def hashed(key, data):
+        if key not in hashes:
+            hashes[key] = hashlib.sha256(data().encode()).hexdigest()
+        return hashes[key]
+    parts = sorted({f"{file}\0outside\0" + hashed((file, "outside"), lambda file=file: canonical(outside_functions(sources[file]))) for file, _, _ in included})
+    parts += sorted(f"{file}\0" + hashed((file, a, b), lambda file=file, a=a, b=b: canonical(sources[file][a:b])) for file, a, b in included)
     header = text[start:text.find("\n", start) if "\n" in text[start:] else len(text)]
-    return header, hashlib.sha256((normalize(text[start:end]) + "\0" + normalize("".join(outside)) + "\0" + callees).encode()).hexdigest()
+    return header, hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
-RUST_KEYWORDS = set("as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while".split())
+RUST_KEYWORDS = set("as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return static struct super trait true type unsafe use where while".split())
+IDENTIFIERS = re.compile(r"(?<![\w.:])[A-Za-z_]\w*")
 
 
 def caller_input(text: str, position: int) -> str | None:
     """The enclosing function's name when a parameter may flow into the reader.
 
-    Taint starts at the parameter names (and `self`) and spreads to every
-    identifier in any statement that mentions a tainted one, so assignments,
-    `push`, and shadowing all propagate. The reader is tainted when its call
-    statement mentions a tainted identifier.
+    Every identifier in every parameter pattern (`P: String`, `(p,): (String,)`,
+    `self`) is tainted; taint flows to bindings, assignments, receivers of
+    mutating calls, and match arms of a tainted scrutinee. The reader is
+    tainted when its statement mentions a tainted identifier. A parameter list
+    that cannot be parsed counts as a caller input.
     """
     spans = [span for span in function_spans(text) if span[0] <= position < span[1]]
     if not spans:
         return None
     start, end = max(spans)
-    body = text[start:end]
+    body = rust_views(text)[1][start:end]
     match = re.search(r"\bfn\s+(\w+)\s*(?:<[^{}]*?>)?\s*\(", body)
     if not match:
-        return None
-    depth = 0
+        return "<unparsed function>"
+    depth, close = 0, None
     for index in range(match.end() - 1, len(body)):
         depth += {"(": 1, ")": -1}.get(body[index], 0)
         if depth == 0:
+            close = index
             break
-    parameters = body[match.end():index]
-    tainted = {word for word in re.findall(r"(?<![\w:])([a-z_]\w*)\s*:", parameters)} | ({"self"} if re.search(r"\bself\b", parameters) else set())
-    tainted -= {"mut"}
+    if close is None:
+        return match[1]
+    parameters, depth, current = [], 0, ""
+    for character in body[match.end():close]:
+        depth += 1 if character in "(<[" else -1 if character in ")>]" else 0
+        if character == "," and depth == 0:
+            parameters.append(current)
+            current = ""
+        else:
+            current += character
+    parameters.append(current)
+    tainted = set()
+    for parameter in filter(str.strip, parameters):
+        depth, pattern = 0, None
+        for index, character in enumerate(parameter):
+            depth += 1 if character in "(<[" else -1 if character in ")>]" else 0
+            if character == ":" and depth == 0 and parameter[index:index + 2] != "::" and parameter[index - 1:index + 1] != "::":
+                pattern = parameter[:index]
+                break
+        if pattern is None:
+            if re.fullmatch(r"\s*(?:#\[[^\]]*\]\s*)*&?\s*(?:'\w+\s+)?(?:mut\s+)?self\s*", parameter):
+                tainted.add("self")
+                continue
+            return match[1]
+        tainted |= set(IDENTIFIERS.findall(re.sub(r"#\[[^\]]*\]", " ", pattern))) - {"mut", "ref"}
     if not tainted:
         return None
-    rest = body[index + 1:]
+    rest = body[close + 1:]
     statements = re.split(r"[;{}]", rest)
-    names = lambda part: set(re.findall(r"(?<![\w.:])[a-z_]\w*", part)) - RUST_KEYWORDS
+    names = lambda part: set(IDENTIFIERS.findall(part)) - RUST_KEYWORDS
     changed = True
     while changed:
         changed = False
@@ -500,27 +630,26 @@ def caller_input(text: str, position: int) -> str | None:
             # `let P = E`, `if let P = E`, `P = E`, `for P in E`: P depends on E.
             binding = re.match(r"\s*(?:(?:if|while)\s+)?(?:let\s+)?(.+?)\s*(?<![=!<>+\-*/%&|^])=(?![=>])(.*)$", statement, re.S) or re.match(r"\s*for\s+(.+?)\s+in\b(.*)$", statement, re.S)
             # `recv.method(E)`: E may be stored into the receiver.
-            mutation = re.match(r"\s*([a-z_]\w*)\s*\.\s*\w+\s*\((.*)$", statement, re.S)
-            # Match arms bind from a tainted scrutinee.
-            arm = arms and "=>" in statement
-            target, source = (binding[1], binding[2]) if binding else (mutation[1], mutation[2]) if mutation else (statement.split("=>")[0], statement) if arm else ("", "")
-            if arm:
-                source = statement if names(statement) & tainted else ""
-                target = statement.split("=>")[0]
+            mutation = re.match(r"\s*([A-Za-z_]\w*)\s*\.\s*\w+\s*\((.*)$", statement, re.S)
+            if arms and "=>" in statement:
+                target, source = statement.split("=>")[0], statement
+            elif binding:
+                target, source = binding[1], binding[2]
+            elif mutation:
+                target, source = mutation[1], mutation[2]
+            else:
+                continue
             if names(source) & tainted and not names(target) <= tainted:
                 tainted |= names(target)
                 changed = True
-    offset = position - start - index - 1
-    reader = next((statement for statement, at in zip(statements, _offsets(rest, statements)) if at <= offset <= at + len(statement)), "")
-    return match[1] if (set(re.findall(r"(?<![\w.:])[a-z_]\w*", reader)) - RUST_KEYWORDS) & tainted else None
-
-
-def _offsets(text: str, parts: list[str]) -> list[int]:
-    offsets, cursor = [], 0
-    for part in parts:
-        offsets.append(cursor)
-        cursor += len(part) + 1
-    return offsets
+    offset = position - start - close - 1
+    cursor, reader = 0, ""
+    for statement in statements:
+        if cursor <= offset <= cursor + len(statement):
+            reader = statement
+            break
+        cursor += len(statement) + 1
+    return match[1] if names(reader) & tainted else None
 
 
 def computed(text: str, found: set[str], name: str = "", runtime: bool = True, registry: dict | None = None, rust: bool | None = None) -> list[str]:
@@ -533,16 +662,25 @@ def computed(text: str, found: set[str], name: str = "", runtime: bool = True, r
     rust = name.endswith((".rs", ".md")) if rust is None else rust
     registry = registry if registry is not None else {"sites": {}, "used": set()}
     reasons = []
-    if COMPUTED_INCLUDE.search(text):
+    # Patterns run on the code view: comments cannot split a path or a `use`,
+    # and `r#fs` reads as `fs`. Offsets still map to the source text.
+    code = rust_views(text)[0] if rust else text
+    if COMPUTED_INCLUDE.search(code):
         reasons.append("computed include")
+    # A macro template that substitutes a path segment or callee
+    # (`std::fs::$reader($path)`, `$m::read(p)`) can name any reader.
+    template = re.compile(r"\b(?:" + "|".join(sorted(FILE_ROOTS | INCLUDE_MACROS | registry.get("heads", set()))) + r")\s*::\s*\$\w+|\$(?!crate\b)\w+\s*::|(?:::\s*)?\$\w+\s*!?\s*\(")
+    if any(template.search(code, a, b) for _, a, b in (macro_spans(text) if rust else ())):
+        reasons.append("macro template with a substituted path or callee")
     def unreviewed(pattern: re.Pattern, accept=lambda match: False) -> bool:
-        for match in pattern.finditer(text):
+        for match in pattern.finditer(code):
             identity = site(name, text, match.start())
             if accept(match):
                 continue
             entry = registry["sites"].get(identity)
             if entry is not None:
-                header, digest = source_context(text, match.start())
+                header, digest = source_context(text, match.start(), name, registry.get("sources"), registry.get("index"), registry.setdefault("cache", {}))
+                registry.setdefault("digests", {})[identity] = digest
                 registry["used"].add(identity)
                 if entry.get("context") != digest:
                     # Any change in the function or its file-level context
@@ -559,7 +697,7 @@ def computed(text: str, found: set[str], name: str = "", runtime: bool = True, r
             return True
         return False
     if runtime:
-        if unreviewed(TRAVERSAL) or BASE_DIRECTORY.search(text) and UPWARD.search(text):
+        if unreviewed(TRAVERSAL) or BASE_DIRECTORY.search(code) and UPWARD.search(code):
             reasons.append("computed directory traversal")
         if unreviewed(WORKTREE_READERS):
             reasons.append("work-tree reader")
@@ -572,9 +710,9 @@ def computed(text: str, found: set[str], name: str = "", runtime: bool = True, r
             reasons.append("run-time file access with a computed path")
         uses = use_statements(text) if rust else []
         values = [FILE_VALUE] + ([registry["wrapper_values"]] if registry.get("wrapper_values") else [])
-        if any(not any(start <= match.start() < end for start, end in uses) and not code_span(text, match) for pattern in values for match in pattern.finditer(text)):
+        if any(not any(start <= match.start() < end for start, end in uses) and not code_span(code, match) for pattern in values for match in pattern.finditer(code)):
             reasons.append("file access used as a value")
-        if re.search(r"\bParentDir\b", text):
+        if re.search(r"\bParentDir\b", code):
             reasons.append("parent directory navigation")
     # A renamed `include!` reads its (possibly computed) argument at compile
     # time; hidden run-time access counts only in executed code.
@@ -595,7 +733,7 @@ def module_files(name: str, text: str, index: Index) -> set[str]:
     """
     folder = Path(name).parent
     found = set()
-    for module in re.findall(r"(?<![\w:])mod\s+(?:r#)?(\w+)\s*;", text):
+    for module in re.findall(r"(?<![\w:])mod\s+(\w+)\s*;", rust_views(text)[1]):
         for base in (folder, folder / Path(name).stem):
             for candidate in (base / f"{module}.rs", base / module / "mod.rs"):
                 found |= index.paths.get(candidate.as_posix().removeprefix("./").casefold(), set())
@@ -775,7 +913,18 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
     # Qualified calls (`crate::tor::create_with_timeouts(…)`) are call sites too;
     # renaming a wrapper or passing it as a value hides its calls.
     wrappers = "|".join(PATH_SEP.join(map(re.escape, call.split("::"))) for call in calls)
+    # Reviewed readers bind their path provenance across files: every Rust
+    # source in the checkout (tracked, untracked, or ignored) is indexed.
+    sources = {}
+    for name in sorted(known) if sites else ():
+        if name.endswith(".rs") and not BUILD_OUTPUT & set(name.split("/")):
+            try:
+                sources[name] = (ROOT / name).read_text()
+            except (OSError, UnicodeDecodeError):
+                pass
     reviewed = {
+        "sources": sources,
+        "index": definition_index(sources),
         "sites": sites,
         "used": set(),
         "wrappers": re.compile(r"(?<!fn )(?<!\w)(?:" + wrappers + r")" + TURBOFISH + GAP + r"\(", re.S) if calls else None,
@@ -896,11 +1045,15 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
     # scanned, which covers every file in a built package (implicit `mod`
     # modules included) and every file a scanned file names.
     policy["consumed_ignored"] = sorted(scanned & ignored_names)
+    # Full inputs mean every repository input: an unknown reader may load any
+    # ignored file, including one outside every package that nothing names.
     if policy["name"] == "full":
         policy["fallback_reason"] = f"{command} validates every repository input"
+        policy["consumed_ignored"] = sorted(ignored_names)
         return policy
     if reasons:
         policy["fallback_reason"] = "; ".join(sorted(set(reasons))[:5])
+        policy["consumed_ignored"] = sorted(ignored_names)
         return policy
     # A reached documentation page is an input and its doctests were scanned above.
     protected |= scanned & candidates
