@@ -378,6 +378,73 @@ class InputPolicyTests(unittest.TestCase):
                 fallback = self.scenario(files)["fallback_reason"]
                 self.assertIn(reason, fallback) if reason else self.assertIsNone(fallback)
 
+    def test_reader_registry_binds_reviewed_sites(self):
+        reader = 'pub fn open(path: &std::path::Path) -> String {\n    std::fs::read_to_string(path).unwrap()\n}\n'
+        caller = '#[test]\nfn opens() {\n    let file = tempfile::NamedTempFile::new().unwrap();\n    crate::io::open(file.path());\n}\n'
+        registry = (
+            '[[wrapper]]\ncall = "io::open"\n\n'
+            '[[reader]]\nfile = "pkg/src/io.rs"\nfunction = "pub fn open(path: &std::path::Path) -> String {"\nline = "std::fs::read_to_string(path).unwrap()"\nreason = "caller path; every io::open call is reviewed"\n\n'
+            '[[reader]]\nfile = "pkg/tests/io.rs"\nfunction = "fn opens() {"\nline = "crate::io::open(file.path());"\nreason = "NamedTempFile"\n'
+        )
+        base = {"pkg/src/io.rs": reader, "pkg/tests/io.rs": caller, dev.READER_REGISTRY: registry}
+        cases = {
+            "reviewed": (base, None),
+            "unreviewed registry absent": ({**base, dev.READER_REGISTRY: ""}, "run-time file access with a computed path in pkg/src/io.rs"),
+            "edited reviewed call": ({**base, "pkg/src/io.rs": reader.replace("(path)", "(path.with_extension(\"md\"))")}, "run-time file access with a computed path in pkg/src/io.rs"),
+            "new wrapper call": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    crate::io::open(std::path::Path::new(&std::env::var("PAGE").unwrap()));\n}\n'}, "run-time file access with a computed path in pkg/tests/io.rs"),
+            "moved to another function": ({**base, "pkg/src/io.rs": reader.replace("pub fn open", "pub fn load")}, "run-time file access with a computed path in pkg/src/io.rs"),
+            "stale entry": ({**base, dev.READER_REGISTRY: registry + '\n[[reader]]\nfile = "pkg/src/gone.rs"\nfunction = "fn gone() {"\nline = "std::fs::read(p)"\nreason = "removed"\n'}, "stale audited reader pkg/src/gone.rs"),
+            "malformed registry": ({**base, dev.READER_REGISTRY: "[[reader]]\nfile = 1\n"}, "unreadable reader registry"),
+        }
+        for case, (files, reason) in cases.items():
+            with self.subTest(case=case):
+                fallback = self.scenario(files)["fallback_reason"]
+                self.assertIn(reason, fallback) if reason else self.assertIsNone(fallback)
+        # The registry is a tracked input: editing it invalidates every policy.
+        self.write(dev.READER_REGISTRY, registry)
+        self.commit()
+        for command in ("test", "verify"):
+            self.assertEqual(self.change(lambda: self.edit(dev.READER_REGISTRY, registry + f"# reviewed again for {command}\n"), command)[0], ["reader-registry"])
+
+    def test_run_time_readers_count_only_where_the_operation_executes_them(self):
+        reader = 'pub fn page(p: &str) -> String { std::fs::read_to_string(p).unwrap() }\n'
+        cases = {
+            ("check", "pkg/src/io.rs"): None,
+            ("lint", "pkg/src/io.rs"): None,
+            ("test", "pkg/src/io.rs"): "run-time file access",
+            ("check", "pkg/build.rs"): "run-time file access",
+            ("test", "pkg/examples/tool.rs"): None,
+        }
+        for (command, name), reason in cases.items():
+            with self.subTest(command=command, name=name):
+                self.write(name, reader)
+                try:
+                    fallback = dev.source_state(command)["policy"]["fallback_reason"]
+                finally:
+                    (self.root / name).unlink()
+                self.assertIn(reason, fallback) if reason else self.assertIsNone(fallback)
+
+    def test_selection_limits_the_audit_to_packages_cargo_builds(self):
+        files = {
+            "Cargo.toml": '[workspace]\nmembers = ["pkg", "other", "dep"]\n',
+            "pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[dependencies]\ndep = { path = "../dep" }\n',
+            "dep/Cargo.toml": '[package]\nname = "dep"\n\n[dev-dependencies]\nother = { path = "../other" }\n',
+            "dep/src/lib.rs": "pub fn f() {}\n",
+            "other/Cargo.toml": '[package]\nname = "other"\n',
+            "other/src/lib.rs": 'pub fn page(p: &str) -> String { std::fs::read_to_string(p).unwrap() }\n',
+        }
+        for name, text in files.items():
+            self.write(name, text)
+        policy = dev.source_state("test", ["pkg"])["policy"]
+        # A dependency's dev-dependencies are not built, so `other` is not reached.
+        self.assertEqual(policy["packages"], ["dep", "pkg"])
+        self.assertIsNone(policy["fallback_reason"])
+        self.assertIn("other/src/lib.rs", dev.source_state("test", ["other"])["policy"]["fallback_reason"])
+        self.assertIn("other/src/lib.rs", dev.source_state("test")["policy"]["fallback_reason"])
+        args = argparse.Namespace(command="test", config="transparent", package=None)
+        self.assertEqual(dev.selected_packages(args), ["zakura-client-backend", "zakura-client-sqlite"])
+        self.assertIsNone(dev.selected_packages(argparse.Namespace(command="test", config="default", package=None)))
+
     def test_untracked_nested_repository_falls_back(self):
         self.write("pkg/vendor/helper/src/lib.rs", 'const G: &str = include_str!("../../../../docs/guide.md");\n')
         subprocess.run(["git", "init", "-q"], cwd=self.root / "pkg/vendor/helper", check=True)
@@ -438,14 +505,19 @@ class InputPolicyTests(unittest.TestCase):
                 self.assertEqual(result["source"]["policy"]["version"], dev.POLICY_VERSION)
                 self.assertIsNone(result["source"]["policy"]["fallback_reason"])
 
-    def test_repository_audit_falls_back_for_unproven_readers(self):
-        # The reviewed sqlite3 launch is accepted, but computed run-time paths
-        # cannot be proven to avoid documentation, so this checkout uses full inputs.
-        with patch.object(dev, "ROOT", Path(__file__).resolve().parents[2]):
-            policy = dev.input_policy("test", dev.repository_files())
-        self.assertNotIn("process launch", policy["fallback_reason"])
-        self.assertIn("run-time file access with a computed path in librustzcash/zcash_client_sqlite/src/lib.rs", policy["fallback_reason"])
-        self.assertEqual(policy["excluded"], [])
+    def test_repository_audit_relies_on_reviewed_readers(self):
+        root = Path(__file__).resolve().parents[2]
+        with patch.object(dev, "ROOT", root):
+            for selection in (["zakura-client-sqlite"], None):
+                with self.subTest(selection=selection):
+                    policy = dev.input_policy("test", dev.repository_files(), selection)
+                    self.assertIsNone(policy["fallback_reason"])
+                    self.assertIn("docs/development.md", policy["excluded"])
+                    self.assertGreater(policy["reviewed_readers"], 0)
+            # Without the reviewed registry, computed run-time paths force full inputs.
+            with patch.object(dev, "READER_REGISTRY", "scripts/missing-registry.toml"):
+                policy = dev.input_policy("test", dev.repository_files(), ["zakura-client-sqlite"])
+            self.assertIn("run-time file access with a computed path in librustzcash/zcash_client_sqlite/src/lib.rs", policy["fallback_reason"])
 
 
 if __name__ == "__main__":

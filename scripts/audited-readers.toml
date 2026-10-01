@@ -1,0 +1,641 @@
+# Reviewed run-time readers for `scripts/dev.py` (rust-check input policy).
+#
+# A reader whose path is computed may still be exempt from the full-input
+# fallback when review shows the path cannot name repository documentation.
+# Each entry is bound to its file, enclosing function, and exact call text
+# (normalized whitespace, through the call's closing parenthesis). Any edit to
+# a reviewed call, a new reader, or an entry that no longer matches its source
+# makes `check`/`test`/`lint` use every input until this file is reviewed again.
+#
+# `[[wrapper]]` names reviewed APIs that open a caller's path: each of their
+# call sites in executed code is a reader that needs its own entry.
+
+[[wrapper]]
+call = "WalletDb::for_path"
+
+[[wrapper]]
+call = "BlockDb::for_path"
+
+[[wrapper]]
+call = "FsBlockDb::for_path"
+
+[[wrapper]]
+call = "Client::create"
+
+[[wrapper]]
+call = "create_with_timeouts"
+
+[[wrapper]]
+call = "crash_copy"
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/build.rs"
+function = "fn install_binding(generated: &Path, checked_in: &str, mode: &str) -> io::Result<()> {"
+line = "fs::copy(generated, checked_in)?;"
+reason = "Build script compares OUT_DIR output with the checked-in src/proto binding named by a literal; COMPACT_FORMATS_PROTO is the literal proto/compact_formats.proto."
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/build.rs"
+function = "fn install_binding(generated: &Path, checked_in: &str, mode: &str) -> io::Result<()> {"
+line = "} else if fs::read(generated)? != fs::read(checked_in)? {"
+reason = "Build script compares OUT_DIR output with the checked-in src/proto binding named by a literal; COMPACT_FORMATS_PROTO is the literal proto/compact_formats.proto."
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/build.rs"
+function = "fn main() -> io::Result<()> {"
+line = "if !Path::new(COMPACT_FORMATS_PROTO).exists() {"
+reason = "Build script compares OUT_DIR output with the checked-in src/proto binding named by a literal; COMPACT_FORMATS_PROTO is the literal proto/compact_formats.proto."
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/src/tor.rs"
+function = "pub async fn create_with_timeouts("
+line = "if !tokio::fs::try_exists(tor_dir).await? {"
+reason = "Checks the caller's Tor state directory; every Client::create and create_with_timeouts call is a reviewed entry."
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/src/tor/http.rs"
+function = "fn httpbin() {"
+line = "let client = Client::create(tor_dir.path(), |_| ()).await.unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/chain.rs"
+function = "fn to_chain_error<D, E: Into<FsBlockDbError>>(err: E) -> Error<D, FsBlockDbError> {"
+line = "File::open(cbr.block_file_path(&cache.blocks_dir)).map_err(to_chain_error)?;"
+reason = "Block file under the FsBlockDb blocks directory, supplied only through reviewed FsBlockDb::for_path entries."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/chain.rs"
+function = "pub fn block_file_path<P: AsRef<Path>>(&self, blocks_dir: &P) -> PathBuf {"
+line = "blocks_dir.as_ref().join(Path::new(&format!( \"{}-{}-compactblock\", self.height, self.block_hash ))"
+reason = "Block file under the FsBlockDb blocks directory, supplied only through reviewed FsBlockDb::for_path entries."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/chain/init.rs"
+function = ""
+line = "/// let db = BlockDb::for_path(cache_file.path()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/chain/init.rs"
+function = "pub fn init_cache_database(db_cache: &BlockDb) -> Result<(), rusqlite::Error> {"
+line = "/// let mut db = FsBlockDb::for_path(blocks_dir.path()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "fn combined_handle_modes_configure_every_supported_lane_and_transaction_handle() {"
+line = "let mut db = WalletDb::for_path( file.path(), zcash_protocol::consensus::Network::MainNetwork, crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "fn combined_handle_modes_configure_every_supported_lane_and_transaction_handle() {"
+line = "let reopened = WalletDb::for_path( file.path(), zcash_protocol::consensus::Network::MainNetwork, crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "pub fn for_path<F: AsRef<Path>>("
+line = "rusqlite::Connection::open(path).and_then(move |conn| {"
+reason = "Opens the caller's database path; every WalletDb::for_path and BlockDb::for_path call is a reviewed entry."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "pub fn for_path<P: AsRef<Path>>(fsblockdb_root: P) -> Result<Self, FsBlockDbError> {"
+line = "conn: rusqlite::Connection::open(db_path).map_err(FsBlockDbError::Db)?,"
+reason = "Path under the FsBlockDb root, which callers supply only through reviewed FsBlockDb::for_path entries."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "pub fn for_path<P: AsRef<Path>>(fsblockdb_root: P) -> Result<Self, FsBlockDbError> {"
+line = "fs::create_dir_all(&blocks_dir)?;"
+reason = "Path under the FsBlockDb root, which callers supply only through reviewed FsBlockDb::for_path entries."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "pub fn for_path<P: AsRef<Path>>(fsblockdb_root: P) -> Result<Self, FsBlockDbError> {"
+line = "let meta = fs::metadata(&fsblockdb_root).map_err(FsBlockDbError::Fs)?;"
+reason = "Path under the FsBlockDb root, which callers supply only through reviewed FsBlockDb::for_path entries."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "pub fn for_path<P: AsRef<Path>>(path: P) -> Result<Self, rusqlite::Error> {"
+line = "rusqlite::Connection::open(path).map(BlockDb)"
+reason = "Opens the caller's database path; every WalletDb::for_path and BlockDb::for_path call is a reviewed entry."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "pub fn write_block_metadata(&self, block_meta: &[BlockMeta]) -> Result<(), FsBlockDbError> {"
+line = "match fs::metadata(&block_path) {"
+reason = "Path under the FsBlockDb root, which callers supply only through reviewed FsBlockDb::for_path entries."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/testing.rs"
+function = "fn insert(&mut self, cb: &CompactBlock) -> Self::InsertResult {"
+line = "File::create(block_path)"
+reason = "Block file under FsBlockCache's tempdir root (testing.rs FsBlockCache::new)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/testing.rs"
+function = "pub(crate) fn new() -> Self {"
+line = "let mut db_meta = FsBlockDb::for_path(&fsblockdb_root).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/testing/db.rs"
+function = "fn new_data_store("
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/commitment_tree.rs"
+function = "fn new_tree<T: ShieldedPoolTester + ShieldedPoolPersistence>("
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/commitment_tree.rs"
+function = "fn put_shard_roots<T: ShieldedPoolTester + ShieldedPoolPersistence>() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/commitment_tree.rs"
+function = "fn remove_retained_checkpoints_below() {"
+line = "let mut db = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/commitment_tree.rs"
+function = "fn witnesses_at_historical_height_for_table("
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/commitment_tree.rs"
+function = "fn witnesses_at_historical_height_with_many_wallet_checkpoints() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/enhance_pir/tests.rs"
+function = "fn response_application_retries_after_another_connection_rolls_back() {"
+line = "let mut competing = Connection::open(st.wallet().data_file_path()).unwrap();"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init.rs"
+function = "fn account_produces_expected_ua_sequence() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init.rs"
+function = "fn down(&self, _: &rusqlite::Transaction) -> Result<(), WalletMigrationError> {"
+line = "let mut db = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init.rs"
+function = "fn init_0_3_0<P: consensus::Parameters, CL: Clock + Clone, R: Rng + Clone>("
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init.rs"
+function = "fn init_autoshielding<P: consensus::Parameters, CL, R>("
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init.rs"
+function = "fn init_main<P: consensus::Parameters, CL, R>("
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init.rs"
+function = "fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> WalletMigrationError {"
+line = "/// let mut db = WalletDb::for_path( /// get_data_db_path(), /// Network::TestNetwork, /// SystemClock, /// UnwrapErr(SysRng), /// )"
+reason = "Doctest: hidden setup binds get_data_db_path to a NamedTempFile path."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init.rs"
+function = "pub fn init_wallet_db<"
+line = "/// let mut db = WalletDb::for_path( /// get_data_db_path(), /// Network::TestNetwork, /// SystemClock, /// UnwrapErr(SysRng), /// )"
+reason = "Doctest: hidden setup binds get_data_db_path to a NamedTempFile path."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations.rs"
+function = "fn migrate_between_releases_without_data() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations.rs"
+function = "pub(crate) fn test_migrate(migrations: &[Uuid]) {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_account_birthdays.rs"
+function = "fn migrate() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transaction_views.rs"
+function = "fn migrate_from_wm2() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transaction_views.rs"
+function = "fn transaction_views() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transparent_receiver_address_index.rs"
+function = "fn cross_account_winner_may_be_legacy_account() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transparent_receiver_address_index.rs"
+function = "fn enforces_uniqueness() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transparent_receiver_address_index.rs"
+function = "fn rejects_cross_account_duplicates() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transparent_receiver_address_index.rs"
+function = "fn repair_carries_min_exposed_at_height() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transparent_receiver_address_index.rs"
+function = "fn resolves_cross_account_duplicate_by_derivation() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transparent_receiver_address_index.rs"
+function = "fn resolves_cross_account_duplicate_by_ephemeral_derivation() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transparent_receiver_address_index.rs"
+function = "fn resolves_preexisting_duplicates() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/add_transparent_value_index.rs"
+function = "fn creates_value_index() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), zcash_protocol::consensus::Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/drop_zip318_pool_migration.rs"
+function = "fn dependent_views_are_named_and_the_upgrade_rolls_back() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/drop_zip318_pool_migration.rs"
+function = "fn drops_populated_schema_and_keeps_transactions() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/ensure_orchard_ua_receiver.rs"
+function = "fn init_migrate_add_orchard_receiver() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/fix_broken_commitment_trees.rs"
+function = "fn migrate_with_confirmed_unmined_at_height_column() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/fix_broken_commitment_trees.rs"
+function = "fn migrate_without_confirmed_unmined_at_height_column() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/ironwood_pool_code_views.rs"
+function = "fn ironwood_and_orchard_notes_appear_in_received_outputs() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/ivk_item_cache.rs"
+function = "fn migrate_populates_ivk_cache() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/received_notes_nullable_nf.rs"
+function = "fn received_notes_nullable_migration() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/receiving_key_scopes.rs"
+function = "fn receiving_key_scopes_migration_enhanced() {"
+line = "WalletDb::for_path(data_file.path(), params, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/receiving_key_scopes.rs"
+function = "fn receiving_key_scopes_migration_non_enhanced() {"
+line = "WalletDb::for_path(data_file.path(), params, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/standalone_p2sh.rs"
+function = "fn migrate_preserves_data() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/transparent_activation_schema.rs"
+function = "fn seedless_upgrade_creates_only_empty_activation_tables() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/transparent_ledger_schema.rs"
+function = "fn pre_migration_wallet(file: &NamedTempFile) -> Db {"
+line = "let mut db = WalletDb::for_path(file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "The parameter is a &NamedTempFile supplied by the test."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/transparent_policy_generation.rs"
+function = "fn existing_queue_rows_keep_generation_zero_and_route_two_is_accepted() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/transparent_recovery_schema.rs"
+function = "fn seedless_upgrade_creates_only_empty_recovery_tables() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/transparent_shared_derivations.rs"
+function = "fn upgrade_is_additive_and_grants_no_authority() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/tx_retrieval_queue.rs"
+function = "fn migrate_with_data() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/v_address_uses_ironwood.rs"
+function = "fn wallet_before_migration() -> (NamedTempFile, TestWalletDb) {"
+line = "WalletDb::for_path(data_file.path(), NETWORK, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/v_transactions_net.rs"
+function = "fn v_transactions_net() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/v_transactions_note_uniqueness.rs"
+function = "fn v_transactions_note_uniqueness_migration() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/v_transactions_zip318_kind.rs"
+function = "fn the_view_column_is_queryable() {"
+line = "let mut db_data = WalletDb::for_path( data_file.path(), Network::TestNetwork, test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/witness_stabilized_notes.rs"
+function = "fn gap_in_scanned_coverage_prevents_stabilization() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/witness_stabilized_notes.rs"
+function = "fn migrate_backfills_stabilized_notes() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/init/migrations/witness_stabilized_notes.rs"
+function = "fn migrate_without_scan_state_is_noop() {"
+line = "WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/locking.rs"
+function = "fn concurrent_handles_resolve_lock_conflict() {"
+line = "let mut db2 = WalletDb::for_path( st.wallet().data_file_path(), network, test_clock(), test_rng(), )"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/request_lifecycle_tests.rs"
+function = "fn expiry_dormancy_preserves_obligations_and_reactivates_after_rewind() {"
+line = "let reopened = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/request_lifecycle_tests.rs"
+function = "fn local_creation_evidence_survives_existing_rows_ingestion_reopen_and_rewind() {"
+line = "let reopened = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/request_lifecycle_tests.rs"
+function = "fn status_evidence_truncation_uses_rescan_floor_below_retained_checkpoint() {"
+line = "let mut conn = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests.rs"
+function = "fn commit_with_old_generation_inserts_nothing() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests.rs"
+function = "fn public_dispatch_does_not_mix_stale_authority_with_new_generation() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests.rs"
+function = "fn second_connection_fails_generation_check_without_changing_memory_mode() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests.rs"
+function = "fn status_work_requires_ledger_mode_even_without_a_chain_tip() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests.rs"
+function = "fn transaction_data_requests_use_one_policy_snapshot() {"
+line = "let mut writer = WalletDb::for_path( st.wallet().data_file_path(), *st.network(), test_clock(), test_rng(), )"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests.rs"
+function = "fn transactional_handles_inherit_and_reopened_handles_do_not() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests.rs"
+function = "fn unconfigured_handle_fails_before_the_chain_is_known() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests.rs"
+function = "fn unconfigured_handles_are_rejected_even_when_empty() {"
+line = "WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/history.rs"
+function = "fn candidate_metadata_survives_reopen_without_granting_authority() {"
+line = "Connection::open(path).unwrap(),"
+reason = "Opens a file inside a tempfile::tempdir() created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/failpoints.rs"
+function = "fn a_crash_before_commit_leaves_the_prior_state() {"
+line = "let (_dir, crashed) = crash_copy(&path);"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/failpoints.rs"
+function = "fn a_crash_before_commit_leaves_the_prior_state() {"
+line = "let (_dir, restarted) = crash_copy(&path);"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/failpoints.rs"
+function = "fn assert_recovery_at_commit(st: &mut State, operation: impl FnOnce(&mut State)) {"
+line = "let (_dir, crashed) = crash_copy(&uncommitted_path);"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/failpoints.rs"
+function = "fn assert_recovery_at_commit(st: &mut State, operation: impl FnOnce(&mut State)) {"
+line = "let (_dir, restarted) = crash_copy(&path);"
+reason = "Opens the test wallet's data file, a NamedTempFile created by TestDbFactory::file_backed (testing/db.rs)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/failpoints.rs"
+function = "fn crash_copy(path: &Path) -> (tempfile::TempDir, Connection) {"
+line = "let conn = Connection::open(&copy).unwrap();"
+reason = "Copies the caller's wallet file into a tempdir created here; every crash_copy call is a reviewed entry."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/failpoints.rs"
+function = "fn crash_copy(path: &Path) -> (tempfile::TempDir, Connection) {"
+line = "let wal = std::path::PathBuf::from(format!(\"{}-wal\", path.display()));"
+reason = "Copies the caller's wallet file into a tempdir created here; every crash_copy call is a reviewed entry."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/failpoints.rs"
+function = "fn crash_copy(path: &Path) -> (tempfile::TempDir, Connection) {"
+line = "std::fs::copy(&wal, dir.path().join(\"wallet.db-wal\")).unwrap();"
+reason = "Copies the caller's wallet file into a tempdir created here; every crash_copy call is a reviewed entry."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/failpoints.rs"
+function = "fn crash_copy(path: &Path) -> (tempfile::TempDir, Connection) {"
+line = "std::fs::copy(path, &copy).unwrap();"
+reason = "Copies the caller's wallet file into a tempdir created here; every crash_copy call is a reviewed entry."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/migration.rs"
+function = "fn new() -> Self {"
+line = "let mut db = WalletDb::for_path(file.path(), NETWORK, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/zewif.rs"
+function = "fn regtest_wallet_db() -> ("
+line = "let mut wdb = WalletDb::for_path( db_file.path(), regtest_local_network(), test_clock(), test_rng(), )"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/zewif.rs"
+function = "fn test_wallet_db() -> ("
+line = "WalletDb::for_path(db_file.path(), TEST_NETWORK, test_clock(), test_rng()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "zakura/pir-transparent/src/recovery.rs"
+function = "fn companion_binding_rejects_account_endpoint_and_schema_changes() {"
+line = "ReferenceRecovery::open(&path, config()).unwrap();"
+reason = "Opens a file inside a tempfile::tempdir() created in the same function."
+
+[[reader]]
+file = "zakura/pir-transparent/src/recovery.rs"
+function = "fn companion_binding_rejects_account_endpoint_and_schema_changes() {"
+line = "assert!(ReferenceRecovery::open(&path, different).is_err());"
+reason = "Opens a file inside a tempfile::tempdir() created in the same function."
+
+[[reader]]
+file = "zakura/pir-transparent/src/recovery.rs"
+function = "fn companion_binding_rejects_account_endpoint_and_schema_changes() {"
+line = "drop(ReferenceRecovery::open(&path, config()).unwrap());"
+reason = "Opens a file inside a tempfile::tempdir() created in the same function."
+
+[[reader]]
+file = "zakura/pir-transparent/src/recovery.rs"
+function = "fn missing_or_unaccepted_targets_and_oversized_watch_sets_fail_before_http() {"
+line = "ReferenceRecovery::open(dir.path().join(\"companion.sqlite\"), config()).unwrap();"
+reason = "Opens a NamedTempFile or tempdir path created in the same function."
+
+[[reader]]
+file = "zakura/pir-transparent/src/recovery.rs"
+function = "fn normalized_events_preserve_attribution_and_local_shard_anchor_after_reopen() {"
+line = "let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();"
+reason = "Opens a file inside a tempfile::tempdir() created in the same function."
+
+[[reader]]
+file = "zakura/pir-transparent/src/recovery.rs"
+function = "fn possible_wallet_export_survives_crash_before_ack_and_withdrawal() {"
+line = "let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();"
+reason = "Opens a file inside a tempfile::tempdir() created in the same function."
+
+[[reader]]
+file = "zakura/pir-transparent/src/recovery.rs"
+function = "pub fn open(path: impl AsRef<Path>, config: RecoveryConfig) -> Result<Self, RecoveryError> {"
+line = "let mut catalog = Connection::open(path).map_err(failure)?;"
+reason = "Opens the caller's companion database; every executed ReferenceRecovery::open call is a reviewed entry."
+
+[[reader]]
+file = "zakura/pir-transparent/src/recovery.rs"
+function = "pub fn open(path: impl AsRef<Path>, config: RecoveryConfig) -> Result<Self, RecoveryError> {"
+line = "let store = SqliteStore::open(&path).map_err(failure)?;"
+reason = "Opens the caller's companion database; every executed ReferenceRecovery::open call is a reviewed entry."

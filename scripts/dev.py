@@ -36,7 +36,7 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 8
+POLICY_VERSION = 9
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
 COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{](?!\s*[bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
@@ -54,6 +54,10 @@ WORKTREE_READERS = re.compile(r"\b(?:git2|gix|vergen\w*|built)::")
 # argument may appear. Bound to its file and function; any other sqlite3
 # launch, or any change to this one, falls back until reviewed again.
 AUDITED_SQLITE = ("librustzcash/zcash_client_sqlite/src/testing/db.rs", "unsafe fn run_sqlite3<S: AsRef<OsStr>>(db_path: S, command: &str) {", 'Command::new("sqlite3") .arg(db_path) .arg("-safe") .arg("-readonly") .arg(command) .output()')
+# Reviewed run-time readers whose computed paths cannot reach documentation,
+# each bound to its file, enclosing function, and exact source line.
+READER_REGISTRY = "scripts/audited-readers.toml"
+FUNCTION = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+\"\w+\"\s+)?fn\s+\w+.*$", re.M)
 # Run-time file access whose path is not one string literal may reach any
 # file, so it is an unknown reader (the policy cannot prove where it points).
 RUNTIME_READER = re.compile(r'(?:\b(?:fs|File|Connection|OpenOptions|Path|PathBuf|Dir|tokio::fs)::(?:\w+)|\.open(?:_with_flags)?|\bread_to_string|(?<!fn )\bopen)\s*\(\s*(?![bc]?r?#*")(?!\))')
@@ -228,25 +232,64 @@ def audited_sqlite(name: str, text: str, spawn: re.Match) -> bool:
     return start >= 0 and "\nfn " not in text[start:spawn.start()] and following.startswith(chain + " ")
 
 
-def computed(text: str, found: set[str], name: str = "") -> list[str]:
-    """Constructs in code that may build a path this scanner cannot resolve."""
+def site(name: str, text: str, position: int) -> tuple[str, str, str]:
+    """A source-bound reader identity: file, enclosing function, and the call.
+
+    The call runs from the start of its line through the balanced parentheses
+    of its arguments, so a changed argument on a later line is a new site.
+    """
+    functions = [m for m in FUNCTION.finditer(text, 0, position)]
+    function = " ".join(functions[-1][0].split()) if functions else ""
+    start = text.rfind("\n", 0, position) + 1
+    opening = text.find("(", position)
+    end = text.find("\n", position)
+    if opening >= 0 and (end < 0 or opening < end):
+        depth = 0
+        for index in range(opening, min(len(text), opening + 4000)):
+            depth += {"(": 1, ")": -1}.get(text[index], 0)
+            if depth == 0:
+                end = max(end, index + 1)
+                break
+    return name, function, " ".join(text[start:end if end >= 0 else len(text)].split())
+
+
+def computed(text: str, found: set[str], name: str = "", runtime: bool = True, registry: dict | None = None) -> list[str]:
+    """Constructs in code that may build a path this scanner cannot resolve.
+
+    Run-time constructs count only in code the operation executes; a reviewed
+    registry site (recorded in `registry["used"]`) is accepted.
+    """
+    registry = registry if registry is not None else {"sites": {}, "used": set()}
     reasons = []
     if COMPUTED_INCLUDE.search(text):
         reasons.append("computed include")
-    if TRAVERSAL.search(text) or BASE_DIRECTORY.search(text) and UPWARD.search(text):
-        reasons.append("computed directory traversal")
-    if WORKTREE_READERS.search(text):
-        reasons.append("work-tree reader")
-    # The package's own binaries (`CARGO_BIN_EXE_*`) are built from scanned
-    # sources. Other programs, including unrestricted sqlite3 whose SQL can
-    # read files, are exempt only as the exact audited invocation.
-    if any(not spawn[2] and not audited_sqlite(name, text, spawn) for spawn in SPAWN.finditer(text)):
-        reasons.append("process launch that may read any file")
-    if RUNTIME_READER.search(text):
-        reasons.append("run-time file access with a computed path")
+    def unreviewed(pattern: re.Pattern, accept=lambda match: False) -> bool:
+        for match in pattern.finditer(text):
+            identity = site(name, text, match.start())
+            if accept(match):
+                continue
+            if identity in registry["sites"]:
+                registry["used"].add(identity)
+                continue
+            return True
+        return False
+    if runtime:
+        if unreviewed(TRAVERSAL) or BASE_DIRECTORY.search(text) and UPWARD.search(text):
+            reasons.append("computed directory traversal")
+        if unreviewed(WORKTREE_READERS):
+            reasons.append("work-tree reader")
+        # The package's own binaries (`CARGO_BIN_EXE_*`) are built from scanned
+        # sources. Other programs, including unrestricted sqlite3 whose SQL can
+        # read files, are exempt only as the exact audited invocation.
+        if unreviewed(SPAWN, lambda spawn: bool(spawn[2]) or audited_sqlite(name, text, spawn)):
+            reasons.append("process launch that may read any file")
+        if unreviewed(RUNTIME_READER) or registry.get("wrappers") and unreviewed(registry["wrappers"]):
+            reasons.append("run-time file access with a computed path")
+        if re.search(r"\bParentDir\b", text):
+            reasons.append("parent directory navigation")
     # Pure upward navigation such as `Path::new("..").join("..")` can reach the root
     # from any package depth.
-    if any(re.fullmatch(r"[./]*\.\.[./]*", literal) for literal in found) or re.search(r"\bParentDir\b", text):
+    if any(re.fullmatch(r"[./]*\.\.[./]*", literal) for literal in found):
         reasons.append("parent directory navigation")
     return reasons
 
@@ -284,7 +327,26 @@ def follow(name: str, literal: str, package: str, index: Index) -> tuple[set[str
     return reached, None
 
 
-def input_policy(command: str, files: dict[str, str]) -> dict:
+def dependency_dirs(manifest: str, document: dict, workspace: dict, development: bool) -> set[str]:
+    """Workspace path dependencies Cargo builds for a package (dev only when selected)."""
+    kinds = ("dependencies", "build-dependencies") + (("dev-dependencies",) if development else ())
+    tables = [document.get(kind, {}) for kind in kinds]
+    tables += [target.get(kind, {}) for target in document.get("target", {}).values() if isinstance(target, dict) for kind in kinds]
+    found = set()
+    for table in tables:
+        for key, value in table.items() if isinstance(table, dict) else ():
+            if isinstance(value, dict) and value.get("workspace"):
+                value = workspace.get(key, {})
+                base = ""
+            else:
+                base = str(Path(manifest).parent)
+            if isinstance(value, dict) and isinstance(value.get("path"), str):
+                target = os.path.normpath(os.path.join(base, value["path"]))
+                found.add("" if target == "." else target)
+    return found
+
+
+def input_policy(command: str, files: dict[str, str], selection: list[str] | None = None) -> dict:
     """Select excluded prose for Cargo commands after auditing what Cargo can reach.
 
     Every file in a package (including Git-ignored ones), every manifest, and
@@ -292,7 +354,7 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
     scanned in turn, so Markdown doctests, build-script generators, and
     included modules are audited transitively.
     """
-    policy = {"name": "rust-check" if command in RUST_CHECK_COMMANDS else "full", "version": POLICY_VERSION, "fallback_reason": None, "protected": [], "excluded": [], "consumed_ignored": []}
+    policy = {"name": "rust-check" if command in RUST_CHECK_COMMANDS else "full", "version": POLICY_VERSION, "fallback_reason": None, "protected": [], "excluded": [], "consumed_ignored": [], "packages": [], "reviewed_readers": 0}
     candidates = {name for name in files if excludable(name)}
     ignored_names = ignored_files()
     known = set(files) | ignored_names
@@ -321,19 +383,61 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
             elif target.is_dir() and (docs.is_relative_to(target) or target.is_relative_to(docs)):
                 reasons.append(f"symlinked directory {name} reaches documentation")
     manifests = {name for name in known if Path(name).name == "Cargo.toml"}
-    packages = []
+    packages, documents = [], {}
     for manifest in manifests:
         try:
-            if {"package", "project"} & set(tomllib.loads((ROOT / manifest).read_text())):
+            documents[manifest] = tomllib.loads((ROOT / manifest).read_text())
+            if {"package", "project"} & set(documents[manifest]):
                 packages.append("" if manifest == "Cargo.toml" else str(Path(manifest).parent))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             pass  # reported when the manifest is scanned below
     packages.sort(key=len, reverse=True)
+    # Only packages the selected command builds can read anything: the
+    # selection with its dev-dependencies, then normal and build dependencies.
+    manifest_of = {package: "Cargo.toml" if package == "" else f"{package}/Cargo.toml" for package in packages}
+    names = {(documents[manifest_of[p]].get("package") or documents[manifest_of[p]].get("project") or {}).get("name"): p for p in packages}
+    workspace = documents.get("Cargo.toml", {}).get("workspace", {}).get("dependencies", {})
+    if selection is None or any(name not in names for name in selection):
+        reachable = set(packages)
+    else:
+        reachable, frontier = set(), [(names[name], True) for name in selection]
+        while frontier:
+            package, development = frontier.pop()
+            if package in reachable or package not in manifest_of:
+                continue
+            reachable.add(package)
+            frontier += [(dependency, False) for dependency in dependency_dirs(manifest_of[package], documents[manifest_of[package]], workspace, development)]
+    policy["packages"] = sorted(p or "." for p in reachable)
+    executed: set[str] = set()
+    def runtime_file(name: str) -> bool:
+        """Code the operation executes: build scripts always, tests' code for
+        `test`, and anything executed code reaches."""
+        if name in executed:
+            return True
+        package = next((p for p in packages if p == "" or name.startswith(p + "/")), None)
+        if package is None:
+            return command not in {"check", "lint"}  # reached outside any package: assume executed
+        if package not in reachable:
+            return False  # not built for this selection unless executed code includes it
+        relative = name[len(package) + 1:] if package else name
+        build = (documents[manifest_of[package]].get("package") or {}).get("build", "build.rs")
+        if relative == build or relative.startswith("build/"):
+            return True
+        return command not in {"check", "lint"} and not relative.startswith("examples/")
+    try:
+        registry = tomllib.loads((ROOT / READER_REGISTRY).read_text()) if (ROOT / READER_REGISTRY).exists() else {}
+        sites = {(entry["file"], entry["function"], entry["line"]): entry for entry in registry.get("reader", [])}
+        # Reviewed readers that open a caller's path: every call site is a reader too.
+        wrappers = [re.escape(entry["call"]) for entry in registry.get("wrapper", [])]
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+        reasons.append(f"unreadable reader registry: {type(error).__name__}")
+        sites, wrappers = {}, []
+    reviewed = {"sites": sites, "used": set(), "wrappers": re.compile(r"(?<!fn )(?<![\w:])(?:" + "|".join(wrappers) + r")\s*\(") if wrappers else None}
     def package_of(name: str) -> str | None:
         return next((p for p in packages if p == "" or name.startswith(p + "/")), None)
     cargo = manifests | {name for name in known if Path(name).name in {"rust-toolchain", "rust-toolchain.toml"} or name.startswith(".cargo/")}
     # Documentation is never a seed: a page is scanned only when something reaches it.
-    pending = sorted((cargo | {name for name in known if package_of(name) is not None}) - candidates)
+    pending = sorted((cargo | {name for name in known if package_of(name) in reachable}) - candidates)
     scanned = set(pending)
     # Files Cargo consumes because a scanned file names or includes them.
     consumed: set[str] = set()
@@ -376,7 +480,7 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
             else:
                 found = literals(f"{name}.rs" if rust else name, text)
                 if rust or path.suffix not in DATA_SUFFIXES:
-                    reasons.extend(f"{reason} in {name}" for reason in computed(text, found, name))
+                    reasons.extend(f"{reason} in {name}" for reason in computed(text, found, name, runtime_file(name), reviewed))
                     heads.update(name for literal in found if DOCS_HEAD.search(literal))
                     tails.update(name for literal in found if DOCS_TAIL.search(literal))
                     if not rust and path.suffix != ".md":
@@ -421,11 +525,20 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
                 # Rescan a file already read as data once it is known to be Rust.
                 pending.extend(sorted((reached - rust_like) & scanned))
                 rust_like |= reached
+            if document is None and runtime_file(name):
+                # Executed code makes what it reaches executed too; rescan if needed.
+                pending.extend(sorted((reached - executed) & scanned))
+                executed |= reached
             for item in reached - scanned:
                 scanned.add(item)
                 pending.append(item)
     if heads and tails:
         reasons.append(f"documentation path fragments in {min(heads)} and {min(tails)}")
+    # A registry entry that no longer matches its source must be reviewed again.
+    for identity in sorted(set(sites) - reviewed["used"]):
+        if identity[0] in scanned and runtime_file(identity[0]) or identity[0] not in known:
+            reasons.append(f"stale audited reader {identity[0]}: {identity[2]!r}")
+    policy["reviewed_readers"] = len(reviewed["used"])
     # Ignored files that Cargo consumes are inputs under every policy.
     policy["consumed_ignored"] = sorted(consumed & ignored_names)
     if policy["name"] == "full":
@@ -450,6 +563,8 @@ def category(name: str) -> str:
     path = Path(name)
     if excludable(name):
         return "documentation-prose"
+    if name == READER_REGISTRY:
+        return "reader-registry"
     if path.name == "Cargo.lock":
         return "lockfile"
     if path.name in {"Cargo.toml", "rust-toolchain.toml"} or name.startswith(".cargo/"):
@@ -465,10 +580,10 @@ def category(name: str) -> str:
     return "other"
 
 
-def source_state(command: str = "verify") -> dict:
+def source_state(command: str = "verify", selection: list[str] | None = None) -> dict:
     """Attribute results to HEAD and the source inputs selected by the command's policy."""
     files = repository_files()
-    policy = input_policy(command, files)
+    policy = input_policy(command, files, selection)
     for name in policy["consumed_ignored"]:
         try:
             files[name] = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
@@ -548,6 +663,16 @@ class Lease:
         self.lock.close()
 
 
+def selected_packages(args) -> list[str] | None:
+    """Packages a Cargo command selects with `-p`; None means the whole workspace."""
+    if args.command not in RUST_CHECK_COMMANDS or not args.config:
+        return None
+    argv = cargo_args(args)
+    if "--workspace" in argv:
+        return None
+    return [argv[i + 1] for i, item in enumerate(argv) if item == "-p"]
+
+
 def cargo_args(args) -> list[str]:
     packages, features = CONFIGS[args.config]
     if args.package:
@@ -582,7 +707,8 @@ def execute(args) -> int:
         for owner in sorted(root.glob("*/*/*/*/*/owner.json")):
             print(f"build owner: {owner}: {owner.read_text().strip()}")
         return ready.returncode
-    before = source_state(args.command)
+    selection = selected_packages(args)
+    before = source_state(args.command, selection)
     with Lease(root, identity, receipt(before)) as lease:
         print(f"build directory: {lease.path}", flush=True)
         env = dict(os.environ, CARGO_TARGET_DIR=str(lease.path))
@@ -627,7 +753,7 @@ def execute(args) -> int:
                 else:
                     code = run(argv, env, pass_fds=(lease.lock.fileno(),)).returncode
         finally:
-            after = source_state(args.command)
+            after = source_state(args.command, selection)
             changed, skipped = compare(before, after)
             if changed:
                 code = 3

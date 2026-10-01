@@ -8,6 +8,7 @@ change. An excluded page that changes the result is a false pass.
 Opt in with WALLET_LIB_CARGO_ORACLES=1; each fixture compiles from scratch.
 """
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -90,6 +91,14 @@ CASES = {
     "sqlite readfile": {
         "pkg/src/lib.rs": TEST.format(body='let out = std::process::Command::new("sqlite3").arg(":memory:").arg("select readfile(\'../do\'||\'cs/\'||\'gu\'||\'ide.md\')").output().unwrap(); assert!(String::from_utf8_lossy(&out.stdout).contains("ORIGINAL"));'),
     },
+    # A reviewed run-time reader of a temporary file keeps the exclusion.
+    "reviewed reader": {
+        "pkg/src/lib.rs": '#[test]\nfn oracle() {\n    let path = std::env::temp_dir().join(format!("oracle-{}.txt", std::process::id()));\n    std::fs::write(&path, "x").unwrap();\n    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");\n}\n',
+        "scripts/audited-readers.toml": "".join(
+            f'[[reader]]\nfile = "pkg/src/lib.rs"\nfunction = "fn oracle() {{"\nline = {json.dumps(line)}\nreason = "file in the system temporary directory"\n\n'
+            for line in ('std::fs::write(&path, "x").unwrap();', 'assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");')
+        ),
+    },
     # Control: nothing reads the pages, so the policy should keep excluding them.
     "unrelated control": {"pkg/src/lib.rs": TEST.format(body="assert_eq!(1 + 1, 2);")},
 }
@@ -132,7 +141,7 @@ class CargoOracleTests(unittest.TestCase):
                         self.assertEqual(cargo_test(root, Path(targets) / page.replace("/", "_")), baseline, f"{case}: excluded {page} changed the result ({policy})")
                     finally:
                         (root / page).write_text(original)
-                if case == "unrelated control":
+                if case in {"unrelated control", "reviewed reader"}:
                     self.assertIsNone(policy["fallback_reason"])
                     self.assertIn("docs/guide.md", policy["excluded"])
 

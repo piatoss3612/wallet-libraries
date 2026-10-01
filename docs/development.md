@@ -62,9 +62,11 @@ reach consumes the page. Any reader the audit cannot resolve makes the run use
 every file, with `fallback_reason` in the receipt; there is no exception for
 run-time or computed paths.
 
-The audit starts from every package file (including Git-ignored ones and a
-root package), every manifest including `metadata` values and path-shaped
-keys, and Cargo configuration. Documentation is never a starting point. It
+The audit starts from every file of the packages the command builds: the
+`-p` selection with its dev-dependencies, then their normal and build
+dependencies (`--workspace` selects every package). It includes Git-ignored
+files and a root package, every manifest including `metadata` values and
+path-shaped keys, and Cargo configuration. Documentation is never a starting point. It
 follows each string literal (escapes decoded, spaces allowed, each line also
 lexed alone) to the files it may name. `include!`, `#[path]`, and
 `#[doc = include_str!]` targets are audited as Rust whatever their extension,
@@ -76,7 +78,8 @@ fall back to every file:
 - non-literal `include_*!`, any `docs` segment that does not name an existing
   file, and literals that concatenation could join into `docs`;
 - run-time file access (`fs`, `File`, `OpenOptions`, `Connection::open`,
-  `Path::new`, and similar) whose path is not one string literal;
+  `Path::new`, and similar) whose path is not one string literal, unless it
+  is a reviewed reader (below);
 - upward navigation: parent paths or placeholder file names at the checkout
   root, pure `..` literals, `Component::ParentDir`, `.parent()`/`.ancestors()`,
   and `current_dir` or `CARGO_MANIFEST_DIR` combined with `.pop()` or `..`;
@@ -91,13 +94,28 @@ fall back to every file:
 - symlinked documentation directories, nested repositories and submodules,
   unreadable sources, and path dependencies outside the checkout.
 
+Run-time rules apply only to code the operation executes. `check` and `lint`
+execute build scripts and what they reach. `test` also executes library,
+test, and doctest code, but not examples. Code in packages the selection does
+not build never runs.
+
+`scripts/audited-readers.toml` lists reviewed run-time readers whose computed
+paths cannot name documentation: temporary files and directories, the test
+wallet's temporary database, and build-script output. Each entry is bound to
+its file, enclosing function, and exact call text, through the call's closing
+parenthesis, with the reason it is safe. `[[wrapper]]` names reviewed APIs
+that open a caller's path, and every call site of one needs its own entry. An
+edited call, a new reader, or a stale entry falls back until the registry is
+reviewed again. The registry is itself an input, so editing it invalidates
+results.
+
 Ignored files that the audit finds consumed (named, included, or compiled as
 modules) join the input digest under every policy. Package Markdown, doctests,
 fixtures and assets of any extension, build-script inputs, manifests, and
 `Cargo.lock` always remain inputs. `verify` and other commands hash every file.
-This checkout currently falls back: run-time database and file paths in
-`zcash_client_sqlite`, `zcash_client_backend`, and its `build.rs` cannot be
-proven to avoid documentation.
+On this checkout, every computed reader is reviewed, so unrelated root pages
+such as `docs/development.md` stay excluded. Removing the registry makes the
+policy fall back.
 `WALLET_LIB_CARGO_ORACLES=1 python3 -m unittest scripts/tests/test_dev_cargo.py`
 runs real Cargo negative oracles: editing an excluded page must not change a
 fresh `cargo test` result. Bump `POLICY_VERSION` with any rule change. OS locks
