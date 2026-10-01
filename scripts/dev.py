@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {
@@ -31,18 +32,202 @@ def capture(argv: list[str], **kwargs) -> str:
     return subprocess.check_output(argv, cwd=ROOT, text=True, **kwargs).strip()
 
 
-def source_state() -> dict[str, str]:
-    """Attribute results to HEAD and the actual tracked/untracked source inputs."""
-    digest = hashlib.sha256()
+# Input policies decide which repository files attribute a result. Cargo-only
+# commands may ignore audited root documentation prose and the root changelog;
+# every other command, and any reference this scanner cannot resolve, hashes
+# every file. Bump the version whenever the exclusion or scanning rules change.
+POLICY_VERSION = 1
+RUST_CHECK_COMMANDS = {"check", "test", "lint"}
+COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{]\s*(?!r?#*\")")
+# Directory walks and manifest-relative parent paths are computed references.
+TRAVERSAL = re.compile(r"\b(?:read_dir|WalkDir|walkdir|glob|CARGO_WORKSPACE_DIR)\b|\.parent\(\)")
+PATH_TOKEN = re.compile(r"[\w.:/\\-]+")
+UNRESOLVED = set("{}$*?")
+
+
+def excludable(name: str) -> bool:
+    """Root `docs/**/*.md` prose and the root changelog; nothing else."""
+    return name == "CHANGELOG.md" or (name.startswith("docs/") and name.endswith(".md"))
+
+
+def repository_files() -> dict[str, str]:
+    """Digest every tracked/untracked file except editor preferences and output."""
     names = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT).split(b"\0")
+    files = {}
     for name in sorted(set(names) - {b""}):
         path = ROOT / os.fsdecode(name)
-        # Editor preferences and output files do not affect validation inputs.
         if path.parts[len(ROOT.parts)] in {".vscode", "target"}:
             continue
-        digest.update(name + b"\0")
-        digest.update(path.read_bytes() if path.is_file() else b"<missing>")
-    return {"sha": capture(["git", "rev-parse", "HEAD"]), "inputs": digest.hexdigest()}
+        files[os.fsdecode(name)] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "<missing>"
+    return files
+
+
+def toml_strings(value, top=True):
+    """Strings Cargo can interpret; `package`/`workspace` metadata is tool-only."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from toml_strings(item, False)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if top and key in {"package", "workspace"} and isinstance(item, dict):
+                item = {k: v for k, v in item.items() if k != "metadata"}
+            yield from toml_strings(item, False)
+
+
+def toml_paths(value):
+    """Values of `path` keys, such as path dependencies and patches."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "path" and isinstance(item, str):
+                yield item
+            else:
+                yield from toml_paths(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from toml_paths(item)
+
+
+def protect(tokens: set[str], candidates: set[str]) -> set[str]:
+    """Candidates whose file name or `docs/...` path a source mentions."""
+    by_name: dict[str, set[str]] = {}
+    for name in candidates:
+        by_name.setdefault(name.rsplit("/", 1)[-1], set()).add(name)
+    protected = set()
+    for token in tokens:
+        parts = token.replace("\\", "/").rstrip(".:").split("/")
+        protected |= by_name.get(parts[-1], set())
+        protected.update("/".join(["docs"] + parts[i + 1:]) for i, part in enumerate(parts) if part == "docs")
+    return protected & candidates
+
+
+def unresolved(literal: str, candidates: set[str]) -> str | None:
+    """A path-like literal that may reach documentation without naming one file."""
+    path = literal.replace("\\", "/").strip()
+    if "://" in path or re.search(r"\s", path):
+        return None
+    parts = path.split("/")
+    for index, part in enumerate(parts):
+        if part != "docs":
+            continue
+        rest = "/".join(parts[index + 1:]).strip("/")
+        if f"docs/{rest}" in candidates:
+            continue
+        name = rest.rsplit("/", 1)[-1]
+        if not rest or UNRESOLVED & set(rest) or (ROOT / "docs" / rest).is_dir() or name.endswith(".md") or "." not in name:
+            return f"unresolved documentation reference {literal!r}"
+    return None
+
+
+def input_policy(command: str, files: dict[str, str]) -> dict:
+    """Select excluded prose for Cargo commands after auditing Rust-visible references."""
+    policy = {"name": "rust-check" if command in RUST_CHECK_COMMANDS else "full", "version": POLICY_VERSION, "fallback_reason": None, "protected": [], "excluded": []}
+    if policy["name"] == "full":
+        policy["fallback_reason"] = f"{command} validates every repository input"
+        return policy
+    candidates = {name for name in files if excludable(name)}
+    tokens: set[str] = set()
+    reasons = []
+    root, docs = ROOT.resolve(), (ROOT / "docs").resolve()
+    for name in sorted(set(files) - candidates):
+        path = ROOT / name
+        if path.is_symlink():
+            target = path.resolve()
+            relative = target.relative_to(root).as_posix() if target.is_relative_to(root) else None
+            if relative in candidates:
+                tokens.add(relative)
+            elif target.is_dir() and (docs.is_relative_to(target) or target.is_relative_to(docs)):
+                reasons.append(f"symlinked directory {name} reaches documentation")
+        if path.suffix not in {".rs", ".toml"} or not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+            if path.suffix == ".toml":
+                document = tomllib.loads(text)
+                literals = list(toml_strings(document))
+                # Only Cargo reads path dependencies; generator inputs may name other roots.
+                for dependency in toml_paths(document) if path.name == "Cargo.toml" or path.parent.name == ".cargo" else ():
+                    target = (path.parent / dependency).resolve()
+                    if not target.is_relative_to(root) or not target.exists():
+                        reasons.append(f"unresolved path dependency {dependency!r} in {name}")
+            else:
+                if COMPUTED_INCLUDE.search(text):
+                    reasons.append(f"computed include in {name}")
+                # Character literals such as '"' would otherwise pair quotes wrongly.
+                literals = re.findall(r'"((?:[^"\\]|\\.)*)"', re.sub(r"'(?:\\.|[^'\\])'", "''", text))
+                if TRAVERSAL.search(text) or "CARGO_MANIFEST_DIR" in text and any(l.startswith("..") for l in literals):
+                    reasons.append(f"computed directory traversal in {name}")
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+            reasons.append(f"unreadable reference source {name}: {type(error).__name__}")
+            continue
+        # Comments and prose can only protect a file; path-like literals may
+        # also be computed or unresolved references that force full inputs.
+        tokens.update(t for t in PATH_TOKEN.findall(text if path.suffix == ".rs" else "\n".join(literals)) if "://" not in t)
+        for literal in literals:
+            if reason := unresolved(literal, candidates):
+                reasons.append(f"{reason} in {name}")
+    if reasons:
+        policy["fallback_reason"] = "; ".join(sorted(set(reasons))[:5])
+        return policy
+    protected = protect(tokens, candidates)
+    policy["protected"] = sorted(protected)
+    policy["excluded"] = sorted(candidates - protected)
+    return policy
+
+
+def ignored(policy: dict, name: str) -> bool:
+    """Whether a policy proves the path cannot affect the Cargo result."""
+    return policy["name"] == "rust-check" and not policy["fallback_reason"] and excludable(name) and name not in policy["protected"]
+
+
+def category(name: str) -> str:
+    path = Path(name)
+    if excludable(name):
+        return "documentation-prose"
+    if path.name == "Cargo.lock":
+        return "lockfile"
+    if path.name in {"Cargo.toml", "rust-toolchain.toml"} or name.startswith(".cargo/"):
+        return "cargo-manifest-or-config"
+    if path.name == "build.rs" or path.suffix == ".proto":
+        return "build-script-input"
+    if path.suffix == ".rs":
+        return "rust-source"
+    if path.suffix in {".md", ".mdc"}:
+        return "included-markdown"
+    if {"tests", "fixtures", "assets", "testdata"} & set(path.parts):
+        return "fixture-or-asset"
+    return "other"
+
+
+def source_state(command: str = "verify") -> dict:
+    """Attribute results to HEAD and the source inputs selected by the command's policy."""
+    files = repository_files()
+    policy = input_policy(command, files)
+    digest = hashlib.sha256()
+    for name, value in files.items():
+        if not ignored(policy, name):
+            digest.update(f"{name}\0{value}\0".encode())
+    return {"sha": capture(["git", "rev-parse", "HEAD"]), "inputs": digest.hexdigest(), "policy": policy, "files": files}
+
+
+def receipt(state: dict) -> dict:
+    return {k: v for k, v in state.items() if k != "files"}
+
+
+def compare(before: dict, after: dict) -> tuple[list[str], list[str]]:
+    """Changed and ignored input categories; HEAD always requires a fresh result."""
+    changed, skipped = set(), set()
+    if before["sha"] != after["sha"]:
+        changed.add("head")
+    protected = set(before["policy"]["protected"]) | set(after["policy"]["protected"])
+    for name in set(before["files"]) | set(after["files"]):
+        if before["files"].get(name) != after["files"].get(name):
+            if ignored(before["policy"], name) and ignored(after["policy"], name):
+                skipped.add(category(name))
+            else:
+                changed.add("included-markdown" if name in protected else category(name))
+    return sorted(changed), sorted(skipped)
 
 
 def build_identity(config: str, profile: str) -> str:
@@ -65,8 +250,9 @@ def build_identity(config: str, profile: str) -> str:
 
 class Lease:
     """Nonblocking OS lease; killed owners release it without stale-PID recovery."""
-    def __init__(self, root: Path, identity: str):
+    def __init__(self, root: Path, identity: str, command: str = "verify"):
         self.root = root / identity
+        self.command = command
         self.lock = None
         self.path = None
 
@@ -82,7 +268,7 @@ class Lease:
                 lock.close()
                 continue
             self.lock, self.path = lock, path
-            (path / "owner.json").write_text(json.dumps({"pid": os.getpid(), "checkout": str(ROOT), "source": source_state()}, indent=2) + "\n")
+            (path / "owner.json").write_text(json.dumps({"pid": os.getpid(), "checkout": str(ROOT), "source": receipt(source_state(self.command))}, indent=2) + "\n")
             return self
         raise RuntimeError("all build directories are leased; finish an existing check")
 
@@ -125,10 +311,10 @@ def execute(args) -> int:
         for owner in sorted(root.glob("*/*/*/*/*/owner.json")):
             print(f"build owner: {owner}: {owner.read_text().strip()}")
         return ready.returncode
-    with Lease(root, identity) as lease:
+    with Lease(root, identity, args.command) as lease:
         print(f"build directory: {lease.path}", flush=True)
         env = dict(os.environ, CARGO_TARGET_DIR=str(lease.path))
-        before = source_state()
+        before = source_state(args.command)
         started = time.monotonic()
         code = 1
         try:
@@ -170,11 +356,14 @@ def execute(args) -> int:
                 else:
                     code = run(argv, env, pass_fds=(lease.lock.fileno(),)).returncode
         finally:
-            after = source_state()
-            if before != after:
+            after = source_state(args.command)
+            changed, skipped = compare(before, after)
+            if changed:
                 code = 3
-                print("source inputs changed during validation; result invalidated", file=sys.stderr)
-            result = {"source": before, "source_after": after, "config": config, "profile": profile, "pid": os.getpid(), "checkout": str(ROOT), "duration_seconds": time.monotonic() - started, "exit_code": code, "status": "pass" if code == 0 else "invalidated" if before != after else "fail"}
+                print(f"source inputs changed during validation ({', '.join(changed)}); result invalidated", file=sys.stderr)
+            if before["policy"]["fallback_reason"]:
+                print(f"input policy: full ({before['policy']['fallback_reason']})", flush=True)
+            result = {"source": receipt(before), "source_after": receipt(after), "changed_inputs": changed, "ignored_changes": skipped, "config": config, "profile": profile, "pid": os.getpid(), "checkout": str(ROOT), "duration_seconds": time.monotonic() - started, "exit_code": code, "status": "pass" if code == 0 else "invalidated" if changed else "fail"}
             write_result(lease.path / "last-result.json", result)
             print(f"result: {lease.path / 'last-result.json'}", flush=True)
         return code

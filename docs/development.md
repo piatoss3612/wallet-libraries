@@ -51,7 +51,22 @@ not cache keys. Do not run other Cargo processes directly inside leased director
 
 `owner.json` records the active process, checkout, and source inputs;
 `last-result.json` records duration, source identity, exit code, and status.
-Changing HEAD or source inputs during a command invalidates success. OS locks
+Changing HEAD or source inputs during a command invalidates success (exit 3,
+status `invalidated`); the receipt lists `changed_inputs` and `ignored_changes`
+by category.
+
+Source inputs follow a versioned policy recorded in each receipt. `check`,
+`test`, and `lint` use `rust-check`: it ignores only root `docs/**/*.md` prose
+and a root `CHANGELOG.md`, and only when no Rust source or Cargo-read TOML
+mentions the file. A literal path or file-name mention, including in comments,
+keeps that page an input. Computed or unresolved references fall back to every
+file and record `fallback_reason`: non-literal `include_*!`, path-like literals
+naming the docs directory without one existing page, directory walks,
+manifest-relative parent paths, symlinked documentation directories, unreadable
+sources, and path dependencies outside the checkout. Package Markdown,
+doctests, fixtures and assets of any extension, build-script inputs, manifests,
+and `Cargo.lock` always remain inputs. `verify` and other commands hash every
+file. Bump `POLICY_VERSION` with any rule change. OS locks
 release on exit or process death; a stale owner file is replaced on reuse.
 Doctor reports recorded owners, which may be stale after a killed process.
 Keep rust-analyzer's target directory separate (for example,
