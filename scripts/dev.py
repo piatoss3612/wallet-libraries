@@ -37,7 +37,7 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 11
+POLICY_VERSION = 12
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
 COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{](?!\s*[bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
@@ -374,6 +374,155 @@ def hidden_access(text: str, heads: set[str]) -> list[str]:
     return reasons
 
 
+def skip_token(text: str, index: int) -> int:
+    """End of a string, character literal, or comment starting at `index`, else `index`."""
+    if text.startswith("//", index):
+        end = text.find("\n", index)
+        return len(text) if end < 0 else end
+    if text.startswith("/*", index):
+        end = text.find("*/", index + 2)
+        return len(text) if end < 0 else end + 2
+    raw = re.match(r'[bc]?r(#*)"', text[index:index + 260])
+    if raw and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_")):
+        end = text.find('"' + raw[1], index + raw.end())
+        return len(text) if end < 0 else end + 1 + len(raw[1])
+    if text[index] == '"':
+        position = index + 1
+        while position < len(text) and text[position] != '"':
+            position += 2 if text[position] == "\\" else 1
+        return position + 1
+    char = re.match(r"'(?:\\.[^']*|[^'\\\n])'", text[index:index + 12])
+    return index + char.end() if char else index
+
+
+@functools.lru_cache(maxsize=64)
+def function_spans(text: str) -> list[tuple[int, int]]:
+    """Each Rust function from its header to its closing brace (or `;`)."""
+    spans = []
+    for header in FUNCTION.finditer(text):
+        position, depth = header.start(), 0
+        while position < len(text):
+            skipped = skip_token(text, position)
+            if skipped != position:
+                position = skipped
+                continue
+            character = text[position]
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif character == ";" and depth == 0:
+                break
+            position += 1
+        spans.append((header.start(), min(position + 1, len(text))))
+    return spans
+
+
+def source_context(text: str, position: int) -> tuple[str, str]:
+    """A reviewed reader's enclosing function and a digest of its whole context.
+
+    The digest covers the complete enclosing function (every path initializer,
+    not only the reader call) and everything in the file outside function
+    bodies: imports, constants, statics, macros, and impl or module headers.
+    Without an enclosing function it covers the whole file.
+    """
+    spans = function_spans(text)
+    enclosing = [span for span in spans if span[0] <= position < span[1]]
+    normalize = lambda part: " ".join(part.split())
+    if not enclosing:
+        return "", hashlib.sha256(normalize(text).encode()).hexdigest()
+    start, end = max(enclosing)
+    outside, cursor = [], 0
+    for span_start, span_end in sorted(span for span in spans if not any(o[0] < span[0] and span[1] <= o[1] for o in spans)):
+        if span_start >= cursor:
+            outside.append(text[cursor:span_start])
+            cursor = span_end
+    outside.append(text[cursor:])
+    # Functions of this file the reader's function calls, transitively, can
+    # build its path too (`let path = page_path();`).
+    defined: dict[str, list[tuple[int, int]]] = {}
+    for span in spans:
+        named = re.search(r"\bfn\s+(\w+)", text[span[0]:span[1]])
+        if named:
+            defined.setdefault(named[1], []).append(span)
+    included, frontier = {(start, end)}, [(start, end)]
+    while frontier:
+        span = frontier.pop()
+        for called in set(re.findall(r"(?<!fn )\b(\w+)\s*(?:::\s*<[^()]*>\s*)?\(", text[span[0]:span[1]])):
+            for callee in defined.get(called, ()):
+                if callee not in included:
+                    included.add(callee)
+                    frontier.append(callee)
+    callees = "\0".join(normalize(text[a:b]) for a, b in sorted(included - {(start, end)}))
+    header = text[start:text.find("\n", start) if "\n" in text[start:] else len(text)]
+    return header, hashlib.sha256((normalize(text[start:end]) + "\0" + normalize("".join(outside)) + "\0" + callees).encode()).hexdigest()
+
+
+RUST_KEYWORDS = set("as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while".split())
+
+
+def caller_input(text: str, position: int) -> str | None:
+    """The enclosing function's name when a parameter may flow into the reader.
+
+    Taint starts at the parameter names (and `self`) and spreads to every
+    identifier in any statement that mentions a tainted one, so assignments,
+    `push`, and shadowing all propagate. The reader is tainted when its call
+    statement mentions a tainted identifier.
+    """
+    spans = [span for span in function_spans(text) if span[0] <= position < span[1]]
+    if not spans:
+        return None
+    start, end = max(spans)
+    body = text[start:end]
+    match = re.search(r"\bfn\s+(\w+)\s*(?:<[^{}]*?>)?\s*\(", body)
+    if not match:
+        return None
+    depth = 0
+    for index in range(match.end() - 1, len(body)):
+        depth += {"(": 1, ")": -1}.get(body[index], 0)
+        if depth == 0:
+            break
+    parameters = body[match.end():index]
+    tainted = {word for word in re.findall(r"(?<![\w:])([a-z_]\w*)\s*:", parameters)} | ({"self"} if re.search(r"\bself\b", parameters) else set())
+    tainted -= {"mut"}
+    if not tainted:
+        return None
+    rest = body[index + 1:]
+    statements = re.split(r"[;{}]", rest)
+    names = lambda part: set(re.findall(r"(?<![\w.:])[a-z_]\w*", part)) - RUST_KEYWORDS
+    changed = True
+    while changed:
+        changed = False
+        arms = any(re.match(r"\s*match\b", statement) and names(statement) & tainted for statement in statements)
+        for statement in statements:
+            # `let P = E`, `if let P = E`, `P = E`, `for P in E`: P depends on E.
+            binding = re.match(r"\s*(?:(?:if|while)\s+)?(?:let\s+)?(.+?)\s*(?<![=!<>+\-*/%&|^])=(?![=>])(.*)$", statement, re.S) or re.match(r"\s*for\s+(.+?)\s+in\b(.*)$", statement, re.S)
+            # `recv.method(E)`: E may be stored into the receiver.
+            mutation = re.match(r"\s*([a-z_]\w*)\s*\.\s*\w+\s*\((.*)$", statement, re.S)
+            # Match arms bind from a tainted scrutinee.
+            arm = arms and "=>" in statement
+            target, source = (binding[1], binding[2]) if binding else (mutation[1], mutation[2]) if mutation else (statement.split("=>")[0], statement) if arm else ("", "")
+            if arm:
+                source = statement if names(statement) & tainted else ""
+                target = statement.split("=>")[0]
+            if names(source) & tainted and not names(target) <= tainted:
+                tainted |= names(target)
+                changed = True
+    offset = position - start - index - 1
+    reader = next((statement for statement, at in zip(statements, _offsets(rest, statements)) if at <= offset <= at + len(statement)), "")
+    return match[1] if (set(re.findall(r"(?<![\w.:])[a-z_]\w*", reader)) - RUST_KEYWORDS) & tainted else None
+
+
+def _offsets(text: str, parts: list[str]) -> list[int]:
+    offsets, cursor = [], 0
+    for part in parts:
+        offsets.append(cursor)
+        cursor += len(part) + 1
+    return offsets
+
+
 def computed(text: str, found: set[str], name: str = "", runtime: bool = True, registry: dict | None = None, rust: bool | None = None) -> list[str]:
     """Constructs in code that may build a path this scanner cannot resolve.
 
@@ -391,8 +540,21 @@ def computed(text: str, found: set[str], name: str = "", runtime: bool = True, r
             identity = site(name, text, match.start())
             if accept(match):
                 continue
-            if identity in registry["sites"]:
+            entry = registry["sites"].get(identity)
+            if entry is not None:
+                header, digest = source_context(text, match.start())
                 registry["used"].add(identity)
+                if entry.get("context") != digest:
+                    # Any change in the function or its file-level context
+                    # (an earlier path initializer, a constant, an import).
+                    registry.setdefault("stale", set()).add(identity)
+                    return True
+                function = caller_input(text, match.start())
+                if function and not entry.get("caller_input") and not any(call == function or call.endswith("::" + function) for call in registry.get("calls", ())):
+                    # A parameter may carry any caller's path: only a wrapper,
+                    # whose every call site is reviewed, may accept it.
+                    registry.setdefault("caller_inputs", set()).add(f"{name}: fn {function}")
+                    return True
                 continue
             return True
         return False
@@ -546,13 +708,17 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
     if selection is None or any(name not in names for name in selection):
         reachable = set(packages)
     else:
-        reachable, frontier = set(), [(names[name], True) for name in selection]
+        # A selected package also reached first as another's dependency must
+        # still contribute its dev-dependencies, whatever the visit order.
+        visited: dict[str, bool] = {}
+        frontier = [(names[name], True) for name in selection]
         while frontier:
             package, development = frontier.pop()
-            if package in reachable or package not in manifest_of:
+            if package not in manifest_of or package in visited and (visited[package] or not development):
                 continue
-            reachable.add(package)
+            visited[package] = development
             frontier += [(dependency, False) for dependency in dependency_dirs(manifest_of[package], documents[manifest_of[package]], workspace, development)]
+        reachable = set(visited)
     policy["packages"] = sorted(p or "." for p in reachable)
     # Proc macros and build dependencies (with what they depend on) run inside
     # the compiler or a build script, so `check` executes them too.
@@ -565,7 +731,21 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
             continue
         compile_time.add(package)
         frontier += dependency_dirs(manifest_of[package], documents[manifest_of[package]], workspace, False)
+    # Targets a manifest places by `path` (possibly outside the package) run
+    # like the targets they declare: build scripts always, tests and benches
+    # for `test`, and examples only when an `[[example]]` sets `test = true`.
     executed: set[str] = set()
+    tested_examples: set[str] = set()
+    for package in reachable:
+        document = documents[manifest_of[package]]
+        base = Path(manifest_of[package]).parent
+        targets = [("build", (document.get("package") or {}).get("build"))]
+        targets += [(kind, table.get("path")) for kind in ("lib", "bin", "test", "bench", "example") for table in ([document.get(kind)] if kind == "lib" else document.get(kind, [])) if isinstance(table, dict)]
+        if any(isinstance(table, dict) and table.get("test") for table in document.get("example", [])):
+            tested_examples.add(package)
+        for kind, target in targets:
+            if isinstance(target, str) and (kind == "build" or command not in {"check", "lint"} and (kind != "example" or package in tested_examples)):
+                executed.add(os.path.normpath(base / target).replace(os.sep, "/").removeprefix("./"))
     def runtime_file(name: str) -> bool:
         """Code the operation executes: build scripts always, tests' code for
         `test`, and anything executed code reaches."""
@@ -576,13 +756,14 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
             return command not in {"check", "lint"}  # reached outside any package: assume executed
         if package not in reachable:
             return False  # not built for this selection unless executed code includes it
-        if package in compile_time:
-            return not name.startswith(f"{package}/examples/") if package else not name.startswith("examples/")
         relative = name[len(package) + 1:] if package else name
+        example = relative.startswith("examples/") and package not in tested_examples
+        if package in compile_time:
+            return not example
         build = (documents[manifest_of[package]].get("package") or {}).get("build", "build.rs")
         if relative == build or relative.startswith("build/"):
             return True
-        return command not in {"check", "lint"} and not relative.startswith("examples/")
+        return command not in {"check", "lint"} and not example
     try:
         registry = tomllib.loads((ROOT / READER_REGISTRY).read_text()) if (ROOT / READER_REGISTRY).exists() else {}
         sites = {(entry["file"], entry["function"], entry["line"]): entry for entry in registry.get("reader", [])}
@@ -600,6 +781,7 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
         "wrappers": re.compile(r"(?<!fn )(?<!\w)(?:" + wrappers + r")" + TURBOFISH + GAP + r"\(", re.S) if calls else None,
         "wrapper_values": re.compile(r"(?<!fn )(?<!\w)(?:" + wrappers + r")\b(?!" + GAP + r"(?:\(|::|!))", re.S) if calls else None,
         "heads": {call.split("::")[0] for call in calls},
+        "calls": calls,
     }
     def package_of(name: str) -> str | None:
         return next((p for p in packages if p == "" or name.startswith(p + "/")), None)
@@ -704,6 +886,8 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
     if heads and tails:
         reasons.append(f"documentation path fragments in {min(heads)} and {min(tails)}")
     # A registry entry that no longer matches its source must be reviewed again.
+    reasons += [f"stale audited reader {identity[0]}: {identity[2]!r}" for identity in sorted(reviewed.get("stale", ()))]
+    reasons += [f"reviewed reader takes a caller input without a wrapper in {item}" for item in sorted(reviewed.get("caller_inputs", ()))]
     for identity in sorted(set(sites) - reviewed["used"]):
         if identity[0] in scanned and runtime_file(identity[0]) or identity[0] not in known:
             reasons.append(f"stale audited reader {identity[0]}: {identity[2]!r}")

@@ -39,6 +39,11 @@ OUT = 'include_str!(concat!(env!("OUT_DIR"), "/page.md"))'
 CHANGELOG = 'concat!("../CHANGE", "LOG.md")'
 BUILD_COPY = 'fn main() {{ let text = {read}; std::fs::write(std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("page.md"), text).unwrap(); }}\n'
 
+# A reviewed reader of the test's own executable, bound to its source context.
+REVIEWED = '#[test]\nfn oracle() {\n    let path = std::env::current_exe().unwrap();\n    assert!(!String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains(&["MUT", "ATED"].concat()));\n}\n'
+REVIEWED_LINE = 'assert!(!String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains(&["MUT", "ATED"].concat()));'
+REVIEWED_REGISTRY = f'[[reader]]\nfile = "pkg/src/lib.rs"\nfunction = "fn oracle() {{"\nline = {json.dumps(REVIEWED_LINE)}\nreason = "the test binary itself"\ncontext = "{dev.source_context(REVIEWED, REVIEWED.index("std::fs::read"))[1]}"\n'
+
 CASES = {
     # Literal compile-time references, including spaces, raw strings and escapes.
     "spaced include": {"pkg/src/lib.rs": f'pub const PAGE: &str = include_str!("../../docs/user guide.md");\n{TEST.format(body=CHECK)}'},
@@ -106,12 +111,15 @@ CASES = {
     "aliased include macro": {"pkg/src/lib.rs": f'use std::include_str as inc;\npub const PAGE: &str = inc!(concat!("../../CHANGE", "LOG.md"));\n{TEST.format(body=CHECK)}'},
     "build script helper module": {"pkg/build.rs": "mod helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": f'pub fn check() {{ assert!(std::fs::read_to_string({CHANGELOG}).unwrap().contains("ORIGINAL")); }}\n', "pkg/src/lib.rs": ""},
     # A reviewed run-time reader of a temporary file keeps the exclusion.
-    "reviewed reader": {
-        "pkg/src/lib.rs": '#[test]\nfn oracle() {\n    let path = std::env::temp_dir().join(format!("oracle-{}.txt", std::process::id()));\n    std::fs::write(&path, "x").unwrap();\n    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");\n}\n',
-        "scripts/audited-readers.toml": "".join(
-            f'[[reader]]\nfile = "pkg/src/lib.rs"\nfunction = "fn oracle() {{"\nline = {json.dumps(line)}\nreason = "file in the system temporary directory"\n\n'
-            for line in ('std::fs::write(&path, "x").unwrap();', 'assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");')
-        ),
+    "reviewed reader": {"pkg/src/lib.rs": REVIEWED, "scripts/audited-readers.toml": REVIEWED_REGISTRY},
+    # The reviewed reader's path initializer now names the changelog: the
+    # registry entry still matches its call line but not its source context.
+    "edited reviewed reader": {"pkg/src/lib.rs": REVIEWED.replace("let path = std::env::current_exe().unwrap();", f"let path: std::path::PathBuf = {CHANGELOG}.into();"), "scripts/audited-readers.toml": REVIEWED_REGISTRY},
+    # An example with `test = true` runs under `cargo test`.
+    "tested example": {
+        "pkg/Cargo.toml": PACKAGE + '\n[[example]]\nname = "tool"\ntest = true\n',
+        "pkg/examples/tool.rs": "fn main() {}\n" + TEST.format(body=f'assert!(std::fs::read_to_string({CHANGELOG}).unwrap().contains("ORIGINAL"));'),
+        "pkg/src/lib.rs": "",
     },
     # Control: nothing reads the pages, so the policy should keep excluding them.
     "unrelated control": {"pkg/src/lib.rs": TEST.format(body="assert_eq!(1 + 1, 2);")},
@@ -197,6 +205,37 @@ class CargoOracleTests(unittest.TestCase):
                         self.assertEqual(cargo_test(root, Path(targets) / page.replace("/", "_"), "check"), baseline, f"{case}: excluded {page} changed the result ({policy})")
                     finally:
                         (root / page).write_text(original)
+
+    def test_selected_packages_keep_dev_dependencies_in_any_order(self):
+        # `scan` depends on `helper`; helper's tests call its dev-dependency
+        # `reader`, which reads the changelog. Selecting helper first must not
+        # lose helper's dev-dependencies when scan reaches it as a dependency.
+        workspace = '[workspace]\nmembers = ["helper", "scan", "reader"]\nresolver = "2"\n'
+        manifest = '[package]\nname = "{}"\nversion = "0.1.0"\nedition = "2021"\n'
+        root = self.fixture({
+            "Cargo.toml": workspace,
+            "reader/Cargo.toml": manifest.format("reader"),
+            "reader/src/lib.rs": f'pub fn page() -> String {{ std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join({CHANGELOG})).unwrap() }}\n',
+            "helper/Cargo.toml": manifest.format("helper") + '\n[dev-dependencies]\nreader = { path = "../reader" }\n',
+            "helper/src/lib.rs": TEST.format(body='assert!(reader::page().contains("ORIGINAL"));'),
+            "scan/Cargo.toml": manifest.format("scan") + '\n[dependencies]\nhelper = { path = "../helper" }\n',
+            "scan/src/lib.rs": "",
+        })
+        env = dict(os.environ, CARGO_NET_OFFLINE="true")
+        run = lambda target: subprocess.run(["cargo", "test", "--quiet", "--offline", "-p", "helper", "-p", "scan"], cwd=root, env=dict(env, CARGO_TARGET_DIR=str(target)), capture_output=True).returncode == 0
+        with tempfile.TemporaryDirectory() as targets:
+            self.assertTrue(run(Path(targets) / "baseline"))
+            for selection in (["helper", "scan"], ["scan", "helper"]):
+                with self.subTest(selection=selection), patch.object(dev, "ROOT", root):
+                    policy = dev.input_policy("test", dev.repository_files(), selection)
+                    self.assertIn("reader", policy["packages"])
+                    for page in policy["excluded"]:
+                        original = (root / page).read_text()
+                        (root / page).write_text("MUTATED\n")
+                        try:
+                            self.assertTrue(run(Path(targets) / page.replace("/", "_")), f"excluded {page} changed the result ({policy})")
+                        finally:
+                            (root / page).write_text(original)
 
     def test_consumed_ignored_edits_change_the_digest_when_cargo_results_change(self):
         # An ignored generated module whose value a test checks (review case

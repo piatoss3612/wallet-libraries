@@ -4,6 +4,7 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -419,10 +420,11 @@ class InputPolicyTests(unittest.TestCase):
     def test_reader_registry_binds_reviewed_sites(self):
         reader = 'pub fn open(path: &std::path::Path) -> String {\n    std::fs::read_to_string(path).unwrap()\n}\n'
         caller = '#[test]\nfn opens() {\n    let file = tempfile::NamedTempFile::new().unwrap();\n    crate::io::open(file.path());\n}\n'
+        context = lambda text, needle: dev.source_context(text, text.index(needle))[1]
         registry = (
             '[[wrapper]]\ncall = "io::open"\n\n'
-            '[[reader]]\nfile = "pkg/src/io.rs"\nfunction = "pub fn open(path: &std::path::Path) -> String {"\nline = "std::fs::read_to_string(path).unwrap()"\nreason = "caller path; every io::open call is reviewed"\n\n'
-            '[[reader]]\nfile = "pkg/tests/io.rs"\nfunction = "fn opens() {"\nline = "crate::io::open(file.path());"\nreason = "NamedTempFile"\n'
+            f'[[reader]]\nfile = "pkg/src/io.rs"\nfunction = "pub fn open(path: &std::path::Path) -> String {{"\nline = "std::fs::read_to_string(path).unwrap()"\nreason = "caller path; every io::open call is reviewed"\ncontext = "{context(reader, "std::fs")}"\n\n'
+            f'[[reader]]\nfile = "pkg/tests/io.rs"\nfunction = "fn opens() {{"\nline = "crate::io::open(file.path());"\nreason = "NamedTempFile"\ncontext = "{context(caller, "crate::io")}"\n'
         )
         base = {"pkg/src/io.rs": reader, "pkg/tests/io.rs": caller, dev.READER_REGISTRY: registry}
         cases = {
@@ -431,6 +433,14 @@ class InputPolicyTests(unittest.TestCase):
             "edited reviewed call": ({**base, "pkg/src/io.rs": reader.replace("(path)", "(path.with_extension(\"md\"))")}, "run-time file access with a computed path in pkg/src/io.rs"),
             "new wrapper call": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    crate::io::open(std::path::Path::new(&std::env::var("PAGE").unwrap()));\n}\n'}, "run-time file access with a computed path in pkg/tests/io.rs"),
             "moved to another function": ({**base, "pkg/src/io.rs": reader.replace("pub fn open", "pub fn load")}, "run-time file access with a computed path in pkg/src/io.rs"),
+            # The call line is unchanged, but the path it reads is not.
+            "edited path initializer": ({**base, "pkg/tests/io.rs": caller.replace("tempfile::NamedTempFile::new().unwrap()", 'std::env::var("PAGE").unwrap()')}, "stale audited reader pkg/tests/io.rs"),
+            "edited file-level constant": ({**base, "pkg/tests/io.rs": "const ROOT: &str = \"..\";\n" + caller}, "stale audited reader pkg/tests/io.rs"),
+            "edited helper the reader calls": ({**base, "pkg/tests/io.rs": caller.replace("tempfile::NamedTempFile::new().unwrap()", "scratch()") + "fn scratch() -> tempfile::NamedTempFile { tempfile::NamedTempFile::new().unwrap() }\n"}, "stale audited reader pkg/tests/io.rs"),
+            "unrelated function edited": ({**base, "pkg/tests/io.rs": caller + "fn other() -> u8 { 1 }\n"}, None),
+            "reader without a wrapper takes a caller path": ({**base, dev.READER_REGISTRY: registry.replace('[[wrapper]]\ncall = "io::open"\n\n', "")}, "reviewed reader takes a caller input without a wrapper in pkg/src/io.rs: fn open"),
+            "attested caller input": ({**base, dev.READER_REGISTRY: registry.replace('[[wrapper]]\ncall = "io::open"\n\n', "").replace('reason = "caller path; every io::open call is reviewed"', 'reason = "x"\ncaller_input = "reviewed: callers pass temporary files"')}, None),
+            "missing context": ({**base, dev.READER_REGISTRY: re.sub(r'context = ".*"\n', "", registry)}, "stale audited reader"),
             "qualified wrapper call": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    pkg::io::open(std::path::Path::new(&std::env::var("PAGE").unwrap()));\n}\n'}, "run-time file access with a computed path in pkg/tests/io.rs"),
             "wrapper as a value": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    let f = crate::io::open;\n    drop(f);\n}\n'}, "file access used as a value in pkg/tests/io.rs"),
             "aliased wrapper": ({**base, "pkg/tests/io.rs": "use crate::io::open as load;\n" + caller}, "aliased file access import in pkg/tests/io.rs"),
@@ -480,6 +490,26 @@ class InputPolicyTests(unittest.TestCase):
         # A normal dependency's library does not run during `check`.
         normal = {**cases["build dependency"], "pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[dependencies]\ngen = { path = "../gen" }\n'}
         self.assertIsNone(self.scenario(normal, command="check")["fallback_reason"])
+
+    def test_tested_examples_run_and_selection_order_keeps_dev_dependencies(self):
+        reader = 'pub fn page(p: &str) -> String { std::fs::read_to_string(p).unwrap() }\n'
+        tested = {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[[example]]\nname = "tool"\ntest = true\n', "pkg/examples/tool.rs": reader}
+        self.assertIn("pkg/examples/tool.rs", self.scenario(tested)["fallback_reason"] or "")
+        self.assertIsNone(self.scenario({"pkg/examples/tool.rs": reader})["fallback_reason"])
+        files = {
+            "Cargo.toml": '[workspace]\nmembers = ["helper", "scan", "reader"]\n',
+            "helper/Cargo.toml": '[package]\nname = "helper"\n\n[dev-dependencies]\nreader = { path = "../reader" }\n',
+            "scan/Cargo.toml": '[package]\nname = "scan"\n\n[dependencies]\nhelper = { path = "../helper" }\n',
+            "reader/Cargo.toml": '[package]\nname = "reader"\n',
+            "reader/src/lib.rs": reader,
+        }
+        for name, text in files.items():
+            self.write(name, text)
+        for selection in (["helper", "scan"], ["scan", "helper"]):
+            with self.subTest(selection=selection):
+                policy = dev.source_state("test", selection)["policy"]
+                self.assertIn("reader", policy["packages"])
+                self.assertIn("reader/src/lib.rs", policy["fallback_reason"] or "")
 
     def test_selection_limits_the_audit_to_packages_cargo_builds(self):
         files = {

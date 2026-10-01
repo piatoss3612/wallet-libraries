@@ -103,15 +103,27 @@ fall back to every file:
 
 Run-time rules apply only to code the operation executes. `check` and `lint`
 execute build scripts and what they reach, including modules a build script
-declares (`mod helper;`). `test` also executes library,
-test, and doctest code, but not examples. Code in packages the selection does
+declares (`mod helper;`), proc-macro crates, and path build-dependencies with
+their own dependencies. A selected package keeps its dev-dependencies even
+when another selected package also depends on it. `test` also executes library,
+test, and doctest code, plus examples when an `[[example]]` sets
+`test = true`, and targets a manifest places by `path`. Code in packages the selection does
 not build never runs.
 
 `scripts/audited-readers.toml` lists reviewed run-time readers whose computed
 paths cannot name documentation: temporary files and directories, the test
 wallet's temporary database, and build-script output. Each entry is bound to
 its file, enclosing function, and exact call text, through the call's closing
-parenthesis, with the reason it is safe. `[[wrapper]]` names reviewed APIs
+parenthesis, with the reason it is safe. Its `context` digest also covers the
+whole enclosing function (every path initializer), everything in the file
+outside function bodies (imports, constants, statics, macros), and the bodies
+of functions in the same file that it calls, transitively. Any change there,
+or a missing digest, makes the entry stale. A parameter that flows into a
+reviewed reader (by assignment, binding, receiver mutation, or match arm) is a
+caller input: the function must be a `[[wrapper]]`, so every caller is
+reviewed, or the entry must state in `caller_input` why the input cannot carry
+a path. That statement is bound by the same digest. Functions in other files
+that build a path are not bound; that is a known limitation. `[[wrapper]]` names reviewed APIs
 that open a caller's path, and every call site of one, qualified or not
 (`crate::WalletDb::for_path(…)`), needs its own entry. An
 edited call, a new reader, or a stale entry falls back until the registry is
