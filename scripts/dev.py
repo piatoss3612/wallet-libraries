@@ -36,13 +36,29 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 1
+POLICY_VERSION = 2
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
-COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{]\s*(?!r?#*\")")
+COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{]\s*(?![bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
-TRAVERSAL = re.compile(r"\b(?:read_dir|WalkDir|walkdir|glob|CARGO_WORKSPACE_DIR)\b|\.parent\(\)")
+TRAVERSAL = re.compile(r"\b(?:read_dir|WalkDir|walkdir|glob|rglob|iterdir|listdir|scandir|os\.walk|CARGO_WORKSPACE_DIR)\b|\.(?:parents?|ancestors)\b")
+SPAWN = re.compile(r'\bCommand::new\(\s*(?:"([^"]*)")?')
+INTERPRETERS = {"python", "python3", "sh", "bash", "zsh", "env", "node", "perl", "ruby", "cargo", "rustc"}
 PATH_TOKEN = re.compile(r"[\w.:/\\-]+")
-UNRESOLVED = set("{}$*?")
+# Rust and doctest literals: raw strings, escaped strings, and character
+# literals (skipped so '"' does not pair quotes wrongly). Other files also
+# use single-quoted strings.
+RUST_LITERAL = re.compile(r'(?<!\w)[bc]?r(#*)"(.*?)"\1|(?<!\w)[bc]?"((?:[^"\\]|\\.)*)"|\'(?:\\.|[^\'\\\n])\'', re.S)
+OTHER_LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'')
+ESCAPE = re.compile(r"\\(?:x([0-9a-fA-F]{2})|u\{([0-9a-fA-F_]{1,8})\}|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|([0-7]{1,3})|(\r?\n\s*)|(.))", re.S)
+DOCS_SEGMENT = re.compile(r"(?:^|[/\s=:(\[`])docs(?:/|$)")
+# Pieces that concatenation could join into `docs`: code anywhere Cargo reaches
+# with a literal ending in a leading piece and one starting with a trailing piece.
+DOCS_HEAD = re.compile(r"(?:^|/)(?:d|do|doc)$")
+DOCS_TAIL = re.compile(r"^(?:ocs|cs|s)(?:/|$)")
+UNRESOLVED = set("{}$*?%<>")
+BUILD_OUTPUT = {"target", ".vscode", ".git"}
+# Files that can compute a path: Rust and doctests, scripts, and executables.
+CODE_SUFFIXES = {".rs", ".md", ".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts", ".pl", ".rb"}
 
 
 def excludable(name: str) -> bool:
@@ -60,6 +76,22 @@ def repository_files() -> dict[str, str]:
             continue
         files[os.fsdecode(name)] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "<missing>"
     return files
+
+
+def ignored_files() -> set[str]:
+    """Git-ignored files outside build output; Cargo can still read them."""
+    entries = subprocess.check_output(["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], cwd=ROOT).split(b"\0")
+    found = set()
+    for entry in map(os.fsdecode, set(entries) - {b""}):
+        if BUILD_OUTPUT & set(entry.rstrip("/").split("/")):
+            continue
+        if not entry.endswith("/"):
+            found.add(entry)
+            continue
+        for directory, subdirectories, names in os.walk(ROOT / entry):
+            subdirectories[:] = [d for d in subdirectories if d not in BUILD_OUTPUT]
+            found.update((Path(directory) / name).relative_to(ROOT).as_posix() for name in names)
+    return found
 
 
 def toml_strings(value, top=True):
@@ -89,6 +121,29 @@ def toml_paths(value):
             yield from toml_paths(item)
 
 
+def unescape(literal: str) -> str:
+    """Decode Rust and Python string escapes so `\\x64ocs` still names `docs`."""
+    def replace(match):
+        digits = match[1] or (match[2] or "").replace("_", "") or match[3] or match[4]
+        if digits:
+            return chr(int(digits, 16)) if int(digits, 16) <= 0x10FFFF else "\ufffd"
+        if match[5]:
+            return chr(int(match[5], 8))
+        if match[6]:
+            return ""
+        return {"n": "\n", "t": "\t", "r": "\r"}.get(match[7], match[7])
+    return ESCAPE.sub(replace, literal)
+
+
+def literals(name: str, text: str) -> set[str]:
+    """Raw and decoded string literals, with `/` separators."""
+    if name.endswith((".rs", ".md")):
+        found = [match[2] if match[2] is not None else match[3] for match in RUST_LITERAL.finditer(text) if match[2] is not None or match[3] is not None]
+    else:
+        found = [a or b for a, b in OTHER_LITERAL.findall(text)]
+    return {re.sub(r"/+", "/", variant.replace("\\", "/")) for literal in found for variant in (literal, unescape(literal))}
+
+
 def protect(tokens: set[str], candidates: set[str]) -> set[str]:
     """Candidates whose file name or `docs/...` path a source mentions."""
     by_name: dict[str, set[str]] = {}
@@ -96,39 +151,84 @@ def protect(tokens: set[str], candidates: set[str]) -> set[str]:
         by_name.setdefault(name.rsplit("/", 1)[-1], set()).add(name)
     protected = set()
     for token in tokens:
-        parts = token.replace("\\", "/").rstrip(".:").split("/")
+        parts = token.replace("\\", "/").strip().rstrip(".:").split("/")
         protected |= by_name.get(parts[-1], set())
         protected.update("/".join(["docs"] + parts[i + 1:]) for i, part in enumerate(parts) if part == "docs")
     return protected & candidates
 
 
-def unresolved(literal: str, candidates: set[str]) -> str | None:
-    """A path-like literal that may reach documentation without naming one file."""
-    path = literal.replace("\\", "/").strip()
-    if "://" in path or re.search(r"\s", path):
+def unresolved(literal: str, known: set[str]) -> str | None:
+    """A literal that may reach documentation without naming one existing file."""
+    if "://" in literal:
         return None
-    parts = path.split("/")
-    for index, part in enumerate(parts):
-        if part != "docs":
-            continue
-        rest = "/".join(parts[index + 1:]).strip("/")
-        if f"docs/{rest}" in candidates:
-            continue
-        name = rest.rsplit("/", 1)[-1]
-        if not rest or UNRESOLVED & set(rest) or (ROOT / "docs" / rest).is_dir() or name.endswith(".md") or "." not in name:
+    for match in DOCS_SEGMENT.finditer(literal):
+        rest = literal[match.end():]
+        # Prose such as "see docs/guide.md for details" names the longest existing path.
+        resolved = any(f"docs/{rest}" == name or (rest.startswith(name[5:]) and re.match(r"[\s.,;:)\]`'\"]", rest[len(name) - 5:])) for name in known if name.startswith("docs/"))
+        if not resolved or UNRESOLVED & set(rest.split()[0] if rest.split() else ""):
             return f"unresolved documentation reference {literal!r}"
     return None
 
 
+def computed(text: str, found: set[str]) -> list[str]:
+    """Constructs in code that may build a path this scanner cannot resolve."""
+    reasons = []
+    if COMPUTED_INCLUDE.search(text):
+        reasons.append("computed include")
+    if TRAVERSAL.search(text) or "CARGO_MANIFEST_DIR" in text and any(re.search(r"(?:^|/)\.\.(?:/|$)", l) for l in found):
+        reasons.append("computed directory traversal")
+    if any(spawn[1] is None or Path(spawn[1]).name in INTERPRETERS for spawn in SPAWN.finditer(text)):
+        reasons.append("process invocation that may read any file")
+    return reasons
+
+
+def follow(name: str, literal: str, packages: list[str], known: set[str], by_name: dict[str, set[str]], by_directory: dict[str, set[str]]) -> set[str]:
+    """Repository files a literal may name relative to its file or package.
+
+    Cargo runs build scripts and tests in the package directory; outside a
+    package the root stands in. A bare file name that resolves nowhere may be
+    joined to a computed directory, so every file with that name is reached.
+    """
+    literal = literal.strip()
+    if "://" in literal or "\n" in literal or not literal:
+        return set()
+    package = next((p for p in packages if name.startswith(p + "/")), "")
+    reached = set()
+    for base in {str(Path(name).parent), package}:
+        target = os.path.normpath(os.path.join(base, literal.lstrip("/")))
+        if target in {".", ""} or target.startswith(".."):
+            continue
+        reached |= ({target} & known) | by_directory.get(target, set())
+    leaf = literal.rsplit("/", 1)[-1]
+    if not reached and "." in leaf.strip("."):
+        reached = set(by_name.get(leaf, ()))
+    return reached
+
+
 def input_policy(command: str, files: dict[str, str]) -> dict:
-    """Select excluded prose for Cargo commands after auditing Rust-visible references."""
+    """Select excluded prose for Cargo commands after auditing what Cargo can reach.
+
+    Every file in a package (including Git-ignored ones), every manifest, and
+    Cargo configuration is scanned; any file a scanned literal may name is
+    scanned in turn, so Markdown doctests, build-script generators, and
+    included modules are audited transitively.
+    """
     policy = {"name": "rust-check" if command in RUST_CHECK_COMMANDS else "full", "version": POLICY_VERSION, "fallback_reason": None, "protected": [], "excluded": []}
     if policy["name"] == "full":
         policy["fallback_reason"] = f"{command} validates every repository input"
         return policy
     candidates = {name for name in files if excludable(name)}
+    known = set(files) | ignored_files()
+    by_name: dict[str, set[str]] = {}
+    by_directory: dict[str, set[str]] = {}
+    for name in known:
+        by_name.setdefault(name.rsplit("/", 1)[-1], set()).add(name)
+        for parent in Path(name).parents[:-1]:
+            by_directory.setdefault(parent.as_posix(), set()).add(name)
+    packages = sorted((str(Path(name).parent) for name in known if name.endswith("Cargo.toml") and name != "Cargo.toml"), key=len, reverse=True)
     tokens: set[str] = set()
     reasons = []
+    heads, tails = set(), set()
     root, docs = ROOT.resolve(), (ROOT / "docs").resolve()
     for name in sorted(set(files) - candidates):
         path = ROOT / name
@@ -139,38 +239,50 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
                 tokens.add(relative)
             elif target.is_dir() and (docs.is_relative_to(target) or target.is_relative_to(docs)):
                 reasons.append(f"symlinked directory {name} reaches documentation")
-        if path.suffix not in {".rs", ".toml"} or not path.is_file():
+    cargo = {name for name in known if Path(name).name in {"Cargo.toml", "rust-toolchain", "rust-toolchain.toml"} or name.startswith(".cargo/")}
+    pending = sorted(cargo | {name for name in known if any(name.startswith(p + "/") for p in packages)})
+    scanned = set(pending)
+    while pending:
+        name = pending.pop()
+        path = ROOT / name
+        if not path.is_file():
             continue
         try:
-            text = path.read_text()
+            text = path.read_bytes().decode("utf-8", errors="strict" if path.suffix in {".rs", ".toml"} else "replace")
             if path.suffix == ".toml":
                 document = tomllib.loads(text)
-                literals = list(toml_strings(document))
+                found = {s.replace("\\", "/") for s in toml_strings(document)}
                 # Only Cargo reads path dependencies; generator inputs may name other roots.
                 for dependency in toml_paths(document) if path.name == "Cargo.toml" or path.parent.name == ".cargo" else ():
                     target = (path.parent / dependency).resolve()
                     if not target.is_relative_to(root) or not target.exists():
                         reasons.append(f"unresolved path dependency {dependency!r} in {name}")
             else:
-                if COMPUTED_INCLUDE.search(text):
-                    reasons.append(f"computed include in {name}")
-                # Character literals such as '"' would otherwise pair quotes wrongly.
-                literals = re.findall(r'"((?:[^"\\]|\\.)*)"', re.sub(r"'(?:\\.|[^'\\])'", "''", text))
-                if TRAVERSAL.search(text) or "CARGO_MANIFEST_DIR" in text and any(l.startswith("..") for l in literals):
-                    reasons.append(f"computed directory traversal in {name}")
+                found = literals(name, text)
+                if path.suffix in CODE_SUFFIXES or text.startswith("#!") or os.access(path, os.X_OK):
+                    reasons.extend(f"{reason} in {name}" for reason in computed(text, found))
+                    heads.update(name for literal in found if DOCS_HEAD.search(literal))
+                    tails.update(name for literal in found if DOCS_TAIL.search(literal))
         except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
             reasons.append(f"unreadable reference source {name}: {type(error).__name__}")
             continue
-        # Comments and prose can only protect a file; path-like literals may
-        # also be computed or unresolved references that force full inputs.
-        tokens.update(t for t in PATH_TOKEN.findall(text if path.suffix == ".rs" else "\n".join(literals)) if "://" not in t)
-        for literal in literals:
-            if reason := unresolved(literal, candidates):
+        # Comments and prose can only protect a file; literals may also be
+        # computed or unresolved references that force full inputs.
+        tokens.update(t for t in PATH_TOKEN.findall(text if path.suffix != ".toml" else "\n".join(found)) if "://" not in t)
+        tokens.update(found)
+        for literal in found:
+            if reason := unresolved(literal, known):
                 reasons.append(f"{reason} in {name}")
+            for reached in follow(name, literal, packages, known, by_name, by_directory) - scanned:
+                scanned.add(reached)
+                pending.append(reached)
+    if heads and tails:
+        reasons.append(f"documentation path fragments in {min(heads)} and {min(tails)}")
     if reasons:
         policy["fallback_reason"] = "; ".join(sorted(set(reasons))[:5])
         return policy
-    protected = protect(tokens, candidates)
+    # A reached documentation page is an input and its doctests were scanned above.
+    protected = protect(tokens, candidates) | (scanned & candidates)
     policy["protected"] = sorted(protected)
     policy["excluded"] = sorted(candidates - protected)
     return policy

@@ -266,6 +266,57 @@ class InputPolicyTests(unittest.TestCase):
         self.edit("pkg/Cargo.toml", FIXTURE["pkg/Cargo.toml"] + '\n[dependencies]\nmissing = { path = "../missing" }\n')
         self.assertIn("unresolved path dependency", dev.source_state("test")["policy"]["fallback_reason"])
 
+    def scenario(self, files: dict[str, str], executable=()):
+        """Policy for the fixture plus files, then a clean fixture again."""
+        for name, text in files.items():
+            self.write(name, text)
+        for name in executable:
+            (self.root / name).chmod(0o755)
+        try:
+            return dev.source_state("test")["policy"]
+        finally:
+            self.git("checkout", "-q", "--", ".")
+            self.git("clean", "-qfdx")
+
+    def test_files_cargo_reaches_are_audited_transitively(self):
+        readme = 'Root guide.\n\n```rust\nlet page = std::fs::read_to_string("{}").unwrap();\n```\n'
+        protected = {
+            "root Markdown doctest": {"pkg/src/root.rs": '#![doc = include_str!("../../README.md")]\n', "README.md": readme.format("../docs/guide.md")},
+            "included documentation doctest": {"pkg/src/page.rs": '#![doc = include_str!("../../docs/included.md")]\n', "docs/included.md": readme.format("../docs/guide.md")},
+            "path with spaces": {"pkg/src/space.rs": 'const P: &str = include_str!("../../docs/my guide.md");\n', "docs/my guide.md": "# Spaced\n"},
+            "escaped separators": {"pkg/src/escape.rs": 'const P: &str = include_str!("..\\\\..\\\\docs\\\\guide.md");\n'},
+            "escaped directory name": {"pkg/src/escape.rs": 'const P: &str = "../../\\x64ocs/gu\\u{69}de.md";\n'},
+            "raw string": {"pkg/src/raw.rs": 'const P: &str = include_str!(r#"..\\..\\docs\\guide.md"#);\n'},
+            "executable generator": {"pkg/build.rs": 'fn main() { std::process::Command::new("../scripts/gen.py").status().unwrap(); }\n', "scripts/gen.py": "#!/usr/bin/env python3\nprint(open('../docs/guide.md').read())\n"},
+            "ignored include module": {".gitignore": "/pkg/src/generated.rs\n", "pkg/src/module.rs": 'include!("generated.rs");\n', "pkg/src/generated.rs": 'const G: &str = include_str!("../../docs/guide.md");\n'},
+        }
+        for case, files in protected.items():
+            with self.subTest(case=case):
+                policy = self.scenario(files, ["scripts/gen.py"] if "scripts/gen.py" in files else ())
+                self.assertIsNone(policy["fallback_reason"])
+                self.assertIn("docs/my guide.md" if case == "path with spaces" else "docs/guide.md", policy["protected"])
+        fallback = {
+            "computed include": {"README.md": readme.format("x").replace("std::fs::read_to_string(\"x\")", 'include_str!(concat!("../docs/", "guide.md"))'), "pkg/src/root.rs": '#![doc = include_str!("../../README.md")]\n'},
+            "documentation path fragments": {"pkg/src/split.rs": 'fn p(n: &str) -> String { format!("{}{}/{n}.md", "../../do", "cs") }\n'},
+            "documentation path fragments ": {"pkg/src/head.rs": 'pub const HEAD: &str = "../../doc";\n', "pkg/src/tail.rs": 'fn p() -> String { format!("{}{}", crate::HEAD, "s/guide") }\n'},
+            "unresolved documentation reference": {"pkg/src/prefix.rs": 'fn p() -> String { ["../../docs/gui", "de.md"].concat() }\n'},
+            "process invocation": {"pkg/build.rs": 'fn main() { std::process::Command::new("python3").arg("../scripts/gen.py").status().unwrap(); }\n'},
+            "computed directory traversal": {"pkg/build.rs": 'fn main() { std::process::Command::new("../scripts/gen.py").status().unwrap(); }\n', "scripts/gen.py": "#!/usr/bin/env python3\nfrom pathlib import Path\nprint((Path(__file__).parents[1] / 'docs' / 'guide.md').read_text())\n"},
+            "unresolved documentation reference ": {".gitignore": "/pkg/src/generated.rs\n", "pkg/src/generated.rs": 'fn p(n: &str) -> String { format!("../../docs/{n}.md") }\n'},
+        }
+        for reason, files in fallback.items():
+            with self.subTest(reason=reason):
+                self.assertIn(reason.strip(), self.scenario(files, ["scripts/gen.py"] if "scripts/gen.py" in files else ())["fallback_reason"] or "")
+
+    def test_unreached_files_and_data_do_not_force_fallback(self):
+        policy = self.scenario({
+            "scripts/tool.py": "from pathlib import Path\nprint(Path('docs').glob('*.md'))\n",
+            "pkg/tests/fixtures/data.json": '{"scripts": ["d", "s/x"]}\n',
+            "pkg/src/letters.rs": 'const L: [&str; 2] = ["d", "x"];\n',
+        })
+        self.assertIsNone(policy["fallback_reason"])
+        self.assertIn("docs/guide.md", policy["excluded"])
+
     def test_metadata_only_changelog_reference_is_not_a_cargo_input(self):
         self.assertIn("CHANGELOG.md", dev.source_state("test")["policy"]["excluded"])
         self.edit("pkg/Cargo.toml", FIXTURE["pkg/Cargo.toml"] + 'include = ["../CHANGELOG.md"]\n')
