@@ -772,6 +772,7 @@ pub(crate) mod tests {
             ids::SUPPORT_LEGACY_SQLITE,
             ids::SUPPORT_ZCASHD_WALLET_IMPORT,
             ids::TRANSPARENT_ACTIVATION_SCHEMA,
+            ids::TRANSPARENT_SHARED_DERIVATIONS,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TRANSPARENT_POLICY_GENERATION,

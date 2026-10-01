@@ -945,6 +945,7 @@ mod tests {
             db::TABLE_TPIR_RECEIVE_EVENTS,
             db::TABLE_TPIR_RECEIVE_OBSERVATIONS,
             db::TABLE_TPIR_REVISIONS,
+            db::TABLE_TPIR_SHARED_DERIVATIONS,
             db::TABLE_TPIR_SPEND_EVENTS,
             db::TABLE_TPIR_SPEND_OBSERVATIONS,
             db::TABLE_TPIR_SPEND_ORIGINS,

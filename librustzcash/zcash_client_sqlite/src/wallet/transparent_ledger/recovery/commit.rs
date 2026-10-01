@@ -234,7 +234,7 @@ fn apply_facts<P: consensus::Parameters>(
     let window_grew = if active {
         // Read-time expansion may have found addresses beyond the wallet's gap generation.
         // Materialize that watch before projecting any receive at those addresses.
-        ownership::materialize_watch(conn, params, &watch)?;
+        ownership::materialize_watch(conn, params, watch)?;
         // Events join the wallet's outputs and spends, where the wallet's own gap-limit
         // generation extends its address window.
         for receive in &commit.receives {
