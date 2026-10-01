@@ -64,7 +64,7 @@ FUNCTION = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+
 # is an unknown reader (the policy cannot prove where it points).
 WHOLE_LITERAL = r'(?:[bc]?"(?:[^"\\]|\\.)*"|[bc]?r(#*)".*?"\1)\s*[,)]'
 TURBOFISH = r"(?:\s*::\s*<[^()]*>)?"
-RUNTIME_READER = re.compile(r'(?:\b(?:fs|fs_err|File|Connection|OpenOptions|Path|PathBuf|Dir|tokio::fs)::(?:\w+)|\.open(?:_with_flags)?|\bread_to_string|(?<!fn )\bopen)' + TURBOFISH + r'\s*\(\s*(?!' + WHOLE_LITERAL + r')(?!\))', re.S)
+RUNTIME_READER = re.compile(r'(?:\b(?:fs|fs_err|File|Connection|OpenOptions|Path|PathBuf|Dir|tokio::fs)::(?:\w+)|\.open(?:_with_flags)?|\bread_to_string|(?<!fn )\b(?:f?open(?:at)?(?:64)?))' + TURBOFISH + r'\s*\(\s*(?!' + WHOLE_LITERAL + r')(?!\))', re.S)
 # Path methods that probe the file system: their receiver may be any path.
 PATH_PROBE = re.compile(r"\.(?:exists|try_exists|is_file|is_dir|is_symlink|metadata|symlink_metadata|canonicalize|read_link)\s*\(")
 # File access hidden behind another name: a file-system function or opener
@@ -467,9 +467,9 @@ def follow(name: str, literal: str, package: str, index: Index) -> tuple[set[str
     return reached, None
 
 
-def dependency_dirs(manifest: str, document: dict, workspace: dict, development: bool) -> set[str]:
+def dependency_dirs(manifest: str, document: dict, workspace: dict, development: bool, kinds: tuple[str, ...] = ()) -> set[str]:
     """Workspace path dependencies Cargo builds for a package (dev only when selected)."""
-    kinds = ("dependencies", "build-dependencies") + (("dev-dependencies",) if development else ())
+    kinds = kinds or ("dependencies", "build-dependencies") + (("dev-dependencies",) if development else ())
     tables = [document.get(kind, {}) for kind in kinds]
     tables += [target.get(kind, {}) for target in document.get("target", {}).values() if isinstance(target, dict) for kind in kinds]
     found = set()
@@ -548,6 +548,17 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
             reachable.add(package)
             frontier += [(dependency, False) for dependency in dependency_dirs(manifest_of[package], documents[manifest_of[package]], workspace, development)]
     policy["packages"] = sorted(p or "." for p in reachable)
+    # Proc macros and build dependencies (with what they depend on) run inside
+    # the compiler or a build script, so `check` executes them too.
+    compile_time: set[str] = set()
+    frontier = [p for p in reachable if ((documents[manifest_of[p]].get("lib") or {}).get("proc-macro") or (documents[manifest_of[p]].get("lib") or {}).get("proc_macro"))]
+    frontier += [d for p in reachable for d in dependency_dirs(manifest_of[p], documents[manifest_of[p]], workspace, False, ("build-dependencies",))]
+    while frontier:
+        package = frontier.pop()
+        if package in compile_time or package not in manifest_of:
+            continue
+        compile_time.add(package)
+        frontier += dependency_dirs(manifest_of[package], documents[manifest_of[package]], workspace, False)
     executed: set[str] = set()
     def runtime_file(name: str) -> bool:
         """Code the operation executes: build scripts always, tests' code for
@@ -559,6 +570,8 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
             return command not in {"check", "lint"}  # reached outside any package: assume executed
         if package not in reachable:
             return False  # not built for this selection unless executed code includes it
+        if package in compile_time:
+            return not name.startswith(f"{package}/examples/") if package else not name.startswith("examples/")
         relative = name[len(package) + 1:] if package else name
         build = (documents[manifest_of[package]].get("package") or {}).get("build", "build.rs")
         if relative == build or relative.startswith("build/"):

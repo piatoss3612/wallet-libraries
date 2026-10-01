@@ -102,7 +102,7 @@ CASES = {
     "reader with turbofish": {"pkg/src/lib.rs": TEST.format(body=f'assert!(std::fs::read_to_string::<&str>({CHANGELOG}).unwrap().contains("ORIGINAL"));')},
     "literal-prefixed path": {"pkg/src/lib.rs": TEST.format(body='assert!(std::fs::read_to_string("../CHANGE".to_owned() + "LOG.md").unwrap().contains("ORIGINAL"));')},
     "aliased include macro": {"pkg/src/lib.rs": f'use std::include_str as inc;\npub const PAGE: &str = inc!(concat!("../../CHANGE", "LOG.md"));\n{TEST.format(body=CHECK)}'},
-    "build script helper module": {"pkg/build.rs": "mod helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": f'pub fn check() {{ assert!(std::fs::read_to_string({CHANGELOG}).unwrap().contains("ORIGINAL")); }}\n'},
+    "build script helper module": {"pkg/build.rs": "mod helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": f'pub fn check() {{ assert!(std::fs::read_to_string({CHANGELOG}).unwrap().contains("ORIGINAL")); }}\n', "pkg/src/lib.rs": ""},
     # A reviewed run-time reader of a temporary file keeps the exclusion.
     "reviewed reader": {
         "pkg/src/lib.rs": '#[test]\nfn oracle() {\n    let path = std::env::temp_dir().join(format!("oracle-{}.txt", std::process::id()));\n    std::fs::write(&path, "x").unwrap();\n    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");\n}\n',
@@ -116,9 +116,31 @@ CASES = {
 }
 
 
-def cargo_test(root: Path, target: Path) -> bool:
+# Code `cargo check` runs: build-script modules, proc macros, and build dependencies.
+READ_PAGE = 'assert!(std::fs::read_to_string(std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join(concat!("../CHANGE", "LOG.md"))).unwrap().contains("ORIGINAL"));'
+CHECK_CASES = {
+    "build script helper module": {"pkg/build.rs": "mod helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": f"pub fn check() {{ {READ_PAGE} }}\n", "pkg/src/lib.rs": ""},
+    "proc macro": {
+        "Cargo.toml": '[workspace]\nmembers = ["pkg", "mac"]\nresolver = "2"\n',
+        "mac/Cargo.toml": '[package]\nname = "mac"\nversion = "0.1.0"\nedition = "2021"\n\n[lib]\nproc-macro = true\n',
+        "mac/src/lib.rs": f'use proc_macro::TokenStream;\n#[proc_macro]\npub fn page(_: TokenStream) -> TokenStream {{ {READ_PAGE} "1".parse().unwrap() }}\n',
+        "pkg/Cargo.toml": PACKAGE + '\n[dependencies]\nmac = { path = "../mac" }\n',
+        "pkg/src/lib.rs": "pub const ONE: u8 = mac::page!();\n",
+    },
+    "build dependency": {
+        "Cargo.toml": '[workspace]\nmembers = ["pkg", "gen"]\nresolver = "2"\n',
+        "gen/Cargo.toml": '[package]\nname = "gen"\nversion = "0.1.0"\nedition = "2021"\n',
+        "gen/src/lib.rs": f"pub fn check() {{ {READ_PAGE} }}\n",
+        "pkg/Cargo.toml": PACKAGE + '\n[build-dependencies]\ngen = { path = "../gen" }\n',
+        "pkg/build.rs": "fn main() { gen::check(); }\n",
+        "pkg/src/lib.rs": "",
+    },
+}
+
+
+def cargo_test(root: Path, target: Path, command: str = "test") -> bool:
     env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_NET_OFFLINE="true")
-    return subprocess.run(["cargo", "test", "--quiet", "--offline", "--workspace"], cwd=root, env=env, capture_output=True).returncode == 0
+    return subprocess.run(["cargo", command, "--quiet", "--offline", "--workspace"], cwd=root, env=env, capture_output=True).returncode == 0
 
 
 @unittest.skipUnless(ENABLED, "set WALLET_LIB_CARGO_ORACLES=1 to run real Cargo oracles")
@@ -156,6 +178,22 @@ class CargoOracleTests(unittest.TestCase):
                 if case in {"unrelated control", "reviewed reader"}:
                     self.assertIsNone(policy["fallback_reason"])
                     self.assertIn("docs/guide.md", policy["excluded"])
+
+    def test_excluded_pages_never_change_a_fresh_cargo_check(self):
+        for case, files in CHECK_CASES.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as targets:
+                root = self.fixture(files)
+                with patch.object(dev, "ROOT", root):
+                    policy = dev.input_policy("check", dev.repository_files())
+                baseline = cargo_test(root, Path(targets) / "baseline", "check")
+                self.assertTrue(baseline, f"{case}: fixture must pass before any edit")
+                for page in policy["excluded"]:
+                    original = (root / page).read_text()
+                    (root / page).write_text("MUTATED\n")
+                    try:
+                        self.assertEqual(cargo_test(root, Path(targets) / page.replace("/", "_"), "check"), baseline, f"{case}: excluded {page} changed the result ({policy})")
+                    finally:
+                        (root / page).write_text(original)
 
     def test_consumed_ignored_edits_change_the_digest_when_cargo_results_change(self):
         # An ignored generated module whose value a test checks (review case

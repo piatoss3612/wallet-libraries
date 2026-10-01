@@ -460,6 +460,22 @@ class InputPolicyTests(unittest.TestCase):
                     (self.root / name).unlink()
                 self.assertIn(reason, fallback) if reason else self.assertIsNone(fallback)
 
+    def test_check_executes_build_modules_proc_macros_and_build_dependencies(self):
+        reader = 'pub fn page(p: &str) -> String { std::fs::read_to_string(p).unwrap() }\n'
+        workspace = '[workspace]\nmembers = ["pkg", "gen"]\n'
+        cases = {
+            "build script module": {"pkg/build.rs": "mod helper;\nfn main() {}\n", "pkg/helper.rs": reader},
+            "proc macro": {"Cargo.toml": workspace, "gen/Cargo.toml": '[package]\nname = "gen"\n\n[lib]\nproc-macro = true\n', "gen/src/lib.rs": reader, "pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[dependencies]\ngen = { path = "../gen" }\n'},
+            "build dependency": {"Cargo.toml": workspace, "gen/Cargo.toml": '[package]\nname = "gen"\n', "gen/src/lib.rs": reader, "pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[build-dependencies]\ngen = { path = "../gen" }\n'},
+            "C library call": {"pkg/build.rs": 'fn main() { unsafe { libc::fopen(std::env::var("P").unwrap().as_ptr().cast(), c"r".as_ptr()); } }\n'},
+        }
+        for case, files in cases.items():
+            with self.subTest(case=case):
+                self.assertIn("run-time file access", self.scenario(files, command="check")["fallback_reason"] or "")
+        # A normal dependency's library does not run during `check`.
+        normal = {**cases["build dependency"], "pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[dependencies]\ngen = { path = "../gen" }\n'}
+        self.assertIsNone(self.scenario(normal, command="check")["fallback_reason"])
+
     def test_selection_limits_the_audit_to_packages_cargo_builds(self):
         files = {
             "Cargo.toml": '[workspace]\nmembers = ["pkg", "other", "dep"]\n',

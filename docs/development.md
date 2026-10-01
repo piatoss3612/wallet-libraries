@@ -78,8 +78,15 @@ fall back to every file:
 - non-literal `include_*!`, any `docs` segment that does not name an existing
   file, and literals that concatenation could join into `docs`;
 - run-time file access (`fs`, `File`, `OpenOptions`, `Connection::open`,
-  `Path::new`, and similar) whose path is not one string literal, unless it
-  is a reviewed reader (below);
+  `Path::new`, and similar, including turbofish calls) whose path is not one
+  whole string literal (`"../CHANGE".to_owned() + "LOG.md"` is computed), and
+  path probes such as `.exists()` or `.metadata()`, unless it is a reviewed
+  reader (below);
+- file access under another name: a `use` that renames or globs file access
+  or a reviewed wrapper (`use std::fs as f;`, `use std::fs::*;`), imports a
+  file-system function by its bare name (`use std::fs::read;`), or renames an
+  `include_*!` macro; and file-system functions, openers, or wrappers used as
+  values (`let load = fs::read_to_string;`, `.map(File::open)`);
 - upward navigation: parent paths or placeholder file names at the checkout
   root, pure `..` literals, `Component::ParentDir`, `.parent()`/`.ancestors()`,
   and `current_dir` or `CARGO_MANIFEST_DIR` combined with `.pop()` or `..`;
@@ -95,7 +102,8 @@ fall back to every file:
   unreadable sources, and path dependencies outside the checkout.
 
 Run-time rules apply only to code the operation executes. `check` and `lint`
-execute build scripts and what they reach. `test` also executes library,
+execute build scripts and what they reach, including modules a build script
+declares (`mod helper;`). `test` also executes library,
 test, and doctest code, but not examples. Code in packages the selection does
 not build never runs.
 
@@ -104,13 +112,15 @@ paths cannot name documentation: temporary files and directories, the test
 wallet's temporary database, and build-script output. Each entry is bound to
 its file, enclosing function, and exact call text, through the call's closing
 parenthesis, with the reason it is safe. `[[wrapper]]` names reviewed APIs
-that open a caller's path, and every call site of one needs its own entry. An
+that open a caller's path, and every call site of one, qualified or not
+(`crate::WalletDb::for_path(…)`), needs its own entry. An
 edited call, a new reader, or a stale entry falls back until the registry is
 reviewed again. The registry is itself an input, so editing it invalidates
 results.
 
-Ignored files that the audit finds consumed (named, included, or compiled as
-modules) join the input digest under every policy. Package Markdown, doctests,
+Git-ignored files the audit scans join the input digest under every policy:
+every ignored file in a built package (implicit `mod` modules included) and any
+ignored file a scanned file names. Package Markdown, doctests,
 fixtures and assets of any extension, build-script inputs, manifests, and
 `Cargo.lock` always remain inputs. `verify` and other commands hash every file.
 On this checkout, every computed reader is reviewed, so unrelated root pages
