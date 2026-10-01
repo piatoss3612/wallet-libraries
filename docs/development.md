@@ -58,21 +58,23 @@ by category.
 Source inputs follow a versioned policy recorded in each receipt. `check`,
 `test`, and `lint` use `rust-check`: it ignores only root `docs/**/*.md` prose
 and a root `CHANGELOG.md`, and only when nothing Cargo can reach mentions the
-file. The audit scans every package file (including Git-ignored ones), every
-manifest, and Cargo configuration, then follows each string literal (escapes
-decoded, spaces allowed) to the files it may name, so Markdown doctests,
-included modules, and executed generators are scanned in turn. A literal path
-or file-name mention, including in comments, keeps that page an input.
-Computed or unresolved references fall back to every file and record
-`fallback_reason`: non-literal `include_*!`, `docs` paths that do not name an
-existing file, literals that concatenation could join into `docs`, directory
-walks, manifest-relative parent paths, interpreter or computed process
-launches, symlinked documentation directories, unreadable sources, and path
-dependencies outside the checkout. Package Markdown, doctests, fixtures and
-assets of any extension, build-script inputs, manifests, and `Cargo.lock`
-always remain inputs. `verify` and other commands hash every file. Paths
-supplied at run time (environment variables, arguments) or spelled character
-by character are not audited. Bump `POLICY_VERSION` with any rule change. OS locks
+file. The audit scans every package file (including Git-ignored ones and a
+root package), every manifest including `metadata` tables, and Cargo
+configuration, then follows each string literal (escapes decoded, spaces
+allowed, each line also lexed alone) to the files it may name, so Markdown
+doctests and included modules are scanned in turn. A file-name mention,
+compared case-insensitively and including comments and symlinks, keeps that
+page an input. Computed or unresolved references fall back to every file and
+record `fallback_reason`: non-literal `include_*!`, any `docs` segment that does
+not name an existing file, literals that concatenation could join into `docs`,
+parent paths naming the checkout root, directory walks, manifest-relative
+parent paths, any process launch except audited `sqlite3`, symlinked
+documentation directories, unreadable sources, and path dependencies outside
+the checkout. Package Markdown, doctests, fixtures and assets of any
+extension, build-script inputs, manifests, and `Cargo.lock` always remain
+inputs. `verify` and other commands hash every file. Paths supplied at run time
+(environment variables, arguments) or spelled character by character are not
+audited. Bump `POLICY_VERSION` with any rule change. OS locks
 release on exit or process death; a stale owner file is replaced on reuse.
 Doctor reports recorded owners, which may be stale after a killed process.
 Keep rust-analyzer's target directory separate (for example,

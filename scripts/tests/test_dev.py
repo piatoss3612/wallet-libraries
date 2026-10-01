@@ -123,7 +123,7 @@ class WorkflowTests(unittest.TestCase):
 
 
 FIXTURE = {
-    "Cargo.toml": '[workspace]\nmembers = ["pkg"]\n\n[workspace.metadata.release]\npre-release-replacements = [{file="CHANGELOG.md", search="x", replace="y"}]\n',
+    "Cargo.toml": '[workspace]\nmembers = ["pkg"]\n',
     "Cargo.lock": "version = 4\n",
     "CHANGELOG.md": "# Changelog\n",
     "README.md": "# Root guidance\n",
@@ -266,10 +266,13 @@ class InputPolicyTests(unittest.TestCase):
         self.edit("pkg/Cargo.toml", FIXTURE["pkg/Cargo.toml"] + '\n[dependencies]\nmissing = { path = "../missing" }\n')
         self.assertIn("unresolved path dependency", dev.source_state("test")["policy"]["fallback_reason"])
 
-    def scenario(self, files: dict[str, str], executable=()):
+    def scenario(self, files: dict[str, str], executable=(), symlinks=()):
         """Policy for the fixture plus files, then a clean fixture again."""
         for name, text in files.items():
             self.write(name, text)
+        for name, target in symlinks:
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).symlink_to(target)
         for name in executable:
             (self.root / name).chmod(0o755)
         try:
@@ -287,12 +290,15 @@ class InputPolicyTests(unittest.TestCase):
             "escaped separators": {"pkg/src/escape.rs": 'const P: &str = include_str!("..\\\\..\\\\docs\\\\guide.md");\n'},
             "escaped directory name": {"pkg/src/escape.rs": 'const P: &str = "../../\\x64ocs/gu\\u{69}de.md";\n'},
             "raw string": {"pkg/src/raw.rs": 'const P: &str = include_str!(r#"..\\..\\docs\\guide.md"#);\n'},
-            "executable generator": {"pkg/build.rs": 'fn main() { std::process::Command::new("../scripts/gen.py").status().unwrap(); }\n', "scripts/gen.py": "#!/usr/bin/env python3\nprint(open('../docs/guide.md').read())\n"},
             "ignored include module": {".gitignore": "/pkg/src/generated.rs\n", "pkg/src/module.rs": 'include!("generated.rs");\n', "pkg/src/generated.rs": 'const G: &str = include_str!("../../docs/guide.md");\n'},
+            "root package": {"Cargo.toml": '[package]\nname = "app"\n\n[workspace]\nmembers = ["pkg"]\n', "src/lib.rs": '#![doc = include_str!("../docs/guide.md")]\n'},
+            "metadata read by a build script": {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[package.metadata.embed]\npages = ["../docs/guide.md"]\n'},
+            "case-insensitive file system": {"pkg/src/case.rs": 'const G: &str = include_str!("../../Docs/Guide.md");\n'},
+            "ignored symlink": {".gitignore": "/pkg/assets/\n", "pkg/src/link.rs": 'const P: &str = include_str!("../assets/page.md");\n'},
         }
         for case, files in protected.items():
             with self.subTest(case=case):
-                policy = self.scenario(files, ["scripts/gen.py"] if "scripts/gen.py" in files else ())
+                policy = self.scenario(files, ["scripts/gen.py"] if "scripts/gen.py" in files else (), [("pkg/assets/page.md", "../../docs/guide.md")] if case == "ignored symlink" else ())
                 self.assertIsNone(policy["fallback_reason"])
                 self.assertIn("docs/my guide.md" if case == "path with spaces" else "docs/guide.md", policy["protected"])
         fallback = {
@@ -300,9 +306,14 @@ class InputPolicyTests(unittest.TestCase):
             "documentation path fragments": {"pkg/src/split.rs": 'fn p(n: &str) -> String { format!("{}{}/{n}.md", "../../do", "cs") }\n'},
             "documentation path fragments ": {"pkg/src/head.rs": 'pub const HEAD: &str = "../../doc";\n', "pkg/src/tail.rs": 'fn p() -> String { format!("{}{}", crate::HEAD, "s/guide") }\n'},
             "unresolved documentation reference": {"pkg/src/prefix.rs": 'fn p() -> String { ["../../docs/gui", "de.md"].concat() }\n'},
-            "process invocation": {"pkg/build.rs": 'fn main() { std::process::Command::new("python3").arg("../scripts/gen.py").status().unwrap(); }\n'},
+            "process launch": {"pkg/build.rs": 'fn main() { std::process::Command::new("python3").arg("../scripts/gen.py").status().unwrap(); }\n'},
             "computed directory traversal": {"pkg/build.rs": 'fn main() { std::process::Command::new("../scripts/gen.py").status().unwrap(); }\n', "scripts/gen.py": "#!/usr/bin/env python3\nfrom pathlib import Path\nprint((Path(__file__).parents[1] / 'docs' / 'guide.md').read_text())\n"},
             "unresolved documentation reference ": {".gitignore": "/pkg/src/generated.rs\n", "pkg/src/generated.rs": 'fn p(n: &str) -> String { format!("../../docs/{n}.md") }\n'},
+            "unresolved documentation reference  ": {"pkg/src/quote.rs": '/// Strips a leading " from the page name.\nfn p(n: &str) -> String { format!("../../docs/{n}.md") }\n'},
+            "unresolved documentation reference   ": {"pkg/src/sep.rs": 'use std::path::MAIN_SEPARATOR as S;\nfn p(n: &str) -> String { format!("..{S}..{S}docs{S}{n}.md") }\n'},
+            "process launch  ": {"pkg/build.rs": 'fn main() { std::process::Command::new("../scripts/gen.py").status().unwrap(); }\n', "scripts/gen.py": "#!/usr/bin/env python3\nprint(open('../docs/guide.md').read())\n"},
+            "process launch ": {"pkg/build.rs": 'fn main() { std::process::Command::new("git").args(["status", "--porcelain"]).status().unwrap(); }\n'},
+            "reaches the checkout root": {"pkg/tests/links.rs": '#[test]\nfn links() { for entry in ignore::Walk::new("..") { drop(entry); } }\n'},
         }
         for reason, files in fallback.items():
             with self.subTest(reason=reason):
@@ -317,10 +328,11 @@ class InputPolicyTests(unittest.TestCase):
         self.assertIsNone(policy["fallback_reason"])
         self.assertIn("docs/guide.md", policy["excluded"])
 
-    def test_metadata_only_changelog_reference_is_not_a_cargo_input(self):
+    def test_manifest_references_including_metadata_protect_pages(self):
         self.assertIn("CHANGELOG.md", dev.source_state("test")["policy"]["excluded"])
-        self.edit("pkg/Cargo.toml", FIXTURE["pkg/Cargo.toml"] + 'include = ["../CHANGELOG.md"]\n')
-        self.assertIn("CHANGELOG.md", dev.source_state("test")["policy"]["protected"])
+        for manifest in ('include = ["../CHANGELOG.md"]\n', '\n[package.metadata.pages]\nchangelog = "../CHANGELOG.md"\n'):
+            with self.subTest(manifest=manifest):
+                self.assertIn("CHANGELOG.md", self.scenario({"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + manifest})["protected"])
 
     def test_execute_receipt_records_policy_and_input_categories(self):
         args = argparse.Namespace(command="test", config="transparent", package=None, profile=None, only=None, filter=None, exact=False)
