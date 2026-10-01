@@ -136,6 +136,22 @@ class CargoOracleTests(unittest.TestCase):
                     self.assertIsNone(policy["fallback_reason"])
                     self.assertIn("docs/guide.md", policy["excluded"])
 
+    def test_consumed_ignored_edits_change_the_digest_when_cargo_results_change(self):
+        # An ignored generated module whose value a test checks (review case 42 -> 43).
+        root = self.fixture({
+            ".gitignore": "/target/\n/pkg/src/generated.rs\n",
+            "pkg/src/generated.rs": "pub const VALUE: u32 = 42;\n",
+            "pkg/src/lib.rs": 'include!("generated.rs");\n' + TEST.format(body="assert_eq!(VALUE, 42);"),
+        })
+        with tempfile.TemporaryDirectory() as targets, patch.object(dev, "ROOT", root):
+            self.assertTrue(cargo_test(root, Path(targets) / "before"))
+            before = {command: dev.source_state(command) for command in ("test", "verify")}
+            (root / "pkg/src/generated.rs").write_text("pub const VALUE: u32 = 43;\n")
+            self.assertFalse(cargo_test(root, Path(targets) / "after"))
+            for command, state in before.items():
+                with self.subTest(command=command):
+                    self.assertEqual(dev.compare(state, dev.source_state(command))[0], ["rust-source"])
+
 
 if __name__ == "__main__":
     unittest.main()
