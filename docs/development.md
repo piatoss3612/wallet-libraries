@@ -56,39 +56,51 @@ status `invalidated`); the receipt lists `changed_inputs` and `ignored_changes`
 by category.
 
 Source inputs follow a versioned policy recorded in each receipt. `check`,
-`test`, and `lint` use `rust-check`: it ignores only root `docs/**/*.md` prose
-and a root `CHANGELOG.md`, and only when nothing Cargo can reach mentions the
-file. The audit scans every package file (including Git-ignored ones and a
+`test`, and `lint` use `rust-check`: it may ignore root `docs/**/*.md` prose
+and a root `CHANGELOG.md`, but only when an audit proves nothing Cargo can
+reach consumes the page. Any reader the audit cannot resolve makes the run use
+every file, with `fallback_reason` in the receipt; there is no exception for
+run-time or computed paths.
+
+The audit starts from every package file (including Git-ignored ones and a
 root package), every manifest including `metadata` values and path-shaped
-keys, and Cargo configuration, then follows each string literal (escapes
-decoded, spaces allowed, each line also lexed alone) to the files it may name,
-so Markdown doctests and included modules are scanned in turn; a reached Rust
-file also reaches the modules beside and below it. A file-name mention,
-compared case-insensitively and including comments and symlinks, or a literal
-naming the page without its extension, keeps that page an input. Computed or unresolved references fall back to
-every file and record `fallback_reason`:
+keys, and Cargo configuration. Documentation is never a starting point. It
+follows each string literal (escapes decoded, spaces allowed, each line also
+lexed alone) to the files it may name. `include!`, `#[path]`, and
+`#[doc = include_str!]` targets are audited as Rust whatever their extension,
+and a reached Rust file reaches the modules beside and below it. A page that is
+reached, or whose file name or extensionless name is mentioned (compared
+case-insensitively, including comments and symlinks), stays an input. These
+fall back to every file:
 
 - non-literal `include_*!`, any `docs` segment that does not name an existing
   file, and literals that concatenation could join into `docs`;
+- run-time file access (`fs`, `File`, `OpenOptions`, `Connection::open`,
+  `Path::new`, and similar) whose path is not one string literal;
 - upward navigation: parent paths or placeholder file names at the checkout
   root, pure `..` literals, `Component::ParentDir`, `.parent()`/`.ancestors()`,
   and `current_dir` or `CARGO_MANIFEST_DIR` combined with `.pop()` or `..`;
 - directory walkers (`read_dir`, `walkdir`, `ignore`, `glob`, `globwalk`, and
   similar) and checkout-relative Cargo `[env]` values;
-- any process launch (including aliases, `duct`, `libc`/`nix` exec, Python
-  `subprocess`, `cc`/`cmake` build tools, and Cargo `runner` settings) except
-  audited `sqlite3` and the package's own `CARGO_BIN_EXE_*` binaries, and
-  work-tree readers (`git2`, `gix`, `vergen`);
+- every process launch other than the package's own `CARGO_BIN_EXE_*`
+  binaries and the reviewed `sqlite3 <db> -safe -readonly <sql>` call in
+  `zcash_client_sqlite/src/testing/db.rs` (`-safe` blocks `readfile()`,
+  `ATTACH`, and `.read`; any other `sqlite3` launch or argument, such as
+  `--nonce`, falls back), Cargo `runner` settings, and work-tree readers
+  (`git2`, `gix`, `vergen`);
 - symlinked documentation directories, nested repositories and submodules,
   unreadable sources, and path dependencies outside the checkout.
 
-Only known data formats (JSON, hex, lockfiles, protobuf, images) skip the
-computed-reference checks. Package Markdown, doctests, fixtures and assets of
-any extension, build-script inputs, manifests, and `Cargo.lock` always remain
-inputs. `verify` and other commands hash every file. Paths supplied at run time
-(environment variables, arguments), strings spelled character by character,
-and third-party libraries that read the checkout with no textual hint are not
-audited. Bump `POLICY_VERSION` with any rule change. OS locks
+Ignored files that the audit finds consumed (named, included, or compiled as
+modules) join the input digest under every policy. Package Markdown, doctests,
+fixtures and assets of any extension, build-script inputs, manifests, and
+`Cargo.lock` always remain inputs. `verify` and other commands hash every file.
+This checkout currently falls back: run-time database and file paths in
+`zcash_client_sqlite`, `zcash_client_backend`, and its `build.rs` cannot be
+proven to avoid documentation.
+`WALLET_LIB_CARGO_ORACLES=1 python3 -m unittest scripts/tests/test_dev_cargo.py`
+runs real Cargo negative oracles: editing an excluded page must not change a
+fresh `cargo test` result. Bump `POLICY_VERSION` with any rule change. OS locks
 release on exit or process death; a stale owner file is replaced on reuse.
 Doctor reports recorded owners, which may be stale after a killed process.
 Keep rust-analyzer's target directory separate (for example,

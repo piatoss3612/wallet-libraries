@@ -111,7 +111,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_changed_inputs_invalidate_success(self):
         old, new = state(), state(files={"src/lib.rs": "c"})
-        code, result, _ = self.run_filtered("ledger: test\n", [old, old, new])
+        code, result, _ = self.run_filtered("ledger: test\n", [old, new])
         self.assertEqual(code, 3)
         self.assertEqual(result["status"], "invalidated")
         self.assertEqual(result["changed_inputs"], ["rust-source"])
@@ -295,7 +295,7 @@ class InputPolicyTests(unittest.TestCase):
             "metadata read by a build script": {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[package.metadata.embed]\npages = ["../docs/guide.md"]\n'},
             "case-insensitive file system": {"pkg/src/case.rs": 'const G: &str = include_str!("../../Docs/Guide.md");\n'},
             "ignored symlink": {".gitignore": "/pkg/assets/\n", "pkg/src/link.rs": 'const P: &str = include_str!("../assets/page.md");\n'},
-            "extensionless page name": {"pkg/tests/cl.rs": '#[test]\nfn cl() { std::fs::read_to_string(std::path::Path::new("../CHANGELOG").with_extension("md")).unwrap(); }\n'},
+            "extensionless page name": {"pkg/tests/cl.rs": 'const CHANGELOG: &str = "../CHANGELOG";\n'},
             "implicit module outside the package": {"pkg/src/shared.rs": '#[path = "../../shared/mod.rs"]\nmod shared;\n', "shared/mod.rs": "mod pages;\n", "shared/pages.rs": 'const G: &str = include_str!("../docs/guide.md");\n'},
             "metadata key": {"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"] + '\n[package.metadata.embed-pages]\n"../docs/guide.md" = "guide"\n'},
         }
@@ -326,6 +326,9 @@ class InputPolicyTests(unittest.TestCase):
             "checkout-relative Cargo environment": {".cargo/config.toml": '[env]\nREPO_ROOT = { value = "", relative = true }\n'},
             "unresolvable symlink": {},
             "parent directory navigation ": {"pkg/tests/up.rs": 'use std::path::{Component, PathBuf};\n#[test]\nfn up() { let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); root.push(Component::ParentDir); drop(root); }\n'},
+            "process launch      ": {"pkg/tests/sql.rs": '#[test]\nfn sql() { std::process::Command::new("sqlite3").arg(":memory:").arg("select readfile(\'../do\'||\'cs/guide.md\')").status().unwrap(); }\n'},
+            "documentation path fragments  ": {"pkg/src/parts.json": '["../../do", "cs/", "guide", ".md"]\n', "pkg/src/lib.rs": FIXTURE["pkg/src/lib.rs"] + 'pub const PARTS: [&str; 4] = include!("parts.json");\n'},
+            "run-time file access with a computed path": {"pkg/src/snippets.inc": 'pub fn page(p: &[&str]) -> String { std::fs::read_to_string(p.concat()).unwrap() }\n', "pkg/src/lib.rs": FIXTURE["pkg/src/lib.rs"] + 'include!("snippets.inc");\n'},
             "custom Cargo runner": {".cargo/config.toml": '[target.x86_64-unknown-linux-gnu]\nrunner = ["python3", "scripts/runner.py"]\n'},
             "computed directory traversal ": {"pkg/tests/top.rs": '#[test]\nfn notes() { let mut root = std::env::current_dir().unwrap(); root.pop(); std::fs::read_to_string(root.join("CHANGELOG").with_extension("md")).unwrap(); }\n'},
             "computed directory traversal  ": {"pkg/tests/links.rs": '#[test]\nfn links() { for entry in globwalk::GlobWalkerBuilder::new(".", "*.md").build().unwrap() { drop(entry); } }\n'},
@@ -338,6 +341,42 @@ class InputPolicyTests(unittest.TestCase):
         for reason, files in fallback.items():
             with self.subTest(reason=reason):
                 self.assertIn(reason.strip(), self.scenario(files, ["scripts/gen.py"] if "scripts/gen.py" in files else (), links.get(reason, ()))["fallback_reason"] or "")
+
+    def test_root_package_keeps_unreferenced_documentation_excluded(self):
+        policy = self.scenario({"Cargo.toml": '[package]\nname = "app"\n\n[workspace]\nmembers = ["pkg"]\n', "src/lib.rs": "pub fn f() {}\n"})
+        self.assertIsNone(policy["fallback_reason"])
+        self.assertIn("docs/guide.md", policy["excluded"])
+        self.assertIn("docs/included.md", policy["protected"])
+
+    def test_consumed_ignored_inputs_invalidate_and_unconsumed_do_not(self):
+        self.write(".gitignore", "/pkg/src/generated.rs\n/pkg/tests/fixtures/local.hex\n/pkg/scratch.txt\n")
+        self.write("pkg/src/generated.rs", "pub const G: u8 = 1;\n")
+        self.write("pkg/tests/fixtures/local.hex", "00\n")
+        self.write("pkg/scratch.txt", "notes\n")
+        self.write("pkg/src/lib.rs", FIXTURE["pkg/src/lib.rs"] + 'include!("generated.rs");\npub const H: &str = include_str!("../tests/fixtures/local.hex");\n')
+        self.commit()
+        cases = {"pkg/src/generated.rs": ["rust-source"], "pkg/tests/fixtures/local.hex": ["fixture-or-asset"], "pkg/scratch.txt": []}
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                for command in ("test", "verify"):
+                    self.assertEqual(self.change(lambda: self.edit(name, f"changed {command}\n"), command)[0], expected)
+
+    def test_only_the_reviewed_sqlite3_invocation_is_exempt(self):
+        name, function, _ = dev.AUDITED_SQLITE
+        call = '    let output = Command::new("sqlite3")\n        .arg(db_path)\n        .arg("-safe")\n        .arg("-readonly")\n        .arg(command)\n        .output()\n        .expect("failed");\n'
+        source = "use std::{ffi::OsStr, process::Command};\n" + function + "\nCALL}\n"
+        cases = {
+            "reviewed invocation": ({"pkg/Cargo.toml": FIXTURE["pkg/Cargo.toml"], name: source.replace("CALL", call)}, None),
+            "nonce re-enables file access": ({name: source.replace("CALL", call.replace('.arg("-readonly")', '.arg("-readonly")\n        .arg("--nonce")'))}, "process launch"),
+            "same call in another file": ({"pkg/src/sql.rs": source.replace("CALL", call)}, "process launch"),
+            "same call in another function": ({name: source.replace("run_sqlite3", "dump").replace("CALL", call)}, "process launch"),
+        }
+        package = str(Path(name).parents[1])
+        for case, (files, reason) in cases.items():
+            with self.subTest(case=case):
+                files = {f"{package}/Cargo.toml": '[package]\nname = "sqlite"\n', **files}
+                fallback = self.scenario(files)["fallback_reason"]
+                self.assertIn(reason, fallback) if reason else self.assertIsNone(fallback)
 
     def test_untracked_nested_repository_falls_back(self):
         self.write("pkg/vendor/helper/src/lib.rs", 'const G: &str = include_str!("../../../../docs/guide.md");\n')
@@ -356,8 +395,12 @@ class InputPolicyTests(unittest.TestCase):
             with self.subTest(case=case):
                 fallback = self.scenario(files)["fallback_reason"]
                 self.assertIn(reason, fallback) if reason else self.assertIsNone(fallback)
-        (self.root / os.fsdecode(b"pkg/caf\xe9.txt")).write_text("x")
-        self.assertIsNone(dev.source_state("test")["policy"]["fallback_reason"])
+        try:
+            (self.root / os.fsdecode(b"pkg/caf\xe9.txt")).write_text("x")
+        except OSError:
+            pass  # APFS rejects non-UTF-8 names (EILSEQ); nothing to digest there
+        else:
+            self.assertIsNone(dev.source_state("test")["policy"]["fallback_reason"])
         self.write("scratch.log", "private\n")
         (self.root / "scratch.log").chmod(0)
         self.addCleanup((self.root / "scratch.log").chmod, 0o644)
@@ -395,11 +438,14 @@ class InputPolicyTests(unittest.TestCase):
                 self.assertEqual(result["source"]["policy"]["version"], dev.POLICY_VERSION)
                 self.assertIsNone(result["source"]["policy"]["fallback_reason"])
 
-    def test_repository_audit_has_no_unresolved_references(self):
+    def test_repository_audit_falls_back_for_unproven_readers(self):
+        # The reviewed sqlite3 launch is accepted, but computed run-time paths
+        # cannot be proven to avoid documentation, so this checkout uses full inputs.
         with patch.object(dev, "ROOT", Path(__file__).resolve().parents[2]):
             policy = dev.input_policy("test", dev.repository_files())
-        self.assertIsNone(policy["fallback_reason"])
-        self.assertTrue(policy["excluded"])
+        self.assertNotIn("process launch", policy["fallback_reason"])
+        self.assertIn("run-time file access with a computed path in librustzcash/zcash_client_sqlite/src/lib.rs", policy["fallback_reason"])
+        self.assertEqual(policy["excluded"], [])
 
 
 if __name__ == "__main__":

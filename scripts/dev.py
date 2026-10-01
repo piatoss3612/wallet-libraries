@@ -36,7 +36,7 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 6
+POLICY_VERSION = 8
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
 COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{](?!\s*[bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
@@ -48,7 +48,18 @@ UPWARD = re.compile(r"\.pop\(\)|\.\.|\bdirname\b|\bParentDir\b")
 SPAWN = re.compile(r'\bCommand\s*::\s*new\s*\(\s*(?:"([^"]*)"\s*\)|(env!\(\s*"CARGO_BIN_EXE_\w+"\s*\)))?|\bcmd!\s*[(\[{]|\b(?:duct|xshell|cmake|cc|autotools|meson|subprocess)::|\bCommand\s+as\b|\b(?:libc|unistd)::(?:system|exec\w*|posix_spawn\w*|fork)\b|\bsubprocess\.|\bos\.(?:system|exec\w*|spawn\w*|popen)\b')
 # Libraries that read the whole work tree, such as Git status for build info.
 WORKTREE_READERS = re.compile(r"\b(?:git2|gix|vergen\w*|built)::")
-AUDITED_PROGRAMS = {"sqlite3"}  # reads only the database and SQL it is given
+# The one audited sqlite3 launch: `-safe` disables readfile(), ATTACH, `.read`
+# and other external file access except the named database, and `-readonly`
+# forbids writes; no `--nonce` (which re-enables them), `-init`, or other
+# argument may appear. Bound to its file and function; any other sqlite3
+# launch, or any change to this one, falls back until reviewed again.
+AUDITED_SQLITE = ("librustzcash/zcash_client_sqlite/src/testing/db.rs", "unsafe fn run_sqlite3<S: AsRef<OsStr>>(db_path: S, command: &str) {", 'Command::new("sqlite3") .arg(db_path) .arg("-safe") .arg("-readonly") .arg(command) .output()')
+# Run-time file access whose path is not one string literal may reach any
+# file, so it is an unknown reader (the policy cannot prove where it points).
+RUNTIME_READER = re.compile(r'(?:\b(?:fs|File|Connection|OpenOptions|Path|PathBuf|Dir|tokio::fs)::(?:\w+)|\.open(?:_with_flags)?|\bread_to_string|(?<!fn )\bopen)\s*\(\s*(?![bc]?r?#*")(?!\))')
+# Literal targets of `include!`, `#[path]`, and `#[doc = include_str!]` are
+# compiled as Rust (doctests for Markdown), whatever their extension.
+RUST_TARGET = re.compile(r'\binclude!\s*[(\[{]\s*[bc]?r?(#*)"(.*?)"\1|#\s*\[\s*path\s*=\s*r?(#*)"(.*?)"\3|\bdoc\s*=\s*include_str!\s*[(\[{]\s*r?(#*)"(.*?)"\5', re.S)
 PATH_TOKEN = re.compile(r"[\w.:/\\-]+")
 WORD = re.compile(r"""[^\s'"`<>|;&()]+""")
 # Rust and doctest literals: raw strings, escaped strings, and character
@@ -207,7 +218,17 @@ def documentation(literal: str, index: Index) -> tuple[set[str], str | None]:
     return named, None
 
 
-def computed(text: str, found: set[str]) -> list[str]:
+def audited_sqlite(name: str, text: str, spawn: re.Match) -> bool:
+    """Whether a launch is exactly the reviewed `-safe -readonly` sqlite3 call."""
+    path, function, chain = AUDITED_SQLITE
+    if name != path or text.count("Command::new") != 1:
+        return False
+    start = text.rfind(function, 0, spawn.start())
+    following = " ".join(text[spawn.start():].split())
+    return start >= 0 and "\nfn " not in text[start:spawn.start()] and following.startswith(chain + " ")
+
+
+def computed(text: str, found: set[str], name: str = "") -> list[str]:
     """Constructs in code that may build a path this scanner cannot resolve."""
     reasons = []
     if COMPUTED_INCLUDE.search(text):
@@ -216,9 +237,13 @@ def computed(text: str, found: set[str]) -> list[str]:
         reasons.append("computed directory traversal")
     if WORKTREE_READERS.search(text):
         reasons.append("work-tree reader")
-    # The package's own binaries (`CARGO_BIN_EXE_*`) are built from scanned sources.
-    if any(spawn[1] not in AUDITED_PROGRAMS and not spawn[2] for spawn in SPAWN.finditer(text)):
+    # The package's own binaries (`CARGO_BIN_EXE_*`) are built from scanned
+    # sources. Other programs, including unrestricted sqlite3 whose SQL can
+    # read files, are exempt only as the exact audited invocation.
+    if any(not spawn[2] and not audited_sqlite(name, text, spawn) for spawn in SPAWN.finditer(text)):
         reasons.append("process launch that may read any file")
+    if RUNTIME_READER.search(text):
+        reasons.append("run-time file access with a computed path")
     # Pure upward navigation such as `Path::new("..").join("..")` can reach the root
     # from any package depth.
     if any(re.fullmatch(r"[./]*\.\.[./]*", literal) for literal in found) or re.search(r"\bParentDir\b", text):
@@ -267,12 +292,10 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
     scanned in turn, so Markdown doctests, build-script generators, and
     included modules are audited transitively.
     """
-    policy = {"name": "rust-check" if command in RUST_CHECK_COMMANDS else "full", "version": POLICY_VERSION, "fallback_reason": None, "protected": [], "excluded": []}
-    if policy["name"] == "full":
-        policy["fallback_reason"] = f"{command} validates every repository input"
-        return policy
+    policy = {"name": "rust-check" if command in RUST_CHECK_COMMANDS else "full", "version": POLICY_VERSION, "fallback_reason": None, "protected": [], "excluded": [], "consumed_ignored": []}
     candidates = {name for name in files if excludable(name)}
-    known = set(files) | ignored_files()
+    ignored_names = ignored_files()
+    known = set(files) | ignored_names
     index = Index(known)
     folded_candidates = {name.casefold(): name for name in candidates}
     protected: set[str] = set()
@@ -285,7 +308,10 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
         path = ROOT / name
         if path.is_symlink():
             try:
-                target = path.resolve(strict=False)
+                # Strict resolution reports loops on every platform.
+                target = path.resolve(strict=True)
+            except FileNotFoundError:
+                target = path.resolve(strict=False)  # dangling: check where it would point
             except (OSError, RuntimeError):
                 reasons.append(f"unresolvable symlink {name}")
                 continue
@@ -306,15 +332,20 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
     def package_of(name: str) -> str | None:
         return next((p for p in packages if p == "" or name.startswith(p + "/")), None)
     cargo = manifests | {name for name in known if Path(name).name in {"rust-toolchain", "rust-toolchain.toml"} or name.startswith(".cargo/")}
-    pending = sorted(cargo | {name for name in known if package_of(name) is not None})
+    # Documentation is never a seed: a page is scanned only when something reaches it.
+    pending = sorted((cargo | {name for name in known if package_of(name) is not None}) - candidates)
     scanned = set(pending)
+    # Files Cargo consumes because a scanned file names or includes them.
+    consumed: set[str] = set()
+    rust_like: set[str] = set()
     while pending:
         name = pending.pop()
         path = ROOT / name
         if not path.is_file():
             continue
         try:
-            text = path.read_bytes().decode("utf-8", errors="strict" if path.suffix in {".rs", ".toml"} else "replace")
+            rust = path.suffix == ".rs" or name in rust_like
+            text = path.read_bytes().decode("utf-8", errors="strict" if rust or path.suffix == ".toml" else "replace")
             cargo_file = path.name == "Cargo.toml" or path.parent.name == ".cargo"
             try:
                 document = tomllib.loads(text) if path.suffix == ".toml" or cargo_file else None
@@ -343,12 +374,12 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
                     if isinstance(value, dict) and value.get("relative") or not text_value.strip("./") or PARENT.search(text_value):
                         reasons.append(f"checkout-relative Cargo environment {key!r} in {name}")
             else:
-                found = literals(name, text)
-                if path.suffix not in DATA_SUFFIXES:
-                    reasons.extend(f"{reason} in {name}" for reason in computed(text, found))
+                found = literals(f"{name}.rs" if rust else name, text)
+                if rust or path.suffix not in DATA_SUFFIXES:
+                    reasons.extend(f"{reason} in {name}" for reason in computed(text, found, name))
                     heads.update(name for literal in found if DOCS_HEAD.search(literal))
                     tails.update(name for literal in found if DOCS_TAIL.search(literal))
-                    if path.suffix not in {".rs", ".md"}:
+                    if not rust and path.suffix != ".md":
                         # Scripts may name paths without quotes.
                         found |= set(WORD.findall(text))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
@@ -366,12 +397,16 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
             stem = literal.strip().rstrip("/").rsplit("/", 1)[-1].casefold()
             protected.update(page for page in candidates if stem and page.rsplit("/", 1)[-1].casefold().removesuffix(".md") == stem)
         # `mod name;` reaches sibling and child modules without a literal.
-        if path.suffix == ".rs":
+        if rust:
             folder = str(Path(name).parent)
             modules = {other for other in known if other.endswith(".rs")} if folder == "." else index.under(folder)
             for item in {m for m in modules if m.endswith(".rs")} - scanned:
                 scanned.add(item)
+                consumed.add(item)
                 pending.append(item)
+            targets = {unescape(m[2] or m[4] or m[6] or "").replace("\\", "/") for m in RUST_TARGET.finditer(text)}
+        else:
+            targets = set()
         package = package_of(name) or ""
         for literal in found:
             named, reason = documentation(literal, index)
@@ -380,11 +415,22 @@ def input_policy(command: str, files: dict[str, str]) -> dict:
             for problem in (reason, escape):
                 if problem:
                     reasons.append(f"{problem} in {name}")
+            # A manifest naming a package directory does not consume every file in it.
+            consumed |= reached if document is None or not cargo_file else {r for r in reached if r.rsplit("/", 1)[-1] == literal.rstrip("/").rsplit("/", 1)[-1]}
+            if literal in targets:
+                # Rescan a file already read as data once it is known to be Rust.
+                pending.extend(sorted((reached - rust_like) & scanned))
+                rust_like |= reached
             for item in reached - scanned:
                 scanned.add(item)
                 pending.append(item)
     if heads and tails:
         reasons.append(f"documentation path fragments in {min(heads)} and {min(tails)}")
+    # Ignored files that Cargo consumes are inputs under every policy.
+    policy["consumed_ignored"] = sorted(consumed & ignored_names)
+    if policy["name"] == "full":
+        policy["fallback_reason"] = f"{command} validates every repository input"
+        return policy
     if reasons:
         policy["fallback_reason"] = "; ".join(sorted(set(reasons))[:5])
         return policy
@@ -423,6 +469,12 @@ def source_state(command: str = "verify") -> dict:
     """Attribute results to HEAD and the source inputs selected by the command's policy."""
     files = repository_files()
     policy = input_policy(command, files)
+    for name in policy["consumed_ignored"]:
+        try:
+            files[name] = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+        except OSError as error:
+            files[name] = f"<unreadable {type(error).__name__}>"
+    files = dict(sorted(files.items()))
     digest = hashlib.sha256()
     for name, value in files.items():
         if not ignored(policy, name):
@@ -469,9 +521,9 @@ def build_identity(config: str, profile: str) -> str:
 
 class Lease:
     """Nonblocking OS lease; killed owners release it without stale-PID recovery."""
-    def __init__(self, root: Path, identity: str, command: str = "verify"):
+    def __init__(self, root: Path, identity: str, source: dict | None = None):
         self.root = root / identity
-        self.command = command
+        self.source = source
         self.lock = None
         self.path = None
 
@@ -487,7 +539,7 @@ class Lease:
                 lock.close()
                 continue
             self.lock, self.path = lock, path
-            (path / "owner.json").write_text(json.dumps({"pid": os.getpid(), "checkout": str(ROOT), "source": receipt(source_state(self.command))}, indent=2) + "\n")
+            (path / "owner.json").write_text(json.dumps({"pid": os.getpid(), "checkout": str(ROOT), "source": self.source}, indent=2) + "\n")
             return self
         raise RuntimeError("all build directories are leased; finish an existing check")
 
@@ -530,10 +582,10 @@ def execute(args) -> int:
         for owner in sorted(root.glob("*/*/*/*/*/owner.json")):
             print(f"build owner: {owner}: {owner.read_text().strip()}")
         return ready.returncode
-    with Lease(root, identity, args.command) as lease:
+    before = source_state(args.command)
+    with Lease(root, identity, receipt(before)) as lease:
         print(f"build directory: {lease.path}", flush=True)
         env = dict(os.environ, CARGO_TARGET_DIR=str(lease.path))
-        before = source_state(args.command)
         started = time.monotonic()
         code = 1
         try:
