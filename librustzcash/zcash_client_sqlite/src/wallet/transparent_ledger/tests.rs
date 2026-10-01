@@ -745,6 +745,18 @@ mod handles {
                 .transparent_ledger_snapshot(account.id(), ConfirmationsPolicy::MIN),
             Err(SqliteClientError::CorruptedData(_))
         ));
+
+        // A shadow snapshot keeps public authority and does not read the provenance of a
+        // last-known amount it would not report, so the same state cannot fail it.
+        set_mode(&mut st, PrivateShadow);
+        let snapshot = st
+            .wallet()
+            .db()
+            .transparent_ledger_snapshot(account.id(), ConfirmationsPolicy::MIN)
+            .unwrap();
+        assert_eq!(snapshot.authority, TransparentAuthority::Public);
+        assert!(snapshot.authorized.is_some());
+        assert!(snapshot.last_known.is_none());
     }
 
     #[test]

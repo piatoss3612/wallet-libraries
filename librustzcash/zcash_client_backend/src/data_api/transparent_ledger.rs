@@ -12,6 +12,9 @@ use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
 use super::{Balance, WalletRead, wallet::ConfirmationsPolicy};
 
+mod activity;
+pub use activity::*;
+
 mod history;
 pub use history::*;
 

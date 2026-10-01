@@ -185,7 +185,8 @@ pub(crate) fn account_ledger<P: consensus::Parameters>(
     gap_limits: &GapLimits,
     account: AccountUuid,
 ) -> Result<AccountLedger, SqliteClientError> {
-    let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    let watch =
+        Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
     let account_ref = watch.account.internal_id();
     Ok(AccountLedger {
         account_ref,
@@ -349,7 +350,8 @@ pub(crate) fn candidate_recovery<P: consensus::Parameters>(
     account: AccountUuid,
 ) -> Result<CandidateRecovery<AccountUuid>, SqliteClientError> {
     resolve_mode(conn, configured)?;
-    let watch = Watch::load(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    let watch =
+        Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
     let account_ref = watch.account.internal_id();
     let status = recovery_status(conn, gap_limits, &watch)?;
 
@@ -395,6 +397,12 @@ pub(super) fn placed_receives(
     )?;
     stmt.query_and_then(named_params![":account_id": account_ref.0], |row| {
         Ok::<_, SqliteClientError>(ReceiveEvent {
+            metadata: super::metadata::candidate_metadata(
+                conn,
+                account_ref,
+                TxId::from_bytes(row.get(0)?),
+                height(row.get(5)?),
+            )?,
             outpoint: OutPoint::new(row.get(0)?, row.get(1)?),
             address: address_from_script(row.get(2)?)?,
             value: Zatoshis::from_nonnegative_i64(row.get(3)?)
@@ -421,6 +429,12 @@ pub(super) fn placed_spends(
     )?;
     stmt.query_and_then(named_params![":account_id": account_ref.0], |row| {
         Ok::<_, SqliteClientError>(SpendEvent {
+            metadata: super::metadata::candidate_metadata(
+                conn,
+                account_ref,
+                TxId::from_bytes(row.get(0)?),
+                height(row.get(5)?),
+            )?,
             spending_txid: TxId::from_bytes(row.get(0)?),
             input_index: row.get(1)?,
             prevout: OutPoint::new(row.get(2)?, row.get(3)?),

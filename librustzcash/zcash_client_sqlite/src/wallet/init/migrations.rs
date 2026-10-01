@@ -17,6 +17,8 @@ mod add_transparent_value_index;
 mod add_utxo_account;
 mod addresses_table;
 mod drop_zip318_pool_migration;
+pub(super) use drop_zip318_pool_migration::remove_zip318_column;
+pub(super) const DROP_ZIP318_POOL_MIGRATION_ID: Uuid = drop_zip318_pool_migration::MIGRATION_ID;
 mod ensure_default_transparent_address;
 mod ensure_orchard_ua_receiver;
 mod ephemeral_addresses;
@@ -51,10 +53,16 @@ mod status_inclusion_evidence;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transparent_activation_schema;
+mod transparent_activity_metadata;
+pub(super) const TRANSPARENT_ACTIVITY_METADATA_ID: Uuid =
+    transparent_activity_metadata::MIGRATION_ID;
 mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod transparent_recovery_schema;
+mod transparent_shared_derivations;
+pub(super) const TRANSPARENT_SHARED_DERIVATIONS_ID: Uuid =
+    transparent_shared_derivations::MIGRATION_ID;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
@@ -160,10 +168,12 @@ pub mod ids {
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
+        transparent_activity_metadata::MIGRATION_ID as TRANSPARENT_ACTIVITY_METADATA,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
         transparent_ledger_schema::MIGRATION_ID as TRANSPARENT_LEDGER_SCHEMA,
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
         transparent_recovery_schema::MIGRATION_ID as TRANSPARENT_RECOVERY_SCHEMA,
+        transparent_shared_derivations::MIGRATION_ID as TRANSPARENT_SHARED_DERIVATIONS,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
         tx_retrieval_queue::MIGRATION_ID as TX_RETRIEVAL_QUEUE,
@@ -401,6 +411,8 @@ pub(super) fn all_migrations<
         Box::new(transparent_policy_generation::Migration),
         Box::new(transparent_recovery_schema::Migration),
         Box::new(transparent_activation_schema::Migration),
+        Box::new(transparent_activity_metadata::Migration),
+        Box::new(transparent_shared_derivations::Migration),
     ]
 }
 
@@ -436,6 +448,7 @@ const PUBLIC_MIGRATION_STATES: &[&[Uuid]] = &[
     V_0_22_0_RC1,
     V_0_22_0_RC2,
     V_ZAKURA_0_1_0_RC5,
+    V_ZAKURA_0_1_0_RC7,
 ];
 
 /// Leaf migrations in the 0.4.0 release.
@@ -605,11 +618,23 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
     v_transactions_zip318_kind::MIGRATION_ID,
 ];
 
+/// Leaf migrations in the published zakura-client-sqlite 0.1.0-rc7 release.
+///
+/// 0.1.0-rc6 is omitted: its `ironwood_compact_encryption` migration was withdrawn in rc7, so
+/// no later build can open a database that applied it.
+pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
+    status_inclusion_evidence::MIGRATION_ID,
+    v_tx_outputs_transparent_addresses::MIGRATION_ID,
+    ivk_item_cache::MIGRATION_ID,
+    add_transparent_receiver_address_index::MIGRATION_ID,
+    add_transparent_value_index::MIGRATION_ID,
+];
+
 /// The migration that creates the transparent ledger schema.
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_activation_schema::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_shared_derivations::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -751,7 +776,9 @@ pub(crate) mod tests {
             ids::STANDALONE_P2SH,
             ids::SUPPORT_LEGACY_SQLITE,
             ids::SUPPORT_ZCASHD_WALLET_IMPORT,
+            ids::TRANSPARENT_ACTIVITY_METADATA,
             ids::TRANSPARENT_ACTIVATION_SCHEMA,
+            ids::TRANSPARENT_SHARED_DERIVATIONS,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TRANSPARENT_POLICY_GENERATION,

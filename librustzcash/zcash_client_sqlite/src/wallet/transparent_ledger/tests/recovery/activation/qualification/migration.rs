@@ -278,6 +278,7 @@ impl PreLedgerWallet {
         coinbase: bool,
     ) -> ReceiveEvent {
         ReceiveEvent {
+            metadata: None,
             outpoint: outpoint.clone(),
             address: self.external(account),
             value: Zatoshis::const_from_u64(value),
@@ -442,6 +443,7 @@ fn a_long_lived_wallet_upgrades_and_activates_keeping_its_local_history() {
                 w.receive(account, &rewound, 10_000, b + 9, false),
             ],
             vec![SpendEvent {
+                metadata: None,
                 spending_txid: TxId::from_bytes([0x22; 32]),
                 input_index: 0,
                 prevout: spent.clone(),
@@ -490,6 +492,7 @@ fn a_multi_seed_wallet_with_a_cross_account_transfer_upgrades_and_activates() {
             (
                 vec![w.receive(payer, &funding, 40_000, b + 2, false)],
                 vec![SpendEvent {
+                    metadata: None,
                     spending_txid: TxId::from_bytes([0x32; 32]),
                     input_index: 0,
                     prevout: funding.clone(),
@@ -552,6 +555,7 @@ fn a_hardware_first_wallet_upgrades_and_activates() {
                 w.receive(device, &spent, 5_000, b + 2, false),
             ],
             vec![SpendEvent {
+                metadata: None,
                 spending_txid: TxId::from_bytes([0x53; 32]),
                 input_index: 0,
                 prevout: spent.clone(),

@@ -836,6 +836,17 @@ CREATE TABLE tpir_candidate_windows (
     end_index INTEGER NOT NULL CHECK (end_index >= 0 AND end_index <= 2147483648),
     PRIMARY KEY (account_id, key_scope)
 )"#;
+/// Derivation origins retained when materialization skips another account's receiver.
+///
+/// These indices supply gap-expansion evidence only. They grant neither address ownership nor
+/// coverage, survive rewind and reopen, and disappear when the deriving account is deleted.
+pub(super) const TABLE_TPIR_SHARED_DERIVATIONS: &str = r#"
+CREATE TABLE tpir_shared_derivations (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    key_scope INTEGER NOT NULL CHECK (key_scope IN (0, 1, 2)),
+    child_index INTEGER NOT NULL CHECK (child_index >= 0 AND child_index < 2147483648),
+    PRIMARY KEY (account_id, key_scope, child_index)
+)"#;
 /// Source revisions that supplied candidate evidence.
 ///
 /// Identifiers are opaque. Within a source, a higher `lineage` replaces a lower one; the
@@ -2090,3 +2101,19 @@ CREATE TABLE ironwood_enhance_metadata_queue (
     CHECK ((commitment_tree_position IS NULL) = (output_index IS NULL)),
     CHECK (compact_bound = 0 OR commitment_tree_position IS NOT NULL)
 )";
+
+/// Source-bound transaction facts. No fee is attributed to an account by this table.
+pub(super) const TABLE_TPIR_TRANSACTION_METADATA: &str = r#"
+CREATE TABLE tpir_transaction_metadata (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    txid BLOB NOT NULL CHECK (length(txid) = 32),
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id) ON DELETE CASCADE,
+    mined_height INTEGER NOT NULL CHECK (mined_height >= 0),
+    fee_state INTEGER NOT NULL CHECK (fee_state IN (0, 1, 2)),
+    fee_zat INTEGER CHECK (fee_zat >= 0 AND fee_zat <= 2100000000000000),
+    input_count INTEGER NOT NULL CHECK (input_count >= 0 AND input_count <= 4294967295),
+    shielded INTEGER NOT NULL CHECK (shielded IN (0, 1)),
+    CHECK ((fee_state = 0 AND fee_zat IS NOT NULL) OR (fee_state != 0 AND fee_zat IS NULL)),
+    CHECK (fee_state != 2 OR input_count = 0),
+    PRIMARY KEY (account_id, txid, revision_id)
+)"#;

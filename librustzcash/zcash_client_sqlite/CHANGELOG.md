@@ -10,12 +10,27 @@ workspace.
 
 ## [Unreleased]
 
+- Shared derivation origins survive promotion and reopen without transferring receiver ownership.
+  Activity at those receivers schedules new gaps and withholds private authority until coverage
+  completes. Active recovery materializes its discovered addresses before projecting receipts.
+  The additive `transparent_shared_derivations` migration creates empty bookkeeping; recording
+  a shared origin requires reader version 8 and excludes public legacy-writer handover.
+
 - Candidate windows respect existing receiver ownership; imports discard competing candidate
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 
 ### Added
 - `SqlTransaction::new` lets consumers run guarded wallet operations and application cleanup in one caller-owned transaction.
 - `WalletDb::check_transparent_transaction_inputs` authorizes finalized submissions and exact-byte retries without permitting competing spends or weakening transparent authority.
+- `wallet::init::prepare_legacy_rollback` restores the unused ZIP 318 column for an
+  explicit handover to the published rc5/rc7 public writers. It refuses changed/private policy
+  and recovery state. Returning initialization reconciles old public output/spend origins
+  atomically, without granting coverage or authority; the migration journal stays intact.
+- Initialization refuses unknown migration IDs before schema interpretation and restores foreign
+  key enforcement on error. ZIP 318 removal names dependent application views/triggers.
+- Shared-receiver activity expands effective recovery windows on read, exposing work immediately.
+  Promotion materializes only unowned receivers; shadow reads do not inspect private provenance,
+  and per-account balance reads share one SQLite snapshot.
 - `WalletHandleModes`, `set_handle_modes`, and `with_handle_modes` configure every supported disclosure lane together without persisting policy.
 - Revision observations no longer supersede wallet-wide evidence. Only the trusted test/development qualification transition withdraws older provisional evidence. New revision writes require reader version 6; version-5 binaries cannot safely operate those wallets.
 - `get_wallet_summary` reuses existing transactions, allowing summary and transparent authority reads in one snapshot. Per-account transparent balances use an account-scoped query.

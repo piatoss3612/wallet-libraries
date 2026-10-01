@@ -79,6 +79,21 @@ fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<()
     {
         return Err(InvalidCommit::Identifier);
     }
+    for receive in &commit.receives {
+        if receive
+            .metadata
+            .is_some_and(|m| !m.is_valid_for(receive.coinbase))
+        {
+            return Err(InvalidCommit::TransactionMetadata);
+        }
+    }
+    for spend in &commit.spends {
+        if spend.metadata.is_some_and(|m| {
+            !m.is_valid_for(false) || spend.input_index >= m.transparent_input_count
+        }) {
+            return Err(InvalidCommit::TransactionMetadata);
+        }
+    }
     let mined = commit.receives.iter().map(|r| r.mined_height);
     if mined
         .chain(commit.spends.iter().map(|s| s.mined_height))
@@ -115,7 +130,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
         ensure_policy_generation(conn, commit.context.policy_generation)?;
 
         let stale = |reason| reject(CommitRejection::Stale(reason));
-        let watch = Watch::load(conn, params, commit.context.account)?
+        let watch = Watch::load(conn, params, gap_limits, commit.context.account)?
             .ok_or_else(|| stale(StaleCommit::AccountUnknown))?;
         let account_ref = watch.account.internal_id();
         if source_quarantined(conn, &commit.revision.source)? {
@@ -219,9 +234,25 @@ fn apply_facts<P: consensus::Parameters>(
 
     for receive in &commit.receives {
         apply_receive(conn, account_ref, revision_id, receive)?;
+        super::metadata::apply_metadata(
+            conn,
+            account_ref,
+            revision_id,
+            TxId::from_bytes(*receive.outpoint.hash()),
+            receive.mined_height,
+            receive.metadata,
+        )?;
     }
     for spend in &commit.spends {
         apply_spend(conn, account_ref, revision_id, spend)?;
+        super::metadata::apply_metadata(
+            conn,
+            account_ref,
+            revision_id,
+            spend.spending_txid,
+            spend.mined_height,
+            spend.metadata,
+        )?;
     }
 
     for range in &commit.coverage {
@@ -232,6 +263,9 @@ fn apply_facts<P: consensus::Parameters>(
     }
 
     let window_grew = if active {
+        // Read-time expansion may have found addresses beyond the wallet's gap generation.
+        // Materialize that watch before projecting any receive at those addresses.
+        ownership::materialize_watch(conn, params, watch)?;
         // Events join the wallet's outputs and spends, where the wallet's own gap-limit
         // generation extends its address window.
         for receive in &commit.receives {
@@ -240,7 +274,7 @@ fn apply_facts<P: consensus::Parameters>(
         for spend in &commit.spends {
             projection::project_spend(conn, params, gap_limits, spend)?;
         }
-        let after = Watch::load(conn, params, commit.context.account)?
+        let after = Watch::load(conn, params, gap_limits, commit.context.account)?
             .ok_or(SqliteClientError::AccountUnknown)?;
         after.production_end != watch.production_end
     } else {
