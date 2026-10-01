@@ -53,6 +53,9 @@ mod status_inclusion_evidence;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transparent_activation_schema;
+mod transparent_activity_metadata;
+pub(super) const TRANSPARENT_ACTIVITY_METADATA_ID: Uuid =
+    transparent_activity_metadata::MIGRATION_ID;
 mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
 mod transparent_policy_generation;
@@ -165,6 +168,7 @@ pub mod ids {
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
+        transparent_activity_metadata::MIGRATION_ID as TRANSPARENT_ACTIVITY_METADATA,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
         transparent_ledger_schema::MIGRATION_ID as TRANSPARENT_LEDGER_SCHEMA,
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
@@ -407,6 +411,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_policy_generation::Migration),
         Box::new(transparent_recovery_schema::Migration),
         Box::new(transparent_activation_schema::Migration),
+        Box::new(transparent_activity_metadata::Migration),
         Box::new(transparent_shared_derivations::Migration),
     ]
 }
@@ -771,6 +776,7 @@ pub(crate) mod tests {
             ids::STANDALONE_P2SH,
             ids::SUPPORT_LEGACY_SQLITE,
             ids::SUPPORT_ZCASHD_WALLET_IMPORT,
+            ids::TRANSPARENT_ACTIVITY_METADATA,
             ids::TRANSPARENT_ACTIVATION_SCHEMA,
             ids::TRANSPARENT_SHARED_DERIVATIONS,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,

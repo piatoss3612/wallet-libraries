@@ -2101,3 +2101,19 @@ CREATE TABLE ironwood_enhance_metadata_queue (
     CHECK ((commitment_tree_position IS NULL) = (output_index IS NULL)),
     CHECK (compact_bound = 0 OR commitment_tree_position IS NOT NULL)
 )";
+
+/// Source-bound transaction facts. No fee is attributed to an account by this table.
+pub(super) const TABLE_TPIR_TRANSACTION_METADATA: &str = r#"
+CREATE TABLE tpir_transaction_metadata (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    txid BLOB NOT NULL CHECK (length(txid) = 32),
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id) ON DELETE CASCADE,
+    mined_height INTEGER NOT NULL CHECK (mined_height >= 0),
+    fee_state INTEGER NOT NULL CHECK (fee_state IN (0, 1, 2)),
+    fee_zat INTEGER CHECK (fee_zat >= 0 AND fee_zat <= 2100000000000000),
+    input_count INTEGER NOT NULL CHECK (input_count >= 0 AND input_count <= 4294967295),
+    shielded INTEGER NOT NULL CHECK (shielded IN (0, 1)),
+    CHECK ((fee_state = 0 AND fee_zat IS NOT NULL) OR (fee_state != 0 AND fee_zat IS NULL)),
+    CHECK (fee_state != 2 OR input_count = 0),
+    PRIMARY KEY (account_id, txid, revision_id)
+)"#;

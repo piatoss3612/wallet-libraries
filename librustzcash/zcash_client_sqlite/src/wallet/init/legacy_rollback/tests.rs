@@ -176,59 +176,76 @@ fn legacy_rollback_refuses_recovery_state_even_with_public_metadata() {
 
 #[test]
 fn legacy_rollback_resumes_before_shared_derivation_migration() {
-    let mut db = db();
-    prepare_legacy_rollback(&mut db).unwrap();
-    // The preceding build could prepare a rollback wallet without this additive table.
-    db.conn
-        .execute_batch("DROP TABLE tpir_shared_derivations")
-        .unwrap();
-    db.conn
-        .execute(
-            "DELETE FROM schemer_migrations WHERE id = ?1",
-            [migrations::TRANSPARENT_SHARED_DERIVATIONS_ID
-                .as_bytes()
-                .to_vec()],
-        )
-        .unwrap();
-    db.conn
-        .execute(
-            "INSERT INTO transactions(txid, min_observed_height) VALUES (X'01', 42)",
-            [],
-        )
-        .unwrap();
-    WalletMigrator::new().init_or_migrate(&mut db).unwrap();
-    assert!(!column_restored(&db.conn).unwrap());
-    assert_eq!(
+    for before_activity in [false, true] {
+        let mut db = db();
+        prepare_legacy_rollback(&mut db).unwrap();
+        // Preceding builds could prepare a rollback wallet before either additive table existed.
         db.conn
-            .query_row("SELECT count(*) FROM tpir_shared_derivations", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
+            .execute_batch("DROP TABLE tpir_shared_derivations")
+            .unwrap();
         db.conn
-            .query_row("SELECT count(*) FROM transactions", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
+            .execute(
+                "DELETE FROM schemer_migrations WHERE id = ?1",
+                [migrations::TRANSPARENT_SHARED_DERIVATIONS_ID
+                    .as_bytes()
+                    .to_vec()],
+            )
+            .unwrap();
+        if before_activity {
+            db.conn
+                .execute_batch("DROP TABLE tpir_transaction_metadata")
+                .unwrap();
+            db.conn
+                .execute(
+                    "DELETE FROM schemer_migrations WHERE id = ?1",
+                    [migrations::TRANSPARENT_ACTIVITY_METADATA_ID
+                        .as_bytes()
+                        .to_vec()],
+                )
+                .unwrap();
+        }
+        db.conn
+            .execute(
+                "INSERT INTO transactions(txid, min_observed_height) VALUES (X'01', 42)",
+                [],
+            )
+            .unwrap();
+        WalletMigrator::new().init_or_migrate(&mut db).unwrap();
+        assert!(!column_restored(&db.conn).unwrap());
+        assert_eq!(
+            db.conn
+                .query_row("SELECT count(*) FROM tpir_shared_derivations", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.conn
+                .query_row("SELECT count(*) FROM transactions", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
 }
 
 #[test]
 fn legacy_rollback_refuses_missing_recorded_shared_table() {
-    let mut db = db();
-    prepare_legacy_rollback(&mut db).unwrap();
-    db.conn
-        .execute_batch("DROP TABLE tpir_shared_derivations")
-        .unwrap();
-    assert!(WalletMigrator::new().init_or_migrate(&mut db).is_err());
-    assert!(column_restored(&db.conn).unwrap());
-    assert_eq!(
+    for table in ["tpir_transaction_metadata", "tpir_shared_derivations"] {
+        let mut db = db();
+        prepare_legacy_rollback(&mut db).unwrap();
         db.conn
-            .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
+            .execute_batch(&format!("DROP TABLE {table}"))
+            .unwrap();
+        assert!(WalletMigrator::new().init_or_migrate(&mut db).is_err());
+        assert!(column_restored(&db.conn).unwrap());
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
 }
 
 #[cfg(feature = "transparent-inputs")]

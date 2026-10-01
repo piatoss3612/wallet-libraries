@@ -906,6 +906,7 @@ fn projection_joins_a_local_transaction_and_keeps_its_details() {
     let fixture = revision(1, true);
     let ws = watch(&st, account);
     let recovered = ReceiveEvent {
+        metadata: None,
         outpoint: OutPoint::new(*txid.as_ref(), output_index),
         address: taddr,
         value: Zatoshis::const_from_u64(50_000),
@@ -961,6 +962,7 @@ fn a_receive_the_stored_transaction_lacks_is_an_integrity_failure() {
     let ws = watch(&st, account);
     // The stored transaction has no transparent output after the payment's.
     let phantom = ReceiveEvent {
+        metadata: None,
         outpoint: OutPoint::new(*txid.as_ref(), output_index + 1),
         address: taddr,
         value: Zatoshis::const_from_u64(50_000),
@@ -979,6 +981,7 @@ fn a_spend_the_stored_transaction_lacks_is_an_integrity_failure() {
     let (mut st, account, taddr, txid, output_index) = local_payment_to_self();
     let ws = watch(&st, account);
     let paid = ReceiveEvent {
+        metadata: None,
         outpoint: OutPoint::new(*txid.as_ref(), output_index),
         address: taddr,
         value: Zatoshis::const_from_u64(50_000),
@@ -987,6 +990,7 @@ fn a_spend_the_stored_transaction_lacks_is_an_integrity_failure() {
     };
     // A shielded-funded transaction has no transparent inputs, so it cannot spend the payment.
     let phantom = SpendEvent {
+        metadata: None,
         spending_txid: txid,
         input_index: 0,
         prevout: paid.outpoint.clone(),

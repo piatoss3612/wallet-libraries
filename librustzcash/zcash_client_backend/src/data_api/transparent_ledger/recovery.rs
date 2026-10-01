@@ -10,7 +10,7 @@ use transparent::{address::TransparentAddress, bundle::OutPoint, keys::Transpare
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
-use super::{CandidateBlocker, ChainPoint};
+use super::{CandidateBlocker, ChainPoint, TransactionMetadata};
 use transparent::keys::NonHardenedChildIndex;
 
 /// The longest source, revision, or page identifier a store accepts, in bytes.
@@ -162,6 +162,8 @@ pub struct RecoveryRevision {
 /// Its identity is the outpoint; the remaining fields are checked content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceiveEvent {
+    /// Creating transaction facts; unavailable for legacy recovery sources.
+    pub metadata: Option<TransactionMetadata>,
     /// The output's identity.
     pub outpoint: OutPoint,
     /// The watched address the output pays.
@@ -180,6 +182,8 @@ pub struct ReceiveEvent {
 /// not identity, so contradictory spends for the same input cannot hide.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpendEvent {
+    /// Spending transaction facts; never the parent transaction metadata.
+    pub metadata: Option<TransactionMetadata>,
     /// The spending transaction.
     pub spending_txid: TxId,
     /// The input's index in the spending transaction.
@@ -317,6 +321,8 @@ pub enum StaleCommit {
 /// Facts that contradict stored evidence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntegrityFailure {
+    /// Retained observations disagree about a transaction fact.
+    TransactionMetadata(TxId),
     /// The revision identifier is known with different lineage, sealing, or publication, or
     /// another revision of the source has the same lineage.
     RevisionMismatch,
@@ -358,6 +364,8 @@ pub enum IntegrityFailure {
 /// A malformed commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvalidCommit {
+    /// Metadata disagrees with coinbase classification or the complete input count.
+    TransactionMetadata,
     /// A source, revision, or page identifier is empty or longer than
     /// [`MAX_RECOVERY_IDENTIFIER_LEN`].
     Identifier,

@@ -967,7 +967,7 @@ candidate activity, including receivers owned by another account. Recovery retai
 skipped derivation indices in `tpir_shared_derivations` when addresses
 are materialized. These indices survive promotion, rewind and reopen, grant no
 ownership or coverage, and are deleted with the deriving account. Their writes require
-reader version 7; earlier readers must refuse those wallets. The seedless additive
+reader version 8; earlier readers must refuse those wallets. The seedless additive
 migration creates an empty table without changing policy or authority. Active commits
 materialize newly discovered addresses before projecting events, retaining other
 accounts' ownership and withholding private authority until the new ranges are covered.

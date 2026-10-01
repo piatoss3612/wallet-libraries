@@ -79,6 +79,21 @@ fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<()
     {
         return Err(InvalidCommit::Identifier);
     }
+    for receive in &commit.receives {
+        if receive
+            .metadata
+            .is_some_and(|m| !m.is_valid_for(receive.coinbase))
+        {
+            return Err(InvalidCommit::TransactionMetadata);
+        }
+    }
+    for spend in &commit.spends {
+        if spend.metadata.is_some_and(|m| {
+            !m.is_valid_for(false) || spend.input_index >= m.transparent_input_count
+        }) {
+            return Err(InvalidCommit::TransactionMetadata);
+        }
+    }
     let mined = commit.receives.iter().map(|r| r.mined_height);
     if mined
         .chain(commit.spends.iter().map(|s| s.mined_height))
@@ -219,9 +234,25 @@ fn apply_facts<P: consensus::Parameters>(
 
     for receive in &commit.receives {
         apply_receive(conn, account_ref, revision_id, receive)?;
+        super::metadata::apply_metadata(
+            conn,
+            account_ref,
+            revision_id,
+            TxId::from_bytes(*receive.outpoint.hash()),
+            receive.mined_height,
+            receive.metadata,
+        )?;
     }
     for spend in &commit.spends {
         apply_spend(conn, account_ref, revision_id, spend)?;
+        super::metadata::apply_metadata(
+            conn,
+            account_ref,
+            revision_id,
+            spend.spending_txid,
+            spend.mined_height,
+            spend.metadata,
+        )?;
     }
 
     for range in &commit.coverage {

@@ -104,7 +104,7 @@ fn shared_activity_after_promotion_extends_discovery_across_reopen() {
     qualify(&mut st, &revision(1, true));
     set_policy(&mut st, PrivateRequired);
     promote(&mut st, a).unwrap();
-    assert_eq!(reader_version(&st), 7);
+    assert_eq!(reader_version(&st), 8);
     assert_eq!(snapshot(&st, a).authority, TransparentAuthority::Private);
     assert!(!watch(&st, a).addresses.iter().any(|w| w.address == shared));
     assert!(watch(&st, b).addresses.iter().any(|w| w.address == shared));
@@ -403,7 +403,7 @@ fn imported_ownership_filters_all_derivable_scopes() {
             .execute_batch("DROP TRIGGER fail_shared_origin")
             .unwrap();
         promote(&mut st, accounts[0]).unwrap();
-        assert_eq!(reader_version(&st), 7);
+        assert_eq!(reader_version(&st), 8);
         assert_eq!(count(&st, "tpir_shared_derivations"), 1);
         let ws = watch(&st, accounts[1]);
         let mut c = commit(&ws);

@@ -4,12 +4,12 @@ use std::collections::HashSet;
 use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
 
-use super::transparent_activation_schema;
+use super::transparent_activity_metadata;
 use crate::wallet::{db::TABLE_TPIR_SHARED_DERIVATIONS, init::WalletMigrationError};
 
 /// Adds empty shared-derivation bookkeeping without changing wallet authority.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0xa03b0d6a_6085_4859_ae77_bce948345214);
-const DEPENDENCIES: &[Uuid] = &[transparent_activation_schema::MIGRATION_ID];
+const DEPENDENCIES: &[Uuid] = &[transparent_activity_metadata::MIGRATION_ID];
 
 pub(super) struct Migration;
 

@@ -123,30 +123,38 @@ fn require_public_baseline(conn: &Connection) -> Result<(), WalletMigrationError
             return Err(WalletMigrationError::LegacyRollbackNotSupported);
         }
     }
-    // A prepared wallet from the preceding build resumes before the new additive migration
-    // runs. Absence is valid only if that migration has not been recorded yet.
-    let has_shared_derivations: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tpir_shared_derivations')",
-        [], |r| r.get(0),
-    )?;
-    if has_shared_derivations {
-        if conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tpir_shared_derivations)",
-            [],
+    // Prepared wallets from preceding builds resume before newer additive migrations run.
+    // Absence is valid only if the corresponding migration has not been recorded yet.
+    for (table, migration) in [
+        (
+            "tpir_transaction_metadata",
+            migrations::TRANSPARENT_ACTIVITY_METADATA_ID,
+        ),
+        (
+            "tpir_shared_derivations",
+            migrations::TRANSPARENT_SHARED_DERIVATIONS_ID,
+        ),
+    ] {
+        let installed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |r| r.get(0),
+        )?;
+        if installed {
+            if conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| {
+                r.get::<_, bool>(0)
+            })? {
+                return Err(WalletMigrationError::LegacyRollbackNotSupported);
+            }
+        } else if conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schemer_migrations WHERE id = ?1)",
+            [migration.as_bytes().to_vec()],
             |r| r.get::<_, bool>(0),
         )? {
-            return Err(WalletMigrationError::LegacyRollbackNotSupported);
+            return Err(WalletMigrationError::CorruptedData(format!(
+                "missing {table} after migration"
+            )));
         }
-    } else if conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM schemer_migrations WHERE id = ?1)",
-        [migrations::TRANSPARENT_SHARED_DERIVATIONS_ID
-            .as_bytes()
-            .to_vec()],
-        |r| r.get::<_, bool>(0),
-    )? {
-        return Err(WalletMigrationError::CorruptedData(
-            "missing shared derivation table after migration".into(),
-        ));
     }
     let private_evidence: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM tpir_output_origins WHERE origin IN (2, 3))

@@ -8,7 +8,9 @@
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{PoolType, consensus::BlockHeight, value::Zatoshis};
 
-use super::PrivateTransparentDetail;
+use super::{
+    AccountMovement, AggregatePayment, PrivateTransparentDetail, TransactionMetadataEvidence,
+};
 
 /// Whether every effect of a transaction on an account within one pool is known.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -92,6 +94,12 @@ pub enum HistoryClassification {
 /// One account's history view of one transaction, from one database read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionHistoryDetails {
+    /// Whole-transaction facts, separate from the account-related fee.
+    pub transaction_metadata: Option<TransactionMetadataEvidence>,
+    /// Aggregate outgoing amount with explicit completeness.
+    pub aggregate_payment: AggregatePayment,
+    /// Known account movement and whether every effect is established.
+    pub account_movement: AccountMovement,
     /// The transaction.
     pub txid: TxId,
     /// The accepted-chain height the transaction is mined at, if any. This placement is

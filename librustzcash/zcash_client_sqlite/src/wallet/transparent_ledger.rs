@@ -89,11 +89,15 @@ pub(super) fn mode_code(mode: TransparentLedgerMode) -> i64 {
 /// qualification, quarantine, and retained outputs whose receive was withdrawn. Version 4
 /// could admit those retained rows under public authority, so activation writes require 5.
 /// Version 6 separates observed revisions from trusted replacement; revision writes require 6.
-/// Version 7 retains shared derivation origins after address materialization.
+/// Version 7 maintains source-bound transaction facts through withdrawals and rewinds.
+/// Version 8 retains shared derivation origins after address materialization.
 pub(crate) const TPIR_READER_VERSION: i64 = SHARED_DERIVATION_READER_VERSION;
 
 /// The reader version retained shared derivation origins require.
-pub(crate) const SHARED_DERIVATION_READER_VERSION: i64 = 7;
+pub(crate) const SHARED_DERIVATION_READER_VERSION: i64 = 8;
+
+/// Maintains source-bound transaction facts through withdrawals and rewinds.
+pub(crate) const METADATA_READER_VERSION: i64 = 7;
 
 /// Separates observed revision identities from trusted wallet-wide supersession.
 pub(crate) const REVISION_READER_VERSION: i64 = 6;
