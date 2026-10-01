@@ -1648,3 +1648,5 @@ mod handles {
         assert_eq!(before, after);
     }
 }
+
+mod transaction_inputs;

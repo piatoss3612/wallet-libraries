@@ -1325,6 +1325,46 @@ pub(crate) fn get_wallet_transparent_output(
     target_height: Option<TargetHeight>,
     authority: &InputAuthority,
 ) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
+    get_wallet_transparent_output_for_retry(conn, outpoint, target_height, authority, None)
+}
+
+/// Checks both linked wallet spends and spends recorded before a receive was discovered.
+pub(crate) fn has_competing_transparent_spend(
+    conn: &rusqlite::Connection,
+    outpoint: &OutPoint,
+    target: TargetHeight,
+    retry_txid: Option<TxId>,
+) -> Result<bool, SqliteClientError> {
+    let retry_bytes = retry_txid.map(|id| *id.as_ref());
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                SELECT 1 FROM transactions stx WHERE stx.id_tx IN (
+                    SELECT s.transaction_id FROM transparent_received_output_spends s
+                    JOIN transparent_received_outputs o ON o.id = s.transparent_received_output_id
+                    JOIN transactions parent ON parent.id_tx = o.transaction_id
+                    WHERE parent.txid = :prevout_txid AND o.output_index = :output_index
+                    UNION
+                    SELECT spending_transaction_id FROM transparent_spend_map
+                    WHERE prevout_txid = :prevout_txid AND prevout_output_index = :output_index
+                ) AND ({}) AND (:retry_txid IS NULL OR stx.txid != :retry_txid)
+            )",
+            tx_unexpired_condition("stx")
+        ),
+        named_params![":prevout_txid": outpoint.txid().as_ref(), ":output_index": outpoint.n(),
+            ":target_height": u32::from(target), ":retry_txid": retry_bytes],
+        |row| row.get(0),
+    )?)
+}
+
+/// Applies the ordinary selection rules, except for a spend by an independently matched retry.
+pub(crate) fn get_wallet_transparent_output_for_retry(
+    conn: &rusqlite::Connection,
+    outpoint: &OutPoint,
+    target_height: Option<TargetHeight>,
+    authority: &InputAuthority,
+    retry_txid: Option<TxId>,
+) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
     // This could return as unspent outputs that are actually not spendable, if they are the
     // outputs of deshielding transactions where the spend anchors have been invalidated by a
     // rewind or spent in a transaction that has not been observed by this wallet. There isn't a
@@ -1355,12 +1395,19 @@ pub(crate) fn get_wallet_transparent_output(
          )
          AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output",
         tx_unexpired_condition("t"),
-        spent_utxos_clause(),
+        format!(
+            "SELECT txo_spends.transparent_received_output_id
+                 FROM transparent_received_output_spends txo_spends
+                 JOIN transactions stx ON stx.id_tx = txo_spends.transaction_id
+                 WHERE ({}) AND (:retry_txid IS NULL OR stx.txid != :retry_txid)",
+            tx_unexpired_condition("stx")
+        ),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         excluding_immature_coinbase_outputs("t"),
         super::transparent_ledger::output_observation_condition("u"),
     ))?;
 
+    let retry_txid_bytes = retry_txid.map(|id| *id.as_ref());
     let txid_bytes = outpoint.hash();
     let output_index = outpoint.n();
     let target_height_arg = target_height.map(u32::from);
@@ -1368,6 +1415,7 @@ pub(crate) fn get_wallet_transparent_output(
     let (private_authority, eligible_accounts) = authority.sql_params();
     let sql_params: Vec<(&str, &dyn ToSql)> = vec![
         (":txid", &txid_bytes),
+        (":retry_txid", &retry_txid_bytes),
         (":output_index", &output_index),
         (":target_height", &target_height_arg),
         (":allow_unspendable", &allow_unspendable),

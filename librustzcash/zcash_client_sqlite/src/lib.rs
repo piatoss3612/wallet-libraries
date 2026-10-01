@@ -339,6 +339,17 @@ pub struct WalletHandleModes {
 /// A wrapper for a SQLite transaction affecting the wallet database.
 pub struct SqlTransaction<'conn>(&'conn rusqlite::Transaction<'conn>);
 
+impl<'conn> SqlTransaction<'conn> {
+    /// Borrows a caller-owned transaction for wallet operations.
+    ///
+    /// The caller retains responsibility for committing or rolling back. Wallet operations
+    /// on the resulting handle share this transaction with application-owned cleanup; no
+    /// nested transaction is started and dropping the wrapper does not commit it.
+    pub fn new(transaction: &'conn rusqlite::Transaction<'conn>) -> Self {
+        Self(transaction)
+    }
+}
+
 impl Borrow<rusqlite::Connection> for SqlTransaction<'_> {
     fn borrow(&self) -> &rusqlite::Connection {
         self.0
@@ -1809,6 +1820,74 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
             self.transparent_ledger_mode,
             target,
         )
+    }
+
+    /// Checks finalized transparent inputs immediately before submission or resubmission.
+    ///
+    /// Ordinary authority, maturity, observation, and competing-spend checks apply. An
+    /// input already consumed by `tx` is admitted only if its complete serialized bytes
+    /// match the stored transaction. A txid match alone never authorizes this exception.
+    /// Outputs of `earlier` finalized transactions in the same validated batch must exist.
+    ///
+    /// This method is read-only and does not validate signatures or proofs. The caller
+    /// must validate the batch first and hold a database snapshot (and a writer reservation
+    /// through submission) to prevent authorization from changing before network dispatch.
+    /// Incompatible readers and unavailable authority return the existing wallet errors.
+    pub fn check_transparent_transaction_inputs(
+        &self,
+        tx: &Transaction,
+        earlier: &[&Transaction],
+        target: TargetHeight,
+    ) -> Result<(), SqliteClientError> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.borrow();
+        let authority = self.input_authority(conn, target)?;
+        let mut raw = Vec::new();
+        tx.write(&mut raw)?;
+        let stored: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT raw FROM transactions WHERE txid = ?1",
+                [tx.txid().as_ref()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let retry_txid = (stored.as_deref() == Some(raw.as_slice())).then_some(tx.txid());
+        for input in tx
+            .transparent_bundle()
+            .map_or(&[][..], |bundle| &bundle.vin[..])
+        {
+            let prevout = input.prevout();
+            if wallet::transparent::has_competing_transparent_spend(
+                conn, prevout, target, retry_txid,
+            )? {
+                return Err(SqliteClientError::TransparentAuthorityUnavailable);
+            }
+            if let Some(parent) = earlier
+                .iter()
+                .find(|parent| parent.txid() == *prevout.txid())
+            {
+                if parent
+                    .transparent_bundle()
+                    .is_none_or(|bundle| bundle.vout.get(prevout.n() as usize).is_none())
+                {
+                    return Err(SqliteClientError::TransparentAuthorityUnavailable);
+                }
+                continue;
+            }
+            if wallet::transparent::get_wallet_transparent_output_for_retry(
+                conn,
+                prevout,
+                Some(target),
+                &authority,
+                retry_txid,
+            )?
+            .is_none()
+            {
+                return Err(SqliteClientError::TransparentAuthorityUnavailable);
+            }
+        }
+        Ok(())
     }
 
     /// Checks that every transparent input of `sent_tx` is admitted by the transparent

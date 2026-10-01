@@ -20,6 +20,8 @@ workspace.
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 
 ### Added
+- `SqlTransaction::new` lets consumers run guarded wallet operations and application cleanup in one caller-owned transaction.
+- `WalletDb::check_transparent_transaction_inputs` authorizes finalized submissions and exact-byte retries without permitting competing spends or weakening transparent authority.
 - `wallet::init::prepare_legacy_rollback` restores the unused ZIP 318 column for an
   explicit handover to the published rc5/rc7 public writers. It refuses changed/private policy
   and recovery state. Returning initialization reconciles old public output/spend origins
