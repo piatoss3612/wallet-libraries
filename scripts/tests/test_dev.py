@@ -266,7 +266,7 @@ class InputPolicyTests(unittest.TestCase):
         self.edit("pkg/Cargo.toml", FIXTURE["pkg/Cargo.toml"] + '\n[dependencies]\nmissing = { path = "../missing" }\n')
         self.assertIn("unresolved path dependency", dev.source_state("test")["policy"]["fallback_reason"])
 
-    def scenario(self, files: dict[str, str], executable=(), symlinks=()):
+    def scenario(self, files: dict[str, str], executable=(), symlinks=(), command="test"):
         """Policy for the fixture plus files, then a clean fixture again."""
         for name, text in files.items():
             self.write(name, text)
@@ -276,7 +276,7 @@ class InputPolicyTests(unittest.TestCase):
         for name in executable:
             (self.root / name).chmod(0o755)
         try:
-            return dev.source_state("test")["policy"]
+            return dev.source_state(command)["policy"]
         finally:
             self.git("checkout", "-q", "--", ".")
             self.git("clean", "-qfdx")
@@ -349,17 +349,50 @@ class InputPolicyTests(unittest.TestCase):
         self.assertIn("docs/included.md", policy["protected"])
 
     def test_consumed_ignored_inputs_invalidate_and_unconsumed_do_not(self):
-        self.write(".gitignore", "/pkg/src/generated.rs\n/pkg/tests/fixtures/local.hex\n/pkg/scratch.txt\n")
+        # Ignored files in a built package may be read by any reader there, and
+        # `mod implicit;` loads an ignored module without naming it in a literal.
+        self.write(".gitignore", "/pkg/src/generated.rs\n/pkg/src/implicit.rs\n/pkg/tests/fixtures/local.hex\n/pkg/scratch.txt\n/notes/\n")
         self.write("pkg/src/generated.rs", "pub const G: u8 = 1;\n")
+        self.write("pkg/src/implicit.rs", "pub const I: u8 = 1;\n")
         self.write("pkg/tests/fixtures/local.hex", "00\n")
         self.write("pkg/scratch.txt", "notes\n")
-        self.write("pkg/src/lib.rs", FIXTURE["pkg/src/lib.rs"] + 'include!("generated.rs");\npub const H: &str = include_str!("../tests/fixtures/local.hex");\n')
+        self.write("notes/scratch.txt", "outside every package\n")
+        self.write("pkg/src/lib.rs", FIXTURE["pkg/src/lib.rs"] + 'include!("generated.rs");\nmod implicit;\npub const H: &str = include_str!("../tests/fixtures/local.hex");\n')
         self.commit()
-        cases = {"pkg/src/generated.rs": ["rust-source"], "pkg/tests/fixtures/local.hex": ["fixture-or-asset"], "pkg/scratch.txt": []}
+        cases = {"pkg/src/generated.rs": ["rust-source"], "pkg/src/implicit.rs": ["rust-source"], "pkg/tests/fixtures/local.hex": ["fixture-or-asset"], "pkg/scratch.txt": ["other"], "notes/scratch.txt": []}
         for name, expected in cases.items():
             with self.subTest(name=name):
                 for command in ("test", "verify"):
                     self.assertEqual(self.change(lambda: self.edit(name, f"changed {command}\n"), command)[0], expected)
+
+    def test_hidden_file_access_falls_back(self):
+        """File access behind an alias, an import, a value, or a computed
+        argument is an unproven reader (review of 9beb56a)."""
+        read = '#[test]\nfn t() {{ {} }}\n'
+        cases = {
+            "aliased file access import": {"pkg/tests/a.rs": "use std::fs::read_to_string as load;\n" + read.format('load(concat!("../CHANGE", "LOG.md")).unwrap();')},
+            "aliased file access import ": {"pkg/tests/a.rs": "use std::fs as f;\n" + read.format('f::read(concat!("../CHANGE", "LOG.md")).unwrap();')},
+            "aliased file access import  ": {"pkg/tests/a.rs": "use std::{\n    fs::{self, File as Handle},\n    io,\n};\n" + read.format("drop(Handle::create);")},
+            "aliased file access import   ": {"pkg/tests/a.rs": "use std::fs::*;\n" + read.format('read(concat!("../CHANGE", "LOG.md")).unwrap();')},
+            "imported file access function": {"pkg/tests/a.rs": "use std::fs::read;\n" + read.format('read(concat!("../CHANGE", "LOG.md")).unwrap();')},
+            "file access used as a value": {"pkg/tests/a.rs": read.format('let r = std::fs::read_to_string; r(concat!("../CHANGE", "LOG.md")).unwrap();')},
+            "file access used as a value ": {"pkg/tests/a.rs": read.format('let pages: Vec<_> = [concat!("../CHANGE", "LOG.md")].iter().map(std::fs::File::open).collect();')},
+            "run-time file access with a computed path": {"pkg/tests/a.rs": read.format('std::fs::read_to_string::<&str>(concat!("../CHANGE", "LOG.md")).unwrap();')},
+            "run-time file access with a computed path ": {"pkg/tests/a.rs": read.format('std::fs::read_to_string("../CHANGE".to_owned() + "LOG.md").unwrap();')},
+            "run-time file access with a computed path  ": {"pkg/tests/a.rs": read.format('let p: std::path::PathBuf = ("../CHANGE".to_owned() + "LOG.md").into(); assert!(p.exists());')},
+            "run-time file access with a computed path   ": {"pkg/build.rs": "mod helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": 'pub fn check() { std::fs::read_to_string(concat!("../CHANGE", "LOG.md")).unwrap(); }\n'},
+            "aliased include_str macro": {"pkg/src/inc.rs": 'use std::include_str as inc;\npub const P: &str = inc!(concat!("../../CHANGE", "LOG.md"));\n'},
+        }
+        for reason, files in cases.items():
+            with self.subTest(reason=reason):
+                command = "check" if "pkg/build.rs" in files or "pkg/src/inc.rs" in files else "test"
+                self.assertIn(reason.strip(), self.scenario(files, command=command)["fallback_reason"] or "")
+        # Prose that merely says "use", and code spans in documentation, are not code.
+        safe = {
+            "pkg/src/notes.rs": "// Count each use to the seeded address.\npub fn count(conn: &rusqlite::Connection) -> u8 { drop(conn); 1 }\n/// Like [`File::open`] or `std::fs::read`.\npub fn doc() {}\n",
+            "pkg/tests/plain.rs": "use std::fs::{self, File};\nuse std::io::Read as _;\n" + read.format('drop(File::open("Cargo.toml").unwrap()); fs::read("Cargo.toml").unwrap();'),
+        }
+        self.assertIsNone(self.scenario(safe)["fallback_reason"])
 
     def test_only_the_reviewed_sqlite3_invocation_is_exempt(self):
         name, function, _ = dev.AUDITED_SQLITE
@@ -393,6 +426,9 @@ class InputPolicyTests(unittest.TestCase):
             "edited reviewed call": ({**base, "pkg/src/io.rs": reader.replace("(path)", "(path.with_extension(\"md\"))")}, "run-time file access with a computed path in pkg/src/io.rs"),
             "new wrapper call": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    crate::io::open(std::path::Path::new(&std::env::var("PAGE").unwrap()));\n}\n'}, "run-time file access with a computed path in pkg/tests/io.rs"),
             "moved to another function": ({**base, "pkg/src/io.rs": reader.replace("pub fn open", "pub fn load")}, "run-time file access with a computed path in pkg/src/io.rs"),
+            "qualified wrapper call": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    pkg::io::open(std::path::Path::new(&std::env::var("PAGE").unwrap()));\n}\n'}, "run-time file access with a computed path in pkg/tests/io.rs"),
+            "wrapper as a value": ({**base, "pkg/tests/io.rs": caller + '#[test]\nfn more() {\n    let f = crate::io::open;\n    drop(f);\n}\n'}, "file access used as a value in pkg/tests/io.rs"),
+            "aliased wrapper": ({**base, "pkg/tests/io.rs": "use crate::io::open as load;\n" + caller}, "aliased file access import in pkg/tests/io.rs"),
             "stale entry": ({**base, dev.READER_REGISTRY: registry + '\n[[reader]]\nfile = "pkg/src/gone.rs"\nfunction = "fn gone() {"\nline = "std::fs::read(p)"\nreason = "removed"\n'}, "stale audited reader pkg/src/gone.rs"),
             "malformed registry": ({**base, dev.READER_REGISTRY: "[[reader]]\nfile = 1\n"}, "unreadable reader registry"),
         }

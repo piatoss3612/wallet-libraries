@@ -35,6 +35,8 @@ PAGES = {
 CHECK = 'assert!(PAGE.contains("ORIGINAL"));'
 TEST = "#[test]\nfn oracle() {{ {body} }}\n"
 OUT = 'include_str!(concat!(env!("OUT_DIR"), "/page.md"))'
+# The root changelog by a path no literal names whole.
+CHANGELOG = 'concat!("../CHANGE", "LOG.md")'
 BUILD_COPY = 'fn main() {{ let text = {read}; std::fs::write(std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("page.md"), text).unwrap(); }}\n'
 
 CASES = {
@@ -91,6 +93,16 @@ CASES = {
     "sqlite readfile": {
         "pkg/src/lib.rs": TEST.format(body='let out = std::process::Command::new("sqlite3").arg(":memory:").arg("select readfile(\'../do\'||\'cs/\'||\'gu\'||\'ide.md\')").output().unwrap(); assert!(String::from_utf8_lossy(&out.stdout).contains("ORIGINAL"));'),
     },
+    # File access hidden behind an alias, an import, a value, or a computed
+    # argument that starts with a literal (review of 9beb56a).
+    "aliased reader import": {"pkg/src/lib.rs": "use std::fs::read_to_string as load;\n" + TEST.format(body=f'assert!(load({CHANGELOG}).unwrap().contains("ORIGINAL"));')},
+    "aliased reader module": {"pkg/src/lib.rs": "use std::fs as f;\n" + TEST.format(body=f'assert!(String::from_utf8(f::read({CHANGELOG}).unwrap()).unwrap().contains("ORIGINAL"));')},
+    "imported reader function": {"pkg/src/lib.rs": "use std::fs::read;\n" + TEST.format(body=f'assert!(String::from_utf8(read({CHANGELOG}).unwrap()).unwrap().contains("ORIGINAL"));')},
+    "reader as a value": {"pkg/src/lib.rs": TEST.format(body=f'let load = std::fs::read_to_string; assert!(load({CHANGELOG}).unwrap().contains("ORIGINAL"));')},
+    "reader with turbofish": {"pkg/src/lib.rs": TEST.format(body=f'assert!(std::fs::read_to_string::<&str>({CHANGELOG}).unwrap().contains("ORIGINAL"));')},
+    "literal-prefixed path": {"pkg/src/lib.rs": TEST.format(body='assert!(std::fs::read_to_string("../CHANGE".to_owned() + "LOG.md").unwrap().contains("ORIGINAL"));')},
+    "aliased include macro": {"pkg/src/lib.rs": f'use std::include_str as inc;\npub const PAGE: &str = inc!(concat!("../../CHANGE", "LOG.md"));\n{TEST.format(body=CHECK)}'},
+    "build script helper module": {"pkg/build.rs": "mod helper;\nfn main() { helper::check(); }\n", "pkg/helper.rs": f'pub fn check() {{ assert!(std::fs::read_to_string({CHANGELOG}).unwrap().contains("ORIGINAL")); }}\n'},
     # A reviewed run-time reader of a temporary file keeps the exclusion.
     "reviewed reader": {
         "pkg/src/lib.rs": '#[test]\nfn oracle() {\n    let path = std::env::temp_dir().join(format!("oracle-{}.txt", std::process::id()));\n    std::fs::write(&path, "x").unwrap();\n    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");\n}\n',
@@ -146,20 +158,23 @@ class CargoOracleTests(unittest.TestCase):
                     self.assertIn("docs/guide.md", policy["excluded"])
 
     def test_consumed_ignored_edits_change_the_digest_when_cargo_results_change(self):
-        # An ignored generated module whose value a test checks (review case 42 -> 43).
-        root = self.fixture({
-            ".gitignore": "/target/\n/pkg/src/generated.rs\n",
-            "pkg/src/generated.rs": "pub const VALUE: u32 = 42;\n",
-            "pkg/src/lib.rs": 'include!("generated.rs");\n' + TEST.format(body="assert_eq!(VALUE, 42);"),
-        })
-        with tempfile.TemporaryDirectory() as targets, patch.object(dev, "ROOT", root):
-            self.assertTrue(cargo_test(root, Path(targets) / "before"))
-            before = {command: dev.source_state(command) for command in ("test", "verify")}
-            (root / "pkg/src/generated.rs").write_text("pub const VALUE: u32 = 43;\n")
-            self.assertFalse(cargo_test(root, Path(targets) / "after"))
-            for command, state in before.items():
-                with self.subTest(command=command):
-                    self.assertEqual(dev.compare(state, dev.source_state(command))[0], ["rust-source"])
+        # An ignored generated module whose value a test checks (review case
+        # 42 -> 43), loaded by `include!` or by an implicit `mod` declaration.
+        for case, lib in {"include": 'include!("generated.rs");\n', "implicit module": "mod generated;\nuse generated::VALUE;\n"}.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as targets:
+                root = self.fixture({
+                    ".gitignore": "/target/\n/pkg/src/generated.rs\n",
+                    "pkg/src/generated.rs": "pub const VALUE: u32 = 42;\n",
+                    "pkg/src/lib.rs": lib + TEST.format(body="assert_eq!(VALUE, 42);"),
+                })
+                with patch.object(dev, "ROOT", root):
+                    self.assertTrue(cargo_test(root, Path(targets) / "before"))
+                    before = {command: dev.source_state(command) for command in ("test", "verify")}
+                    (root / "pkg/src/generated.rs").write_text("pub const VALUE: u32 = 43;\n")
+                    self.assertFalse(cargo_test(root, Path(targets) / "after"))
+                    for command, state in before.items():
+                        with self.subTest(command=command):
+                            self.assertEqual(dev.compare(state, dev.source_state(command))[0], ["rust-source"])
 
 
 if __name__ == "__main__":

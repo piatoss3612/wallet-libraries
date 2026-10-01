@@ -639,3 +639,159 @@ file = "zakura/pir-transparent/src/recovery.rs"
 function = "pub fn open(path: impl AsRef<Path>, config: RecoveryConfig) -> Result<Self, RecoveryError> {"
 line = "let store = SqliteStore::open(&path).map_err(failure)?;"
 reason = "Opens the caller's companion database; every executed ReferenceRecovery::open call is a reviewed entry."
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/src/data_api/enhance_pir/storage.rs"
+function = "pub fn validate_and_apply_records<DbT: EnhancePirStorage>("
+line = "let proposed = (record.transparent_flags(), record.metadata());"
+reason = "Accessor on an in-memory PIR record (`record.metadata()`), not a file-system call."
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/src/data_api/enhance_pir/storage.rs"
+function = "fn validate_record<DbT: EnhancePirStorage>("
+line = "if !record.has_transparent() && record.metadata().fee_zatoshis().is_none() {"
+reason = "Accessor on an in-memory PIR record (`record.metadata()`), not a file-system call."
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/src/data_api/enhance_pir/storage.rs"
+function = "fn validate_record<DbT: EnhancePirStorage>("
+line = "if !known.agrees_with(record.metadata()) {"
+reason = "Accessor on an in-memory PIR record (`record.metadata()`), not a file-system call."
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/src/data_api/enhance_pir/storage.rs"
+function = "fn validate_record<DbT: EnhancePirStorage>("
+line = "metadata: record.metadata(),"
+reason = "Accessor on an in-memory PIR record (`record.metadata()`), not a file-system call."
+
+[[reader]]
+file = "librustzcash/zcash_client_backend/src/tor.rs"
+function = "pub async fn create("
+line = "Self::create_with_timeouts(tor_dir, with_permissions, Timeouts::default()).await"
+reason = "Client::create forwards its caller's directory; every Client::create call site is a reviewed wrapper site."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "pub fn for_path<P: AsRef<Path>>(fsblockdb_root: P) -> Result<Self, FsBlockDbError> {"
+line = "if meta.is_dir() {"
+reason = "Metadata of the FsBlockDb root or its block metadata database, which callers supply only through reviewed FsBlockDb::for_path entries."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/lib.rs"
+function = "pub fn write_block_metadata(&self, block_meta: &[BlockMeta]) -> Result<(), FsBlockDbError> {"
+line = "if !meta.is_file() {"
+reason = "Metadata of the FsBlockDb root or its block metadata database, which callers supply only through reviewed FsBlockDb::for_path entries."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/enhance_pir/tests.rs"
+function = "fn reorg_prunes_positions_but_retains_protection_and_lwd_decisions() {"
+line = "let reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), test_clock(), test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/enhance_pir/tests.rs"
+function = "fn reopening_uses_explicit_mode_and_preserves_routes() {"
+line = "let mut reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), test_clock(), test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/enhance_pir/tests.rs"
+function = "fn unified_work_preserves_both_suspension_kinds_across_reopen() {"
+line = "let mut reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), test_clock(), test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/enhance_pir/tests.rs"
+function = "fn payload_enumeration_requires_mode_even_without_a_chain_tip() {"
+line = "crate::WalletDb::for_path( file.path(), TestBuilder::<(), ()>::DEFAULT_NETWORK, test_clock(), test_rng(), )"
+reason = "Reopens the NamedTempFile created earlier in the same test."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/enhance_pir/tests.rs"
+function = "fn reopening_requires_mode_before_enumerating_persisted_work() {"
+line = "let db = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), test_clock(), test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/enhance_pir/tests/discovery.rs"
+function = "fn deleting_a_funder_does_not_block_another_transaction_in_the_block() {"
+line = "let mut reopened = crate::WalletDb::for_path( send.st.wallet().data_file_path(), *send.st.network(), test_clock(), test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/enhance_pir/tests/discovery.rs"
+function = "fn deleting_an_exclusively_owned_transaction_cascades_its_discovery_job() {"
+line = "let reopened = crate::WalletDb::for_path( send.st.wallet().data_file_path(), *send.st.network(), test_clock(), test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/enhance_pir/tests/discovery.rs"
+function = "fn retro_link_reopens_retired_enhancement_and_recovers_recipient_privately() {"
+line = "let mut reopened = crate::WalletDb::for_path( send.st.wallet().data_file_path(), *send.st.network(), test_clock(), test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation.rs"
+function = "fn a_failed_promotion_changes_nothing_across_a_reopen() {"
+line = "let reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/boundaries/financial.rs"
+function = "fn wallet_summary_and_authority_share_a_snapshot_across_a_wal_writer() {"
+line = "let mut writer = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/boundaries/ownership.rs"
+function = "fn shared_activity_after_promotion_extends_discovery_across_reopen() {"
+line = "let reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/boundaries/ownership.rs"
+function = "fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {"
+line = "let reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/boundaries/revisions.rs"
+function = "fn candidate_observations_cannot_revoke_another_accounts_financial_evidence() {"
+line = "let reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/boundaries/work.rs"
+function = "fn recovery_batches_resume_pages_before_gaps_and_persist_across_reopen() {"
+line = "let reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/boundaries/work.rs"
+function = "fn recovery_work_without_a_target_is_empty_and_handles_still_require_configuration() {"
+line = "let reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/gating/withdrawal.rs"
+function = "fn withdrawing_and_replaying_a_receive_preserves_its_reservation_across_reopen() {"
+line = "let mut reopened = crate::WalletDb::for_path( st.wallet().data_file_path(), *st.network(), crate::testing::db::test_clock(), crate::testing::db::test_rng(), )"
+reason = "Reopens the test wallet's own temporary database file (`data_file_path()`)."
+
+[[reader]]
+file = "librustzcash/zcash_client_sqlite/src/wallet/transparent_ledger/tests/recovery/activation/qualification/failpoints.rs"
+function = "fn crash_copy(path: &Path) -> (tempfile::TempDir, Connection) {"
+line = "if wal.exists() {"
+reason = "SQLite WAL beside the database that crash_copy's reviewed callers pass; crash_copy is a reviewed wrapper."
+
+[[reader]]
+file = "zakura/pir-enhance-types/src/lib.rs"
+function = "fn schema11_frozen_vector_and_metadata_validation() {"
+line = "record.metadata(),"
+reason = "Accessor on an in-memory PIR record (`record.metadata()`), not a file-system call."
+
+[[reader]]
+file = "zakura/pir-enhance-types/src/lib.rs"
+function = "fn schema11_frozen_vector_and_metadata_validation() {"
+line = ".metadata()"
+reason = "Accessor on an in-memory PIR record (`record.metadata()`), not a file-system call."

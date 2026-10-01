@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -36,7 +37,7 @@ def capture(argv: list[str], **kwargs) -> str:
 # commands may ignore audited root documentation prose and the root changelog;
 # every other command, and any reference this scanner cannot resolve, hashes
 # every file. Bump the version whenever the exclusion or scanning rules change.
-POLICY_VERSION = 9
+POLICY_VERSION = 10
 RUST_CHECK_COMMANDS = {"check", "test", "lint"}
 COMPUTED_INCLUDE = re.compile(r"\binclude(?:_str|_bytes)?!\s*[(\[{](?!\s*[bc]?r?#*\")")
 # Directory walks and manifest-relative parent paths are computed references.
@@ -58,9 +59,22 @@ AUDITED_SQLITE = ("librustzcash/zcash_client_sqlite/src/testing/db.rs", "unsafe 
 # each bound to its file, enclosing function, and exact source line.
 READER_REGISTRY = "scripts/audited-readers.toml"
 FUNCTION = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+\"\w+\"\s+)?fn\s+\w+.*$", re.M)
-# Run-time file access whose path is not one string literal may reach any
-# file, so it is an unknown reader (the policy cannot prove where it points).
-RUNTIME_READER = re.compile(r'(?:\b(?:fs|File|Connection|OpenOptions|Path|PathBuf|Dir|tokio::fs)::(?:\w+)|\.open(?:_with_flags)?|\bread_to_string|(?<!fn )\bopen)\s*\(\s*(?![bc]?r?#*")(?!\))')
+# Run-time file access whose path is not one whole string literal (a literal
+# followed by `+ "…"` or `.to_owned()` is computed) may reach any file, so it
+# is an unknown reader (the policy cannot prove where it points).
+WHOLE_LITERAL = r'(?:[bc]?"(?:[^"\\]|\\.)*"|[bc]?r(#*)".*?"\1)\s*[,)]'
+TURBOFISH = r"(?:\s*::\s*<[^()]*>)?"
+RUNTIME_READER = re.compile(r'(?:\b(?:fs|fs_err|File|Connection|OpenOptions|Path|PathBuf|Dir|tokio::fs)::(?:\w+)|\.open(?:_with_flags)?|\bread_to_string|(?<!fn )\bopen)' + TURBOFISH + r'\s*\(\s*(?!' + WHOLE_LITERAL + r')(?!\))', re.S)
+# Path methods that probe the file system: their receiver may be any path.
+PATH_PROBE = re.compile(r"\.(?:exists|try_exists|is_file|is_dir|is_symlink|metadata|symlink_metadata|canonicalize|read_link)\s*\(")
+# File access hidden behind another name: a file-system function or opener
+# used as a value (`let r = fs::read;`, `.map(File::open)`), or imported by
+# `use` under an alias, as a glob, or as a bare function (`use std::fs::read;`).
+FILE_ROOTS = {"fs", "fs_err", "File", "OpenOptions", "DirBuilder", "Path", "PathBuf", "Connection", "Mmap", "MmapOptions", "Command"}
+FILE_VALUE = re.compile(r"\b(?:fs|fs_err)\s*::\s*[a-z_]\w*\b(?!\s*(?:\(|::|!))|\b(?:File|OpenOptions|DirBuilder|Connection|Mmap|MmapOptions|Path|PathBuf)\s*::\s*(?:open\w*|create\w*|new|from|options|map\w*)\b(?!\s*(?:\(|::))")
+INCLUDE_MACROS = {"include", "include_str", "include_bytes"}
+USE_TOKEN = re.compile(r"::|[{},*]|r#\w+|[A-Za-z_]\w*")
+USE_DELIMITER = re.compile(r"[{};]")
 # Literal targets of `include!`, `#[path]`, and `#[doc = include_str!]` are
 # compiled as Rust (doctests for Markdown), whatever their extension.
 RUST_TARGET = re.compile(r'\binclude!\s*[(\[{]\s*[bc]?r?(#*)"(.*?)"\1|#\s*\[\s*path\s*=\s*r?(#*)"(.*?)"\3|\bdoc\s*=\s*include_str!\s*[(\[{]\s*r?(#*)"(.*?)"\5', re.S)
@@ -253,12 +267,115 @@ def site(name: str, text: str, position: int) -> tuple[str, str, str]:
     return name, function, " ".join(text[start:end if end >= 0 else len(text)].split())
 
 
-def computed(text: str, found: set[str], name: str = "", runtime: bool = True, registry: dict | None = None) -> list[str]:
+@functools.lru_cache(maxsize=64)
+def use_statements(text: str) -> list[tuple[int, int]]:
+    """Spans of `use …;` declarations, ending at the first `;` outside braces."""
+    spans = []
+    for match in re.finditer(r"(?<![\w:])use\s", text):
+        depth, end = 0, len(text)
+        for delimiter in USE_DELIMITER.finditer(text, match.end()):
+            depth += {"{": 1, "}": -1}.get(delimiter[0], 0)
+            if delimiter[0] == ";" and depth == 0 or depth < 0:
+                end = delimiter.start()
+                break
+        spans.append((match.start(), end))
+    return spans
+
+
+def use_paths(tree: str) -> list[tuple[list[str], str | None]]:
+    """Expand a use tree into imported paths and their aliases.
+
+    `std::{fs::{self, read as r}, io}` gives `std::fs::self`, `std::fs::read`
+    (alias `r`), and `std::io`. A glob ends its path with `*`.
+    """
+    tokens = USE_TOKEN.findall(tree)
+    def parse(position: int, prefix: list[str]):
+        segments = list(prefix)
+        while position < len(tokens):
+            token = tokens[position]
+            if token == "{":
+                position, found = position + 1, []
+                while tokens[position] != "}":
+                    items, position = parse(position, segments)
+                    found += items
+                    if tokens[position] == ",":
+                        position += 1
+                return found, position + 1
+            if token == "*":
+                return [(segments + ["*"], None)], position + 1
+            if token == "as":
+                return [(segments, tokens[position + 1])], position + 2
+            if token in {",", "}"}:
+                break
+            if token != "::":
+                segments.append(token)
+            position += 1
+        return [(segments, None)], position
+    return parse(0, [])[0]
+
+
+def code_span(text: str, match: re.Match) -> bool:
+    """Whether a path is a Markdown code span such as [`Client::create`] in prose."""
+    start = match.start()
+    while start > 0 and (text[start - 1].isalnum() or text[start - 1] in "_:"):
+        start -= 1
+    return text[start - 1:start] == "`" and text[match.end():match.end() + 1] == "`"
+
+
+def use_tree(declaration: str) -> str | None:
+    """The tree of a syntactically valid `use` declaration, else None.
+
+    Prose such as "use to the seeded address." is not Rust and is skipped;
+    code that does not parse as a use tree cannot compile either.
+    """
+    tree = declaration.split(None, 1)[1] if len(declaration.split(None, 1)) > 1 else ""
+    if not re.fullmatch(r"[\w\s:{},*#]*", tree):
+        return None
+    tokens = USE_TOKEN.findall(tree)
+    words = [token for token in tokens if token not in {"::", "{", "}", ",", "*"}]
+    if any(re.fullmatch(r"(?:r#)?\w+", a) and re.fullmatch(r"(?:r#)?\w+", b) and "as" not in {a, b} for a, b in zip(tokens, tokens[1:])):
+        return None
+    return tree if words or "*" in tokens else None
+
+
+def hidden_access(text: str, heads: set[str]) -> list[str]:
+    """Imports that rename, glob, or bare-import file access or `include` macros."""
+    reasons = []
+    for start, end in use_statements(text):
+        tree = use_tree(text[start:end])
+        if tree is None:
+            continue
+        try:
+            paths = use_paths(tree)
+        except IndexError:
+            reasons.append("unparsed use declaration")
+            continue
+        for segments, alias in paths:
+            if segments and segments[-1] == "self":
+                segments = segments[:-1]
+            if not segments:
+                continue
+            last = segments[-1]
+            if last in INCLUDE_MACROS and alias:
+                reasons.append(f"aliased {last} macro")
+            roots = [i for i, segment in enumerate(segments) if segment in FILE_ROOTS | heads]
+            if not roots:
+                continue
+            if alias and alias != "_" or last == "*":
+                reasons.append("aliased file access import")
+            elif roots[-1] < len(segments) - 1 and last[:1].islower():
+                reasons.append("imported file access function")
+    return reasons
+
+
+def computed(text: str, found: set[str], name: str = "", runtime: bool = True, registry: dict | None = None, rust: bool | None = None) -> list[str]:
     """Constructs in code that may build a path this scanner cannot resolve.
 
     Run-time constructs count only in code the operation executes; a reviewed
-    registry site (recorded in `registry["used"]`) is accepted.
+    registry site (recorded in `registry["used"]`) is accepted. Aliased or
+    value uses of file access are never accepted.
     """
+    rust = name.endswith((".rs", ".md")) if rust is None else rust
     registry = registry if registry is not None else {"sites": {}, "used": set()}
     reasons = []
     if COMPUTED_INCLUDE.search(text):
@@ -283,15 +400,38 @@ def computed(text: str, found: set[str], name: str = "", runtime: bool = True, r
         # read files, are exempt only as the exact audited invocation.
         if unreviewed(SPAWN, lambda spawn: bool(spawn[2]) or audited_sqlite(name, text, spawn)):
             reasons.append("process launch that may read any file")
-        if unreviewed(RUNTIME_READER) or registry.get("wrappers") and unreviewed(registry["wrappers"]):
+        if unreviewed(RUNTIME_READER) or unreviewed(PATH_PROBE) or registry.get("wrappers") and unreviewed(registry["wrappers"]):
             reasons.append("run-time file access with a computed path")
+        uses = use_statements(text) if rust else []
+        values = [FILE_VALUE] + ([registry["wrapper_values"]] if registry.get("wrapper_values") else [])
+        if any(not any(start <= match.start() < end for start, end in uses) and not code_span(text, match) for pattern in values for match in pattern.finditer(text)):
+            reasons.append("file access used as a value")
         if re.search(r"\bParentDir\b", text):
             reasons.append("parent directory navigation")
+    # A renamed `include!` reads its (possibly computed) argument at compile
+    # time; hidden run-time access counts only in executed code.
+    if rust:
+        reasons += [reason for reason in hidden_access(text, registry.get("heads", set())) if runtime or "macro" in reason]
     # Pure upward navigation such as `Path::new("..").join("..")` can reach the root
     # from any package depth.
     if any(re.fullmatch(r"[./]*\.\.[./]*", literal) for literal in found):
         reasons.append("parent directory navigation")
     return reasons
+
+
+def module_files(name: str, text: str, index: Index) -> set[str]:
+    """Files `mod name;` declarations may load, from either module directory.
+
+    A crate root or `mod.rs` keeps modules beside it; `foo.rs` keeps them in
+    `foo/`. Both are taken, so a misjudged crate root only adds files.
+    """
+    folder = Path(name).parent
+    found = set()
+    for module in re.findall(r"(?<![\w:])mod\s+(?:r#)?(\w+)\s*;", text):
+        for base in (folder, folder / Path(name).stem):
+            for candidate in (base / f"{module}.rs", base / module / "mod.rs"):
+                found |= index.paths.get(candidate.as_posix().removeprefix("./").casefold(), set())
+    return found
 
 
 def follow(name: str, literal: str, package: str, index: Index) -> tuple[set[str], str | None]:
@@ -428,19 +568,26 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
         registry = tomllib.loads((ROOT / READER_REGISTRY).read_text()) if (ROOT / READER_REGISTRY).exists() else {}
         sites = {(entry["file"], entry["function"], entry["line"]): entry for entry in registry.get("reader", [])}
         # Reviewed readers that open a caller's path: every call site is a reader too.
-        wrappers = [re.escape(entry["call"]) for entry in registry.get("wrapper", [])]
+        calls = [entry["call"] for entry in registry.get("wrapper", [])]
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
         reasons.append(f"unreadable reader registry: {type(error).__name__}")
-        sites, wrappers = {}, []
-    reviewed = {"sites": sites, "used": set(), "wrappers": re.compile(r"(?<!fn )(?<![\w:])(?:" + "|".join(wrappers) + r")\s*\(") if wrappers else None}
+        sites, calls = {}, []
+    # Qualified calls (`crate::tor::create_with_timeouts(…)`) are call sites too;
+    # renaming a wrapper or passing it as a value hides its calls.
+    wrappers = "|".join(re.escape(call) for call in calls)
+    reviewed = {
+        "sites": sites,
+        "used": set(),
+        "wrappers": re.compile(r"(?<!fn )(?<!\w)(?:" + wrappers + r")" + TURBOFISH + r"\s*\(") if calls else None,
+        "wrapper_values": re.compile(r"(?<!fn )(?<!\w)(?:" + wrappers + r")\b(?!\s*(?:\(|::|!))") if calls else None,
+        "heads": {call.split("::")[0] for call in calls},
+    }
     def package_of(name: str) -> str | None:
         return next((p for p in packages if p == "" or name.startswith(p + "/")), None)
     cargo = manifests | {name for name in known if Path(name).name in {"rust-toolchain", "rust-toolchain.toml"} or name.startswith(".cargo/")}
     # Documentation is never a seed: a page is scanned only when something reaches it.
     pending = sorted((cargo | {name for name in known if package_of(name) in reachable}) - candidates)
     scanned = set(pending)
-    # Files Cargo consumes because a scanned file names or includes them.
-    consumed: set[str] = set()
     rust_like: set[str] = set()
     while pending:
         name = pending.pop()
@@ -480,7 +627,7 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
             else:
                 found = literals(f"{name}.rs" if rust else name, text)
                 if rust or path.suffix not in DATA_SUFFIXES:
-                    reasons.extend(f"{reason} in {name}" for reason in computed(text, found, name, runtime_file(name), reviewed))
+                    reasons.extend(f"{reason} in {name}" for reason in computed(text, found, name, runtime_file(name), reviewed, rust))
                     heads.update(name for literal in found if DOCS_HEAD.search(literal))
                     tails.update(name for literal in found if DOCS_TAIL.search(literal))
                     if not rust and path.suffix != ".md":
@@ -506,8 +653,13 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
             modules = {other for other in known if other.endswith(".rs")} if folder == "." else index.under(folder)
             for item in {m for m in modules if m.endswith(".rs")} - scanned:
                 scanned.add(item)
-                consumed.add(item)
                 pending.append(item)
+            if runtime_file(name):
+                # A build script's `mod helper;` runs with it: executed code
+                # makes its declared modules executed too; rescan if needed.
+                declared = module_files(name, text, index)
+                pending.extend(sorted((declared - executed) & scanned))
+                executed |= declared
             targets = {unescape(m[2] or m[4] or m[6] or "").replace("\\", "/") for m in RUST_TARGET.finditer(text)}
         else:
             targets = set()
@@ -519,8 +671,6 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
             for problem in (reason, escape):
                 if problem:
                     reasons.append(f"{problem} in {name}")
-            # A manifest naming a package directory does not consume every file in it.
-            consumed |= reached if document is None or not cargo_file else {r for r in reached if r.rsplit("/", 1)[-1] == literal.rstrip("/").rsplit("/", 1)[-1]}
             if literal in targets:
                 # Rescan a file already read as data once it is known to be Rust.
                 pending.extend(sorted((reached - rust_like) & scanned))
@@ -539,8 +689,10 @@ def input_policy(command: str, files: dict[str, str], selection: list[str] | Non
         if identity[0] in scanned and runtime_file(identity[0]) or identity[0] not in known:
             reasons.append(f"stale audited reader {identity[0]}: {identity[2]!r}")
     policy["reviewed_readers"] = len(reviewed["used"])
-    # Ignored files that Cargo consumes are inputs under every policy.
-    policy["consumed_ignored"] = sorted(consumed & ignored_names)
+    # Ignored files Cargo may consume are inputs under every policy: everything
+    # scanned, which covers every file in a built package (implicit `mod`
+    # modules included) and every file a scanned file names.
+    policy["consumed_ignored"] = sorted(scanned & ignored_names)
     if policy["name"] == "full":
         policy["fallback_reason"] = f"{command} validates every repository input"
         return policy
