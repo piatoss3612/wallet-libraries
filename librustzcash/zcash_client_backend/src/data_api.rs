@@ -4136,10 +4136,12 @@ pub trait WalletWrite:
     /// A wallet output at `address` whose creating transaction is mined in
     /// `start_height..=as_of_height`, that was not returned, and that the wallet does not know to be spent by a
     /// transaction mined at or below that height, has been spent by a transaction the wallet has
-    /// not linked. The wallet stops counting it as spendable and requests the spend through
-    /// [`WalletRead::transaction_data_requests`]; storing the spending transaction links it.
+    /// not linked. Under public authority the wallet stops counting it as spendable and requests
+    /// the spend through [`WalletRead::transaction_data_requests`]; storing the spending
+    /// transaction links it.
     /// Evidence that the output is unspent at or above `as_of_height`, such as a later query that
     /// returns it, supersedes the absence, and so does a rewind below `as_of_height`.
+    /// Public absence observations do not override qualified private ledger authority.
     #[cfg(feature = "transparent-inputs")]
     fn notify_transparent_utxos_observed(
         &mut self,

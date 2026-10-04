@@ -39,8 +39,10 @@ workspace.
   expiry cannot leave it unmined. After that observation the ordinary rules apply.
 - `notify_transparent_utxos_observed` records outputs a complete UTXO query did not return in the
   new `transparent_utxo_absences` table (migration `transparent_utxo_absences`). Such an output is
-  excluded from balances and input selection while the absence is newer than its last observation
-  as unspent; a rewind below the observation removes it. It is queued for spend detection, and the
+  excluded from public balances and input selection while the absence is newer than its last
+  observation as unspent; a rewind below the observation removes it. Public absence observations
+  do not constrain qualified private balances, selection, or submission/retry checks, and remain
+  available on a return to public authority. It is queued for spend detection, and the
   address search reaches the observed height instead of stopping at the expiry delta.
 - Spend detection for a transparent output is kept while its only known spender is unmined, and a
   spend by an expired transaction no longer suppresses the search. Previously storing an unmined

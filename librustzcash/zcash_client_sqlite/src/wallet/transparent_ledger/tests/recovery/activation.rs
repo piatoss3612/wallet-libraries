@@ -1457,6 +1457,7 @@ mod spend_evidence;
 mod qualification;
 
 mod gating {
+    mod absence;
     mod coinbase;
     mod withdrawal;
 
