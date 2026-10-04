@@ -254,6 +254,15 @@ mod tests {
             .unwrap()
     }
 
+    fn recreate_earlier_sender_grouping_view(conn: &Connection) {
+        // Fresh migrations now retain this column. Recreate the already-applied older view
+        // without changing the journal or the stored classification values.
+        let earlier_view = view(conn).replace(",\n       transactions.zip318_kind", "");
+        assert!(!earlier_view.contains("transactions.zip318_kind"));
+        conn.execute_batch(&format!("DROP VIEW v_transactions; {earlier_view}"))
+            .unwrap();
+    }
+
     #[test]
     fn migrate() {
         test_migrate(&[MIGRATION_ID]);
@@ -268,6 +277,7 @@ mod tests {
         WalletMigrator::new()
             .init_or_migrate_to(&mut db, DEPENDENCIES)
             .unwrap();
+        recreate_earlier_sender_grouping_view(&db.conn);
         assert!(!view(&db.conn).contains("transactions.zip318_kind"));
         db.conn.execute(
             "INSERT INTO transactions (txid, min_observed_height, created, raw, fee, expiry_height, zip318_kind)
@@ -319,6 +329,7 @@ mod tests {
         WalletMigrator::new()
             .init_or_migrate_to(&mut db, DEPENDENCIES)
             .unwrap();
+        recreate_earlier_sender_grouping_view(&db.conn);
         db.conn
             .execute_batch("ALTER TABLE transactions DROP COLUMN zip318_kind")
             .unwrap();

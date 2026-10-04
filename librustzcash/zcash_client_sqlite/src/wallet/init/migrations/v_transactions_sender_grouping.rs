@@ -207,7 +207,8 @@ SELECT accounts.uuid                AS account_uuid,
        -- between shielded pools; NULL when it is not such a transfer. A transaction is one
        -- exactly when this column is non-NULL.
        pool_crossings.crossing_value AS pool_crossing_value,
-       transactions.trust_status
+       transactions.trust_status,
+       transactions.zip318_kind
 FROM notes
 JOIN accounts ON accounts.id = notes.account_id
 JOIN transactions ON transactions.id_tx = notes.transaction_id
@@ -260,5 +261,9 @@ mod tests {
         let view = view(&db.conn);
         assert!(!view.contains("GROUP BY account_id, sent_notes.transaction_id"));
         assert!(view.contains("GROUP BY sent_notes.from_account_id, sent_notes.transaction_id"));
+        // Published 0.1.0-rc5 and 0.1.0-rc7 builds still read the retained legacy column.
+        db.conn
+            .prepare("SELECT zip318_kind FROM v_transactions")
+            .unwrap();
     }
 }
