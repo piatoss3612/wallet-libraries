@@ -212,9 +212,6 @@ pub(crate) fn durable_policy(
             Ok(None)
         };
     }
-    if super::init::legacy_writers::pending(conn)? {
-        return Err(SqliteClientError::LegacyWritesUnreconciled);
-    }
     let (mode, generation, min_reader_version) = conn
         .query_row(
             "SELECT applied_mode, policy_generation, min_reader_version FROM tpir_meta WHERE id = 0",

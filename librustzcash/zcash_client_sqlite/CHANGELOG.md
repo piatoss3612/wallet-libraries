@@ -22,20 +22,11 @@ workspace.
 ### Added
 - `SqlTransaction::new` lets consumers run guarded wallet operations and application cleanup in one caller-owned transaction.
 - `WalletDb::check_transparent_transaction_inputs` authorizes finalized submissions and exact-byte retries without permitting competing spends or weakening transparent authority.
-- A wallet this library upgraded stays usable by builds that use the published rc5/rc7, with no
-  handover step. The unreleased `drop_zip318_pool_migration` retains
-  `transactions.zip318_kind` and its `v_transactions` field in place. Development databases
-  that already dropped them are outside the supported upgrade path. The `legacy_writer_marker`
-  migration installs `tpir_legacy_writes` and a trigger on classification updates by older builds.
-  Initialization reconciles an older build's writes atomically: transparent outputs and spends
-  without an origin get legacy (and local) provenance, without coverage or authority, and the
-  marker is cleared only after active private receives and spends match their wallet
-  projections. UTXO-only legacy writes are checked even without a marker; a mismatch
-  refuses initialization and durably marks the wallet to withhold financial authority.
-  Ledger APIs return `SqliteClientError::LegacyWritesUnreconciled` for a
-  marked wallet until then. The
-  column is to be dropped once no supported build writes it
-  ([#85](https://github.com/zakura-core/wallet-libraries/issues/85)).
+- The unreleased `drop_zip318_pool_migration` retains `transactions.zip318_kind` and its
+  `v_transactions` field in place, preserving classification values on upgrades from published
+  rc5/rc7 schemas. The obsolete explicit rollback preparation API is removed. Development
+  databases that already dropped the column are outside the supported upgrade path. Writable
+  downgrades after a private-ledger upgrade are not qualified by this schema change.
 - Initialization refuses unknown migration IDs before schema interpretation and restores foreign
   key enforcement on error. ZIP 318 removal names dependent application views/triggers.
 - Shared-receiver activity expands effective recovery windows on read, exposing work immediately.

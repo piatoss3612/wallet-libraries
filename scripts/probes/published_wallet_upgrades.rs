@@ -1,4 +1,4 @@
-//! Runs only against disposable databases created by check-legacy-writers.py.
+//! Runs only against disposable databases created by check-published-wallet-upgrades.py.
 use std::path::PathBuf;
 use zcash_client_backend::data_api::{
     DecryptedTransaction, WalletRead, WalletWrite, testing::TestRng,
@@ -35,8 +35,8 @@ fn main() {
                 .unwrap();
             }
         }
-        "ingest" | "expect-failure" => {
-            // Exercise the old migrator too: it must accept the current schema as it is.
+        "ingest" => {
+            // Ingest using the published schema before the current library upgrades it.
             WalletMigrator::new().init_or_migrate(&mut db).unwrap();
             db.update_chain_tip(BlockHeight::from_u32(3_483_367))
                 .unwrap();
@@ -80,49 +80,39 @@ fn main() {
                 vec![],
                 vec![],
             );
-            let result = db.store_decrypted_tx(decrypted);
-            if args[1] == "expect-failure" {
-                let err = result
-                    .expect_err("negative control must fail without the legacy column");
-                assert!(
-                    err.to_string().contains("zip318_kind"),
-                    "unexpected failure: {err}"
-                );
-            } else {
-                result.unwrap();
-                assert!(db.get_transaction(tx.txid()).unwrap().is_some());
-                // Repeat ingestion of the existing row, as sync/enhancement does.
-                db.store_decrypted_tx(DecryptedTransaction::new(
-                    Some(BlockHeight::from_u32(3_483_367)),
-                    &tx,
-                    vec![],
-                    vec![],
-                    vec![],
-                ))
-                .unwrap();
-                #[cfg(not(feature = "current"))]
-                {
-                    use transparent::bundle::{OutPoint, TxOut};
-                    use zcash_client_backend::wallet::WalletTransparentOutput;
-                    use zcash_protocol::value::Zatoshis;
-                    let account = db.get_account_ids().unwrap()[0];
-                    let address = *db
-                        .get_transparent_receivers(account, false, false)
-                        .unwrap()
-                        .keys()
-                        .next()
-                        .unwrap();
-                    let output = WalletTransparentOutput::from_parts(
-                        OutPoint::new([7; 32], 0),
-                        TxOut::new(Zatoshis::const_from_u64(50_000), address.script().into()),
-                        Some(BlockHeight::from_u32(3_483_365)),
-                        Some(account),
-                        None,
-                        None,
-                    )
+            db.store_decrypted_tx(decrypted).unwrap();
+            assert!(db.get_transaction(tx.txid()).unwrap().is_some());
+            // Repeat ingestion of the existing row, as sync/enhancement does.
+            db.store_decrypted_tx(DecryptedTransaction::new(
+                Some(BlockHeight::from_u32(3_483_367)),
+                &tx,
+                vec![],
+                vec![],
+                vec![],
+            ))
+            .unwrap();
+            #[cfg(not(feature = "current"))]
+            {
+                use transparent::bundle::{OutPoint, TxOut};
+                use zcash_client_backend::wallet::WalletTransparentOutput;
+                use zcash_protocol::value::Zatoshis;
+                let account = db.get_account_ids().unwrap()[0];
+                let address = *db
+                    .get_transparent_receivers(account, false, false)
+                    .unwrap()
+                    .keys()
+                    .next()
                     .unwrap();
-                    db.put_received_transparent_utxo(&output).unwrap();
-                }
+                let output = WalletTransparentOutput::from_parts(
+                    OutPoint::new([7; 32], 0),
+                    TxOut::new(Zatoshis::const_from_u64(50_000), address.script().into()),
+                    Some(BlockHeight::from_u32(3_483_365)),
+                    Some(account),
+                    None,
+                    None,
+                )
+                .unwrap();
+                db.put_received_transparent_utxo(&output).unwrap();
             }
         }
         _ => panic!("unexpected command"),

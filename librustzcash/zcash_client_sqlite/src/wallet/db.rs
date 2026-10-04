@@ -320,9 +320,8 @@ CREATE TABLE blocks (
 /// - `zip318_kind`: unused legacy column. Published zakura-client-sqlite 0.1.0-rc5 and 0.1.0-rc7
 ///   write how each transaction they store classifies against ZIP 318 here, and read it through
 ///   `v_transactions`; this build never reads it, and new rows hold the default, `0` (not
-///   classified). It is kept so that those builds can still use a wallet this build upgraded. A
-///   write to it marks [`TABLE_TPIR_LEGACY_WRITES`]. TODO(zakura-core/wallet-libraries#85): drop
-///   it once no supported build writes it.
+///   classified). Upgrades retain its existing values. TODO(zakura-core/wallet-libraries#85):
+///   drop it once no supported build writes it.
 pub(super) const TABLE_TRANSACTIONS: &str = r#"
 CREATE TABLE "transactions" (
     id_tx INTEGER PRIMARY KEY,
@@ -778,26 +777,6 @@ CREATE INDEX idx_transparent_spend_map_transaction_id ON transparent_spend_map (
 )"#;
 
 // Transparent ledger (`tpir_*`) tables. See `docs/transparent-pir-ledger-architecture.md`.
-
-/// Records that a build older than the transparent ledger wrote to this wallet.
-///
-/// The `tpir_legacy_zip318_write` trigger inserts its single row whenever `transactions.zip318_kind`
-/// is written, which only published rc5/rc7 builds do. Initialization also sets this marker when
-/// active private projections disagree with retained ledger facts, including unmarked older
-/// UTXO writes. It clears the row only after validation and reconciliation succeed; transparent
-/// ledger APIs refuse the wallet while it is set.
-pub(super) const TABLE_TPIR_LEGACY_WRITES: &str = r#"
-CREATE TABLE tpir_legacy_writes (
-    id INTEGER PRIMARY KEY CHECK (id = 0)
-)"#;
-
-/// Marks [`TABLE_TPIR_LEGACY_WRITES`] when an older build stores a transaction.
-pub(super) const TRIGGER_TPIR_LEGACY_ZIP318_WRITE: &str = r#"
-CREATE TRIGGER tpir_legacy_zip318_write
-AFTER UPDATE OF zip318_kind ON transactions
-BEGIN
-    INSERT OR IGNORE INTO tpir_legacy_writes (id) VALUES (0);
-END"#;
 
 /// The durable transparent ledger policy, as a single row.
 ///

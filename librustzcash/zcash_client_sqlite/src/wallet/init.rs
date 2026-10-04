@@ -19,7 +19,6 @@ use self::migrations::verify_network_compatibility;
 use super::commitment_tree;
 use crate::{WalletDb, error::SqliteClientError, util::Clock};
 
-pub(super) mod legacy_writers;
 pub mod migrations;
 
 const SQLITE_MAJOR_VERSION: u32 = 3;
@@ -193,9 +192,6 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         #[cfg(feature = "orchard")]
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
-        }
-        SqliteClientError::LegacyWritesUnreconciled => {
-            unreachable!("older builds' writes are reconciled before ledger state is read")
         }
         SqliteClientError::TransparentLedgerModeNotConfigured
         | SqliteClientError::TransparentLedgerPolicyConflict { .. }
@@ -699,10 +695,6 @@ fn init_wallet_db_internal<
                 migrator.up(Some(*target_migration))?;
             }
         }
-        drop(migrator);
-        // Builds older than the transparent ledger can reopen this wallet without any step being
-        // taken first; reconcile whatever they wrote before anything else uses it.
-        legacy_writers::reconcile(wdb.conn.borrow_mut()).map_err(MigratorError::Adapter)?;
         // Now that the migration succeeded, check whether the seed is relevant to the wallet.
         // We can only check this if we have migrated as far as `full_account_ids::MIGRATION_ID`,
         // but unfortunately `schemer` does not currently expose its DAG of migrations. As a
@@ -929,7 +921,6 @@ mod tests {
             db::TABLE_TPIR_ACTIVE_ACCOUNTS,
             db::TABLE_TPIR_CANDIDATE_WINDOWS,
             db::TABLE_TPIR_COVERAGE,
-            db::TABLE_TPIR_LEGACY_WRITES,
             db::TABLE_TPIR_META,
             db::TABLE_TPIR_OUTPUT_ORIGINS,
             db::TABLE_TPIR_PENDING_PAGE_SCRIPTS,
@@ -1070,13 +1061,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(
-            triggers
-                .iter()
-                .map(|sql| normalize(sql))
-                .collect::<Vec<_>>(),
-            vec![normalize(db::TRIGGER_TPIR_LEGACY_ZIP318_WRITE)]
-        );
+        assert!(triggers.is_empty(), "unexpected triggers: {triggers:?}");
     }
 
     #[test]

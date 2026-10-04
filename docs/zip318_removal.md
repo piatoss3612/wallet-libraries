@@ -77,23 +77,20 @@ Published rc5/rc7 reference them only through `ON DELETE CASCADE` from
 
 `transactions.zip318_kind` and `v_transactions.zip318_kind` stay, as unused
 legacy schema. Published zakura-client-sqlite 0.1.0-rc5 and 0.1.0-rc7 write the
-column on every transaction store and read the view field, so a wallet this
-library upgraded keeps working when a user reinstalls a build that uses them.
+column on every transaction store and read the view field. Retaining both
+preserves existing classification values and avoids the missing-column failure.
 This library never reads either; new rows hold the default, `0`.
 
-- The unreleased `drop_zip318_pool_migration` retains the column and view field
-  in place. Supported inputs are fresh databases and upgrades from published
-  schemas. Databases that applied the earlier development revision which dropped
-  the column are outside the supported upgrade path; no repair migration is provided.
-- `legacy_writer_marker` (the current leaf) installs `tpir_legacy_writes` and a
-  trigger on classification updates after the transparent ledger schema exists.
-  Older transaction stores update the classification; UTXO-only writes do not,
-  so initialization also validates private projections without a marker. See
-  `wallet::init::legacy_writers`. This replaced the explicit
-  `prepare_legacy_rollback` handover.
-- The column, its view field, the marker table and its trigger go together
-  once no supported build writes the column
-  ([#85](https://github.com/zakura-core/wallet-libraries/issues/85)).
+The unreleased `drop_zip318_pool_migration` retains the column and view field
+in place. Supported inputs are fresh databases and upgrades from published
+schemas. Databases that applied the earlier development revision which dropped
+the column are outside the supported upgrade path; no repair migration is provided.
+The obsolete explicit rollback preparation API is removed. This schema change
+provides no reconciliation or qualification for older builds writing to a wallet
+after its private-ledger upgrade.
+
+The column and its view field can be removed once no supported build writes them
+([#85](https://github.com/zakura-core/wallet-libraries/issues/85)).
 
 A fresh wallet and an upgraded wallet end with the same schema, and
 `verify_schema` checks that.

@@ -54,12 +54,6 @@ pub enum SqliteClientError {
     EnhancementModeNotConfigured,
     /// Transparent ledger APIs require an explicit mode on this handle.
     TransparentLedgerModeNotConfigured,
-    /// Legacy writes require reconciliation, or active private projections disagree with retained
-    /// ledger facts. Run [`WalletMigrator`] before using ledger APIs; mismatched projections must
-    /// first be repaired from verified facts.
-    ///
-    /// [`WalletMigrator`]: crate::wallet::init::WalletMigrator
-    LegacyWritesUnreconciled,
     /// The handle's transparent ledger mode is weaker than the policy durably applied to the
     /// wallet. The stored policy is never weakened by a handle's configuration.
     TransparentLedgerPolicyConflict {
@@ -386,10 +380,6 @@ impl fmt::Display for SqliteClientError {
             SqliteClientError::TransparentLedgerModeNotConfigured => write!(
                 f,
                 "Transparent ledger mode is not configured; call set_transparent_ledger_mode first"
-            ),
-            SqliteClientError::LegacyWritesUnreconciled => write!(
-                f,
-                "An older build wrote to this wallet; run WalletMigrator before using this build"
             ),
             SqliteClientError::TransparentLedgerPolicyConflict {
                 configured,

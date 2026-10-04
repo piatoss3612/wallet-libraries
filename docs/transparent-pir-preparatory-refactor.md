@@ -929,44 +929,24 @@ generating addresses and rolls the entire transition back if that would introduc
 receivers; perform the explicit production transfer and recover before retrying promotion.
 
 
-## Older builds and recovery boundary repairs
+## Published-wallet upgrades and recovery boundary repairs
 
-A wallet this library upgraded stays usable by builds that use the published
-`zakura-client-sqlite` rc5/rc7, without any step taken in advance. The schema
-keeps everything those builds write: `transactions.zip318_kind INTEGER NOT NULL
-DEFAULT 0` and the matching `v_transactions` field stay as unused legacy schema
-(see `docs/zip318_removal.md`). The pool-migration tables and engine remain
-removed; this is not support for pool-migration users. Fresh databases and upgrades
-from published schemas retain the column in place. Databases that applied the earlier
-development revision which dropped it are outside the supported upgrade path.
+Fresh wallets and upgrades from published `zakura-client-sqlite` rc5/rc7 retain
+`transactions.zip318_kind INTEGER NOT NULL DEFAULT 0` and its matching
+`v_transactions` field in place (see `docs/zip318_removal.md`). Existing
+classification values survive the upgrade. The unused pool-migration tables
+and engine remain removed. Databases that applied the earlier development
+revision which dropped the column are outside the supported upgrade path.
+This change does not qualify older builds writing to wallets after a
+private-ledger upgrade and adds no downgrade reconciliation machinery.
 
-Older builds do not maintain transparent provenance. `legacy_writer_marker`
-installs `tpir_legacy_writes` and a trigger on writes to `zip318_kind`, which
-only an older build's transaction store performs. Current ledger APIs refuse a
-marked wallet. `WalletMigrator::init_or_migrate`, after verifying known
-migrations and the network and applying migrations, reconciles atomically:
-every transparent output and spend without an origin gets legacy public
-evidence, plus local construction when its transaction carries creation
-evidence, and it clears the marker. Records that
-already have an origin keep exactly the origins they had, so reconciliation
-grants no new coverage, qualification or authority. Before clearing the marker,
-initialization validates the placed receives and spends of active private accounts
-against their wallet projections, including output content, ownership, coinbase
-classification, placement and spend links. This runs even without a marker because
-older UTXO updates do not write `zip318_kind`. A disagreement refuses initialization
-and durably sets the marker, preventing ledger access even if the caller ignores
-the error. Matching private state and public wallets continue to reconcile normally.
-It never removes or replays applied migration IDs. Other failures roll back;
-foreign key enforcement is restored on every exit.
-
-`python3 scripts/check-legacy-writers.py` creates disposable databases using
-actual published rc5 and rc7 crates. After the current library initializes
-each, the old library ingests a serialized wallet-owned transaction fixture
-twice and discovers a UTXO with no step in between, and the current library then
-reopens it with identical transaction bytes and migration IDs and legacy
-provenance for the old outputs. This complements unit coverage of provenance
-reconciliation and failure atomicity. It is not whole-wallet sync
-qualification; Vizor runs its own release probes against its pin.
+`python3 scripts/check-published-wallet-upgrades.py` creates disposable databases
+using actual published rc5 and rc7 crates, ingests wallet-owned transactions and
+a UTXO before upgrading, and checks that the current library preserves accounts,
+transaction bytes, classification values and outputs. The existing ledger migration
+classifies pre-upgrade outputs as legacy provenance without private coverage.
+Repeated current initialization preserves the migration journal. This is an
+upgrade probe, not whole-wallet sync qualification.
 
 Recovery reads derive the effective discovery window from all recorded mined
 candidate activity, including receivers owned by another account. Recovery retains
