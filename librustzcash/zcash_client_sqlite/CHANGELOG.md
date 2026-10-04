@@ -36,7 +36,9 @@ workspace.
   address search reaches the observed height instead of stopping at the expiry delta. Queries
   must retain identical before/after tip heights and hashes matching the wallet's accepted tip;
   changed or unaccepted points are rejected. Public absences never override private authority.
-  Completing spend searches advances unspent evidence despite retained expired spender links.
+  Completing spend searches advances unspent evidence despite retained expired spender links,
+  only for outputs whose own search frontier lies in the completed range. A later range at a
+  shared address cannot supersede another output's absence or skip its unresolved history.
 - Spend detection for a transparent output is kept while its only known spender is unmined, and a
   spend by an expired transaction no longer suppresses the search. Previously storing an unmined
   spend dropped the search for good, so a withheld or expired local spend hid a conflicting spend

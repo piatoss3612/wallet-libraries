@@ -2299,8 +2299,8 @@ pub(crate) fn mark_transparent_utxo_spent(
 /// Sets the max observed unspent height for all unspent transparent outputs received at the given
 /// address to at least the given height (calling this method will not cause the max observed
 /// unspent height to decrease). Only outputs whose own search frontier is covered by
-/// `range_start..=checked_at` advance; completing a later range at a shared address must not
-/// skip another output's unresolved history.
+/// `range_start..=checked_at` advance: completing a later range at a shared address must not
+/// skip another output's unresolved history or supersede its earlier absence.
 pub(crate) fn update_observed_unspent_heights<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
     params: &P,
