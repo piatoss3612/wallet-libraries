@@ -66,7 +66,7 @@ fn reject_dependents(transaction: &rusqlite::Transaction) -> Result<(), WalletMi
         transaction
             .prepare(
                 "SELECT name FROM sqlite_master WHERE type = 'trigger'
-                 AND instr(sql, 'orchard_ironwood_migration') > 0",
+                 AND instr(lower(sql), 'orchard_ironwood_migration') > 0",
             )?
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?,
@@ -278,6 +278,61 @@ mod tests {
                 .conn
                 .prepare(&format!("SELECT * FROM {view}"))
                 .unwrap();
+        }
+    }
+    /// SQLite identifiers are case-insensitive; every casing of a dependent trigger must
+    /// refuse the migration before its removed tables and journal entry are committed.
+    #[test]
+    fn dependent_triggers_are_named_and_the_upgrade_rolls_back() {
+        use crate::wallet::init::WalletMigrationError;
+        use schemerz::MigratorError;
+
+        for table in ["ORCHARD_IRONWOOD_MIGRATIONS", "Orchard_Ironwood_Migrations"] {
+            let file = NamedTempFile::new().unwrap();
+            let mut db =
+                WalletDb::for_path(file.path(), Network::TestNetwork, test_clock(), test_rng())
+                    .unwrap();
+            let seed = [0xab; 32];
+            WalletMigrator::new()
+                .with_seed(Secret::new(seed.to_vec()))
+                .ignore_seed_relevance()
+                .init_or_migrate_to(&mut db, DEPENDENCIES)
+                .unwrap();
+            db.conn
+                .execute_batch(&format!(
+                    "CREATE TRIGGER ext_pool_trigger AFTER UPDATE ON accounts
+                 BEGIN DELETE FROM {table} WHERE account_id = NEW.id; END;"
+                ))
+                .unwrap();
+            let result = WalletMigrator::new()
+                .with_seed(Secret::new(seed.to_vec()))
+                .ignore_seed_relevance()
+                .init_or_migrate_to(&mut db, &[MIGRATION_ID]);
+            assert!(
+                matches!(result, Err(MigratorError::Migration {
+                error: WalletMigrationError::CorruptedData(ref reason), ..
+            }) if reason.contains("ext_pool_trigger")),
+                "{result:?}"
+            );
+            assert!(table_exists(&db.conn, "orchard_ironwood_migrations"));
+            let applied: bool = db
+                .conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM schemer_migrations WHERE id = ?1)",
+                    [MIGRATION_ID.as_bytes().to_vec()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!applied);
+            db.conn
+                .execute_batch("DROP TRIGGER ext_pool_trigger")
+                .unwrap();
+            WalletMigrator::new()
+                .with_seed(Secret::new(seed.to_vec()))
+                .ignore_seed_relevance()
+                .init_or_migrate_to(&mut db, &[MIGRATION_ID])
+                .unwrap();
+            assert!(!table_exists(&db.conn, "orchard_ironwood_migrations"));
         }
     }
 }
