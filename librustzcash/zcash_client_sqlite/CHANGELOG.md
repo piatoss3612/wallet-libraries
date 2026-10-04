@@ -26,6 +26,11 @@ workspace.
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 
 ### Added
+- `WalletDb::transaction_history_summaries` returns typed account-scoped transaction
+  metadata and monetary effects without reading raw transaction payloads. It shares
+  the corrected accounting definition of `v_transactions`, filters account inputs
+  before aggregation, and reuses caller-owned read snapshots. The existing view
+  and migration history are unchanged.
 - `SqlTransaction::new` lets consumers run guarded wallet operations and application cleanup in one caller-owned transaction.
 - `WalletDb::check_transparent_transaction_inputs` authorizes finalized submissions and exact-byte retries without permitting competing spends or weakening transparent authority.
 - The unreleased `drop_zip318_pool_migration` retains `transactions.zip318_kind` and its
