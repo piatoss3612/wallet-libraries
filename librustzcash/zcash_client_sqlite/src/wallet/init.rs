@@ -19,9 +19,8 @@ use self::migrations::verify_network_compatibility;
 use super::commitment_tree;
 use crate::{WalletDb, error::SqliteClientError, util::Clock};
 
-pub(super) mod legacy_rollback;
+pub(super) mod legacy_writers;
 pub mod migrations;
-pub use legacy_rollback::prepare_legacy_rollback;
 
 const SQLITE_MAJOR_VERSION: u32 = 3;
 const MIN_SQLITE_MINOR_VERSION: u32 = 35;
@@ -74,9 +73,6 @@ pub enum WalletMigrationError {
     /// build cannot interpret its schema, so it refuses to open it rather than read or write state
     /// whose meaning it does not know. External migrations must be supplied on every call.
     UnknownMigrations(Vec<Uuid>),
-
-    /// Legacy rollback is restricted to public wallets with no private recovery history.
-    LegacyRollbackNotSupported,
 
     /// Some other unexpected violation of database business rules occurred
     Other(Box<SqliteClientError>),
@@ -156,10 +152,6 @@ impl fmt::Display for WalletMigrationError {
             WalletMigrationError::CannotRevert(uuid) => {
                 write!(f, "Reverting migration {uuid} is not supported")
             }
-            WalletMigrationError::LegacyRollbackNotSupported => write!(
-                f,
-                "Legacy rollback requires an unchanged public policy and no private recovery state"
-            ),
             WalletMigrationError::UnknownMigrations(ids) => {
                 let ids: Vec<_> = ids.iter().map(Uuid::to_string).collect();
                 write!(
@@ -202,8 +194,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
-        SqliteClientError::LegacyRollbackPrepared => {
-            WalletMigrationError::LegacyRollbackNotSupported
+        SqliteClientError::LegacyWritesUnreconciled => {
+            unreachable!("older builds' writes are reconciled before ledger state is read")
         }
         SqliteClientError::TransparentLedgerModeNotConfigured
         | SqliteClientError::TransparentLedgerPolicyConflict { .. }
@@ -689,8 +681,6 @@ fn init_wallet_db_internal<
         verify_network_compatibility(wdb.conn.borrow(), &wdb.params)
             .map_err(MigratorError::Adapter)?;
 
-        legacy_rollback::resume_current(wdb.conn.borrow_mut()).map_err(MigratorError::Adapter)?;
-
         // Now create the adapter that we're actually going to use to perform the migrations, and
         // proceed.
         let adapter =
@@ -709,6 +699,10 @@ fn init_wallet_db_internal<
                 migrator.up(Some(*target_migration))?;
             }
         }
+        drop(migrator);
+        // Builds older than the transparent ledger can reopen this wallet without any step being
+        // taken first; reconcile whatever they wrote before anything else uses it.
+        legacy_writers::reconcile(wdb.conn.borrow_mut()).map_err(MigratorError::Adapter)?;
         // Now that the migration succeeded, check whether the seed is relevant to the wallet.
         // We can only check this if we have migrated as far as `full_account_ids::MIGRATION_ID`,
         // but unfortunately `schemer` does not currently expose its DAG of migrations. As a
@@ -935,6 +929,7 @@ mod tests {
             db::TABLE_TPIR_ACTIVE_ACCOUNTS,
             db::TABLE_TPIR_CANDIDATE_WINDOWS,
             db::TABLE_TPIR_COVERAGE,
+            db::TABLE_TPIR_LEGACY_WRITES,
             db::TABLE_TPIR_META,
             db::TABLE_TPIR_OUTPUT_ORIGINS,
             db::TABLE_TPIR_PENDING_PAGE_SCRIPTS,
@@ -1063,6 +1058,25 @@ mod tests {
             assert_eq!(normalize(&actual), normalize(&expected_views[expected_idx]));
             expected_idx += 1;
         }
+        assert_eq!(expected_idx, expected_views.len());
+
+        let triggers: Vec<String> = st
+            .wallet()
+            .db()
+            .conn
+            .prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            triggers
+                .iter()
+                .map(|sql| normalize(sql))
+                .collect::<Vec<_>>(),
+            vec![normalize(db::TRIGGER_TPIR_LEGACY_ZIP318_WRITE)]
+        );
     }
 
     #[test]

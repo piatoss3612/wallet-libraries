@@ -212,8 +212,8 @@ pub(crate) fn durable_policy(
             Ok(None)
         };
     }
-    if super::init::legacy_rollback::column_restored(conn)? {
-        return Err(SqliteClientError::LegacyRollbackPrepared);
+    if super::init::legacy_writers::pending(conn)? {
+        return Err(SqliteClientError::LegacyWritesUnreconciled);
     }
     let (mode, generation, min_reader_version) = conn
         .query_row(

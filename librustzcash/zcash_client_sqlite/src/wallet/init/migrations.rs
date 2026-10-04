@@ -17,8 +17,6 @@ mod add_transparent_value_index;
 mod add_utxo_account;
 mod addresses_table;
 mod drop_zip318_pool_migration;
-pub(super) use drop_zip318_pool_migration::remove_zip318_column;
-pub(super) const DROP_ZIP318_POOL_MIGRATION_ID: Uuid = drop_zip318_pool_migration::MIGRATION_ID;
 mod ensure_default_transparent_address;
 mod ensure_orchard_ua_receiver;
 mod ephemeral_addresses;
@@ -44,6 +42,7 @@ mod orchard_received_notes;
 mod orchard_shardtree;
 mod received_notes_nullable_nf;
 mod receiving_key_scopes;
+mod retain_zip318_kind;
 mod sapling_memo_consistency;
 mod sent_notes_to_internal;
 mod shardtree_support;
@@ -54,15 +53,11 @@ mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transparent_activation_schema;
 mod transparent_activity_metadata;
-pub(super) const TRANSPARENT_ACTIVITY_METADATA_ID: Uuid =
-    transparent_activity_metadata::MIGRATION_ID;
 mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod transparent_recovery_schema;
 mod transparent_shared_derivations;
-pub(super) const TRANSPARENT_SHARED_DERIVATIONS_ID: Uuid =
-    transparent_shared_derivations::MIGRATION_ID;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
@@ -159,6 +154,7 @@ pub mod ids {
         orchard_shardtree::MIGRATION_ID as ORCHARD_SHARDTREE,
         received_notes_nullable_nf::MIGRATION_ID as RECEIVED_NOTES_NULLABLE_NF,
         receiving_key_scopes::MIGRATION_ID as RECEIVING_KEY_SCOPES,
+        retain_zip318_kind::MIGRATION_ID as RETAIN_ZIP318_KIND,
         sapling_memo_consistency::MIGRATION_ID as SAPLING_MEMO_CONSISTENCY,
         sent_notes_to_internal::MIGRATION_ID as SENT_NOTES_TO_INTERNAL,
         shardtree_support::MIGRATION_ID as SHARDTREE_SUPPORT,
@@ -288,7 +284,8 @@ pub(super) fn all_migrations<
     // ironwood_enhance, and ironwood_received_notes -> orchard_ironwood_migration_tables ->
     // orchard_ironwood_migration_anchor_interval -> orchard_ironwood_migration_unsatisfiability.
     // Both chains meet at status_inclusion_evidence, which is followed by
-    // drop_zip318_pool_migration, which drops the schema the ZIP 318 migrations created.
+    // drop_zip318_pool_migration, which drops the pool-migration tables. retain_zip318_kind, the
+    // current leaf, keeps the ZIP 318 classification column for older builds.
     //
     let rng = Rc::new(Mutex::new(rng));
     vec![
@@ -413,6 +410,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_activation_schema::Migration),
         Box::new(transparent_activity_metadata::Migration),
         Box::new(transparent_shared_derivations::Migration),
+        Box::new(retain_zip318_kind::Migration),
     ]
 }
 
@@ -634,7 +632,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_shared_derivations::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[retain_zip318_kind::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -768,6 +766,7 @@ pub(crate) mod tests {
             ids::ORCHARD_RECEIVED_NOTES,
             ids::ORCHARD_SHARDTREE,
             ids::RECEIVED_NOTES_NULLABLE_NF,
+            ids::RETAIN_ZIP318_KIND,
             ids::RECEIVING_KEY_SCOPES,
             ids::SAPLING_MEMO_CONSISTENCY,
             ids::SENT_NOTES_TO_INTERNAL,

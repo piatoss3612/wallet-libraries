@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Qualify old-writer transaction ingestion against disposable rc5/rc7 wallets.
+"""Qualify rc5/rc7 writers against disposable wallets the current library upgraded.
+
+The current library initializes each wallet, the published library then ingests transactions and a
+UTXO with no step in between, and the current library reopens it and reconciles those writes. A
+copy whose legacy `zip318_kind` column is removed must make the published ingestion fail, so the
+probe would notice the column going away.
 
 Separate consumers retain the published dependency families without modifying the workspace
 lockfile. Every run exclusively owns its Cargo target; no user wallet is accepted.
 """
 import argparse
 import fcntl
+import shutil
 import json
 from pathlib import Path
 import sqlite3
@@ -19,8 +25,8 @@ FIXTURE = ROOT / "librustzcash/zcash_client_backend/tests/fixtures/ironwood-fee-
 def consumer(root, version):
     dest = root / version
     (dest / "src").mkdir(parents=True)
-    (dest / "src/main.rs").write_text((ROOT / "scripts/probes/legacy_rollback.rs").read_text())
-    manifest = f'[package]\nname = "legacy-rollback-probe-{version}"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[features]\ncurrent = []\n[dependencies]\nhex = "0.4"\nsecrecy = "0.8"\n'
+    (dest / "src/main.rs").write_text((ROOT / "scripts/probes/legacy_writers.rs").read_text())
+    manifest = f'[package]\nname = "legacy-writers-probe-{version}"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[features]\ncurrent = []\n[dependencies]\nhex = "0.4"\nsecrecy = "0.8"\n'
     for alias, package, directory in [
         ("zcash_client_sqlite", "zakura-client-sqlite", "zcash_client_sqlite"),
         ("zcash_client_backend", "zakura-client-backend", "zcash_client_backend"),
@@ -42,6 +48,20 @@ def consumer(root, version):
     return dest
 
 
+def has_column(conn, relation, column):
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({relation})"))
+
+
+def drop_legacy_column(path):
+    with sqlite3.connect(path) as conn:
+        (view,) = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'v_transactions'").fetchone()
+        assert view.count(",\n       transactions.zip318_kind") == 1
+        conn.executescript("DROP VIEW v_transactions;")
+        conn.executescript(view.replace(",\n       transactions.zip318_kind", ""))
+        conn.executescript("ALTER TABLE transactions DROP COLUMN zip318_kind;")
+        assert not has_column(conn, "transactions", "zip318_kind")
+
+
 def snapshot(path):
     with sqlite3.connect(path) as conn:
         return conn.execute("SELECT id FROM schemer_migrations ORDER BY id").fetchall()
@@ -49,12 +69,12 @@ def snapshot(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target-dir", type=Path, default=Path.home() / ".cache/wallet-libraries/legacy-rollback")
+    parser.add_argument("--target-dir", type=Path, default=Path.home() / ".cache/wallet-libraries/legacy-writers")
     args = parser.parse_args()
     args.target_dir.mkdir(parents=True, exist_ok=True)
     lease = (args.target_dir / "owner.lock").open("w")
     fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    with tempfile.TemporaryDirectory(prefix="legacy-rollback-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="legacy-writers-") as tmp:
         root = Path(tmp)
         consumers = {v: consumer(root, v) for v in ("current", "rc5", "rc7")}
         def run(version, command, db):
@@ -70,13 +90,18 @@ def main():
             with sqlite3.connect(db) as conn:
                 accounts = conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
                 assert len(accounts) == 1
-            run(version, "expect-failure", db)
             with sqlite3.connect(db) as conn:
-                assert conn.execute("SELECT count(*) FROM transactions").fetchone()[0] == 0
-            run("current", "prepare", db)
-            assert snapshot(db) == before
+                assert has_column(conn, "transactions", "zip318_kind")
+                assert has_column(conn, "v_transactions", "zip318_kind")
+                assert conn.execute("SELECT count(*) FROM tpir_legacy_writes").fetchone()[0] == 0
+            # Negative control: without the legacy column the published writer fails.
+            control = root / f"{version}-without-column.sqlite"
+            shutil.copyfile(db, control)
+            drop_legacy_column(control)
+            run(version, "expect-failure", control)
             run(version, "ingest", db)
             with sqlite3.connect(db) as conn:
+                assert conn.execute("SELECT count(*) FROM tpir_legacy_writes").fetchone()[0] == 1
                 old_rows = conn.execute("SELECT txid, raw, min_observed_height, mined_height FROM transactions ORDER BY txid").fetchall()
                 assert len(old_rows) == 2
                 old_outputs = conn.execute("SELECT * FROM transparent_received_outputs ORDER BY id").fetchall()
@@ -87,11 +112,12 @@ def main():
                 assert conn.execute("SELECT txid, raw, min_observed_height, mined_height FROM transactions ORDER BY txid").fetchall() == old_rows
                 assert conn.execute("SELECT * FROM transparent_received_outputs ORDER BY id").fetchall() == old_outputs
                 assert conn.execute("SELECT output_id, origin FROM tpir_output_origins ORDER BY output_id,origin").fetchall() == [(row[0], 0) for row in old_outputs]
-                assert not any(row[1] == "zip318_kind" for row in conn.execute("PRAGMA table_info(transactions)"))
+                assert has_column(conn, "transactions", "zip318_kind")
+                assert conn.execute("SELECT count(*) FROM tpir_legacy_writes").fetchone()[0] == 0
                 assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
                 assert conn.execute("SELECT count(*) FROM tpir_coverage").fetchone()[0] == 0
             assert snapshot(db) == before
-            print(f"PASS {version}: failed before preparation; ingested twice after preparation; current round trip preserved account, raw transactions, UTXO and journal", flush=True)
+            print(f"PASS {version}: ingested twice and discovered a UTXO with no handover; failed without the legacy column; current round trip preserved account, raw transactions, UTXO and journal and reconciled provenance", flush=True)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-//! Runs only against disposable databases created by check-legacy-rollback.py.
+//! Runs only against disposable databases created by check-legacy-writers.py.
 use std::path::PathBuf;
 use zcash_client_backend::data_api::{
     DecryptedTransaction, WalletRead, WalletWrite, testing::TestRng,
@@ -35,12 +35,8 @@ fn main() {
                 .unwrap();
             }
         }
-        #[cfg(feature = "current")]
-        "prepare" => {
-            zcash_client_sqlite::wallet::init::prepare_legacy_rollback(&mut db).unwrap();
-        }
         "ingest" | "expect-failure" => {
-            // Exercise the old migrator too: it must leave this handover schema usable.
+            // Exercise the old migrator too: it must accept the current schema as it is.
             WalletMigrator::new().init_or_migrate(&mut db).unwrap();
             db.update_chain_tip(BlockHeight::from_u32(3_483_367))
                 .unwrap();
@@ -87,7 +83,7 @@ fn main() {
             let result = db.store_decrypted_tx(decrypted);
             if args[1] == "expect-failure" {
                 let err = result
-                    .expect_err("negative control must fail before compatibility preparation");
+                    .expect_err("negative control must fail without the legacy column");
                 assert!(
                     err.to_string().contains("zip318_kind"),
                     "unexpected failure: {err}"
