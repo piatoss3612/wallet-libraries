@@ -317,6 +317,11 @@ CREATE TABLE blocks (
 /// - `trust_status`: A flag indicating whether the transaction should be considered "trusted".
 ///   When set to `1`, outputs of this transaction will be considered spendable with `trusted`
 ///   confirmations instead of `untrusted` confirmations.
+/// - `zip318_kind`: unused legacy column. Published zakura-client-sqlite 0.1.0-rc5 and 0.1.0-rc7
+///   write how each transaction they store classifies against ZIP 318 here, and read it through
+///   `v_transactions`; this build never reads it, and new rows hold the default, `0` (not
+///   classified). Upgrades retain its existing values. TODO(zakura-core/wallet-libraries#85):
+///   drop it once no supported build writes it.
 pub(super) const TABLE_TRANSACTIONS: &str = r#"
 CREATE TABLE "transactions" (
     id_tx INTEGER PRIMARY KEY,
@@ -332,6 +337,7 @@ CREATE TABLE "transactions" (
     min_observed_height INTEGER NOT NULL,
     confirmed_unmined_at_height INTEGER,
     trust_status INTEGER,
+    zip318_kind INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (block) REFERENCES blocks(height),
     CONSTRAINT height_consistency CHECK (
         block IS NULL OR mined_height = block
@@ -1657,7 +1663,8 @@ SELECT accounts.uuid                AS account_uuid,
        -- between shielded pools; NULL when it is not such a transfer. A transaction is one
        -- exactly when this column is non-NULL.
        pool_crossings.crossing_value AS pool_crossing_value,
-       transactions.trust_status
+       transactions.trust_status,
+       transactions.zip318_kind
 FROM notes
 JOIN accounts ON accounts.id = notes.account_id
 JOIN transactions ON transactions.id_tx = notes.transaction_id

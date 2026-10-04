@@ -22,10 +22,11 @@ workspace.
 ### Added
 - `SqlTransaction::new` lets consumers run guarded wallet operations and application cleanup in one caller-owned transaction.
 - `WalletDb::check_transparent_transaction_inputs` authorizes finalized submissions and exact-byte retries without permitting competing spends or weakening transparent authority.
-- `wallet::init::prepare_legacy_rollback` restores the unused ZIP 318 column for an
-  explicit handover to the published rc5/rc7 public writers. It refuses changed/private policy
-  and recovery state. Returning initialization reconciles old public output/spend origins
-  atomically, without granting coverage or authority; the migration journal stays intact.
+- The unreleased `drop_zip318_pool_migration` retains `transactions.zip318_kind` and its
+  `v_transactions` field in place, preserving classification values on upgrades from published
+  rc5/rc7 schemas. The obsolete explicit rollback preparation API is removed. Development
+  databases that already dropped the column are outside the supported upgrade path. Writable
+  downgrades after a private-ledger upgrade are not qualified by this schema change.
 - Initialization refuses unknown migration IDs before schema interpretation and restores foreign
   key enforcement on error. ZIP 318 removal names dependent application views/triggers.
 - Shared-receiver activity expands effective recovery windows on read, exposing work immediately.
@@ -222,9 +223,9 @@ workspace.
 ### Removed
 - The ZIP 318 pool-migration schema. A new `drop_zip318_pool_migration`
   migration drops the `orchard_ironwood_migration*` tables and their indexes,
-  which nothing read or wrote, and the `zip318_kind` column of `transactions`
-  and `v_transactions`. The migrations that created them stay registered, so
-  existing databases still migrate.
+  which nothing read or wrote. The migrations that created them stay
+  registered, so existing databases still migrate. The `zip318_kind` column of
+  `transactions` and `v_transactions` stays for published rc5/rc7 writers.
 - The implementations of the removed backend APIs
   (`put_zip318_classification`, `select_single_spendable_note`,
   `anchor_computable` and `WalletRead::anchor_retention_interval`).

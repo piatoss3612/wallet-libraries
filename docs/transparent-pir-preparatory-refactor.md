@@ -929,38 +929,24 @@ generating addresses and rolls the entire transition back if that would introduc
 receivers; perform the explicit production transfer and recover before retrying promotion.
 
 
-## Public rollback handover and recovery boundary repairs
+## Published-wallet upgrades and recovery boundary repairs
 
-`wallet::init::prepare_legacy_rollback` supports a narrow handover from the current
-schema to the published `zakura-client-sqlite` rc5/rc7 public transaction writers.
-Vizor does not use ZIP 318 classifications; their ingestion still writes the column.
-The helper restores `transactions.zip318_kind INTEGER NOT NULL DEFAULT 0` and the
-matching `v_transactions` column. The pool-migration tables and engine remain removed;
-this is not a general rollback of library features or support for pool-migration users.
+Fresh wallets and upgrades from published `zakura-client-sqlite` rc5/rc7 retain
+`transactions.zip318_kind INTEGER NOT NULL DEFAULT 0` and its matching
+`v_transactions` field in place (see `docs/zip318_removal.md`). Existing
+classification values survive the upgrade. The unused pool-migration tables
+and engine remain removed. Databases that applied the earlier development
+revision which dropped the column are outside the supported upgrade path.
+This change does not qualify older builds writing to wallets after a
+private-ledger upgrade and adds no downgrade reconciliation machinery.
 
-Stop all wallet workers, take a consistent backup, call the helper, close all current
-handles, and only then switch writers. Preparation first initializes the wallet, so
-seed-dependent historical upgrades must be completed by the caller with the seed.
-It accepts only unchanged public policy (generation 0, reader 1) and empty recovery,
-qualification, activation and quarantine state. Returning to public after private use
-does not make an old privacy-unaware binary a valid rollback target.
-
-Current ledger APIs refuse a prepared database. On returning to this library, run
-`WalletMigrator::init_or_migrate` before starting workers: it verifies known migrations
-and the network, then atomically removes the compatibility columns and reconciles all
-old outputs/spends as legacy evidence, retaining local-construction evidence too.
-That reconciliation adds no private coverage, qualifications or authority. It never
-removes or replays applied migration IDs. Failed preparation/resumption rolls back;
-initialization restores foreign key enforcement even on refusal. A dependent
-application view over ZIP 318 must be removed by its owner before resumption.
-
-`python3 scripts/check-legacy-rollback.py` creates disposable databases using actual
-published rc5 and rc7 crates. It requires old ingestion to fail before preparation,
-then ingest a serialized wallet-owned transaction fixture twice after preparation, and return to the current
-schema with identical transaction bytes and migration IDs. This complements unit
-coverage of provenance reconciliation, policy refusal and failure atomicity. It is
-not an application release designation or whole-wallet sync qualification; Vizor
-must wire the handover and run its own release probes against the eventual pin.
+`python3 scripts/check-published-wallet-upgrades.py` creates disposable databases
+using actual published rc5 and rc7 crates, ingests wallet-owned transactions and
+a UTXO before upgrading, and checks that the current library preserves accounts,
+transaction bytes, classification values and outputs. The existing ledger migration
+classifies pre-upgrade outputs as legacy provenance without private coverage.
+Repeated current initialization preserves the migration journal. This is an
+upgrade probe, not whole-wallet sync qualification.
 
 Recovery reads derive the effective discovery window from all recorded mined
 candidate activity, including receivers owned by another account. Recovery retains

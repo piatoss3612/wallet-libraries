@@ -17,8 +17,7 @@ removes the rest:
 | Piece | What it did |
 | --- | --- |
 | `orchard_ironwood_migration*` tables and indexes | Stored the engine's plans. Nothing read or wrote them once the engine was gone. |
-| `transactions.zip318_kind`, `v_transactions.zip318_kind` | Labelled each decrypted transaction against ZIP 318. Vizor derives its own history labels and never read the column. |
-| `data_api::zip318`, `put_zip318_classification` | Computed and stored that label during `store_decrypted_tx`. |
+| `data_api::zip318`, `put_zip318_classification` | Computed and stored a ZIP 318 label for each decrypted transaction during `store_decrypted_tx`. Vizor derives its own history labels and never read it. |
 | `propose_transfer`'s crossing attempt | Steered a send of a canonical denomination toward the migration shape: bucketed anchor, single-note funding. Vizor never called `propose_transfer`, so this never ran for it. |
 | `WalletRead::pool_migration_params`, `WalletRead::anchor_retention_interval` | Read the grid for that attempt and for the builder. |
 | `PreferSingle`, `select_single_spendable_note`, `anchor_computable` | Selection and anchor checks used only by that policy. |
@@ -72,12 +71,26 @@ the wallet's own shielded pools, and it is not specific to ZIP 318.
 The migrations that created the removed schema are published, and later
 migrations depend on them, so they stay registered and unchanged. A new
 migration, `drop_zip318_pool_migration`, runs after `status_inclusion_evidence`
-and does three things:
+and drops the eight `orchard_ironwood_migration*` tables and their two indexes.
+Published rc5/rc7 reference them only through `ON DELETE CASCADE` from
+`accounts`, which is inert once they are gone.
 
-- drops the eight `orchard_ironwood_migration*` tables and their two indexes;
-- rebuilds `v_transactions` from its stored definition with only the
-  `zip318_kind` column removed;
-- drops `transactions.zip318_kind`.
+`transactions.zip318_kind` and `v_transactions.zip318_kind` stay, as unused
+legacy schema. Published zakura-client-sqlite 0.1.0-rc5 and 0.1.0-rc7 write the
+column on every transaction store and read the view field. Retaining both
+preserves existing classification values and avoids the missing-column failure.
+This library never reads either; new rows hold the default, `0`.
+
+The unreleased `drop_zip318_pool_migration` retains the column and view field
+in place. Supported inputs are fresh databases and upgrades from published
+schemas. Databases that applied the earlier development revision which dropped
+the column are outside the supported upgrade path; no repair migration is provided.
+The obsolete explicit rollback preparation API is removed. This schema change
+provides no reconciliation or qualification for older builds writing to a wallet
+after its private-ledger upgrade.
+
+The column and its view field can be removed once no supported build writes them
+([#85](https://github.com/zakura-core/wallet-libraries/issues/85)).
 
 A fresh wallet and an upgraded wallet end with the same schema, and
 `verify_schema` checks that.
@@ -86,5 +99,5 @@ A fresh wallet and an upgraded wallet end with the same schema, and
 
 These files diverge from upstream now. When an upstream release touches the
 removed code, keep the deletion when resolving the merge. If upstream adds a
-migration that depends on the dropped tables or on `zip318_kind`, it has to be
-adapted before it can be registered here.
+migration that depends on the dropped tables, it has to be adapted before it
+can be registered here.

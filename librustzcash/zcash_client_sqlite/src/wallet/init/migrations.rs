@@ -17,8 +17,6 @@ mod add_transparent_value_index;
 mod add_utxo_account;
 mod addresses_table;
 mod drop_zip318_pool_migration;
-pub(super) use drop_zip318_pool_migration::remove_zip318_column;
-pub(super) const DROP_ZIP318_POOL_MIGRATION_ID: Uuid = drop_zip318_pool_migration::MIGRATION_ID;
 mod ensure_default_transparent_address;
 mod ensure_orchard_ua_receiver;
 mod ephemeral_addresses;
@@ -54,15 +52,11 @@ mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transparent_activation_schema;
 mod transparent_activity_metadata;
-pub(super) const TRANSPARENT_ACTIVITY_METADATA_ID: Uuid =
-    transparent_activity_metadata::MIGRATION_ID;
 mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod transparent_recovery_schema;
 mod transparent_shared_derivations;
-pub(super) const TRANSPARENT_SHARED_DERIVATIONS_ID: Uuid =
-    transparent_shared_derivations::MIGRATION_ID;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
@@ -288,7 +282,8 @@ pub(super) fn all_migrations<
     // ironwood_enhance, and ironwood_received_notes -> orchard_ironwood_migration_tables ->
     // orchard_ironwood_migration_anchor_interval -> orchard_ironwood_migration_unsatisfiability.
     // Both chains meet at status_inclusion_evidence, which is followed by
-    // drop_zip318_pool_migration, which drops the schema the ZIP 318 migrations created.
+    // drop_zip318_pool_migration, which drops only the pool-migration tables and retains
+    // the published ZIP 318 classification column and view field.
     //
     let rng = Rc::new(Mutex::new(rng));
     vec![

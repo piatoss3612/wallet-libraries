@@ -19,9 +19,7 @@ use self::migrations::verify_network_compatibility;
 use super::commitment_tree;
 use crate::{WalletDb, error::SqliteClientError, util::Clock};
 
-pub(super) mod legacy_rollback;
 pub mod migrations;
-pub use legacy_rollback::prepare_legacy_rollback;
 
 const SQLITE_MAJOR_VERSION: u32 = 3;
 const MIN_SQLITE_MINOR_VERSION: u32 = 35;
@@ -74,9 +72,6 @@ pub enum WalletMigrationError {
     /// build cannot interpret its schema, so it refuses to open it rather than read or write state
     /// whose meaning it does not know. External migrations must be supplied on every call.
     UnknownMigrations(Vec<Uuid>),
-
-    /// Legacy rollback is restricted to public wallets with no private recovery history.
-    LegacyRollbackNotSupported,
 
     /// Some other unexpected violation of database business rules occurred
     Other(Box<SqliteClientError>),
@@ -156,10 +151,6 @@ impl fmt::Display for WalletMigrationError {
             WalletMigrationError::CannotRevert(uuid) => {
                 write!(f, "Reverting migration {uuid} is not supported")
             }
-            WalletMigrationError::LegacyRollbackNotSupported => write!(
-                f,
-                "Legacy rollback requires an unchanged public policy and no private recovery state"
-            ),
             WalletMigrationError::UnknownMigrations(ids) => {
                 let ids: Vec<_> = ids.iter().map(Uuid::to_string).collect();
                 write!(
@@ -201,9 +192,6 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         #[cfg(feature = "orchard")]
         SqliteClientError::EnhancementModeNotConfigured => {
             unreachable!("we don't enumerate enhancement requests in migrations")
-        }
-        SqliteClientError::LegacyRollbackPrepared => {
-            WalletMigrationError::LegacyRollbackNotSupported
         }
         SqliteClientError::TransparentLedgerModeNotConfigured
         | SqliteClientError::TransparentLedgerPolicyConflict { .. }
@@ -689,8 +677,6 @@ fn init_wallet_db_internal<
         verify_network_compatibility(wdb.conn.borrow(), &wdb.params)
             .map_err(MigratorError::Adapter)?;
 
-        legacy_rollback::resume_current(wdb.conn.borrow_mut()).map_err(MigratorError::Adapter)?;
-
         // Now create the adapter that we're actually going to use to perform the migrations, and
         // proceed.
         let adapter =
@@ -1063,6 +1049,19 @@ mod tests {
             assert_eq!(normalize(&actual), normalize(&expected_views[expected_idx]));
             expected_idx += 1;
         }
+        assert_eq!(expected_idx, expected_views.len());
+
+        let triggers: Vec<String> = st
+            .wallet()
+            .db()
+            .conn
+            .prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(triggers.is_empty(), "unexpected triggers: {triggers:?}");
     }
 
     #[test]
