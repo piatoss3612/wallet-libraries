@@ -192,6 +192,7 @@ mod db;
 pub(crate) mod encoding;
 #[cfg(feature = "orchard")]
 pub(crate) mod enhance_pir;
+pub mod history;
 pub mod init;
 pub(crate) mod ironwood_hooks;
 pub(crate) mod locking;

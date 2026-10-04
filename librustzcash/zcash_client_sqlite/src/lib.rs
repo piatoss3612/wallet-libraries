@@ -662,6 +662,29 @@ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Reads this account's transaction summaries without loading raw transaction payloads.
+    ///
+    /// Accounting matches `v_transactions`; the account is filtered before aggregation. Results
+    /// contain every stored transaction involving the account, with unspecified order. Apply
+    /// product-specific classification, sorting, and limits afterward (a TEX operation can need
+    /// both legs before a display limit is applied). An unknown account returns
+    /// [`SqliteClientError::AccountUnknown`]. No network work is produced or performed.
+    ///
+    /// The read starts a snapshot when necessary and reuses an existing caller transaction.
+    /// To combine summaries, output reads, and `transaction_history_details` consistently, use
+    /// a handle borrowing the same connection inside a caller-owned read transaction, or call
+    /// these APIs together inside [`Self::transactionally`]. Separate autocommit calls can see
+    /// different database states. Summaries alone do not establish history completeness or
+    /// transparent financial authority.
+    pub fn transaction_history_summaries(
+        &self,
+        account: AccountUuid,
+    ) -> Result<Vec<wallet::history::TransactionSummary>, SqliteClientError> {
+        wallet::transparent_ledger::with_read_snapshot(self.conn.borrow(), |conn| {
+            wallet::history::transaction_summaries(conn, account)
+        })
+    }
+
     /// Constructs a new wrapper around the given connection.
     ///
     /// This is provided for use cases such as connection pooling, where `conn` may be an

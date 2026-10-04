@@ -69,6 +69,7 @@ mod v_address_uses_ironwood;
 mod v_received_output_spends_account;
 mod v_sapling_shard_unscanned_ranges;
 mod v_transactions_additional_totals;
+mod v_transactions_legacy_projection;
 mod v_transactions_net;
 mod v_transactions_note_uniqueness;
 mod v_transactions_pool_crossing;
@@ -180,6 +181,7 @@ pub mod ids {
         v_received_output_spends_account::MIGRATION_ID as V_RECEIVED_OUTPUT_SPENDS_ACCOUNT,
         v_sapling_shard_unscanned_ranges::MIGRATION_ID as V_SAPLING_SHARD_UNSCANNED_RANGES,
         v_transactions_additional_totals::MIGRATION_ID as V_TRANSACTIONS_ADDITIONAL_TOTALS,
+        v_transactions_legacy_projection::MIGRATION_ID as V_TRANSACTIONS_LEGACY_PROJECTION,
         v_transactions_net::MIGRATION_ID as V_TRANSACTIONS_NET,
         v_transactions_note_uniqueness::MIGRATION_ID as V_TRANSACTIONS_NOTE_UNIQUENESS,
         v_transactions_pool_crossing::MIGRATION_ID as V_TRANSACTIONS_POOL_CROSSING,
@@ -411,6 +413,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_activity_metadata::Migration),
         Box::new(transparent_shared_derivations::Migration),
         Box::new(v_transactions_sender_grouping::Migration),
+        Box::new(v_transactions_legacy_projection::Migration),
     ]
 }
 
@@ -632,7 +635,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[v_transactions_sender_grouping::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[v_transactions_legacy_projection::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -807,6 +810,7 @@ pub(crate) mod tests {
             ids::WALLET_SUMMARIES,
             ids::WITNESS_STABILIZED_NOTES,
             ids::V_TRANSACTIONS_SENDER_GROUPING,
+            ids::V_TRANSACTIONS_LEGACY_PROJECTION,
             ids::ZIP318_CLASSIFICATION,
         ]);
 
