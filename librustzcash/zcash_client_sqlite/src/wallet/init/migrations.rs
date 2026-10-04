@@ -29,6 +29,9 @@ mod full_account_ids;
 mod funding_attribution;
 #[cfg(test)]
 pub(crate) const FUNDING_ATTRIBUTION_ID: Uuid = funding_attribution::MIGRATION_ID;
+#[cfg(test)]
+pub(crate) const V_TRANSACTIONS_SENDER_GROUPING_ID: Uuid =
+    v_transactions_sender_grouping::MIGRATION_ID;
 mod initial_setup;
 mod ironwood_enhance;
 mod ironwood_pool_code_views;

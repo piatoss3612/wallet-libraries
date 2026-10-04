@@ -299,8 +299,12 @@ impl PreLedgerWallet {
                 .into_iter()
                 // Later migrations' bookkeeping, not wallet data.
                 .filter(|(table, _)| {
-                    !["schemer_migrations", "tx_reconfirmation_receipts", "tx_attribution_queue"]
-                        .contains(&table.as_str())
+                    ![
+                        "schemer_migrations",
+                        "tx_reconfirmation_receipts",
+                        "tx_attribution_queue",
+                    ]
+                    .contains(&table.as_str())
                 })
                 .collect::<Vec<_>>()
         };
