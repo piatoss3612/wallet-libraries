@@ -394,3 +394,67 @@ fn a_shielded_spender_stored_before_its_note_was_linked_is_rederived_when_scanne
         TransactionFunding::Sole
     );
 }
+
+#[test]
+fn upgrading_rederives_a_sole_shielded_spender_with_an_existing_spend_link() {
+    for constructed in [false, true] {
+        let (mut st, accounts) = public_wallet(0);
+        let account = accounts[0];
+        let (txid, output_index) = pay_from_sapling(&mut st, EXTERNAL, 50_000);
+        let send = st.wallet().get_transaction(txid).unwrap().unwrap();
+        let (height, _) = st.generate_next_block_including(txid);
+        st.scan_cached_blocks(height, 1);
+        let construction_records = sent_outputs(&st, &send);
+        assert!(construction_records.contains(&(account, output_index, None, 50_000)));
+        let linked_spends: i64 = conn(&st)
+            .query_row(
+                "SELECT COUNT(*) FROM sapling_received_note_spends s
+                 JOIN transactions t ON t.id_tx = s.transaction_id WHERE t.txid = ?1",
+                [txid.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_spends, 1);
+        assert!(send.transparent_bundle().unwrap().vin.is_empty());
+
+        if !constructed {
+            // An earlier restored wallet already linked the sole shielded spend, but never
+            // re-derived the external transparent payment from the raw transaction.
+            conn(&st)
+                .execute_batch(&format!(
+                    "UPDATE transactions SET created = NULL, target_height = NULL
+                     WHERE txid = X'{tx}';
+                     DELETE FROM sent_notes WHERE transaction_id =
+                         (SELECT id_tx FROM transactions WHERE txid = X'{tx}');",
+                    tx = hex::encode(txid.as_ref()),
+                ))
+                .unwrap();
+        }
+
+        let migration = crate::wallet::init::migrations::FUNDING_ATTRIBUTION_ID;
+        conn(&st)
+            .execute_batch(&format!(
+                "DROP TABLE tx_attribution_queue;
+                 DELETE FROM schemer_migrations WHERE id = X'{migration}';",
+                migration = hex::encode(migration.as_bytes()),
+            ))
+            .unwrap();
+        WalletMigrator::new()
+            .init_or_migrate(st.wallet_mut().db_mut())
+            .unwrap();
+        assert_eq!(queued(&st), if constructed { 0 } else { 1 });
+
+        // An unrelated storage call must repair the backfill without rediscovering the spend.
+        let unrelated = funding(0xa1, external_of(&st, account), 100_000);
+        store(&mut st, &unrelated);
+        assert_eq!(queued(&st), 0);
+        assert!(sent_outputs(&st, &send).contains(&(account, output_index, None, 50_000)));
+        assert_eq!(
+            history(&st, account, &send).funding,
+            TransactionFunding::Sole
+        );
+        if constructed {
+            assert_eq!(sent_outputs(&st, &send), construction_records);
+        }
+    }
+}

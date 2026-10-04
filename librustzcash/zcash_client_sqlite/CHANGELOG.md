@@ -26,8 +26,9 @@ workspace.
   a public fallback or proves absence. Delayed changed-block recovery beyond Status PIR retention
   can remain unresolved. See `docs/transaction_status_work.md` for the coverage contract.
 - The `funding_attribution` migration adds `tx_attribution_queue` and queues every stored
-  transaction, not constructed by this wallet, that spends a wallet transparent output or the
-  outputs of more than one account. The next `WalletWrite::store_decrypted_tx` or
+  transaction with raw data, not constructed by this wallet, that spends any wallet output or
+  shielded note, including sole shielded spenders already linked by an earlier writer.
+  The next `WalletWrite::store_decrypted_tx` or
   `put_received_transparent_utxo` call re-derives them, repairing sent outputs that earlier
   writers recorded for an arbitrary funder of a jointly funded transaction or never recorded for
   a send stored before its inputs were known.
@@ -43,6 +44,8 @@ workspace.
   the account's once the account's transparent evidence is settled. Qualified transaction metadata
   and complete owned transparent effects can establish `Sole` or `Shared` funding without raw
   transaction data; incomplete coverage does not establish funding this way.
+  An active ledger's owned spend establishes funding participation even before its parent output
+  supplies the spent value; unresolved funding remains `Undetermined`, rather than `NotFunded`.
 - `transaction_history_details` reports `AggregatePayment::Exact` once every spent unit of a
   sole-funded reconstructed transaction is accounted for, rather than `Partial`. A shared
   contribution equal to the whole transaction's fee does not establish a zero payment, complete

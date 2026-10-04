@@ -64,6 +64,7 @@ fn every_supported_pool_has_an_entry_and_other_transactions_are_omitted() {
         .transaction_history_details(account, &[unrelated, *unspent.outpoint.txid()])
         .unwrap();
     assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].funding, TransactionFunding::NotFunded);
     assert_eq!(
         entries[0]
             .effects
@@ -447,6 +448,7 @@ fn a_spend_of_an_unrecovered_output_is_incomplete() {
     );
     assert_eq!(entry.fee, FeeState::Unknown);
     assert_eq!(entry.classification, HistoryClassification::Provisional);
+    assert_eq!(entry.funding, TransactionFunding::Undetermined);
 }
 
 #[test]
@@ -1060,6 +1062,7 @@ fn an_unresolved_spend_alone_makes_the_account_a_party() {
     assert_eq!(entry.fee, FeeState::Unknown);
     assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
     assert_eq!(entry.classification, HistoryClassification::Provisional);
+    assert_eq!(entry.funding, TransactionFunding::Undetermined);
 }
 
 #[test]

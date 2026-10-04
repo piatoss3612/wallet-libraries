@@ -36,22 +36,17 @@ impl schemerz::Migration<Uuid> for Migration {
 }
 
 /// Stored transactions whose sent outputs earlier writers may have attributed incorrectly or
-/// failed to record: those, not constructed by this wallet, that spend a wallet transparent
-/// output or spend outputs of more than one wallet account.
+/// failed to record: those, not constructed by this wallet, with any known wallet spend. This
+/// includes a sole shielded spender whose input was linked after its raw data was stored: the
+/// existing link will not trigger the new runtime re-derivation hook again.
 pub(in crate::wallet) const QUEUE_AFFECTED_TRANSACTIONS: &str = "
     INSERT INTO tx_attribution_queue (transaction_id)
     SELECT t.id_tx FROM transactions t
     WHERE t.raw IS NOT NULL
     AND t.created IS NULL
-    AND (
-        EXISTS (
-            SELECT 1 FROM transparent_received_output_spends s
-            WHERE s.transaction_id = t.id_tx
-        )
-        OR (
-            SELECT COUNT(DISTINCT ros.account_id) FROM v_received_output_spends ros
-            WHERE ros.transaction_id = t.id_tx
-        ) > 1
+    AND EXISTS (
+        SELECT 1 FROM v_received_output_spends ros
+        WHERE ros.transaction_id = t.id_tx
     )
     ON CONFLICT (transaction_id) DO NOTHING";
 

@@ -552,10 +552,11 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             continue;
         };
         let known = known_amounts(conn, account_id, tx.id)?;
+        // An owned spend establishes participation even before its parent supplies the value.
+        let account_spent = known.iter().any(|(_, _, spent)| *spent > Zatoshis::ZERO);
         #[cfg(feature = "transparent-inputs")]
-        let involved = !known.is_empty() || has_active_ledger_spend(conn, account_id, txid)?;
-        #[cfg(not(feature = "transparent-inputs"))]
-        let involved = !known.is_empty();
+        let account_spent = account_spent || has_active_ledger_spend(conn, account_id, txid)?;
+        let involved = !known.is_empty() || account_spent;
         if !involved {
             continue;
         }
@@ -666,7 +667,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             conn,
             account_id,
             &tx,
-            spent > 0,
+            account_spent,
             transparent_effect,
             transaction_metadata.as_ref(),
             owned_inputs,
