@@ -225,7 +225,7 @@ GROUP BY notes.account_id, notes.transaction_id
 
 #[cfg(test)]
 mod tests {
-    use super::{DEPENDENCIES, MIGRATION_ID};
+    use super::{DEPENDENCIES, MIGRATION_ID, VIEW_TRANSACTIONS};
     use crate::{
         WalletDb,
         testing::db::{test_clock, test_rng},
@@ -241,6 +241,19 @@ mod tests {
             |row| row.get(0),
         )
         .unwrap()
+    }
+
+    /// Recreates the historical applied sender-grouping view while retaining its migration
+    /// journal entry. Fresh migrations now preserve ZIP 318, so they no longer produce the
+    /// older view that this repair migration must still handle.
+    fn install_historical_sender_grouping_view(conn: &Connection) {
+        let historical_view = VIEW_TRANSACTIONS.replace(
+            "       transactions.trust_status,\n       transactions.zip318_kind\n",
+            "       transactions.trust_status\n",
+        );
+        assert!(!historical_view.contains("transactions.zip318_kind"));
+        conn.execute_batch(&format!("DROP VIEW v_transactions;{historical_view}"))
+            .unwrap();
     }
 
     fn transactions(conn: &Connection) -> Vec<Vec<Value>> {
@@ -268,6 +281,7 @@ mod tests {
         WalletMigrator::new()
             .init_or_migrate_to(&mut db, DEPENDENCIES)
             .unwrap();
+        install_historical_sender_grouping_view(&db.conn);
         assert!(!view(&db.conn).contains("transactions.zip318_kind"));
         db.conn.execute(
             "INSERT INTO transactions (txid, min_observed_height, created, raw, fee, expiry_height, zip318_kind)
@@ -319,6 +333,7 @@ mod tests {
         WalletMigrator::new()
             .init_or_migrate_to(&mut db, DEPENDENCIES)
             .unwrap();
+        install_historical_sender_grouping_view(&db.conn);
         db.conn
             .execute_batch("ALTER TABLE transactions DROP COLUMN zip318_kind")
             .unwrap();
