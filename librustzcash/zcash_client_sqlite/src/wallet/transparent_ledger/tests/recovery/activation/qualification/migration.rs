@@ -297,12 +297,14 @@ impl PreLedgerWallet {
         let wallet_rows = |conn: &Connection| {
             production_dump(conn)
                 .into_iter()
-                // Later migrations' work queue and empty receipts, not wallet data.
+                // Later migrations' work queue, empty receipts and absence records, not wallet
+                // data.
                 .filter(|(table, _)| {
                     ![
                         "schemer_migrations",
                         "tx_attribution_queue",
                         "tx_reconfirmation_receipts",
+                        "transparent_utxo_absences",
                     ]
                     .contains(&table.as_str())
                 })

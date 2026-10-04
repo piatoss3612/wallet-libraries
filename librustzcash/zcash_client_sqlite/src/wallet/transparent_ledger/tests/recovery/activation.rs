@@ -1451,6 +1451,7 @@ mod public_fixtures;
 
 mod attribution;
 mod rewind_reconfirmation;
+mod spend_evidence;
 
 mod qualification;
 
