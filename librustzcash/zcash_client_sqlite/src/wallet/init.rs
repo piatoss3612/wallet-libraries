@@ -942,6 +942,7 @@ mod tests {
             db::TABLE_TRANSPARENT_SPEND_MAP,
             db::TABLE_TRANSPARENT_SPEND_SEARCH_QUEUE,
             db::TABLE_TX_LOCATOR_MAP,
+            db::TABLE_TX_RECONFIRMATION_RECEIPTS,
             db::TABLE_TX_RETRIEVAL_QUEUE,
         ];
 
@@ -999,6 +1000,7 @@ mod tests {
             db::INDEX_TRANSPARENT_RECEIVED_OUTPUTS_VALUE_ZAT,
             db::INDEX_TRANSPARENT_SPEND_MAP_TX,
             db::INDEX_TRANSPARENT_SPEND_SEARCH_TX,
+            db::INDEX_TX_RECONFIRMATION_RECEIPTS_HEIGHT,
             db::INDEX_TX_RETIREVAL_QUEUE_DEPENDENT_TX,
         ];
         let mut indices_query = st

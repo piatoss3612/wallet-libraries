@@ -48,8 +48,10 @@ mod shardtree_support;
 mod spend_key_available;
 mod standalone_p2sh;
 mod status_inclusion_evidence;
+mod status_reconfirmation;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
+mod transaction_reconfirmation_receipts;
 mod transparent_activation_schema;
 mod transparent_activity_metadata;
 mod transparent_gap_limit_handling;
@@ -63,6 +65,7 @@ mod tx_retrieval_queue;
 mod tx_retrieval_queue_expiry;
 mod tx_status_observation_intent;
 mod ufvk_support;
+mod unmined_status_obligations;
 mod utxos_table;
 mod utxos_to_txos;
 mod v_address_uses_ironwood;
@@ -160,8 +163,10 @@ pub mod ids {
         spend_key_available::MIGRATION_ID as SPEND_KEY_AVAILABLE,
         standalone_p2sh::MIGRATION_ID as STANDALONE_P2SH,
         status_inclusion_evidence::MIGRATION_ID as STATUS_INCLUSION_EVIDENCE,
+        status_reconfirmation::MIGRATION_ID as STATUS_RECONFIRMATION,
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
+        transaction_reconfirmation_receipts::MIGRATION_ID as TRANSACTION_RECONFIRMATION_RECEIPTS,
         transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
         transparent_activity_metadata::MIGRATION_ID as TRANSPARENT_ACTIVITY_METADATA,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
@@ -174,8 +179,9 @@ pub mod ids {
         tx_retrieval_queue::MIGRATION_ID as TX_RETRIEVAL_QUEUE,
         tx_retrieval_queue_expiry::MIGRATION_ID as TX_RETRIEVAL_QUEUE_EXPIRY,
         tx_status_observation_intent::MIGRATION_ID as TX_STATUS_OBSERVATION_INTENT,
-        ufvk_support::MIGRATION_ID as UFVK_SUPPORT, utxos_table::MIGRATION_ID as UTXOS_TABLE,
-        utxos_to_txos::MIGRATION_ID as UTXOS_TO_TXOS,
+        ufvk_support::MIGRATION_ID as UFVK_SUPPORT,
+        unmined_status_obligations::MIGRATION_ID as UNMINED_STATUS_OBLIGATIONS,
+        utxos_table::MIGRATION_ID as UTXOS_TABLE, utxos_to_txos::MIGRATION_ID as UTXOS_TO_TXOS,
         v_address_uses_ironwood::MIGRATION_ID as V_ADDRESS_USES_IRONWOOD,
         v_received_output_spends_account::MIGRATION_ID as V_RECEIVED_OUTPUT_SPENDS_ACCOUNT,
         v_sapling_shard_unscanned_ranges::MIGRATION_ID as V_SAPLING_SHARD_UNSCANNED_RANGES,
@@ -411,6 +417,9 @@ pub(super) fn all_migrations<
         Box::new(transparent_activity_metadata::Migration),
         Box::new(transparent_shared_derivations::Migration),
         Box::new(v_transactions_sender_grouping::Migration),
+        Box::new(unmined_status_obligations::Migration),
+        Box::new(status_reconfirmation::Migration),
+        Box::new(transaction_reconfirmation_receipts::Migration),
     ]
 }
 
@@ -632,7 +641,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[v_transactions_sender_grouping::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transaction_reconfirmation_receipts::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -807,6 +816,9 @@ pub(crate) mod tests {
             ids::WALLET_SUMMARIES,
             ids::WITNESS_STABILIZED_NOTES,
             ids::V_TRANSACTIONS_SENDER_GROUPING,
+            ids::UNMINED_STATUS_OBLIGATIONS,
+            ids::STATUS_RECONFIRMATION,
+            ids::TRANSACTION_RECONFIRMATION_RECEIPTS,
             ids::ZIP318_CLASSIFICATION,
         ]);
 
