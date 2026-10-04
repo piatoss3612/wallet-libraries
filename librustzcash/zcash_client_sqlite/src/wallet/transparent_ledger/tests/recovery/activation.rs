@@ -499,7 +499,11 @@ fn spend_count(st: &State, outpoint: &OutPoint) -> i64 {
 /// with an unspent receive at the last external address and a spent one, under a durable
 /// `PrivateRequired` policy.
 fn ready_wallet() -> (State, AccountUuid, ReceiveEvent, ReceiveEvent) {
-    let (mut st, accounts) = shadow_wallet_with(0);
+    ready_wallet_with(0)
+}
+
+fn ready_wallet_with(extra: u8) -> (State, AccountUuid, ReceiveEvent, ReceiveEvent) {
+    let (mut st, accounts) = shadow_wallet_with(extra);
     let account = accounts[0];
     let fixture = revision(1, true);
     let ws = watch(&st, account);
@@ -2031,3 +2035,4 @@ fn transaction_fixture_commits_and_rolls_back_wallet_writes() {
 }
 
 mod boundaries;
+mod legacy_writers;

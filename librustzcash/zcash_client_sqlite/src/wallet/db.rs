@@ -782,8 +782,10 @@ CREATE INDEX idx_transparent_spend_map_transaction_id ON transparent_spend_map (
 /// Records that a build older than the transparent ledger wrote to this wallet.
 ///
 /// The `tpir_legacy_zip318_write` trigger inserts its single row whenever `transactions.zip318_kind`
-/// is written, which only published rc5/rc7 builds do. Initialization reconciles such a build's
-/// writes and clears the row; transparent ledger APIs refuse the wallet while it is set.
+/// is written, which only published rc5/rc7 builds do. Initialization also sets this marker when
+/// active private projections disagree with retained ledger facts, including unmarked older
+/// UTXO writes. It clears the row only after validation and reconciliation succeed; transparent
+/// ledger APIs refuse the wallet while it is set.
 pub(super) const TABLE_TPIR_LEGACY_WRITES: &str = r#"
 CREATE TABLE tpir_legacy_writes (
     id INTEGER PRIMARY KEY CHECK (id = 0)

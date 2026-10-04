@@ -29,7 +29,10 @@ workspace.
   `tpir_legacy_writes` with a trigger on writes to the column, which only older builds make.
   Initialization reconciles an older build's writes atomically: transparent outputs and spends
   without an origin get legacy (and local) provenance, without coverage or authority, and the
-  marker is cleared. Ledger APIs return `SqliteClientError::LegacyWritesUnreconciled` for a
+  marker is cleared only after active private receives and spends match their wallet
+  projections. UTXO-only legacy writes are checked even without a marker; a mismatch
+  refuses initialization and durably marks the wallet to withhold financial authority.
+  Ledger APIs return `SqliteClientError::LegacyWritesUnreconciled` for a
   marked wallet until then. The
   column is to be dropped once no supported build writes it
   ([#85](https://github.com/zakura-core/wallet-libraries/issues/85)).

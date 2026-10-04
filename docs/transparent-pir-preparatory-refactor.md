@@ -946,10 +946,16 @@ migrations and the network and applying migrations, reconciles atomically:
 every transparent output and spend without an origin gets legacy public
 evidence, plus local construction when its transaction carries creation
 evidence, and it clears the marker. Records that
-already have an origin keep exactly the origins they had, so a private wallet
-gains no coverage, qualification or authority, and neither policy nor
-recovery state blocks the reconciliation. It never removes or replays applied
-migration IDs, and a failure rolls back with foreign key enforcement restored.
+already have an origin keep exactly the origins they had, so reconciliation
+grants no new coverage, qualification or authority. Before clearing the marker,
+initialization validates the placed receives and spends of active private accounts
+against their wallet projections, including output content, ownership, coinbase
+classification, placement and spend links. This runs even without a marker because
+older UTXO updates do not write `zip318_kind`. A disagreement refuses initialization
+and durably sets the marker, preventing ledger access even if the caller ignores
+the error. Matching private state and public wallets continue to reconcile normally.
+It never removes or replays applied migration IDs. Other failures roll back;
+foreign key enforcement is restored on every exit.
 
 `python3 scripts/check-legacy-writers.py` creates disposable databases using
 actual published rc5 and rc7 crates. After the current library initializes
