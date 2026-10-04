@@ -3067,6 +3067,11 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             .transpose()?
             .flatten();
 
+        let scanned_block_identities: Vec<_> = blocks
+            .iter()
+            .map(|block| (block.height(), block.block_hash()))
+            .collect();
+
         ll::wallet::put_blocks::<_, SqliteClientError, commitment_tree::Error>(
             self,
             #[cfg(feature = "transparent-inputs")]
@@ -3075,7 +3080,15 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             blocks,
             anchor_retention.as_ref(),
         )
-        .map_err(SqliteClientError::from)
+        .map_err(SqliteClientError::from)?;
+
+        wallet::transaction_reconfirmation::reconcile_scanned_blocks(
+            self.conn.0,
+            &self.params,
+            #[cfg(feature = "transparent-inputs")]
+            &self.gap_limits,
+            &scanned_block_identities,
+        )
     }
 
     fn put_received_transparent_utxo(

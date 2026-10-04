@@ -582,6 +582,36 @@ mod tests {
         );
     }
     #[test]
+    fn missing_reconfirmation_record_requires_creation_evidence_and_retained_coverage() {
+        let mut snapshot = manifest();
+        snapshot.coverage_start = 15;
+        let empty_row = vec![0; ROW_BYTES];
+        // Previously observed inclusion at 12 is now outside the retained window.
+        // It is not a trustworthy creation bound and cannot turn missing history into absence.
+        assert_eq!(
+            decode_row(&snapshot, &[9; 32], None, &empty_row),
+            Err(Error::CoverageIncomplete)
+        );
+        assert_eq!(
+            decode_row(&snapshot, &[9; 32], Some(12), &empty_row),
+            Err(Error::CoverageIncomplete)
+        );
+        // Only actual conservative creation evidence covered by the snapshot supports absence.
+        assert_eq!(
+            decode_row(&snapshot, &[9; 32], Some(15), &empty_row),
+            Ok(Observation::NotFound)
+        );
+        assert_eq!(
+            LocalCoverageContext {
+                earliest_possible_inclusion: Some(15),
+                required_through: Some(snapshot.anchor_height + 1)
+            }
+            .validate(&snapshot),
+            Err(Error::CoverageIncomplete)
+        );
+    }
+
+    #[test]
     fn freshness_coverage_and_binding_are_separate() {
         let m = manifest();
         let row = vec![0; ROW_BYTES];
