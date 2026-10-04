@@ -23,6 +23,8 @@ use crate::wallet::init::WalletMigrationError;
 /// Regroups `v_transactions.sent_note_counts` and creates `tx_attribution_queue`.
 pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x1496b05b_5e21_4a76_b44c_5d371d294387);
 
+// The sender-grouping and legacy-projection repairs on main must precede this rebuild.
+// Keep the frozen view below identical to that repaired projection, including zip318_kind.
 const DEPENDENCIES: &[Uuid] = &[v_transactions_legacy_projection::MIGRATION_ID];
 
 pub(super) struct Migration;

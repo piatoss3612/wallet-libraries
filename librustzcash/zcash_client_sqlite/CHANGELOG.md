@@ -30,8 +30,8 @@ workspace.
   rescanning re-observes only transactions with the wallet's shielded spends or outputs. A
   transparent-only transaction was therefore never marked mined again and was eventually reported
   as expired. Truncation now queues a status observation for each such transaction it un-mines,
-  and the `unmined_status_obligations` migration (and returning from a legacy writer) queues one
-  for every unmined transaction rescanning cannot observe.
+  and the `unmined_status_obligations` migration queues one for every unmined transaction
+  rescanning cannot observe.
 - Status obligations that re-confirm a previously mined transaction carry the new
   `tx_retrieval_queue.reconfirm_mined` flag (migration `status_reconfirmation`, which also flags
   the backfilled obligations). They are exempt from expiry dormancy until one status observation
