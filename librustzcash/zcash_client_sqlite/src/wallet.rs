@@ -200,6 +200,7 @@ pub(crate) mod locking;
 pub(crate) mod orchard;
 pub(crate) mod sapling;
 pub(crate) mod scanning;
+pub(crate) mod transaction_reconfirmation;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) mod transparent;
 pub(crate) mod transparent_ledger;
@@ -3820,6 +3821,8 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
 ) -> Result<(), SqliteClientError> {
     let chain_tip = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
 
+    transaction_reconfirmation::complete_observation(conn, txid)?;
+
     match status {
         TransactionStatus::TxidNotRecognized | TransactionStatus::NotInMainChain => {
             conn.execute(
@@ -3863,42 +3866,58 @@ pub(crate) fn set_transaction_status<P: consensus::Parameters>(
             )?;
         }
         TransactionStatus::Mined(height) => {
-            // The transaction has been mined, so we can set its mined height and associate it with
-            // the appropriate block. A status-observation intent is retained but remains dormant
-            // while the mined height is known, so that it automatically becomes active if a
-            // subsequent chain rewind un-mines the transaction.
-            let sql_args = named_params![
-                ":txid": txid.as_ref(),
-                ":height": u32::from(height)
-            ];
-
-            conn.execute(
-                "UPDATE transactions
-                 SET mined_height = :height,
-                     min_observed_height = MIN(
-                        min_observed_height,
-                        IFNULL(mined_height, :height),
-                        :height
-                     ),
-                     confirmed_unmined_at_height = NULL
-                 WHERE txid = :txid",
-                sql_args,
+            record_mined_transaction(
+                conn,
+                _params,
+                #[cfg(feature = "transparent-inputs")]
+                gap_limits,
+                txid,
+                height,
             )?;
-
-            conn.execute(
-                "UPDATE transactions
-                 SET block = blocks.height
-                 FROM blocks
-                 WHERE txid = :txid
-                 AND blocks.height = :height",
-                sql_args,
-            )?;
-
-            #[cfg(feature = "transparent-inputs")]
-            transparent::update_gap_limits(conn, _params, gap_limits, txid, height)?;
         }
     }
 
+    Ok(())
+}
+
+/// Shared mined-state transition for status observations and validated local restoration.
+/// It associates an available block and updates gap limits, without establishing unspentness.
+fn record_mined_transaction<P: consensus::Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    _params: &P,
+    #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
+    txid: TxId,
+    height: BlockHeight,
+) -> Result<(), SqliteClientError> {
+    let sql_args = named_params![
+        ":txid": txid.as_ref(),
+        ":height": u32::from(height)
+    ];
+
+    conn.execute(
+        "UPDATE transactions
+         SET mined_height = :height,
+             min_observed_height = MIN(
+                 min_observed_height,
+                 IFNULL(mined_height, :height),
+                 :height
+             ),
+             confirmed_unmined_at_height = NULL
+         WHERE txid = :txid",
+        sql_args,
+    )?;
+
+    conn.execute(
+        "UPDATE transactions
+         SET block = blocks.height
+         FROM blocks
+         WHERE txid = :txid
+         AND blocks.height = :height",
+        sql_args,
+    )?;
+
+    #[cfg(feature = "transparent-inputs")]
+    transparent::update_gap_limits(conn, _params, gap_limits, txid, height)?;
     Ok(())
 }
 
@@ -4279,6 +4298,13 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     )?;
 
     ironwood_hooks::truncate_before_unmine(conn, truncation_height)?;
+
+    // Rescanning re-observes a transaction only through the wallet's shielded spends or outputs in
+    // it. Every other transaction about to be un-mined needs a status observation to be marked
+    // mined again, so it receives the same durable intent as an unmined transaction stored without
+    // shielded involvement.
+    queue_status_for_unobservable_transactions(conn, Some(truncation_height))?;
+    transaction_reconfirmation::capture_before_rewind(conn, truncation_height, rescan_floor)?;
 
     // Un-mine transactions. This must be done outside of the last_scanned_height check because
     // transaction entries may be created as a consequence of receiving transparent TXOs.
@@ -4827,6 +4853,8 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
     // Even an unscanned suffix can contain a transaction on the replacement branch.
     // The rescan floor, not the retained tree checkpoint, bounds that possibility.
     lower_creation_evidence(conn, target_height).map_err(RewindError::DataSource)?;
+    transaction_reconfirmation::reset_validation_after_rewind(conn, target_height)
+        .map_err(RewindError::DataSource)?;
 
     // Overwrite the scan-queue range above the rewind target with a `Historic` rescan range,
     // forcing re-scan of any blocks that previously appeared above the target. This both
@@ -5347,6 +5375,40 @@ pub(crate) fn queue_tx_status(
     Ok(())
 }
 
+/// Queues a durable obligation to re-confirm the mined state of every transaction that
+/// compact-block scanning cannot observe, because the wallet has neither a shielded spend nor a
+/// shielded output in it: those mined above `above`, which a truncation is about to un-mine, or,
+/// without a height, those already unmined. Such a transaction was mined before, so its
+/// obligation is exempt from expiry dormancy until one status observation completes (see
+/// `tx_retrieval_queue.reconfirm_mined`).
+pub(crate) fn queue_status_for_unobservable_transactions(
+    conn: &rusqlite::Transaction<'_>,
+    above: Option<BlockHeight>,
+) -> Result<(), SqliteClientError> {
+    let expected = transparent_ledger::capture_policy_generation(conn)?;
+    transparent_ledger::ensure_policy_generation(conn, expected)?;
+    let unobservable = transaction_reconfirmation::UNOBSERVABLE_TRANSACTION;
+    conn.execute(
+        &format!(
+            "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation, reconfirm_mined)
+             SELECT t.txid, :status_type, :policy_generation, 1
+             FROM transactions t
+             WHERE CASE WHEN :above IS NULL THEN t.mined_height IS NULL
+                        ELSE t.mined_height > :above END
+             AND ({unobservable})
+             ON CONFLICT (txid, query_type) DO UPDATE SET reconfirm_mined = 1"
+        ),
+        named_params![
+            ":status_type": TxQueryType::Status.code(),
+            ":policy_generation": i64::try_from(expected).map_err(|_| {
+                SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+            })?,
+            ":above": above.map(u32::from),
+        ],
+    )?;
+    Ok(())
+}
+
 /// Returns routed status work representing the observations needed
 /// by the wallet backend in order to be able to present a complete view of wallet history.
 ///
@@ -5380,11 +5442,16 @@ pub(crate) fn transaction_status_work(
          LEFT JOIN transactions t ON t.txid = q.txid
          WHERE q.query_type = :status_type
          AND t.mined_height IS NULL
+         AND NOT EXISTS (
+            SELECT 1 FROM tx_reconfirmation_receipts r
+            WHERE r.transaction_id = t.id_tx AND r.replacement_observed = 0
+         )
          AND (
             t.expiry_height IS NULL
             OR t.expiry_height = 0
             OR :scanned_height IS NULL
             OR :scanned_height < t.expiry_height + :reorg_depth
+            OR q.reconfirm_mined = 1
          )
          AND (
             t.confirmed_unmined_at_height IS NULL

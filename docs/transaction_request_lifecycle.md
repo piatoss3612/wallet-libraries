@@ -58,6 +58,20 @@ rules to determine whether to retain a status request. Reaching a terminal statu
 may retire **that status request only**. An unrecognized txid is an observation,
 not proof that a transaction was never broadcast.
 
+### Reconfirmation receipts
+
+Unobservable transactions preserve an available prior block hash before un-mining. Automatic
+status enumeration waits for the receipt height's accepted rescan. A matching hash restores
+inclusion without a status lookup; a mismatch exposes the queued fallback. No hash means immediate
+fallback. The new `transaction_reconfirmation_receipts` migration creates empty bookkeeping.
+Resolved receipts are removed, while status intent can remain dormant for subsequent rewinds.
+
+A receipt never preserves authoritative mining across a rewind or restores transparent
+unspentness. Completed status observations supersede it; errors (including incomplete private
+coverage) preserve it. Local restoration and receipt removal commit with the accepted scan batch.
+See [the local reconfirmation and Status PIR contract](transaction_status_work.md#local-reconfirmation-after-a-rewind)
+for retention limits, unknown imported inclusion bounds, and delayed unresolved recovery.
+
 ## Atomicity and response ordering
 
 The standalone SQLite write methods commit atomically. Calls through a
