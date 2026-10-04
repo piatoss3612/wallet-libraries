@@ -207,11 +207,27 @@ mod tests {
     fn restores_the_column_after_the_dropping_revision() {
         let (_file, mut db) = db();
         migrate_to(&mut db, DEPENDENCIES);
-        db.conn
-            .execute_batch(
-                "INSERT INTO transactions (id_tx, txid, min_observed_height) VALUES (1, X'01', 0);
-                 ALTER TABLE transactions DROP COLUMN zip318_kind;",
+        // The dropping revision removed the view field, then the column.
+        let view: String = db
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'v_transactions'",
+                [],
+                |row| row.get(0),
             )
+            .unwrap();
+        let without_field = regex::Regex::new(r",\s*transactions\.zip318_kind")
+            .unwrap()
+            .replace(&view, "")
+            .into_owned();
+        assert_ne!(without_field, view);
+        db.conn
+            .execute_batch(&format!(
+                "INSERT INTO transactions (id_tx, txid, min_observed_height) VALUES (1, X'01', 0);
+                 DROP VIEW v_transactions;
+                 {without_field};
+                 ALTER TABLE transactions DROP COLUMN zip318_kind;"
+            ))
             .unwrap();
         migrate_to(&mut db, &[MIGRATION_ID]);
 

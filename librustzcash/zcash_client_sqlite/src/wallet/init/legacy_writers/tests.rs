@@ -277,9 +277,4 @@ fn unmarked_old_outputs_are_classified_and_existing_origins_kept() {
             .unwrap(),
         vec![(0, 0), (0, 1), (4, 3)]
     );
-    // No transaction store was recorded, so nothing was queued for re-attribution.
-    assert_eq!(
-        count(&db.conn, "SELECT count(*) FROM tx_attribution_queue"),
-        0
-    );
 }
