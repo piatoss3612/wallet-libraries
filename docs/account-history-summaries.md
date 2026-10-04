@@ -8,7 +8,10 @@ The accounting SQL is shared with the canonical `v_transactions` schema definiti
 The parameterized query filters received notes, spent notes, and sent-note counts by
 account before aggregation. The existing view's columns and behavior are unchanged;
 historical migrations remain frozen. The schema regression checks the expanded view
-against the persisted result of those migrations.
+against the persisted result of those migrations. The seedless
+`v_transactions_legacy_projection` migration repairs the missing legacy
+`zip318_kind` view field after the sender-grouping migration, including wallets
+that already applied it. It changes only the view and preserves stored values.
 
 ## Replacing Vizor's copied aggregation
 
