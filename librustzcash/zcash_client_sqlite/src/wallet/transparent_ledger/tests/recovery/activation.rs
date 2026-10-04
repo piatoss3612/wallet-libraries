@@ -1447,6 +1447,10 @@ fn leaving_private_required_demotes_every_account() {
 
 mod history;
 
+mod public_fixtures;
+
+mod attribution;
+
 mod qualification;
 
 mod gating {

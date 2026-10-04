@@ -1592,7 +1592,9 @@ sent_note_counts AS (
     FROM sent_notes
     LEFT JOIN v_received_outputs ro ON sent_notes.id = ro.sent_note_id
     WHERE COALESCE(ro.is_change, 0) = 0
-    GROUP BY account_id, sent_notes.transaction_id
+    -- Group by the sending account. A bare `account_id` here would resolve to the joined
+    -- `ro.account_id`, splitting one sender's notes into a group per receiving account.
+    GROUP BY sent_notes.from_account_id, sent_notes.transaction_id
 ),
 -- Identifies the transactions that are wallet-internal transfers moving an account's own
 -- funds between shielded pools, and reports the value that crossed. `crossing_value` is

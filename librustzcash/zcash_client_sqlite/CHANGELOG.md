@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+- Fixed `v_transactions.account_balance_delta`, `total_spent` and `total_received` being
+  multiplied for a send whose sent notes include an output a wallet account received
+  (transparent change, or a transfer to another account): `sent_note_counts` grouped by the
+  receiving rather than the sending account. The `v_transactions_sender_grouping` migration
+  recreates the view.
+
 - Shared derivation origins survive promotion and reopen without transferring receiver ownership.
   Activity at those receivers schedules new gaps and withholds private authority until coverage
   completes. Active recovery materializes its discovered addresses before projecting receipts.
