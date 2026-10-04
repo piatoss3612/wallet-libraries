@@ -22,8 +22,20 @@ fn absent_public_output() -> (State, AccountUuid, ReceiveEvent) {
         .unwrap();
     scan_new_blocks(&mut st, 1);
     let tip = st.wallet().chain_height().unwrap().unwrap();
+    let point = ChainPoint {
+        height: tip,
+        hash: crate::wallet::get_block_hash(conn(&st), tip)
+            .unwrap()
+            .unwrap(),
+    };
     st.wallet_mut()
-        .notify_transparent_utxos_observed(&unspent.address, BlockHeight::from_u32(0), tip, &[])
+        .notify_transparent_utxos_observed(
+            &unspent.address,
+            BlockHeight::from_u32(0),
+            point,
+            point,
+            &[],
+        )
         .unwrap();
     assert_eq!(count(&st, "transparent_utxo_absences"), 1);
     (st, account, unspent)
