@@ -15,6 +15,16 @@ workspace.
   (transparent change, or a transfer to another account): `sent_note_counts` grouped by the
   receiving rather than the sending account. The `v_transactions_sender_grouping` migration
   recreates the view.
+- Rewinds now preserve historical inclusion receipts for transactions compact scanning cannot
+  rediscover through wallet shielded notes or spends. Accepted rescanning of the same block restores
+  mined height and an available transaction index locally, without an automatic status query.
+  A changed block or missing receipt uses the existing routed status recovery. The additive
+  `transaction_reconfirmation_receipts` migration starts empty; it cannot reconstruct erased hashes.
+- Reconfirmation status obligations are backfilled by `unmined_status_obligations` and flagged by
+  `status_reconfirmation`. The `reconfirm_mined` flag exempts fallback work from expiry dormancy
+  until one completed observation. Incomplete private coverage preserves recovery; it never permits
+  a public fallback or proves absence. Delayed changed-block recovery beyond Status PIR retention
+  can remain unresolved. See `docs/transaction_status_work.md` for the coverage contract.
 
 - Shared derivation origins survive promotion and reopen without transferring receiver ownership.
   Activity at those receivers schedules new gaps and withholds private authority until coverage

@@ -1072,6 +1072,18 @@ CREATE INDEX idx_sent_notes_transaction_id ON sent_notes (
     transaction_id
 )"#;
 
+/// Historical inclusion evidence awaiting an accepted scan; it grants no mined authority.
+pub(super) const TABLE_TX_RECONFIRMATION_RECEIPTS: &str = r#"
+CREATE TABLE tx_reconfirmation_receipts (
+    transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    mined_height INTEGER NOT NULL CHECK (typeof(mined_height) = 'integer' AND mined_height BETWEEN 0 AND 4294967295),
+    block_hash BLOB NOT NULL CHECK (typeof(block_hash) = 'blob' AND length(block_hash) = 32),
+    tx_index INTEGER CHECK (tx_index IS NULL OR (typeof(tx_index) = 'integer' AND tx_index BETWEEN 0 AND 65535)),
+    replacement_observed INTEGER NOT NULL DEFAULT 0 CHECK (replacement_observed IN (0, 1))
+)"#;
+pub(super) const INDEX_TX_RECONFIRMATION_RECEIPTS_HEIGHT: &str = r#"
+CREATE INDEX idx_tx_reconfirmation_receipts_height ON tx_reconfirmation_receipts(mined_height)"#;
+
 /// Stores the set of transaction ids for which the backend required additional data.
 ///
 /// ### Columns:
@@ -1085,13 +1097,19 @@ CREATE INDEX idx_sent_notes_transaction_id ON sent_notes (
 ///   to blockchain scanning.
 /// - `policy_generation`: The durable transparent-policy generation that produced this row.
 ///   Public dispatch requires a matching current generation.
+/// - `reconfirm_mined`: `1` for a status obligation whose transaction was mined before a rewind
+///   un-mined it, and whose mined state has not been observed since. Compact-block rescanning
+///   cannot re-observe such a transaction. A matching accepted block may restore inclusion
+///   from a retained receipt. Otherwise the obligation is exempt from expiry dormancy until
+///   one status observation completes, whatever its result. The observation resets it to `0`, after which the ordinary
+///   rules apply.
 pub(super) const TABLE_TX_RETRIEVAL_QUEUE: &str = r#"
 CREATE TABLE "tx_retrieval_queue" (
     txid BLOB NOT NULL,
     query_type INTEGER NOT NULL,
     dependent_transaction_id INTEGER
         REFERENCES transactions(id_tx) ON DELETE CASCADE,
-    policy_generation INTEGER NOT NULL DEFAULT 0,
+    policy_generation INTEGER NOT NULL DEFAULT 0, reconfirm_mined INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT tx_retrieval_intent UNIQUE (txid, query_type)
 )"#;
 pub(super) const INDEX_TX_RETIREVAL_QUEUE_DEPENDENT_TX: &str = r#"
