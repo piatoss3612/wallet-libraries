@@ -1447,6 +1447,7 @@ fn leaving_private_required_demotes_every_account() {
 
 mod history;
 
+mod expired_spends;
 mod public_fixtures;
 
 mod attribution;

@@ -2238,18 +2238,24 @@ pub(crate) fn mark_transparent_utxo_spent(
     )?;
     let affected_rows = stmt_mark_transparent_utxo_spent.execute(spend_params)?;
 
-    // Since we know that the output is spent, we no longer need to search for
-    // it to find out if it has been spent.
+    // Once a mined transaction spends the output, we no longer need to search for its spend. An
+    // unmined spender may expire, or lose to a conflicting spend that only the search can find, so
+    // the search stays queued until then; requests skip it while the spender is pending.
     let mut stmt_remove_spend_detection = conn.prepare_cached(
         "DELETE FROM transparent_spend_search_queue
          WHERE output_index = :prevout_idx
          AND transaction_id IN (
             SELECT id_tx FROM transactions WHERE txid = :prevout_txid
+         )
+         AND EXISTS (
+            SELECT 1 FROM transactions
+            WHERE id_tx = :spent_in_tx AND mined_height IS NOT NULL
          )",
     )?;
     stmt_remove_spend_detection.execute(named_params![
         ":prevout_txid": outpoint.hash(),
         ":prevout_idx": outpoint.n(),
+        ":spent_in_tx": spent_in_tx.0,
     ])?;
 
     // If no rows were affected, we know that we don't actually have the output in
@@ -2274,11 +2280,14 @@ pub(crate) fn mark_transparent_utxo_spent(
 
 /// Sets the max observed unspent height for all unspent transparent outputs received at the given
 /// address to at least the given height (calling this method will not cause the max observed
-/// unspent height to decrease).
+/// unspent height to decrease). Only outputs whose own search frontier is covered by
+/// `range_start..=checked_at` advance; completing a later range at a shared address must not
+/// skip another output's unresolved history.
 pub(crate) fn update_observed_unspent_heights<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
     params: &P,
     address: TransparentAddress,
+    range_start: BlockHeight,
     checked_at: BlockHeight,
 ) -> Result<(), SqliteClientError> {
     let chain_tip_height = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
@@ -2290,7 +2299,7 @@ pub(crate) fn update_observed_unspent_heights<P: consensus::Parameters>(
         checked_at, addr_str
     );
 
-    let mut stmt_update_observed_unspent = conn.prepare(
+    let mut stmt_update_observed_unspent = conn.prepare(&format!(
         "UPDATE transparent_received_outputs AS tro
          SET max_observed_unspent_height = CASE
             WHEN max_observed_unspent_height IS NULL THEN :checked_at
@@ -2298,15 +2307,21 @@ pub(crate) fn update_observed_unspent_heights<P: consensus::Parameters>(
             ELSE max_observed_unspent_height
          END
          WHERE address = :addr_str
-         AND tro.id NOT IN (
-             SELECT transparent_received_output_id
-             FROM transparent_received_output_spends
-         )",
-    )?;
+         AND COALESCE(
+             tro.max_observed_unspent_height + 1,
+             (SELECT t.mined_height FROM transactions t WHERE t.id_tx = tro.transaction_id),
+             :chain_tip_height
+         ) BETWEEN :range_start AND :checked_at
+         AND NOT ({resolved_spend})",
+        resolved_spend = resolved_spend_condition(),
+    ))?;
 
     stmt_update_observed_unspent.execute(named_params![
         ":addr_str": addr_str,
-        ":checked_at": u32::from(checked_at)
+        ":range_start": u32::from(range_start),
+        ":chain_tip_height": u32::from(chain_tip_height),
+        ":checked_at": u32::from(checked_at),
+        ":target_height": u32::from(chain_tip_height + 1),
     ])?;
 
     Ok(())
@@ -2327,7 +2342,7 @@ pub(crate) fn update_observed_unspent_height_for_outpoint(
     let chain_tip_height = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
     let checked_at = std::cmp::min(checked_at, chain_tip_height);
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "UPDATE transparent_received_outputs AS tro
          SET max_observed_unspent_height = CASE
             WHEN max_observed_unspent_height IS NULL THEN :checked_at
@@ -2338,16 +2353,15 @@ pub(crate) fn update_observed_unspent_height_for_outpoint(
          WHERE tro.transaction_id = t.id_tx
          AND t.txid = :txid
          AND tro.output_index = :output_index
-         AND tro.id NOT IN (
-             SELECT transparent_received_output_id
-             FROM transparent_received_output_spends
-         )",
-    )?;
+         AND NOT ({resolved_spend})",
+        resolved_spend = resolved_spend_condition(),
+    ))?;
 
     stmt.execute(named_params![
         ":txid": outpoint.hash(),
         ":output_index": outpoint.n(),
-        ":checked_at": u32::from(checked_at)
+        ":checked_at": u32::from(checked_at),
+        ":target_height": u32::from(chain_tip_height + 1),
     ])?;
 
     Ok(())
@@ -2515,6 +2529,21 @@ pub(crate) fn mark_transparent_addresses_exposed<P: consensus::Parameters>(
     Ok(())
 }
 
+/// A SQL condition that `tro`'s spend is resolved: a transaction that is mined, or not yet expired,
+/// spends it. A retained unmined spender that expired does not resolve the output's spend;
+/// discovery must continue. The parent must provide `:target_height`.
+fn resolved_spend_condition() -> String {
+    format!(
+        "EXISTS (
+             SELECT 1 FROM transparent_received_output_spends spend
+             JOIN transactions stx ON stx.id_tx = spend.transaction_id
+             WHERE spend.transparent_received_output_id = tro.id
+             AND ({})
+         )",
+        super::common::tx_unexpired_condition("stx")
+    )
+}
+
 /// Returns the vector of [`TransactionDataRequest`]s that represents the information needed by the
 /// wallet backend in order to be able to present a complete view of wallet history and memo data.
 ///
@@ -2546,25 +2575,25 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
         // Per-outpoint spend resolution is privacy-preserving (it does not correlate the
         // wallet's addresses to an untrusted server), so unlike the address-based path below
         // there is no need to exclude ephemeral-address outpoints here.
-        let mut spend_requests_stmt = conn.prepare_cached(
+        let mut spend_requests_stmt = conn.prepare_cached(&format!(
             "SELECT t.txid, ssq.output_index
              FROM transparent_spend_search_queue ssq
              JOIN transactions t ON t.id_tx = ssq.transaction_id
              JOIN transparent_received_outputs tro
                 ON tro.transaction_id = ssq.transaction_id AND tro.output_index = ssq.output_index
-             LEFT OUTER JOIN transparent_received_output_spends tros
-                ON tros.transparent_received_output_id = tro.id
-             WHERE tros.transaction_id IS NULL
+             WHERE NOT ({resolved_spend})
              AND (
                  tro.max_observed_unspent_height IS NULL
                  OR tro.max_observed_unspent_height < :chain_tip_height
              )",
-        )?;
+            resolved_spend = resolved_spend_condition(),
+        ))?;
 
         spend_requests_stmt
             .query_and_then(
                 named_params! {
-                    ":chain_tip_height": u32::from(chain_tip_height)
+                    ":chain_tip_height": u32::from(chain_tip_height),
+                    ":target_height": u32::from(chain_tip_height + 1),
                 },
                 |row| {
                     let outpoint = OutPoint::new(row.get::<_, [u8; 32]>(0)?, row.get::<_, u32>(1)?);
@@ -2578,17 +2607,16 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
 
     #[cfg(not(feature = "spend-index"))]
     let spend_search_requests = {
-        let mut spend_requests_stmt = conn.prepare_cached(
+        let mut spend_requests_stmt = conn.prepare_cached(&format!(
             "SELECT
                 ssq.address,
                 COALESCE(tro.max_observed_unspent_height + 1, t.mined_height) AS block_range_start
              FROM transparent_spend_search_queue ssq
              JOIN transactions t ON t.id_tx = ssq.transaction_id
-             JOIN transparent_received_outputs tro ON tro.transaction_id = t.id_tx
+             JOIN transparent_received_outputs tro
+                ON tro.transaction_id = t.id_tx AND tro.output_index = ssq.output_index
              JOIN addresses ON addresses.id = tro.address_id
-             LEFT OUTER JOIN transparent_received_output_spends tros
-                ON tros.transparent_received_output_id = tro.id
-             WHERE tros.transaction_id IS NULL
+             WHERE NOT ({resolved_spend})
              AND addresses.key_scope != :ephemeral_key_scope
              AND (
                  tro.max_observed_unspent_height IS NULL
@@ -2598,13 +2626,15 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
                  block_range_start IS NOT NULL
                  OR t.expiry_height > :chain_tip_height
              )",
-        )?;
+            resolved_spend = resolved_spend_condition(),
+        ))?;
 
         spend_requests_stmt
             .query_and_then(
                 named_params! {
                     ":ephemeral_key_scope": KeyScope::Ephemeral.encode(),
-                    ":chain_tip_height": u32::from(chain_tip_height)
+                    ":chain_tip_height": u32::from(chain_tip_height),
+                    ":target_height": u32::from(chain_tip_height + 1),
                 },
                 |row| {
                     let address = TransparentAddress::decode(params, &row.get::<_, String>(0)?)?;

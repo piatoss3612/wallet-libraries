@@ -3332,6 +3332,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             self.conn.0,
             &self.params,
             request.address(),
+            request.block_range_start(),
             as_of_height,
         )
     }

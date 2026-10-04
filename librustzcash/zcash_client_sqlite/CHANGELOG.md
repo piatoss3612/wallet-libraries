@@ -10,6 +10,10 @@ workspace.
 
 ## [Unreleased]
 
+- Transparent spend discovery retains work for unmined local spenders and resumes after they
+  expire. Address and per-outpoint completion advance past expired-spender links, using expiry
+  at the current tip; an address range advances only the outputs whose search frontier it covers.
+
 - Fixed `v_transactions.account_balance_delta`, `total_spent` and `total_received` being
   multiplied for a send whose sent notes include an output a wallet account received
   (transparent change, or a transfer to another account): `sent_note_counts` grouped by the
