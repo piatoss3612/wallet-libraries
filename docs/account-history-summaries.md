@@ -40,7 +40,8 @@ semantics. Database-local transaction identifiers only support local ordering an
 pairing; they are not portable identifiers.
 
 Mapping to Vizor's current `TxBase` retains its presentation defaults: absent block
-or construction times become zero and an absent transaction index becomes -1. The
+or construction times become zero, construction seconds use the existing
+`i64::unsigned_abs` conversion, and an absent transaction index becomes -1. The
 library preserves those unknowns as `Option`. A missing expiry cannot establish
 expiration. Expiry uses the library view's private-history fallback; expiration
 retains the view's existing stored-transaction expiry predicate. Completeness and
@@ -80,3 +81,22 @@ For the ignored timing experiment, use the same wrapper's built test binary with
 ownership while compiling. Timings are observations on synthetic data, not a
 production latency guarantee. Raw-read denial and query-plan assertions are the
 structural performance checks.
+
+### Observed results
+
+On an Apple M4 Max with Rust 1.98's optimized test profile, two five-read warm
+experiments gave the following averages. Other validation was active during the
+second run, so the paired comparisons matter more than the absolute times.
+
+| Read | First run | Second run |
+| --- | ---: | ---: |
+| Typed account summary API | 5.27 ms | 9.37 ms |
+| Frozen current Vizor CTE | 7.53 ms | 12.48 ms |
+| Existing view with raw projection | 1,024.20 ms | 1,582.93 ms |
+
+These synthetic receive-history measurements show no regression against Vizor's
+current read in this corpus. The API returns more classification metadata while
+filtering the accounting inputs earlier. They do not qualify all production data
+shapes or latency; consumer integration must retain its own activity regressions.
+The non-timing tests prove account isolation, raw-column avoidance, accounting
+equivalence and shared snapshots independently of these measurements.

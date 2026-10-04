@@ -55,8 +55,8 @@ pub struct TransactionSummary {
     pub is_shielding: bool,
     /// Value crossing between the account's shielded pools, when the view establishes it.
     pub pool_crossing_value: Option<u64>,
-    /// Whether the transaction carries the wallet's trust marker.
-    pub is_trusted: bool,
+    /// Recorded wallet trust marker; `None` when the marker has not been set.
+    pub is_trusted: Option<bool>,
     /// Recorded local construction time, in SQLite's stored timestamp format.
     pub created: Option<String>,
     /// Construction time converted to Unix seconds, if parseable.
@@ -323,3 +323,117 @@ pub(crate) const SUMMARY_QUERY: &str = history_sql!(
            WHERE s.transaction_id = transactions.id_tx AND n.note_version = 2
        ) AS has_orchard_spend"
 );
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, params};
+    use zcash_client_backend::data_api::{Account as _, testing::TestBuilder};
+    use zcash_primitives::block::BlockHash;
+
+    use super::read_summary;
+    use crate::{AccountUuid, error::SqliteClientError, testing::db::TestDbFactory};
+
+    fn transaction(conn: &Connection, tag: u8) -> i64 {
+        conn.execute(
+            "INSERT INTO transactions (txid, min_observed_height) VALUES (?1, 0)",
+            [[tag; 32]],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn history_summaries_empty_and_unknown_accounts_in_every_feature_lane() {
+        let st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let db = st.wallet().db();
+        assert!(
+            db.transaction_history_summaries(st.test_account().unwrap().id())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            db.transaction_history_summaries(AccountUuid::from_uuid(uuid::Uuid::nil())),
+            Err(SqliteClientError::AccountUnknown)
+        ));
+    }
+
+    #[test]
+    fn history_summaries_preserve_pool_crossings_memos_and_private_expiry_without_raw() {
+        // Local accounting fixtures under the real migrated schema. No raw transaction or
+        // cryptographic note payload is required to summarize partially recovered history.
+        let st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let db = st.wallet().db();
+        let conn = &db.conn;
+        let account = st.test_account().unwrap().id();
+        let account_id: i64 = conn
+            .query_row(
+                "SELECT id FROM accounts WHERE uuid = ?1",
+                [account.expose_uuid().as_bytes()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let original = transaction(conn, 0xe0);
+        let crossing = transaction(conn, 0xe1);
+        let ironwood = transaction(conn, 0xe2);
+        conn.execute("INSERT INTO sapling_received_notes (transaction_id, output_index, account_id, diversifier, value, rcm, is_change) VALUES (?1, 0, ?2, zeroblob(11), 500000, zeroblob(32), 0)", params![original, account_id]).unwrap();
+        let sapling_note = conn.last_insert_rowid();
+        conn.execute("INSERT INTO sapling_received_note_spends (sapling_received_note_id, transaction_id) VALUES (?1, ?2)", params![sapling_note, crossing]).unwrap();
+        conn.execute("INSERT INTO orchard_received_notes (transaction_id, action_index, account_id, diversifier, value, rho, rseed, is_change, memo, note_version) VALUES (?1, 0, ?2, zeroblob(11), 490000, zeroblob(32), zeroblob(32), 1, X'01', 2)", params![crossing, account_id]).unwrap();
+        let orchard_note = conn.last_insert_rowid();
+        conn.execute("INSERT INTO orchard_received_note_spends (orchard_received_note_id, transaction_id) VALUES (?1, ?2)", params![orchard_note, ironwood]).unwrap();
+        conn.execute("INSERT INTO ironwood_received_notes (transaction_id, action_index, account_id, diversifier, value, rho, rseed, is_change, memo, note_version) VALUES (?1, 0, ?2, zeroblob(11), 480000, zeroblob(32), zeroblob(32), 1, X'F6', 3)", params![ironwood, account_id]).unwrap();
+        conn.execute("INSERT INTO ironwood_enhance_routing (transaction_id, route, history_expiry_height) VALUES (?1, 0, 2000000)", [ironwood]).unwrap();
+        let actual = db.transaction_history_summaries(account).unwrap();
+        let s = actual
+            .iter()
+            .find(|s| s.transaction_id == crossing)
+            .unwrap();
+        assert_eq!(
+            (s.account_balance_delta, s.total_spent, s.total_received),
+            (-10000, 500000, 490000)
+        );
+        assert_eq!(s.pool_crossing_value, Some(490000));
+        assert_eq!(
+            (
+                s.spent_note_count,
+                s.received_note_count,
+                s.sent_note_count,
+                s.memo_count
+            ),
+            (1, 0, 0, 1)
+        );
+        assert!(s.has_change);
+        assert!(!s.is_shielding);
+        assert!(!s.has_orchard_spend);
+        assert_eq!(s.is_trusted, None);
+        let i = actual
+            .iter()
+            .find(|s| s.transaction_id == ironwood)
+            .unwrap();
+        assert_eq!(i.pool_crossing_value, Some(480000));
+        assert!(i.has_orchard_spend);
+        assert_eq!(i.expiry_height.map(u32::from), Some(2000000));
+        assert!(!i.expired_unmined);
+        assert_eq!(i.memo_count, 0);
+        assert_eq!(i.fee, None);
+        let mut view = conn.prepare("SELECT vt.*, tx.id_tx AS transaction_id, tx.created,
+            CAST(strftime('%s', tx.created) AS INTEGER) AS created_time,
+            EXISTS (SELECT 1 FROM orchard_received_note_spends s JOIN orchard_received_notes n ON n.id = s.orchard_received_note_id WHERE s.transaction_id = tx.id_tx AND n.note_version = 2) AS has_orchard_spend
+            FROM v_transactions vt JOIN transactions tx ON tx.txid = vt.txid WHERE vt.account_uuid = ?1").unwrap();
+        let mut expected = view
+            .query_map([account.expose_uuid().as_bytes()], read_summary)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut actual = actual;
+        expected.sort_by_key(|s| s.transaction_id);
+        actual.sort_by_key(|s| s.transaction_id);
+        assert_eq!(actual, expected);
+    }
+}

@@ -1,5 +1,7 @@
 //! Library-owned activity summaries: independent amounts, view/Vizor equivalence and read costs.
 use std::time::Instant;
+use zcash_keys::encoding::AddressCodec;
+use zcash_script::script::Evaluable;
 
 use rusqlite::{
     hooks::{AuthAction, AuthContext, Authorization},
@@ -183,7 +185,7 @@ fn history_summaries_preserve_status_unknowns_and_local_metadata() {
         (None, None, None, None, None)
     );
     assert!(!s.expired_unmined);
-    assert!(s.is_trusted);
+    assert_eq!(s.is_trusted, Some(true));
     assert_eq!(s.created_time, Some(1_767_323_045));
     assert!(!s.has_orchard_spend);
     assert_equivalent(&st, account);
@@ -308,10 +310,10 @@ fn history_summaries_multi_account_benchmark() {
             let mut txid = [0u8; 32];
             txid[..4].copy_from_slice(&i.to_le_bytes());
             txid[4] = a as u8;
-            populate.execute("INSERT INTO transactions (txid, raw, expiry_height) VALUES (?1, zeroblob(32768), 1000000)", [txid]).unwrap();
+            populate.execute("INSERT INTO transactions (txid, raw, expiry_height, min_observed_height) VALUES (?1, zeroblob(32768), 1000000, 0)", [txid]).unwrap();
             let id = populate.last_insert_rowid();
             populate.execute("INSERT INTO transparent_received_outputs (transaction_id, output_index, account_id, address, script, value_zat, max_observed_unspent_height, address_id) VALUES (?1, 0, ?2, ?3, ?4, 50000, 1, ?5)",
-                params![id, account_id, address.encode(st.network()), address.script().0, address_id]).unwrap();
+                params![id, account_id, address.encode(st.network()), address.script().to_bytes(), address_id]).unwrap();
         }
     }
     populate.commit().unwrap();
