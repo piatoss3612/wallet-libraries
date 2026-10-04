@@ -53,9 +53,13 @@ workspace.
   constructed are never queued, and storing a transaction removes it from the queue.
 - `transaction_history_details` reports `TransactionHistoryDetails::funding`. A transaction is
   `Shared` when another wallet account spent in it, or when one of its transparent inputs is not
-  the account's once the account's transparent evidence is settled.
+  the account's once the account's transparent evidence is settled. Qualified transaction metadata
+  and complete owned transparent effects can establish `Sole` or `Shared` funding without raw
+  transaction data; incomplete coverage does not establish funding this way.
 - `transaction_history_details` reports `AggregatePayment::Exact` once every spent unit of a
-  reconstructed transaction is accounted for, rather than `Partial`.
+  sole-funded reconstructed transaction is accounted for, rather than `Partial`. A shared
+  contribution equal to the whole transaction's fee does not establish a zero payment, complete
+  payment details, or reconstructed payment history.
 - `get_txs_spending_transparent_outputs_of` returns only spenders of the given transaction's
   outputs; it previously returned every fee-less transaction spending any wallet output.
 

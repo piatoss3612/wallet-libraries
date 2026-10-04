@@ -373,6 +373,32 @@ fn a_jointly_funded_payment_is_attributed_to_no_single_account() {
 }
 
 #[test]
+fn a_shared_contribution_equal_to_the_whole_fee_does_not_prove_a_zero_payment() {
+    for contributed in [9_999, 10_000, 10_001] {
+        let (mut st, accounts) = public_wallet(1);
+        let (a, b) = (accounts[0], accounts[1]);
+        let from_a = funding(0xb2, external_of(&st, a), contributed);
+        let from_b = funding(0xb3, external_of(&st, b), 700_000);
+        let joint = transaction(
+            vec![outpoint(&from_a, 0), outpoint(&from_b, 0)],
+            vec![(EXTERNAL, contributed + 700_000 - 10_000)],
+        );
+        for tx in [&from_a, &from_b, &joint] {
+            store(&mut st, tx);
+        }
+        assert_eq!(sent_outputs(&st, &joint), vec![]);
+        for account in [a, b] {
+            let entry = history(&st, account, &joint);
+            assert_eq!(entry.funding, TransactionFunding::Shared);
+            assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+            assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+            assert_eq!(entry.classification, HistoryClassification::Provisional);
+            assert_eq!(entry.fee, FeeState::Known(zat(10_000)));
+        }
+    }
+}
+
+#[test]
 fn joint_funding_found_input_by_input_is_attributed_to_no_single_account() {
     let (mut st, accounts) = public_wallet(1);
     let (a, b) = (accounts[0], accounts[1]);

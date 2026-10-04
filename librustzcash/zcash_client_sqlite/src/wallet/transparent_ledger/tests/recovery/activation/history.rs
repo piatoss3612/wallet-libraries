@@ -2,8 +2,8 @@
 
 use zcash_client_backend::data_api::transparent_ledger::{
     AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification,
-    PoolEffect, PrivateTransparentDetail, TransactionHistoryDetails, TransactionMetadata,
-    WholeTransactionFee,
+    PoolEffect, PrivateTransparentDetail, TransactionFunding, TransactionHistoryDetails,
+    TransactionMetadata, WholeTransactionFee,
 };
 use zcash_protocol::PoolType;
 
@@ -176,6 +176,7 @@ fn a_debit_with_change_and_no_known_recipient_stays_visible() {
     assert_eq!(entry.fee, FeeState::Unknown);
     assert_eq!(entry.classification, HistoryClassification::Provisional);
     assert_eq!(entry.pending_private_details, vec![]);
+    assert_eq!(entry.funding, TransactionFunding::Undetermined);
     assert_eq!(
         st.wallet()
             .db()
@@ -241,6 +242,22 @@ fn transaction_metadata_establishes_payment_only_for_complete_sole_funding() {
         apply(&mut st, c).unwrap();
         let entry = history(&st, account, payment.spending_txid);
         assert_eq!(entry.aggregate_payment, expected);
+        assert!(
+            st.wallet()
+                .get_transaction(payment.spending_txid)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            entry.funding,
+            if inputs > 1 {
+                TransactionFunding::Shared
+            } else if shielded {
+                TransactionFunding::Undetermined
+            } else {
+                TransactionFunding::Sole
+            }
+        );
         let evidence = entry.transaction_metadata.unwrap();
         assert_eq!(evidence.metadata, metadata);
         assert_eq!(evidence.provenance.len(), 1);
@@ -269,6 +286,50 @@ fn transaction_metadata_establishes_payment_only_for_complete_sole_funding() {
                 )
                 .unwrap(),
             7
+        );
+    }
+}
+
+#[test]
+fn metadata_funding_requires_complete_owned_effects() {
+    for inputs in [1, 2] {
+        let (mut st, account, unspent) = active_wallet();
+        let ws = watch(&st, account);
+        let mut payment = spend(6, &unspent, below_target(&ws, 0));
+        payment.metadata = Some(TransactionMetadata {
+            fee: WholeTransactionFee::Exact(zat(1_000)),
+            transparent_input_count: inputs,
+            has_shielded_components: false,
+        });
+        cover_one(
+            &mut st,
+            account,
+            external(&ws),
+            vec![],
+            vec![payment.clone()],
+        );
+
+        let entry = history(&st, account, payment.spending_txid);
+        assert_eq!(
+            transparent(&entry).completeness,
+            EffectCompleteness::Incomplete
+        );
+        assert_eq!(entry.funding, TransactionFunding::Undetermined);
+        assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+
+        cover(&mut st, account, &revision(1, true), vec![]);
+        let entry = history(&st, account, payment.spending_txid);
+        assert_eq!(
+            transparent(&entry).completeness,
+            EffectCompleteness::Complete
+        );
+        assert_eq!(
+            entry.funding,
+            if inputs == 1 {
+                TransactionFunding::Sole
+            } else {
+                TransactionFunding::Shared
+            }
         );
     }
 }

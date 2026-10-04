@@ -448,15 +448,18 @@ fn has_unresolved_spend(
     )?)
 }
 
-/// Who funded the transaction, from the account's view. `transparent_settled` says whether the
-/// account's transparent evidence for it is settled, so that an input it does not own belongs to
-/// another party rather than awaiting discovery.
+/// Who funded the transaction, from the account's view. A settled `transparent_effect` means an
+/// input the account does not own belongs to another party rather than awaiting discovery.
+/// Qualified metadata and complete owned input
+/// evidence can establish funding without the raw transaction; partial coverage cannot.
 fn transaction_funding(
     conn: &rusqlite::Connection,
     account_id: i64,
     tx: &TransactionFacts,
     account_spent: bool,
-    transparent_settled: bool,
+    transparent_effect: Option<&PoolEffect>,
+    metadata: Option<&TransactionMetadataEvidence>,
+    owned_inputs: u32,
 ) -> Result<TransactionFunding, SqliteClientError> {
     if !account_spent {
         return Ok(TransactionFunding::NotFunded);
@@ -474,6 +477,19 @@ fn transaction_funding(
     }
     if tx.constructed {
         return Ok(TransactionFunding::Sole);
+    }
+    if let Some(metadata) = metadata.filter(|_| {
+        transparent_effect.is_some_and(|e| e.completeness == EffectCompleteness::Complete)
+    }) {
+        if owned_inputs < metadata.metadata.transparent_input_count {
+            return Ok(TransactionFunding::Shared);
+        }
+        if owned_inputs > 0
+            && owned_inputs == metadata.metadata.transparent_input_count
+            && !metadata.metadata.has_shielded_components
+        {
+            return Ok(TransactionFunding::Sole);
+        }
     }
     if !tx.has_full_data {
         return Ok(TransactionFunding::Undetermined);
@@ -497,7 +513,7 @@ fn transaction_funding(
     )?;
     Ok(if owned >= inputs {
         TransactionFunding::Sole
-    } else if transparent_settled {
+    } else if transparent_effect.is_some_and(|e| e.completeness.is_settled()) {
         TransactionFunding::Shared
     } else {
         TransactionFunding::Undetermined
@@ -644,15 +660,28 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             .map(|(_, received, _)| received.into_u64())
             .sum();
 
+        let owned_inputs = published_owned_inputs(conn, account_id, txid)?;
+        let transparent_effect = effects.iter().find(|e| e.pool == PoolType::Transparent);
+        let funding = transaction_funding(
+            conn,
+            account_id,
+            &tx,
+            spent > 0,
+            transparent_effect,
+            transaction_metadata.as_ref(),
+            owned_inputs,
+        )?;
+
         // The account provably only received: every effect is settled and none is a spend. Creation
         // evidence without the stored construction details means the wallet likely funded the
         // transaction through spends it has not recorded.
         let received_only = settled && spent == 0 && !(tx.created_locally && !tx.constructed);
-        // Every unit the account spent is accounted for by what it received back, the recorded
-        // outputs it sent elsewhere, and the fee, so no unknown payment of its funds remains.
-        // Full data alone proves nothing: outputs that cannot be decrypted are not recorded.
+        // For a sole funder, every spent unit is accounted for by its receipts, recorded payments,
+        // and the fee. Shared funding cannot allocate the whole transaction's fee to this account,
+        // even when its net movement happens to equal that fee. Full data alone proves nothing:
+        // outputs that cannot be decrypted are not recorded.
         let payments_accounted = match tx.fee {
-            Some(fee) if settled && spent > 0 => {
+            Some(fee) if settled && spent > 0 && funding == TransactionFunding::Sole => {
                 let sent = sent_elsewhere(conn, account_id, tx.id)?;
                 Some(spent)
                     == received
@@ -669,10 +698,9 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         } else {
             DetailCompleteness::Incomplete
         };
-        let owned_inputs = published_owned_inputs(conn, account_id, txid)?;
-        let transparent_effect = effects.iter().find(|e| e.pool == PoolType::Transparent);
         let sole_transparent_funding = transaction_metadata.as_ref().is_some_and(|e| {
-            !e.metadata.has_shielded_components
+            funding == TransactionFunding::Sole
+                && !e.metadata.has_shielded_components
                 && owned_inputs > 0
                 && owned_inputs == e.metadata.transparent_input_count
         });
@@ -738,12 +766,6 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         } else {
             HistoryClassification::Provisional
         };
-
-        let transparent_settled = effects
-            .iter()
-            .filter(|e| e.pool == PoolType::Transparent)
-            .all(|e| e.completeness.is_settled());
-        let funding = transaction_funding(conn, account_id, &tx, spent > 0, transparent_settled)?;
 
         entries.push(TransactionHistoryDetails {
             transaction_metadata,
