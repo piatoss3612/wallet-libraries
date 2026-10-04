@@ -297,8 +297,10 @@ impl PreLedgerWallet {
         let wallet_rows = |conn: &Connection| {
             production_dump(conn)
                 .into_iter()
+                // Later migrations' bookkeeping, not wallet data.
                 .filter(|(table, _)| {
-                    table != "schemer_migrations" && table != "tx_reconfirmation_receipts"
+                    !["schemer_migrations", "tx_reconfirmation_receipts", "tx_attribution_queue"]
+                        .contains(&table.as_str())
                 })
                 .collect::<Vec<_>>()
         };
