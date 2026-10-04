@@ -4119,33 +4119,39 @@ pub trait WalletWrite:
         )
     }
 
-    /// Reports the result of a complete query of the unspent transparent outputs received at
-    /// `address`, so that the wallet learns of spends by transactions it has not seen.
+    /// Reports a complete query of an address's unspent transparent outputs at a stable,
+    /// locally accepted chain point, so the wallet learns of spends it has not yet linked.
     ///
-    /// Call this after storing each returned output with [`Self::put_received_transparent_utxo`]
-    /// and only when the query is complete: it was not truncated by an entry limit, and its
-    /// response stream ended without error.
+    /// Capture the provider's tip height and hash immediately before the query and after its
+    /// entire response stream ends successfully. `query_start` and `query_end` must be equal;
+    /// a changed height or hash requires discarding the observation and retrying. The provider
+    /// must serve the UTXO query from that chain state. An entry limit or stream error never
+    /// establishes absence, even when the chain points match.
+    ///
+    /// The wallet must still have that point as its accepted tip. Store the returned outputs
+    /// with [`Self::put_received_transparent_utxo`] and report the observation in one wallet
+    /// transaction, so rejected or stale observations roll back the refresh. Implementations
+    /// must reject inconsistent or unaccepted chain points without applying the observation.
     ///
     /// # Arguments
     /// - `address`: the queried address.
     /// - `start_height`: the query's start height. Only outputs mined at or above it are judged.
-    /// - `as_of_height`: a height at or below the chain state the query reflects, such as the
-    ///   chain tip the caller observed immediately before issuing the query.
+    /// - `query_start`: the provider's accepted tip before issuing the query.
+    /// - `query_end`: the provider's accepted tip after consuming the complete response.
     /// - `unspent`: every outpoint the query returned for `address`.
     ///
-    /// A wallet output at `address` whose creating transaction is mined in
-    /// `start_height..=as_of_height`, that was not returned, and that the wallet does not know to be spent by a
-    /// transaction mined at or below that height, has been spent by a transaction the wallet has
-    /// not linked. The wallet stops counting it as spendable and requests the spend through
-    /// [`WalletRead::transaction_data_requests`]; storing the spending transaction links it.
-    /// Evidence that the output is unspent at or above `as_of_height`, such as a later query that
-    /// returns it, supersedes the absence, and so does a rewind below `as_of_height`.
+    /// A wallet output mined in `start_height..=query_end.height` that was not returned and has
+    /// no known spend mined by then is excluded from public balances and inputs, and its spend
+    /// is requested through [`WalletRead::transaction_data_requests`]. Public absence evidence
+    /// never changes private financial authority. A later unspent observation supersedes the
+    /// absence, as does a rewind below its accepted observation height.
     #[cfg(feature = "transparent-inputs")]
     fn notify_transparent_utxos_observed(
         &mut self,
         _address: &TransparentAddress,
         _start_height: BlockHeight,
-        _as_of_height: BlockHeight,
+        _query_start: crate::data_api::transparent_ledger::ChainPoint,
+        _query_end: crate::data_api::transparent_ledger::ChainPoint,
         _unspent: &[OutPoint],
     ) -> Result<(), <Self as WalletRead>::Error> {
         unimplemented!(

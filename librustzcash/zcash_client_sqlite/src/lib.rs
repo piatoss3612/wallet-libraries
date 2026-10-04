@@ -1961,20 +1961,25 @@ fn admitted_transparent_output(
     target: TargetHeight,
     authority: &wallet::transparent_ledger::InputAuthority,
 ) -> Result<Option<WalletTransparentOutput<AccountUuid>>, SqliteClientError> {
+    // Evaluate the current authority first. Public absence evidence may suppress the public
+    // probe but must not veto an output authorized by the private ledger.
     let output = wallet::transparent::get_wallet_transparent_output(
         conn,
         outpoint,
         Some(target),
-        &wallet::transparent_ledger::InputAuthority::Public,
+        authority,
     )?;
-    if output.is_some()
+    if matches!(
+        authority,
+        wallet::transparent_ledger::InputAuthority::Private(_)
+    ) && output.is_none()
         && wallet::transparent::get_wallet_transparent_output(
             conn,
             outpoint,
             Some(target),
-            authority,
+            &wallet::transparent_ledger::InputAuthority::Public,
         )?
-        .is_none()
+        .is_some()
     {
         return Err(SqliteClientError::TransparentAuthorityUnavailable);
     }
@@ -2773,11 +2778,18 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         &mut self,
         address: &TransparentAddress,
         start_height: BlockHeight,
-        as_of_height: BlockHeight,
+        query_start: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
+        query_end: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
         unspent: &[OutPoint],
     ) -> Result<(), <Self as WalletRead>::Error> {
         self.transactionally(|wdb| {
-            wdb.notify_transparent_utxos_observed(address, start_height, as_of_height, unspent)
+            wdb.notify_transparent_utxos_observed(
+                address,
+                start_height,
+                query_start,
+                query_end,
+                unspent,
+            )
         })
     }
 
@@ -3355,7 +3367,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         address: &TransparentAddress,
         start_height: BlockHeight,
-        as_of_height: BlockHeight,
+        query_start: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
+        query_end: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
         unspent: &[OutPoint],
     ) -> Result<(), <Self as WalletRead>::Error> {
         // The query is public discovery, admitted on the same terms as the outputs it returned.
@@ -3368,7 +3381,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
             &self.params,
             address,
             start_height,
-            as_of_height,
+            query_start,
+            query_end,
             unspent,
         )
     }

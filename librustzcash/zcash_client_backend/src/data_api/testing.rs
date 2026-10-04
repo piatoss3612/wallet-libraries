@@ -3775,7 +3775,8 @@ impl WalletWrite for MockWalletDb {
         &mut self,
         _address: &TransparentAddress,
         _start_height: BlockHeight,
-        _as_of_height: BlockHeight,
+        _query_start: crate::data_api::transparent_ledger::ChainPoint,
+        _query_end: crate::data_api::transparent_ledger::ChainPoint,
         _unspent: &[::transparent::bundle::OutPoint],
     ) -> Result<(), <Self as WalletRead>::Error> {
         Ok(())

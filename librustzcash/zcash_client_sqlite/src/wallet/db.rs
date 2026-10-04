@@ -1123,7 +1123,7 @@ CREATE INDEX idx_tx_retrieval_queue_dependent_tx ON tx_retrieval_queue (
 ///
 /// A row is recorded by `WalletWrite::notify_transparent_utxos_observed` for an output whose
 /// creating transaction is mined at or below the observed height and that has no spend by a
-/// transaction mined at or below that height. The output counts as spent while `observed_height`
+/// transaction mined at or below that height. Under public authority it counts as spent while `observed_height`
 /// exceeds its `max_observed_unspent_height`; later evidence that it is unspent at or above the
 /// observed height supersedes the absence, and a rewind below the observed height removes it.
 /// The output is also queued for spend detection, so that ordinary enhancement finds and links
