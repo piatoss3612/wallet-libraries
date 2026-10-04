@@ -1965,16 +1965,25 @@ fn admitted_transparent_output(
         conn,
         outpoint,
         Some(target),
-        &wallet::transparent_ledger::InputAuthority::Public,
+        authority,
     )?;
-    if output.is_some()
+    // Distinguish unavailable authority from an absent or unspendable output using metadata
+    // lookups. A public spendability query could hide an output that private authority admits,
+    // for example after qualified recovery supersedes a public absence observation.
+    if output.is_none()
+        && matches!(
+            authority,
+            wallet::transparent_ledger::InputAuthority::Private(_)
+        )
         && wallet::transparent::get_wallet_transparent_output(
             conn,
             outpoint,
-            Some(target),
-            authority,
+            None,
+            &wallet::transparent_ledger::InputAuthority::Public,
         )?
-        .is_none()
+        .is_some()
+        && wallet::transparent::get_wallet_transparent_output(conn, outpoint, None, authority)?
+            .is_none()
     {
         return Err(SqliteClientError::TransparentAuthorityUnavailable);
     }
