@@ -1,6 +1,7 @@
 # Common 3.0 dependency migration
 
 Depends on [Common #540](https://github.com/zakura-core/common/pull/540).
+Coordinated node draft: [#1292](https://github.com/zakura-core/zakura/pull/1292).
 Based on fetched wallet main `0497bc3`, rather than the stale local checkout.
 
 ## Changes and API review
@@ -38,6 +39,9 @@ Sapling, Orchard, and Ironwood round trips pass all three tests. The graph
 verifier and facade verifier pass, including both mutually exclusive backends
 and a fresh Rust 1.91 consumer. Production graph inspection finds one Common
 note-encryption package and no standalone encoding or upstream note encryption.
+Scoped backend/SQLite Clippy passes with existing unused code/import warnings;
+no blanket lint suppression was added. The Python tooling suite passes all
+12 tests, including generation from pristine upstream sources.
 No benchmarks were run.
 
 Initial cross-repository checks used temporary `.cargo/config.toml` patches

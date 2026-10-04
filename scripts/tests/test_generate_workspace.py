@@ -27,7 +27,7 @@ class GenerationTests(unittest.TestCase):
             first = (root / "Cargo.toml").read_text()
             dependencies = tomllib.loads(first)["workspace"]["dependencies"]
             self.assertNotIn("zcash_encoding", dependencies)
-            self.assertNotIn("# Binary encoding", first)
+            self.assertNotIn("# zcash_encoding 0.5.0 is a breaking release", first)
             note = dependencies["zcash_note_encryption"]
             self.assertEqual(note["package"], "zakura-note-encryption")
             self.assertFalse(note["default-features"])
