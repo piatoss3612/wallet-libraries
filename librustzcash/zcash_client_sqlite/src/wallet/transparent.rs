@@ -1190,12 +1190,14 @@ fn to_unspent_transparent_output(
     })
 }
 
-// Generates a SQL expression that returns the identifiers of all spent UTXOS in the wallet.
+/// Generates a SQL expression that returns the identifiers of spent UTXOs in the wallet.
 ///
 /// # Usage requirements
 /// - The parent must provide `:target_height` as a named argument.
 /// - The parent is responsible for enclosing this condition in parentheses as appropriate.
-pub(crate) fn spent_utxos_clause() -> String {
+/// - `private_authority` is the parent's SQL boolean expression for private financial reads.
+///   Public absence observations constrain public authority only; linked spends apply to both.
+pub(crate) fn spent_utxos_clause(private_authority: &str) -> String {
     format!(
         r#"
         SELECT txo_spends.transparent_received_output_id
@@ -1206,19 +1208,25 @@ pub(crate) fn spent_utxos_clause() -> String {
         {}
         "#,
         super::common::tx_unexpired_condition("stx"),
-        ABSENT_UTXOS_CLAUSE,
+        absent_utxos_clause(private_authority),
     )
 }
 
 /// Selects the identifiers of outputs that a complete query of their address's unspent outputs
 /// did not return, unless later evidence shows them unspent at or above that height. Such an
-/// output is spent by a transaction the wallet has not linked yet. See
-/// [`notify_transparent_utxos_observed`].
-pub(crate) const ABSENT_UTXOS_CLAUSE: &str = "
+/// output is treated as spent under public authority, but cannot override private ledger
+/// evidence. `private_authority` is the parent's SQL boolean expression for private financial
+/// reads. See [`notify_transparent_utxos_observed`].
+fn absent_utxos_clause(private_authority: &str) -> String {
+    format!(
+        "
         SELECT absence.output_id
         FROM transparent_utxo_absences absence
         JOIN transparent_received_outputs absent ON absent.id = absence.output_id
-        WHERE absence.observed_height > IFNULL(absent.max_observed_unspent_height, -1)";
+        WHERE NOT ({private_authority})
+        AND absence.observed_height > IFNULL(absent.max_observed_unspent_height, -1)"
+    )
+}
 
 /// Generates an SQL condition that a transaction is mined with at least a required number of
 /// confirmations, or is unexpired if UTXOS are spendable with zero confirmations.
@@ -1414,8 +1422,9 @@ pub(crate) fn get_wallet_transparent_output_for_retry(
                  JOIN transactions stx ON stx.id_tx = txo_spends.transaction_id
                  WHERE ({}) AND (:retry_txid IS NULL OR stx.txid != :retry_txid)
                  UNION
-                 {ABSENT_UTXOS_CLAUSE}",
-            tx_unexpired_condition("stx")
+                 {}",
+            tx_unexpired_condition("stx"),
+            absent_utxos_clause(":private_authority"),
         ),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         excluding_immature_coinbase_outputs("t"),
@@ -1490,7 +1499,7 @@ fn spendable_transparent_outputs_query(
          AND ({INPUT_AUTHORITY_CONDITION}) -- the transparent authority admits the output
          ORDER BY {order_by_sql}",
         tx_unexpired_condition_minconf_0("t"),
-        spent_utxos_clause(),
+        spent_utxos_clause(":private_authority"),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         excluding_immature_coinbase_outputs("t"),
         super::transparent_ledger::output_observation_condition("u"),
@@ -1837,7 +1846,7 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
          AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
          AND ({}) -- exclude withdrawn ledger-only receives",
         tx_unexpired_condition_minconf_0("t"),
-        spent_utxos_clause(),
+        spent_utxos_clause("0"),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         super::transparent_ledger::output_observation_condition("u"),
     ))?;
@@ -1899,7 +1908,7 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
              AND u.id NOT IN ({}) -- and the output is unspent
              AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
              AND ({}) -- exclude withdrawn ledger-only receives",
-            spent_utxos_clause(),
+            spent_utxos_clause("0"),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             super::transparent_ledger::output_observation_condition("u"),
         ))?;
@@ -2044,7 +2053,7 @@ pub(crate) fn transparent_balance_provenance(
                  )",
             tx_unexpired_condition_minconf_0("t"),
             tx_unconfirmed_condition("t"),
-            spent_utxos_clause(),
+            spent_utxos_clause("0"),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             super::transparent_ledger::output_observation_condition("u"),
         ),
@@ -2071,7 +2080,8 @@ pub(crate) fn transparent_balance_provenance(
 ///
 /// With `ledger_only`, only outputs projected from a receive the private ledger currently places
 /// count: legacy public, local-only, and rewound outputs are excluded, as they are from private
-/// input selection.
+/// input selection. Public absence observations do not constrain these private amounts; the
+/// caller must separately establish ledger coverage and authority before authorizing them.
 #[tracing::instrument(skip(conn, account_balances))]
 pub(crate) fn add_transparent_account_balances(
     conn: &rusqlite::Connection,
@@ -2100,7 +2110,7 @@ pub(crate) fn add_transparent_account_balances(
          AND (:account IS NULL OR accounts.uuid = :account)
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase, is_mature",
         tx_unexpired_condition_minconf_0("t"),
-        spent_utxos_clause(),
+        spent_utxos_clause(":ledger_only"),
         excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
         LEDGER_ORIGIN_CONDITION,
         super::transparent_ledger::output_observation_condition("u"),
@@ -2176,7 +2186,7 @@ pub(crate) fn add_transparent_account_balances(
              AND (:account IS NULL OR accounts.uuid = :account)
          GROUP BY accounts.uuid, lock_expiry_height, is_coinbase",
             tx_unconfirmed_condition("t"),
-            spent_utxos_clause(),
+            spent_utxos_clause(":ledger_only"),
             excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
             LEDGER_ORIGIN_CONDITION,
             super::transparent_ledger::output_observation_condition("u"),
@@ -2342,8 +2352,9 @@ pub(crate) fn update_observed_unspent_heights<P: consensus::Parameters>(
 /// - returned: observed unspent through `as_of`;
 /// - not returned, and spent by a transaction mined at or below `as_of`: already explained;
 /// - otherwise: spent by a transaction the wallet has not linked. The absence is recorded in
-///   `transparent_utxo_absences`, so the output stops counting as spendable, and the output is
+///   `transparent_utxo_absences`, so the output stops counting as publicly spendable, and it is
 ///   queued for spend detection, so that ordinary enhancement finds and stores its spender.
+///   Qualified private financial reads are governed by their ledger evidence instead.
 ///
 /// `as_of` is clamped to the wallet's chain tip. Outputs whose receipt is unmined, or mined
 /// outside `start..=as_of`, are left alone: the query cannot speak for them.
