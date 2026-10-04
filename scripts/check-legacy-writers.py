@@ -13,6 +13,7 @@ import argparse
 import fcntl
 import shutil
 import json
+import re
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -55,9 +56,10 @@ def has_column(conn, relation, column):
 def drop_legacy_column(path):
     with sqlite3.connect(path) as conn:
         (view,) = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'v_transactions'").fetchone()
-        assert view.count(",\n       transactions.zip318_kind") == 1
+        without_field, count = re.subn(r",\s*transactions\.zip318_kind", "", view)
+        assert count == 1
         conn.executescript("DROP VIEW v_transactions;")
-        conn.executescript(view.replace(",\n       transactions.zip318_kind", ""))
+        conn.executescript(without_field)
         conn.executescript("ALTER TABLE transactions DROP COLUMN zip318_kind;")
         assert not has_column(conn, "transactions", "zip318_kind")
 
