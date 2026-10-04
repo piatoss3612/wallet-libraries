@@ -319,7 +319,9 @@ fn upgrading_rederives_history_that_earlier_writers_stored() {
 
     // Recreate what earlier writers stored: no payments for a send stored before its input, and
     // a jointly funded payment attributed to one of its funders.
+    // Earlier writers ran neither the view fix nor the attribution migration.
     let migration = crate::wallet::init::migrations::FUNDING_ATTRIBUTION_ID;
+    let view_migration = crate::wallet::init::migrations::V_TRANSACTIONS_SENDER_GROUPING_ID;
     conn(&st)
         .execute_batch(&format!(
             "DELETE FROM sent_notes WHERE transaction_id =
@@ -330,17 +332,18 @@ fn upgrading_rederives_history_that_earlier_writers_stored() {
                     1000000
              FROM transactions WHERE txid = X'{joint}';
              DROP TABLE tx_attribution_queue;
-             DELETE FROM schemer_migrations WHERE id = X'{migration}';",
+             DELETE FROM schemer_migrations WHERE id IN (X'{migration}', X'{view_migration}');",
             send = hex::encode(send.txid().as_ref()),
             joint = hex::encode(joint.txid().as_ref()),
             a = hex::encode(a.expose_uuid().as_bytes()),
             migration = hex::encode(migration.as_bytes()),
+            view_migration = hex::encode(view_migration.as_bytes()),
         ))
         .unwrap();
     WalletMigrator::new()
         .init_or_migrate(st.wallet_mut().db_mut())
         .unwrap();
-    // The migration fixes the view and queues both transactions; the next storage operation
+    // The migrations fix the view and queue both transactions; the next storage operation
     // re-derives them.
     assert_eq!(movement(&st, a, &send), (-610_000, 1_000_000, 390_000));
     assert_eq!(queued(&st), 2);
