@@ -1450,6 +1450,7 @@ mod history;
 mod public_fixtures;
 
 mod attribution;
+mod spend_evidence;
 
 mod qualification;
 

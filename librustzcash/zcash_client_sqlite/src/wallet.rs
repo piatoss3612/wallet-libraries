@@ -4277,6 +4277,12 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
+    // An absence observed above the truncation height no longer describes the accepted chain.
+    conn.execute(
+        "DELETE FROM transparent_utxo_absences WHERE observed_height > :height",
+        named_params![":height": u32::from(truncation_height)],
+    )?;
+
     ironwood_hooks::truncate_before_unmine(conn, truncation_height)?;
 
     // Un-mine transactions. This must be done outside of the last_scanned_height check because

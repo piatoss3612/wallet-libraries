@@ -15,6 +15,17 @@ workspace.
   (transparent change, or a transfer to another account): `sent_note_counts` grouped by the
   receiving rather than the sending account. The `v_transactions_sender_grouping` migration
   recreates the view.
+- `notify_transparent_utxos_observed` records outputs a complete UTXO query did not return in the
+  new `transparent_utxo_absences` table (migration `transparent_utxo_absences`). Such an output is
+  excluded from balances and input selection while the absence is newer than its last observation
+  as unspent; a rewind below the observation removes it. It is queued for spend detection, and the
+  address search reaches the observed height instead of stopping at the expiry delta.
+- Spend detection for a transparent output is kept while its only known spender is unmined, and a
+  spend by an expired transaction no longer suppresses the search. Previously storing an unmined
+  spend dropped the search for good, so a withheld or expired local spend hid a conflicting spend
+  by another transaction.
+- The address-based spend search now joins the queued output itself rather than every wallet
+  output of the same transaction.
 
 - Shared derivation origins survive promotion and reopen without transferring receiver ownership.
   Activity at those receivers schedules new gaps and withholds private authority until coverage
