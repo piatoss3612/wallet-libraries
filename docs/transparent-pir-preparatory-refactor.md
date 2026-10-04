@@ -936,9 +936,11 @@ A wallet this library upgraded stays usable by builds that use the published
 keeps everything those builds write: `transactions.zip318_kind INTEGER NOT NULL
 DEFAULT 0` and the matching `v_transactions` field stay as unused legacy schema
 (see `docs/zip318_removal.md`). The pool-migration tables and engine remain
-removed; this is not support for pool-migration users.
+removed; this is not support for pool-migration users. Fresh databases and upgrades
+from published schemas retain the column in place. Databases that applied the earlier
+development revision which dropped it are outside the supported upgrade path.
 
-Older builds do not maintain transparent provenance. `retain_zip318_kind`
+Older builds do not maintain transparent provenance. `legacy_writer_marker`
 installs `tpir_legacy_writes` and a trigger on writes to `zip318_kind`, which
 only an older build's transaction store performs. Current ledger APIs refuse a
 marked wallet. `WalletMigrator::init_or_migrate`, after verifying known

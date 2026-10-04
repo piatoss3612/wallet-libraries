@@ -10,8 +10,8 @@
 //! The `zip318_kind` column of `transactions` and `v_transactions` is kept. Published rc5 and rc7
 //! write it every time they store a decrypted transaction, so dropping it would break a wallet
 //! reopened by a build that uses them. This build never reads it; see
-//! [`super::retain_zip318_kind`]. An earlier, unpublished revision of this migration dropped the
-//! column too; `retain_zip318_kind` restores it for wallets that applied that revision.
+//! [`super::legacy_writer_marker`] for detection of older transaction stores. Upgrades from
+//! published schemas retain the column and view field without reconstructing either.
 
 use std::collections::HashSet;
 

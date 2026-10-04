@@ -81,17 +81,16 @@ column on every transaction store and read the view field, so a wallet this
 library upgraded keeps working when a user reinstalls a build that uses them.
 This library never reads either; new rows hold the default, `0`.
 
-- `drop_zip318_pool_migration` first dropped the column too. That revision was
-  never in a crates.io release (it landed after 0.1.0-rc7), but development
-  builds applied it, so the migration was changed in place to keep the column,
-  and `retain_zip318_kind` (the current leaf) restores the column and view
-  field for wallets that applied the earlier revision.
-- `retain_zip318_kind` also installs `tpir_legacy_writes` and a trigger on
-  writes to the column. Only an older build writes it, so initialization knows
-  exactly when to reconcile such a build's writes; see
+- The unreleased `drop_zip318_pool_migration` retains the column and view field
+  in place. Supported inputs are fresh databases and upgrades from published
+  schemas. Databases that applied the earlier development revision which dropped
+  the column are outside the supported upgrade path; no repair migration is provided.
+- `legacy_writer_marker` (the current leaf) installs `tpir_legacy_writes` and a
+  trigger on classification updates after the transparent ledger schema exists.
+  Older transaction stores update the classification; UTXO-only writes do not,
+  so initialization also validates private projections without a marker. See
   `wallet::init::legacy_writers`. This replaced the explicit
-  `prepare_legacy_rollback` handover, which nothing in an application could
-  call at the right time.
+  `prepare_legacy_rollback` handover.
 - The column, its view field, the marker table and its trigger go together
   once no supported build writes the column
   ([#85](https://github.com/zakura-core/wallet-libraries/issues/85)).

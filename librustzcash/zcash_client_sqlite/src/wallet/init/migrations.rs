@@ -32,6 +32,7 @@ mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
 mod ivk_item_cache;
+mod legacy_writer_marker;
 mod note_locking;
 mod nullifier_map;
 mod orchard_ironwood_migration_anchor_interval;
@@ -42,7 +43,6 @@ mod orchard_received_notes;
 mod orchard_shardtree;
 mod received_notes_nullable_nf;
 mod receiving_key_scopes;
-mod retain_zip318_kind;
 mod sapling_memo_consistency;
 mod sent_notes_to_internal;
 mod shardtree_support;
@@ -144,8 +144,9 @@ pub mod ids {
         ironwood_pool_code_views::MIGRATION_ID as IRONWOOD_POOL_CODE_VIEWS,
         ironwood_received_notes::MIGRATION_ID as IRONWOOD_RECEIVED_NOTES,
         ironwood_shardtree::MIGRATION_ID as IRONWOOD_SHARDTREE,
-        ivk_item_cache::MIGRATION_ID as IVK_ITEM_CACHE, note_locking::MIGRATION_ID as NOTE_LOCKING,
-        nullifier_map::MIGRATION_ID as NULLIFIER_MAP,
+        ivk_item_cache::MIGRATION_ID as IVK_ITEM_CACHE,
+        legacy_writer_marker::MIGRATION_ID as LEGACY_WRITER_MARKER,
+        note_locking::MIGRATION_ID as NOTE_LOCKING, nullifier_map::MIGRATION_ID as NULLIFIER_MAP,
         orchard_ironwood_migration_anchor_interval::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
         orchard_ironwood_migration_tables::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_TABLES,
         orchard_ironwood_migration_unsatisfiability::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_UNSATISFIABILITY,
@@ -154,7 +155,6 @@ pub mod ids {
         orchard_shardtree::MIGRATION_ID as ORCHARD_SHARDTREE,
         received_notes_nullable_nf::MIGRATION_ID as RECEIVED_NOTES_NULLABLE_NF,
         receiving_key_scopes::MIGRATION_ID as RECEIVING_KEY_SCOPES,
-        retain_zip318_kind::MIGRATION_ID as RETAIN_ZIP318_KIND,
         sapling_memo_consistency::MIGRATION_ID as SAPLING_MEMO_CONSISTENCY,
         sent_notes_to_internal::MIGRATION_ID as SENT_NOTES_TO_INTERNAL,
         shardtree_support::MIGRATION_ID as SHARDTREE_SUPPORT,
@@ -284,8 +284,8 @@ pub(super) fn all_migrations<
     // ironwood_enhance, and ironwood_received_notes -> orchard_ironwood_migration_tables ->
     // orchard_ironwood_migration_anchor_interval -> orchard_ironwood_migration_unsatisfiability.
     // Both chains meet at status_inclusion_evidence, which is followed by
-    // drop_zip318_pool_migration, which drops the pool-migration tables. retain_zip318_kind, the
-    // current leaf, keeps the ZIP 318 classification column for older builds.
+    // drop_zip318_pool_migration, which drops the pool-migration tables. legacy_writer_marker, the
+    // current leaf, installs the older-writer marker after the transparent ledger schema.
     //
     let rng = Rc::new(Mutex::new(rng));
     vec![
@@ -410,7 +410,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_activation_schema::Migration),
         Box::new(transparent_activity_metadata::Migration),
         Box::new(transparent_shared_derivations::Migration),
-        Box::new(retain_zip318_kind::Migration),
+        Box::new(legacy_writer_marker::Migration),
     ]
 }
 
@@ -632,7 +632,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[retain_zip318_kind::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[legacy_writer_marker::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -766,7 +766,7 @@ pub(crate) mod tests {
             ids::ORCHARD_RECEIVED_NOTES,
             ids::ORCHARD_SHARDTREE,
             ids::RECEIVED_NOTES_NULLABLE_NF,
-            ids::RETAIN_ZIP318_KIND,
+            ids::LEGACY_WRITER_MARKER,
             ids::RECEIVING_KEY_SCOPES,
             ids::SAPLING_MEMO_CONSISTENCY,
             ids::SENT_NOTES_TO_INTERNAL,

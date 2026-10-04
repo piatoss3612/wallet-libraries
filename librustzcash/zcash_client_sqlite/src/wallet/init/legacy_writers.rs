@@ -1,7 +1,7 @@
 //! Reconciles what builds older than the transparent ledger wrote to a wallet this build upgraded.
 //!
 //! Published zakura-client-sqlite 0.1.0-rc5 and 0.1.0-rc7 can open a wallet this build upgraded:
-//! the schema keeps everything they read and write (see `migrations::retain_zip318_kind`). They do
+//! the schema keeps everything they read and write (see `migrations::legacy_writer_marker`). They do
 //! not maintain the transparent ledger's provenance, so after one of them has run, this build
 //! reconciles its writes during initialization, before anything else uses the wallet:
 //!
@@ -132,7 +132,7 @@ const PRIVATE_PROJECTION_CONFLICT: &str = "
 /// retaining a handle after failed initialization therefore cannot use its private authority.
 pub(super) fn reconcile(conn: &mut Connection) -> Result<(), WalletMigrationError> {
     if !marker_installed(conn)? {
-        // Initialization was asked to stop before `retain_zip318_kind`.
+        // Initialization was asked to stop before `legacy_writer_marker`.
         return Ok(());
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
