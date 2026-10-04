@@ -78,6 +78,7 @@ mod v_transactions_additional_totals;
 mod v_transactions_net;
 mod v_transactions_note_uniqueness;
 mod v_transactions_pool_crossing;
+mod v_transactions_sender_grouping;
 mod v_transactions_shielding_balance;
 mod v_transactions_transparent_history;
 mod v_transactions_zip318_kind;
@@ -188,6 +189,7 @@ pub mod ids {
         v_transactions_net::MIGRATION_ID as V_TRANSACTIONS_NET,
         v_transactions_note_uniqueness::MIGRATION_ID as V_TRANSACTIONS_NOTE_UNIQUENESS,
         v_transactions_pool_crossing::MIGRATION_ID as V_TRANSACTIONS_POOL_CROSSING,
+        v_transactions_sender_grouping::MIGRATION_ID as V_TRANSACTIONS_SENDER_GROUPING,
         v_transactions_shielding_balance::MIGRATION_ID as V_TRANSACTIONS_SHIELDING_BALANCE,
         v_transactions_transparent_history::MIGRATION_ID as V_TRANSACTIONS_TRANSPARENT_HISTORY,
         v_transactions_zip318_kind::MIGRATION_ID as V_TRANSACTIONS_ZIP318_KIND,
@@ -413,6 +415,7 @@ pub(super) fn all_migrations<
         Box::new(transparent_activation_schema::Migration),
         Box::new(transparent_activity_metadata::Migration),
         Box::new(transparent_shared_derivations::Migration),
+        Box::new(v_transactions_sender_grouping::Migration),
     ]
 }
 
@@ -634,7 +637,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[transparent_shared_derivations::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[v_transactions_sender_grouping::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -808,6 +811,7 @@ pub(crate) mod tests {
             ids::V_TRANSACTIONS_ZIP318_KIND,
             ids::WALLET_SUMMARIES,
             ids::WITNESS_STABILIZED_NOTES,
+            ids::V_TRANSACTIONS_SENDER_GROUPING,
             ids::ZIP318_CLASSIFICATION,
         ]);
 
