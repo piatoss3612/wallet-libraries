@@ -59,6 +59,7 @@ mod transparent_ledger_schema;
 mod transparent_policy_generation;
 mod transparent_recovery_schema;
 mod transparent_shared_derivations;
+mod transparent_utxo_absences;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
@@ -175,6 +176,7 @@ pub mod ids {
         transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
         transparent_recovery_schema::MIGRATION_ID as TRANSPARENT_RECOVERY_SCHEMA,
         transparent_shared_derivations::MIGRATION_ID as TRANSPARENT_SHARED_DERIVATIONS,
+        transparent_utxo_absences::MIGRATION_ID as TRANSPARENT_UTXO_ABSENCES,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
         tx_retrieval_queue::MIGRATION_ID as TX_RETRIEVAL_QUEUE,
@@ -423,6 +425,7 @@ pub(super) fn all_migrations<
         Box::new(unmined_status_obligations::Migration),
         Box::new(status_reconfirmation::Migration),
         Box::new(transaction_reconfirmation_receipts::Migration),
+        Box::new(transparent_utxo_absences::Migration),
     ]
 }
 
@@ -647,6 +650,7 @@ pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema:
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     v_transactions_legacy_projection::MIGRATION_ID,
     transaction_reconfirmation_receipts::MIGRATION_ID,
+    transparent_utxo_absences::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
@@ -826,6 +830,7 @@ pub(crate) mod tests {
             ids::UNMINED_STATUS_OBLIGATIONS,
             ids::STATUS_RECONFIRMATION,
             ids::TRANSACTION_RECONFIRMATION_RECEIPTS,
+            ids::TRANSPARENT_UTXO_ABSENCES,
             ids::ZIP318_CLASSIFICATION,
         ]);
 

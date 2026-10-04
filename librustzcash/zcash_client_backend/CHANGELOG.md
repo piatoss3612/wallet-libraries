@@ -11,6 +11,12 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `WalletWrite::notify_transparent_utxos_observed` (behind `transparent-inputs`) reports a
+  complete query of an address's unspent transparent outputs (start height, the height it
+  reflects, and the outpoints returned). A wallet output mined in that range that the query did
+  not return, and that no transaction mined by then is known to spend, stops counting as
+  spendable and is requested through `transaction_data_requests` until its spender is stored.
+  Implementors of `WalletWrite` with `transparent-inputs` must provide it.
 - `tor::Client::connect_lightwalletd_channel` returns the Tor-routed `tonic` channel that
   `connect_to_lightwalletd` wraps, so callers can layer `tower` services over it.
 - `TransparentLedgerRead::transparent_recovery_work` and typed bounded batches of pending pages and missing coverage ranges. Requery after committing each batch; scheduling grants no source or financial authority.
