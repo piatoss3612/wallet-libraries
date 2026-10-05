@@ -2270,15 +2270,14 @@ pub trait WalletRead {
         &self,
     ) -> Result<HashMap<Self::AccountId, UnifiedFullViewingKey>, Self::Error>;
 
-    /// Returns registered derived Ironwood keys to include in the next scan.
-    /// Registration alone does not schedule replay of already scanned history.
+    /// Returns the derived Ironwood keys to trial-decrypt in every scan batch.
     #[cfg(feature = "experimental-swap-receiving")]
     fn get_swap_scanning_keys(&self) -> Result<Vec<SwapScanningKey<Self::AccountId>>, Self::Error> {
         Ok(vec![])
     }
 
     /// Selects keys for full transaction decryption, retaining known-note ownership
-    /// even after a watch retires. `receivers` come from ordinary authenticated
+    /// even after a key stops scanning. `receivers` come from ordinary authenticated
     /// decryption and preserve self-payments before compact scanning.
     /// Stores without a transaction index can conservatively return all keys.
     #[cfg(feature = "experimental-swap-receiving")]
@@ -2289,18 +2288,6 @@ pub trait WalletRead {
         _receivers: &[orchard::Address],
     ) -> Result<Vec<SwapScanningKey<Self::AccountId>>, Self::Error> {
         self.get_swap_scanning_keys()
-    }
-
-    /// Keys active at `from_height` and an optional exclusive batch boundary.
-    /// A caller must stop before that boundary and reload the set for the next batch.
-    /// Full-transaction enhancement uses `get_swap_transaction_keys` to retain
-    /// retired note ownership without trying unrelated historical keys.
-    #[cfg(feature = "experimental-swap-receiving")]
-    fn get_swap_scan_window(
-        &self,
-        _from_height: BlockHeight,
-    ) -> Result<(Vec<SwapScanningKey<Self::AccountId>>, Option<BlockHeight>), Self::Error> {
-        self.get_swap_scanning_keys().map(|keys| (keys, None))
     }
 
     /// Returns the memo for a note.
@@ -3888,11 +3875,13 @@ pub trait WalletWrite:
         blocks: Vec<ScannedBlock<<Self as WalletRead>::AccountId>>,
     ) -> Result<(), <Self as WalletRead>::Error>;
 
-    /// Persists scanned blocks and records which swap keys actually scanned them.
+    /// Persists scanned blocks together with the swap keys that scanned them.
     ///
     /// `keys` must be the snapshot used for trial decryption, not a fresh registry
-    /// lookup. Implementations tracking coverage must commit it with the blocks.
-    /// The default stores blocks without tracking per-key coverage.
+    /// lookup, so implementations can requeue blocks a key activated mid-batch missed.
+    /// The default stores the blocks without that check. Scanners must use this while
+    /// swap keys are active: a store may treat blocks from `put_blocks` as scanned
+    /// without them and queue those blocks again.
     #[cfg(feature = "experimental-swap-receiving")]
     fn put_blocks_with_swap_keys(
         &mut self,

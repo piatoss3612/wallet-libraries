@@ -235,7 +235,6 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 Err(corrupt("conflicting swap recovery identity"))
             };
         }
-        conn.execute("UPDATE ironwood_swap_discovery SET closed=0,next_attempt_at=0 WHERE receiving_key_id=?1 AND closed=1",[id])?;
         conn.execute(
             "INSERT INTO ironwood_swap_payment_recovery (
                 receiving_key_id, txid, action_index, height, block_hash,

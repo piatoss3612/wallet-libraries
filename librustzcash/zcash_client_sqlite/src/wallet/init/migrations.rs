@@ -50,19 +50,7 @@ mod standalone_p2sh;
 mod status_inclusion_evidence;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
-mod swap_nullifier_retention;
-mod swap_payment_recovery;
-mod swap_private_recovery;
-mod swap_receive_reservations;
-mod swap_receive_verification;
-mod swap_receiver_index;
-mod swap_receiving_coverage;
-mod swap_receiving_keys;
-mod swap_receiving_notes;
-mod swap_recovery_schedule;
-mod swap_refund_memo_progress;
-mod swap_refund_watches;
-mod swap_scan_lifecycle;
+mod swap_receiving;
 mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
 mod tree_retained_checkpoints;
@@ -169,11 +157,7 @@ pub mod ids {
         status_inclusion_evidence::MIGRATION_ID as STATUS_INCLUSION_EVIDENCE,
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
-        swap_payment_recovery::MIGRATION_ID as SWAP_PAYMENT_RECOVERY,
-        swap_private_recovery::MIGRATION_ID as SWAP_PRIVATE_RECOVERY,
-        swap_receiving_coverage::MIGRATION_ID as SWAP_RECEIVING_COVERAGE,
-        swap_receiving_keys::MIGRATION_ID as SWAP_RECEIVING_KEYS,
-        swap_receiving_notes::MIGRATION_ID as SWAP_RECEIVING_NOTES,
+        swap_receiving::MIGRATION_ID as SWAP_RECEIVING,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
         transparent_ledger_schema::MIGRATION_ID as TRANSPARENT_LEDGER_SCHEMA,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
@@ -394,19 +378,7 @@ pub(super) fn all_migrations<
         Box::new(orchard_note_version::Migration),
         Box::new(ironwood_received_notes::Migration),
         Box::new(ironwood_enhance::Migration),
-        Box::new(swap_receiving_keys::Migration),
-        Box::new(swap_receiving_notes::Migration),
-        Box::new(swap_receiving_coverage::Migration),
-        Box::new(swap_payment_recovery::Migration),
-        Box::new(swap_private_recovery::Migration),
-        Box::new(swap_scan_lifecycle::Migration),
-        Box::new(swap_receive_reservations::Migration),
-        Box::new(swap_receive_verification::Migration),
-        Box::new(swap_nullifier_retention::Migration),
-        Box::new(swap_refund_watches::Migration),
-        Box::new(swap_receiver_index::Migration),
-        Box::new(swap_refund_memo_progress::Migration),
-        Box::new(swap_recovery_schedule::Migration),
+        Box::new(swap_receiving::Migration),
         Box::new(ironwood_pool_code_views::Migration),
         Box::new(fix_bad_ironwood_change_flagging::Migration),
         Box::new(v_address_uses_ironwood::Migration),
@@ -633,7 +605,7 @@ pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema:
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     transparent_ledger_schema::MIGRATION_ID,
-    swap_recovery_schedule::MIGRATION_ID,
+    swap_receiving::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
@@ -771,10 +743,7 @@ pub(crate) mod tests {
             ids::STANDALONE_P2SH,
             ids::SUPPORT_LEGACY_SQLITE,
             ids::SUPPORT_ZCASHD_WALLET_IMPORT,
-            ids::SWAP_PAYMENT_RECOVERY,
-            ids::SWAP_RECEIVING_COVERAGE,
-            ids::SWAP_RECEIVING_KEYS,
-            ids::SWAP_RECEIVING_NOTES,
+            ids::SWAP_RECEIVING,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TRANSPARENT_LEDGER_SCHEMA,
             ids::TREE_RETAINED_CHECKPOINTS,

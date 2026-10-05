@@ -1,6 +1,6 @@
-//! Temporary spend evidence for notes discovered after ordinary scanning.
+//! Temporary spend evidence for notes that a restore sweep finds after ordinary scanning.
 use super::{Error, account_key, corrupt};
-use crate::{AccountUuid, SqlTransaction, WalletDb, wallet};
+use crate::{AccountUuid, SqlTransaction, WalletDb, util::Clock, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::BorrowMut;
 use zakura_swap_receiving::lifecycle::ChainAnchor;
@@ -9,9 +9,29 @@ use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Releases the covered prefix of retained Ironwood nullifiers at a canonical
-    /// scanned tip. Missing memos and pending notes protect their required evidence.
-    /// Returns true when release reaches the tip, independent of provider completion.
+    /// Retains `account`'s Ironwood spend evidence from its birthday until
+    /// [`WalletDb::finish_swap_nullifier_recovery`] releases it. Call before the
+    /// first scan; evidence already pruned cannot be recovered without a rescan.
+    pub fn retain_swap_spend_history(&mut self, account: AccountUuid) -> Result<(), Error> {
+        self.transactionally(|db| {
+            let (id, _) = account_key(db.conn.0, &db.params, account)?;
+            db.conn.0.execute(
+                "INSERT OR IGNORE INTO ironwood_swap_spend_retention(account_id, nullifier_retention_height)
+                 SELECT id, MAX(birthday_height, ?2) FROM accounts WHERE id = ?1",
+                params![
+                    id.0,
+                    db.params.activation_height(NetworkUpgrade::Nu6_3).map(u32::from).unwrap_or(0)
+                ],
+            )?;
+            Ok(())
+        })
+    }
+}
+
+impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
+    /// Releases retained Ironwood nullifiers at a canonical scanned tip once no
+    /// restore sweep needs them. Missing memos, pending sweeps and queued candidates
+    /// protect their evidence. Returns true when release reaches the tip.
     ///
     /// `lookahead` is the wallet's nonzero incoming-address gap limit. Maintenance
     /// runs inside the transaction so an edge payment cannot race with pruning.
@@ -27,7 +47,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         self.transactionally(|db| {
             let (id, _) = account_key(db.conn.0, &db.params, account)?;
             let enabled: bool = db.conn.0.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_private_recovery WHERE account_id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_spend_retention WHERE account_id=?1)",
                 [id.0], |r| r.get(0),
             )?;
             if !enabled { return Ok(false); }
@@ -61,34 +81,25 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 params![id.0], |r| r.get(0),
             )?;
             if pending { return Ok(false); }
-            // The earliest uncovered height, not provider completion, controls
-            // retention. A pending candidate may only lower this safe frontier.
-            let mut next = u32::from(through.height).saturating_add(1);
-            let keys={
-                let mut stmt=db.conn.0.prepare("SELECT purpose,derivation_version,key_index,scan_from FROM ironwood_receiving_keys WHERE account_id=?1")?;
-                let mut rows=stmt.query([id.0])?; let mut keys=Vec::new();
-                while let Some(r)=rows.next()? {keys.push((super::stored_key_id(r)?,r.get::<_,u32>(3)?));}
-                keys
-            };
-            for (key,start) in keys {
-                let closed:bool=db.conn.0.query_row("SELECT closed FROM ironwood_swap_discovery WHERE receiving_key_id=?1",[super::payments::key_ref(db.conn.0,account,key)?],|r|r.get(0))?;
-                if closed && db.swap_directory_check(account,key)?.is_some() {continue;}
-                let mut frontier=start;
-                if let Some(check)=db.swap_directory_check(account,key)? {frontier=frontier.max(u32::from(check.height).saturating_add(1));}
-                for range in db.get_swap_receiving_scan_ranges(account,key)?.unwrap_or_default() {
-                    if u32::from(range.start)>frontier {break;}
-                    frontier=frontier.max(u32::from(range.end));
-                }
-                next=next.min(frontier);
-            }
-            let pending_height:Option<u32>=db.conn.0.query_row("SELECT MIN(p.height) FROM ironwood_swap_payment_recovery p
-                JOIN ironwood_receiving_keys k ON k.id=p.receiving_key_id WHERE k.account_id=?1",[id.0],|r|r.get(0))?;
-            if let Some(height)=pending_height {next=next.min(height);}
-            let old:u32=db.conn.0.query_row("SELECT nullifier_retention_height FROM ironwood_swap_private_recovery WHERE account_id=?1",[id.0],|r|r.get(0))?;
+            // Pending sweeps keep evidence from their earliest possible payment, and a
+            // queued candidate from its height. Scanned keys never need it.
+            let pending: Option<u32> = db.conn.0.query_row(
+                "SELECT MIN(h) FROM (
+                    SELECT k.scan_from AS h FROM ironwood_swap_sweeps s
+                        JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
+                        WHERE k.account_id = ?1 AND s.done_height IS NULL
+                    UNION ALL SELECT p.height FROM ironwood_swap_payment_recovery p
+                        JOIN ironwood_receiving_keys k ON k.id = p.receiving_key_id
+                        WHERE k.account_id = ?1)",
+                [id.0],
+                |r| r.get(0),
+            )?;
+            let next = pending.unwrap_or(u32::from(through.height).saturating_add(1));
+            let old:u32=db.conn.0.query_row("SELECT nullifier_retention_height FROM ironwood_swap_spend_retention WHERE account_id=?1",[id.0],|r|r.get(0))?;
             if next>old {db.conn.0.execute("DELETE FROM ironwood_swap_spend_replay WHERE account_id=?1",[id.0])?;}
 
             db.conn.0.execute(
-                "UPDATE ironwood_swap_private_recovery SET nullifier_retention_height=?2
+                "UPDATE ironwood_swap_spend_retention SET nullifier_retention_height=?2
                  WHERE account_id=?1", params![id.0, next],
             )?;
             wallet::prune_nullifier_map(db.conn.0, through.height.saturating_sub(crate::PRUNING_DEPTH))?;
@@ -124,7 +135,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             return Err(corrupt("empty spend recovery interval"));
         }
         self.conn.0.execute(
-            "INSERT INTO ironwood_swap_private_recovery(account_id,nullifier_retention_height)
+            "INSERT INTO ironwood_swap_spend_retention(account_id,nullifier_retention_height)
              VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET
              nullifier_retention_height=MIN(nullifier_retention_height,excluded.nullifier_retention_height)",
             params![id.0,u32::from(start)],

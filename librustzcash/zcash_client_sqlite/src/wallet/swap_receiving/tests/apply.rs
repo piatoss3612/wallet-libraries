@@ -321,7 +321,7 @@ fn swap_payment_imports_an_already_spent_note_without_crediting_it() {
         if pruned {
             st.wallet_mut()
                 .db_mut()
-                .enable_private_swap_recovery(account)
+                .retain_swap_spend_history(account)
                 .unwrap();
             st.wallet()
                 .conn()
@@ -496,18 +496,16 @@ fn private_payment_uses_its_witness_anchor_and_rewind_invalidates_directory_prog
             .unwrap(),
         PaymentApplication::Applied
     );
-    st.wallet_mut()
-        .db_mut()
-        .mark_swap_directory_checked(account, key.key_id(), through)
-        .unwrap();
+    let db = st.wallet_mut().db_mut();
+    db.finish_sweep(account, key.key_id(), through).unwrap();
+    assert!(!db.swap_history_pending(account, through.height).unwrap());
     st.truncate_to_height_retaining_cache(proof_anchor.height);
+    let db = st.wallet().db();
     assert_eq!(
-        st.wallet()
-            .db()
-            .swap_directory_check(account, key.key_id())
-            .unwrap(),
+        db.swap_lookup_coverage(account, key.key_id()).unwrap(),
         None
     );
+    assert!(db.swap_history_pending(account, through.height).unwrap());
     let notes = st
         .wallet()
         .db()

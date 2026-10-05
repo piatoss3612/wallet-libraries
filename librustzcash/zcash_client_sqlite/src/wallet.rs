@@ -830,7 +830,7 @@ pub(crate) fn delete_account(
     // their account removes that evidence, so absence needs fresh scan coverage.
     conn.execute("DELETE FROM ironwood_nullifier_scan_blocks", [])?;
     conn.execute(
-        "UPDATE ironwood_swap_private_recovery SET nullifier_retention_height=0",
+        "UPDATE ironwood_swap_spend_retention SET nullifier_retention_height=0",
         [],
     )?;
 
@@ -4265,45 +4265,23 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // to the retained height.
     trim_scan_queue_to(conn, truncation_height)?;
     conn.execute(
-        "UPDATE ironwood_swap_private_recovery SET nullifier_retention_height =
+        "UPDATE ironwood_swap_spend_retention SET nullifier_retention_height =
          MIN(nullifier_retention_height, ?1 + 1)",
         [u32::from(truncation_height)],
     )?;
+    // A sweep whose lookup or completion the rewind removed runs again. Active keys
+    // need no repair: the scanner rescans the truncated blocks with them.
     conn.execute(
-        "UPDATE ironwood_swap_discovery SET closed=0,next_attempt_at=0,completed_at=NULL,
-        lookup_height=NULL,lookup_hash=NULL WHERE lookup_height>?1 OR receiving_key_id IN
-        (SELECT receiving_key_id FROM ironwood_swap_directory_checks WHERE height>?1)",
-        [u32::from(truncation_height)],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_swap_scan_uses SET anchor_height=NULL,scan_through=NULL
-        WHERE anchor_height>?1",
+        "UPDATE ironwood_swap_sweeps SET done_height = NULL, next_attempt_at = 0,
+            lookup_height = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_height END,
+            lookup_hash = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_hash END,
+            target_height = CASE WHEN target_height > ?1 THEN NULL ELSE target_height END,
+            target_hash = CASE WHEN target_height > ?1 THEN NULL ELSE target_hash END
+         WHERE done_height > ?1 OR lookup_height > ?1 OR target_height > ?1",
         [u32::from(truncation_height)],
     )?;
     conn.execute(
         "UPDATE ironwood_swap_spend_replay SET through_height=MIN(through_height,?1)",
-        [u32::from(truncation_height)],
-    )?;
-    // Coverage must follow canonical blocks even in builds without swap support.
-    conn.execute(
-        "DELETE FROM ironwood_receiving_key_scan_ranges WHERE range_start > ?1",
-        [u32::from(truncation_height)],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_receiving_key_scan_ranges SET range_end = ?1 + 1 WHERE range_end > ?1 + 1",
-        [u32::from(truncation_height)],
-    )?;
-
-    conn.execute(
-        "DELETE FROM ironwood_swap_recovery_targets WHERE height > ?1",
-        [u32::from(truncation_height)],
-    )?;
-    conn.execute(
-        "DELETE FROM ironwood_swap_receive_checks WHERE height > ?1",
-        [u32::from(truncation_height)],
-    )?;
-    conn.execute(
-        "DELETE FROM ironwood_swap_directory_checks WHERE height > ?1",
         [u32::from(truncation_height)],
     )?;
     conn.execute(
@@ -5921,7 +5899,7 @@ pub(crate) fn ironwood_nullifier_retention_height(
     conn: &Connection,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
     conn.query_row(
-        "SELECT MIN(nullifier_retention_height) FROM ironwood_swap_private_recovery",
+        "SELECT MIN(nullifier_retention_height) FROM ironwood_swap_spend_retention",
         [],
         |row| {
             row.get::<_, Option<u32>>(0)

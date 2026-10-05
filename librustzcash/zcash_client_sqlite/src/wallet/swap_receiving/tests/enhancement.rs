@@ -239,7 +239,10 @@ fn send_with_change_memo(
 
 #[test]
 fn refund_funding_memo_recovers_from_seed_with_zero_change() {
-    use zakura_swap_receiving::RefundMemo;
+    use zakura_swap_receiving::{
+        RefundMemo,
+        lifecycle::{ChainAnchor, ProviderStatus, near_observation},
+    };
     let (mut st, first) = ironwood_funded_wallet();
     let network = *st.network();
     let account = st.test_account().cloned().unwrap();
@@ -261,17 +264,6 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert_eq!(change[0].memo(), Some(&memo_bytes));
     let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
 
-    let refund_fvk = KeyId::new(Purpose::Refund, 7)
-        .derive(&orchard::keys::FullViewingKey::from(
-            account.usk().orchard(),
-        ))
-        .unwrap();
-    let (refunded, _, _) = st.generate_next_block(
-        &IronwoodFvk(refund_fvk),
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(980_000),
-    );
-
     // Replace the wallet with a seed restore. No reservations or sent-transaction
     // records survive, so recovery must authenticate chain inputs and the memo.
     let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
@@ -280,8 +272,8 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .wallet_mut()
         .create_account("restored", &seed, account.birthday(), None)
         .unwrap();
-    st.wallet_mut().update_chain_tip(refunded).unwrap();
-    st.scan_cached_blocks(first, (u32::from(refunded) - u32::from(first) + 1) as usize);
+    st.wallet_mut().update_chain_tip(mined).unwrap();
+    st.scan_cached_blocks(first, (u32::from(mined) - u32::from(first) + 1) as usize);
     assert!(
         st.wallet_mut()
             .db_mut()
@@ -316,6 +308,21 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].key_id(), KeyId::new(Purpose::Refund, 7));
     assert_eq!(keys[0].scan_from(), mined);
+    // The wallet never scanned this key, so its history comes from a receiver-directory
+    // sweep rather than trial decryption.
+    assert!(
+        st.wallet()
+            .db()
+            .get_swap_scanning_keys()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        st.wallet()
+            .db()
+            .swap_history_pending(restored, mined)
+            .unwrap()
+    );
     assert!(
         st.wallet_mut()
             .db_mut()
@@ -333,37 +340,8 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .is_empty()
     );
 
-    // The first pass already crossed the refund without its key. Registration
-    // queues that missing history, and replay makes the note reconstructible.
-    st.scan_cached_blocks(mined, 2);
-    let notes = st
-        .wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(restored, refunded)
-        .unwrap();
-    assert!(
-        notes
-            .iter()
-            .any(|note| note.swap_key_id() == Some(KeyId::new(Purpose::Refund, 7)))
-    );
-
     // Restoration rebuilds provider polling without a local swap activity record.
-    st.wallet_mut()
-        .db_mut()
-        .enable_private_swap_recovery(restored)
-        .unwrap();
     let key = KeyId::new(Purpose::Refund, 7);
-    let initial = zakura_swap_receiving::lifecycle::ChainAnchor {
-        height: refunded,
-        hash: st
-            .wallet()
-            .db()
-            .get_block_hash(refunded)
-            .unwrap()
-            .unwrap()
-            .0,
-    };
-
     assert_eq!(
         st.wallet_mut()
             .db_mut()
@@ -405,12 +383,18 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .len(),
         1
     );
+
+    // A completed refund sweep scans the key from the next block.
+    let swept = ChainAnchor {
+        height: mined,
+        hash: st.wallet().db().get_block_hash(mined).unwrap().unwrap().0,
+    };
     st.wallet_mut()
         .db_mut()
-        .mark_swap_directory_checked(restored, key, initial)
+        .finish_sweep(restored, key, swept)
         .unwrap();
-
-    st.truncate_to_height_retaining_cache(refunded);
+    // `reset` forgot the cached tip that the next generated block extends.
+    st.truncate_to_height_retaining_cache(mined);
     let (late, _, _) = st.generate_next_block(
         &IronwoodFvk(keys[0].full_viewing_key().clone()),
         AddressType::DefaultExternal,
@@ -427,79 +411,24 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .count(),
         1
     );
+    let refunded = near_observation(
+        Purpose::Refund,
+        &ProviderStatus {
+            status: "REFUNDED",
+            refunded_amount: Some(Zatoshis::const_from_u64(50_000)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     st.wallet_mut()
         .db_mut()
-        .observe_swap_operation(restored, key, &deposit.to_string(), true, late)
-        .unwrap();
-    // Repeated memo recovery cannot reopen terminal status or move its deadline.
-    st.wallet_mut()
-        .db_mut()
-        .recover_swap_refund_memos(restored)
+        .record_swap_observation(restored, key, &deposit.to_string(), refunded, 1_100)
         .unwrap();
     assert!(
         st.wallet_mut()
             .db_mut()
             .take_swap_refund_status_checks(restored, 2_000, std::num::NonZeroU32::new(8).unwrap())
             .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        st.wallet()
-            .db()
-            .get_swap_scan_window(late + 10)
-            .unwrap()
-            .0
-            .len(),
-        1
-    );
-    assert!(
-        st.wallet()
-            .db()
-            .get_swap_scan_window(late + 11)
-            .unwrap()
-            .0
-            .is_empty()
-    );
-
-    // Terminal status before catch-up cannot skip the unscanned grace blocks.
-    st.wallet_mut()
-        .db_mut()
-        .mark_swap_directory_checked(restored, key, initial)
-        .unwrap();
-
-    for _ in 0..10 {
-        st.generate_empty_block();
-    }
-    st.scan_cached_blocks(late + 1, 10);
-    let closed = zakura_swap_receiving::lifecycle::ChainAnchor {
-        height: late + 10,
-        hash: st
-            .wallet()
-            .db()
-            .get_block_hash(late + 10)
-            .unwrap()
-            .unwrap()
-            .0,
-    };
-
-    st.wallet_mut()
-        .db_mut()
-        .mark_swap_directory_checked(restored, key, closed)
-        .unwrap();
-    st.truncate_to_height_retaining_cache(late + 9);
-    assert_eq!(
-        st.wallet()
-            .db()
-            .swap_recovery_target(restored, key)
-            .unwrap(),
-        None
-    );
-    assert!(
-        !st.wallet()
-            .db()
-            .get_swap_scan_window(late + 10)
-            .unwrap()
-            .0
             .is_empty()
     );
 
@@ -619,6 +548,126 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .recover_swap_refund_memos(restored)
             .unwrap(),
         records
+    );
+    // Reprocessed memos cannot reopen the provider's terminal status.
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .take_swap_refund_status_checks(restored, 3_000, std::num::NonZeroU32::new(8).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn locally_scanned_refund_key_records_only_memo_progress() {
+    use zakura_swap_receiving::RefundMemo;
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let key = st
+        .wallet_mut()
+        .db_mut()
+        .reserve_swap_receiving_key(account, Purpose::Refund, tip + 1)
+        .unwrap();
+    let memo = MemoBytes::from_bytes(&RefundMemo::new(key.key_id().index()).encode()).unwrap();
+    let deposit = Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]));
+    let (_, _, mined) = send_with_change_memo(
+        &mut st,
+        vec![Payment::without_memo(
+            deposit.to_zcash_address(&network),
+            Zatoshis::const_from_u64(100_000),
+        )],
+        &memo,
+    );
+    let db = st.wallet_mut().db_mut();
+    let records = db.recover_swap_refund_memos(account).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].index, key.key_id().index());
+    assert!(db.recover_swap_refund_memos(account).unwrap().is_empty());
+    assert!(!db.swap_history_pending(account, mined).unwrap());
+    assert!(
+        db.take_swap_refund_status_checks(account, 0, std::num::NonZeroU32::new(8).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    let operations: u32 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM ironwood_swap_operations", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(operations, 0);
+}
+
+#[test]
+fn reissued_refund_key_sweeps_history_before_its_scan_start() {
+    use zakura_swap_receiving::RefundMemo;
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let memo = MemoBytes::from_bytes(&RefundMemo::new(0).encode()).unwrap();
+    let deposit = Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]));
+    let (_, _, mined) = send_with_change_memo(
+        &mut st,
+        vec![Payment::without_memo(
+            deposit.to_zcash_address(&network),
+            Zatoshis::const_from_u64(100_000),
+        )],
+        &memo,
+    );
+    // A restored wallet can issue the memo's index again before recovering the memo.
+    let db = st.wallet_mut().db_mut();
+    let key = db
+        .reserve_swap_receiving_key(account, Purpose::Refund, mined + 1)
+        .unwrap();
+    assert_eq!(key.key_id().index(), 0);
+    assert_eq!(db.recover_swap_refund_memos(account).unwrap().len(), 1);
+    assert!(db.swap_history_pending(account, mined).unwrap());
+}
+
+#[test]
+fn refund_status_checks_skip_closed_keys() {
+    use zakura_swap_receiving::{
+        RefundMemo,
+        lifecycle::{ChainAnchor, CompletionPolicy},
+    };
+    let (mut st, _) = ironwood_funded_wallet();
+    let account = st.test_account().unwrap().id();
+    let network = *st.network();
+    let memo = MemoBytes::from_bytes(&RefundMemo::new(7).encode()).unwrap();
+    let deposit =
+        Address::Transparent(TransparentAddress::PublicKeyHash([7; 20])).to_zcash_address(&network);
+    let (_, _, mined) = send_with_change_memo(
+        &mut st,
+        vec![Payment::without_memo(
+            deposit.clone(),
+            Zatoshis::const_from_u64(100_000),
+        )],
+        &memo,
+    );
+    let swept = ChainAnchor {
+        height: mined,
+        hash: st.wallet().get_block_hash(mined).unwrap().unwrap().0,
+    };
+    let key = KeyId::new(Purpose::Refund, 7);
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(db.recover_swap_refund_memos(account).unwrap().len(), 1);
+    db.finish_sweep(account, key, swept).unwrap();
+    // The provider never reports an outcome, so only the scanning limit closes the key.
+    let limit = unix_now(&test_clock()) + CompletionPolicy::default().limit_secs;
+    let batch = std::num::NonZeroU32::new(8).unwrap();
+    assert_eq!(
+        db.take_swap_refund_status_checks(account, limit, batch)
+            .unwrap(),
+        vec![(key, deposit.to_string())]
+    );
+    assert_eq!(db.close_finished_swap_keys(account, limit).unwrap(), 1);
+    assert!(
+        db.take_swap_refund_status_checks(account, limit + 60, batch)
+            .unwrap()
+            .is_empty()
     );
 }
 

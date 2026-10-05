@@ -1463,7 +1463,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
                     return Ok(keys);
                 };
                 for key in self
-                    .get_swap_receiving_keys(account)
+                    .swap_scanning_keys(account)
                     .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?
                 {
                     keys.push(key.into_scanning_key());
@@ -1496,36 +1496,6 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
             );
         }
         Ok(result)
-    }
-
-    #[cfg(feature = "experimental-swap-receiving")]
-    fn get_swap_scan_window(
-        &self,
-        from_height: BlockHeight,
-    ) -> Result<
-        (
-            Vec<zcash_client_backend::scanning::swap_receiving::SwapScanningKey<AccountUuid>>,
-            Option<BlockHeight>,
-        ),
-        Self::Error,
-    > {
-        let mut active = Vec::new();
-        let mut boundary = None;
-        for (account, ufvk) in self.get_unified_full_viewing_keys()? {
-            let Some(_) = ufvk.orchard() else {
-                continue;
-            };
-            let (keys, next) = self
-                .swap_receiving_keys_for_scan(account, Some(from_height))
-                .map_err(|e| SqliteClientError::CorruptedData(e.to_string()))?;
-            if let Some(next) = next {
-                boundary = Some(boundary.map_or(next, |end: BlockHeight| end.min(next)));
-            }
-            for key in keys {
-                active.push(key.into_scanning_key());
-            }
-        }
-        Ok((active, boundary))
     }
 
     fn get_memo(&self, note_id: NoteId) -> Result<Option<Memo>, Self::Error> {
@@ -2499,14 +2469,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             anchor_retention.as_ref(),
         )
         .map_err(SqliteClientError::from)?;
+        // A key activated after the scanner captured its keys missed this batch.
         #[cfg(feature = "experimental-swap-receiving")]
-        {
-            if let Some(range) = scanned_range {
-                wallet::swap_receiving::coverage::record(self.conn.0, keys, range)?;
-            }
-            // A registration may have arrived after the scanner captured its keys.
-            // Restore its gaps after ordinary scan completion updates the shared queue.
-            wallet::swap_receiving::coverage::queue_missing(self.conn.0)?;
+        if let Some(range) = scanned_range {
+            wallet::swap_receiving::rescan_missed_keys(self.conn.0, keys, range)?;
         }
         Ok(())
     }
@@ -2718,10 +2684,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
         &mut self,
         tip_height: BlockHeight,
     ) -> Result<(), <Self as WalletRead>::Error> {
-        wallet::scanning::update_chain_tip(self.conn.0, &self.params, tip_height)?;
-        #[cfg(feature = "experimental-swap-receiving")]
-        wallet::swap_receiving::coverage::queue_missing(self.conn.0)?;
-        Ok(())
+        wallet::scanning::update_chain_tip(self.conn.0, &self.params, tip_height)
     }
 
     fn prune_scan_queue_below(

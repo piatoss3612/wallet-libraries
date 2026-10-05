@@ -93,13 +93,11 @@ fn lookahead_does_not_skip_unissued_addresses_and_recovery_promotes_it() {
                 .advances_allocation()
         );
     }
-    assert_eq!(
-        db.reserve_swap_receiving_key(account, Purpose::Receive, start())
-            .unwrap()
-            .key_id()
-            .index(),
-        0
-    );
+    // An unswept lookahead index waits for its sweep rather than being skipped.
+    assert!(matches!(
+        db.reserve_swap_receiving_key(account, Purpose::Receive, start()),
+        Err(Error::ReservationPolicy(ReservationPolicy::Gap))
+    ));
     let key_id = KeyId::new(Purpose::Receive, 18);
     let recovered = db
         .recover_swap_receiving_key(account, key_id, 80.into())
@@ -109,13 +107,10 @@ fn lookahead_does_not_skip_unissued_addresses_and_recovery_promotes_it() {
     assert!(repeated.advances_allocation());
     assert_eq!(repeated.scan_from(), BlockHeight::from_u32(80));
     assert_eq!(db.get_swap_receiving_keys(account).unwrap().len(), 20);
-    assert_eq!(
-        db.reserve_swap_receiving_key(account, Purpose::Receive, start())
-            .unwrap()
-            .key_id()
-            .index(),
-        19
-    );
+    assert!(matches!(
+        db.reserve_swap_receiving_key(account, Purpose::Receive, start()),
+        Err(Error::ReservationPolicy(ReservationPolicy::Gap))
+    ));
     assert_eq!(
         db.reserve_swap_receiving_key(account, Purpose::Refund, start())
             .unwrap()
@@ -282,12 +277,6 @@ fn account_deletion_cascades_and_unknown_accounts_cannot_reserve() {
     ));
 }
 
-mod scanning;
-
-mod enhancement;
-
-mod coverage;
-
 #[test]
 fn maintained_lookahead_advances_only_after_reservation_or_payment() {
     let mut st = wallet(false);
@@ -313,51 +302,41 @@ fn maintained_lookahead_advances_only_after_reservation_or_payment() {
     assert_eq!(keys.last().unwrap().key_id().index(), 39);
 }
 
-mod payments;
-
 mod apply;
-
-mod private;
-
-mod reservations;
-
-mod verification;
-
-mod retention;
-
+mod enhancement;
 mod key_access;
-
+mod lifecycle;
+mod payments;
 mod planner;
+mod reservations;
+mod retention;
+mod scanning;
 
-// Compatibility shorthand for fixtures that provide a fresh, already accepted
-// block. Production callers persist the observation before refreshing that block.
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
+    /// Records `status` for `operation` at Unix time `now`, without a quote deadline.
     fn observe_swap_operation(
         &mut self,
         account: AccountUuid,
         key: KeyId,
         operation: &str,
-        terminal: bool,
-        height: BlockHeight,
+        status: zakura_swap_receiving::lifecycle::OperationStatus,
+        now: i64,
     ) -> Result<(), Error> {
-        use zakura_swap_receiving::lifecycle::{ChainAnchor, OperationStatus, ReceiptExpectation};
-        let status = if terminal {
-            OperationStatus::Terminal(ReceiptExpectation::None)
-        } else {
-            OperationStatus::Active
+        let observation = zakura_swap_receiving::lifecycle::Observation {
+            status,
+            deadline: None,
         };
-        self.record_swap_observation(account, key, operation, status, 0, true)?;
-        if terminal {
-            if let Some(hash) = crate::wallet::get_block_hash(self.conn.borrow(), height)? {
-                self.anchor_swap_observations(
-                    ChainAnchor {
-                        height,
-                        hash: hash.0,
-                    },
-                    1,
-                )?;
-            }
-        }
-        Ok(())
+        self.record_swap_observation(account, key, operation, observation, now)
+    }
+
+    /// Finishes `key`'s sweep at `anchor` after an empty lookup there.
+    fn finish_sweep(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        anchor: zakura_swap_receiving::lifecycle::ChainAnchor,
+    ) -> Result<(), Error> {
+        self.queue_swap_lookup(account, key, anchor, &[])?;
+        self.finish_swap_discovery_attempt(account, key, anchor)
     }
 }

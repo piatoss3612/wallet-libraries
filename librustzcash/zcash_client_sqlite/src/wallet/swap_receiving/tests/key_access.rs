@@ -74,7 +74,7 @@ fn exact_key_access_ignores_unrelated_history_and_validates_the_requested_key() 
 
 #[test]
 fn exact_key_access_keeps_accounts_and_reservations_separate() {
-    let mut st = reservations::fixture();
+    let mut st = wallet(false);
     let account = st.test_account().unwrap().id();
     let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
     let birthday = st.test_account().unwrap().birthday().clone();
@@ -113,20 +113,17 @@ fn exact_key_access_keeps_accounts_and_reservations_separate() {
 }
 
 #[test]
-fn transaction_keys_exclude_unrelated_private_history_and_preserve_self_payments() {
+fn transaction_keys_exclude_unscanned_history_and_preserve_self_payments() {
     use zcash_client_backend::data_api::WalletRead;
     use zcash_primitives::transaction::TxId;
     let mut st = wallet(false);
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.enable_private_swap_recovery(account).unwrap();
     let historical = db
         .recover_swap_receiving_key(account, KeyId::new(Purpose::Refund, 70), start())
         .unwrap();
     let active = db
         .reserve_swap_receiving_key(account, Purpose::Refund, start())
-        .unwrap();
-    db.observe_swap_operation(account, active.key_id(), "local", false, start())
         .unwrap();
     let txid = TxId::from_bytes([17; 32]);
     let keys = db
@@ -135,27 +132,34 @@ fn transaction_keys_exclude_unrelated_private_history_and_preserve_self_payments
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].key_id(), active.key_id());
     // An ordinary OVK can identify a self-payment before compact scanning, even
-    // when the receiving key was recovered without a local watch.
+    // when the receiving key was recovered without being scanned.
     let keys = db
         .get_swap_transaction_keys(txid, None, &[historical.receiver()])
         .unwrap();
     assert_eq!(keys.len(), 2);
     assert!(keys.iter().any(|k| k.key_id() == historical.key_id()));
+    // A closed key stops being tried on unrelated transactions.
+    db.conn
+        .borrow()
+        .execute(
+            "UPDATE ironwood_receiving_keys SET closed_at = 1 WHERE purpose = 0 AND key_index = ?1",
+            [active.key_id().index().to_be_bytes()],
+        )
+        .unwrap();
+    assert!(
+        db.get_swap_transaction_keys(txid, Some(start()), &[])
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
-fn retired_transaction_keys_follow_pending_and_imported_output_identity() {
+fn unscanned_transaction_keys_follow_pending_and_imported_output_identity() {
     use zcash_client_backend::data_api::WalletRead;
     let (mut st, key, candidate, through, path) = super::apply::fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.enable_private_swap_recovery(account).unwrap();
-    assert!(
-        db.get_swap_scan_window(through.height)
-            .unwrap()
-            .0
-            .is_empty()
-    );
+    assert!(db.get_swap_scanning_keys().unwrap().is_empty());
     let known = db
         .get_swap_transaction_keys(candidate.txid, Some(through.height), &[])
         .unwrap();

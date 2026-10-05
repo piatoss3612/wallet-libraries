@@ -1,5 +1,5 @@
 //! Shared swap completion policy. Wallet storage owns canonical-chain validation,
-//! receipt attribution, and atomic persistence of this state with scan coverage.
+//! receipt attribution, and atomic persistence of this state with scanning.
 
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 
@@ -12,31 +12,23 @@ pub struct ChainAnchor {
     pub hash: [u8; 32],
 }
 
-/// Defaults are wallet conventions, not consensus parameters.
+/// When a key's trial decryption may stop. Defaults are wallet conventions, not
+/// consensus parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompletionPolicy {
-    /// Additional blocks to scan after observing terminal status.
-    pub grace_blocks: u32,
-    /// Seconds after first terminal observation before directory reconciliation.
-    pub reconciliation_delay_secs: u64,
-}
-
-impl CompletionPolicy {
-    /// Inclusive end of temporary trial decryption. This deadline does not depend
-    /// on receipt accounting or directory availability; reconciliation can outlive it.
-    pub fn scan_through(self, observed_height: BlockHeight) -> Result<BlockHeight, LifecycleError> {
-        u32::from(observed_height)
-            .checked_add(self.grace_blocks)
-            .map(BlockHeight::from)
-            .ok_or(LifecycleError::DeadlineOverflow)
-    }
+    /// Seconds to keep scanning after the first terminal status, once every
+    /// expected receipt has been found.
+    pub grace_secs: i64,
+    /// Seconds after the quote deadline, or after registration when no deadline
+    /// is known, after which scanning stops whatever the provider reports.
+    pub limit_secs: i64,
 }
 
 impl Default for CompletionPolicy {
     fn default() -> Self {
         Self {
-            grace_blocks: 10,
-            reconciliation_delay_secs: 12 * 60 * 60,
+            grace_secs: 24 * 60 * 60,
+            limit_secs: 7 * 24 * 60 * 60,
         }
     }
 }
@@ -53,20 +45,7 @@ pub enum ReceiptExpectation {
     Unknown,
 }
 
-/// A height deadline cannot be represented.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LifecycleError {
-    /// Grace would exceed the representable chain height.
-    DeadlineOverflow,
-}
-impl std::fmt::Display for LifecycleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("swap completion deadline overflow")
-    }
-}
-impl std::error::Error for LifecycleError {}
-
-/// Provider outcome normalized by direction. It schedules discovery but never
+/// Provider outcome normalized by direction. It schedules scanning but never
 /// establishes ownership, inclusion, or an on-chain amount.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationStatus {
@@ -76,66 +55,160 @@ pub enum OperationStatus {
     Terminal(ReceiptExpectation),
 }
 
-/// Normalize the supported NEAR states once. Unrecognized states preserve the
-/// previous observation. A refund on the source chain is not a Zcash receipt.
-pub fn near_status(purpose: crate::Purpose, status: &str) -> Option<OperationStatus> {
+/// The fields of a NEAR 1Click status response that affect scanning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProviderStatus<'a> {
+    /// The `status` string.
+    pub status: &'a str,
+    /// The quote request's `swapType`, such as `EXACT_OUTPUT`.
+    pub swap_type: Option<&'a str>,
+    /// `swapDetails.refundedAmount` in the origin asset's base units.
+    pub refunded_amount: Option<Zatoshis>,
+    /// `swapDetails.amountOut` in the destination asset's base units.
+    pub amount_out: Option<Zatoshis>,
+    /// The quote deadline as a Unix timestamp.
+    pub deadline: Option<i64>,
+}
+
+/// A normalized provider observation and the deadline that bounds scanning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Observation {
+    /// The direction-specific outcome.
+    pub status: OperationStatus,
+    /// The quote deadline, if the response carried one.
+    pub deadline: Option<i64>,
+}
+
+/// Normalizes a NEAR status response for a key of `purpose`. Unrecognized
+/// statuses return `None`, preserving the previous observation.
+///
+/// A refund key expects ZEC whenever the provider reports a positive refunded
+/// amount, and after an exact-output `SUCCESS`, which returns unused input once
+/// the swap completes. A refund on the source chain is not a Zcash receipt. A
+/// zero payout amount is treated as unreported.
+pub fn near_observation(
+    purpose: crate::Purpose,
+    status: &ProviderStatus<'_>,
+) -> Option<Observation> {
     use crate::Purpose;
     use OperationStatus::*;
     use ReceiptExpectation::*;
-    match status {
-        "KNOWN_DEPOSIT_TX" | "PENDING_DEPOSIT" | "INCOMPLETE_DEPOSIT" | "PROCESSING" => {
-            Some(Active)
+    let refund = status.refunded_amount.filter(|v| !v.is_zero());
+    let outcome = match (status.status, purpose) {
+        ("KNOWN_DEPOSIT_TX" | "PENDING_DEPOSIT" | "INCOMPLETE_DEPOSIT" | "PROCESSING", _) => Active,
+        ("SUCCESS", Purpose::Receive) => {
+            Terminal(Positive(status.amount_out.filter(|v| !v.is_zero())))
         }
-        "SUCCESS" => Some(Terminal(if purpose == Purpose::Receive {
-            Positive(std::option::Option::None)
-        } else {
-            None
-        })),
-        "REFUNDED" => Some(Terminal(if purpose == Purpose::Refund {
-            Positive(std::option::Option::None)
-        } else {
-            None
-        })),
-        "FAILED" => Some(Terminal(Unknown)),
-        _ => std::option::Option::None,
-    }
+        ("SUCCESS", Purpose::Refund) => Terminal(match refund {
+            Some(value) => Positive(Some(value)),
+            std::option::Option::None if status.swap_type == Some("EXACT_OUTPUT") => {
+                Positive(std::option::Option::None)
+            }
+            std::option::Option::None => None,
+        }),
+        ("REFUNDED", Purpose::Refund) => Terminal(Positive(refund)),
+        ("REFUNDED", Purpose::Receive) => Terminal(None),
+        ("FAILED", _) => Terminal(Unknown),
+        _ => return std::option::Option::None,
+    };
+    Some(Observation {
+        status: outcome,
+        deadline: status.deadline,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Purpose::*;
+
+    /// The normalized status of `status` for a key of `purpose`.
+    fn observe(purpose: crate::Purpose, status: ProviderStatus<'_>) -> Option<OperationStatus> {
+        near_observation(purpose, &status).map(|o| o.status)
+    }
+
     #[test]
     fn provider_outcomes_preserve_direction_and_unknowns() {
-        use crate::Purpose::*;
+        let status = |status| ProviderStatus {
+            status,
+            ..Default::default()
+        };
+        let positive = |v| Some(OperationStatus::Terminal(ReceiptExpectation::Positive(v)));
         assert_eq!(
-            near_status(Refund, "PROCESSING"),
+            observe(Refund, status("PROCESSING")),
             Some(OperationStatus::Active)
         );
+        assert_eq!(observe(Refund, status("REFUNDED")), positive(None));
         assert_eq!(
-            near_status(Refund, "REFUNDED"),
-            Some(OperationStatus::Terminal(ReceiptExpectation::Positive(
-                None
-            )))
+            observe(Receive, status("REFUNDED")),
+            Some(OperationStatus::Terminal(ReceiptExpectation::None))
         );
+        assert_eq!(observe(Receive, status("SUCCESS")), positive(None));
         assert_eq!(
-            near_status(Receive, "REFUNDED"),
+            observe(Refund, status("SUCCESS")),
             Some(OperationStatus::Terminal(ReceiptExpectation::None))
         );
         assert_eq!(
-            near_status(Receive, "SUCCESS"),
-            Some(OperationStatus::Terminal(ReceiptExpectation::Positive(
-                None
-            )))
-        );
-        assert_eq!(
-            near_status(Refund, "FAILED"),
+            observe(Refund, status("FAILED")),
             Some(OperationStatus::Terminal(ReceiptExpectation::Unknown))
         );
-        assert_eq!(near_status(Refund, "NEW_STATE"), None);
-        assert!(
-            CompletionPolicy::default()
-                .scan_through(u32::MAX.into())
-                .is_err()
+        assert_eq!(observe(Refund, status("NEW_STATE")), None);
+    }
+
+    #[test]
+    fn amounts_and_exact_output_set_refund_expectations() {
+        let amount = Zatoshis::const_from_u64(1_000);
+        let positive = |v| Some(OperationStatus::Terminal(ReceiptExpectation::Positive(v)));
+        // Excess deposits and exact-output leftovers come back after SUCCESS.
+        let refunded = ProviderStatus {
+            status: "SUCCESS",
+            refunded_amount: Some(amount),
+            ..Default::default()
+        };
+        assert_eq!(observe(Refund, refunded), positive(Some(amount)));
+        let exact_output = ProviderStatus {
+            status: "SUCCESS",
+            swap_type: Some("EXACT_OUTPUT"),
+            ..Default::default()
+        };
+        assert_eq!(observe(Refund, exact_output), positive(None));
+        let zero = ProviderStatus {
+            status: "SUCCESS",
+            refunded_amount: Some(Zatoshis::ZERO),
+            ..Default::default()
+        };
+        assert_eq!(
+            observe(Refund, zero),
+            Some(OperationStatus::Terminal(ReceiptExpectation::None))
+        );
+        // A source-chain refund on an incoming swap is never a Zcash receipt.
+        let incoming_refund = ProviderStatus {
+            status: "REFUNDED",
+            refunded_amount: Some(amount),
+            ..Default::default()
+        };
+        assert_eq!(
+            observe(Receive, incoming_refund),
+            Some(OperationStatus::Terminal(ReceiptExpectation::None))
+        );
+        let zero_payout = ProviderStatus {
+            status: "SUCCESS",
+            amount_out: Some(Zatoshis::ZERO),
+            ..Default::default()
+        };
+        assert_eq!(observe(Receive, zero_payout), positive(None));
+        let payout = ProviderStatus {
+            status: "SUCCESS",
+            amount_out: Some(amount),
+            deadline: Some(42),
+            ..Default::default()
+        };
+        assert_eq!(
+            near_observation(Receive, &payout),
+            Some(Observation {
+                status: OperationStatus::Terminal(ReceiptExpectation::Positive(Some(amount))),
+                deadline: Some(42),
+            })
         );
     }
 }

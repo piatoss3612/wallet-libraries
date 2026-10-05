@@ -156,7 +156,7 @@ mod tests {
         // Independent swap migrations belong to the baseline, so this test
         // isolates the transparent migration's effects on existing rows.
         let mut baseline = DEPENDENCIES.to_vec();
-        baseline.push(super::super::swap_refund_watches::MIGRATION_ID);
+        baseline.push(super::super::swap_receiving::MIGRATION_ID);
         WalletMigrator::new()
             .init_or_migrate_to(&mut db, &baseline)
             .unwrap();

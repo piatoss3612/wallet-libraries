@@ -1,4 +1,92 @@
+use std::{cell::Cell, ops::Range};
+
+use zakura_swap_receiving::lifecycle::{CompletionPolicy, OperationStatus, ReceiptExpectation};
+use zcash_client_backend::{
+    data_api::{
+        WalletRead,
+        chain::{BlockSource, ChainState, error, scan_cached_blocks},
+        testing::{AddressType, IronwoodFvk},
+    },
+    proto::compact_formats::CompactBlock,
+};
+use zcash_protocol::value::Zatoshis;
+
 use super::*;
+
+type State = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
+
+/// A file-backed wallet with a block cache and Ironwood active from its first block.
+fn fixture() -> State {
+    let activation = BlockHeight::from_u32(100_000);
+    TestBuilder::new()
+        .with_network(LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        })
+        .with_data_store_factory(TestDbFactory::file_backed())
+        .with_block_cache(crate::testing::BlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build()
+}
+
+/// Block ranges the wallet still has to scan.
+fn queued(st: &State) -> Vec<Range<BlockHeight>> {
+    st.wallet()
+        .suggest_scan_ranges()
+        .unwrap()
+        .iter()
+        .map(|r| r.block_range().clone())
+        .collect()
+}
+
+/// The swap key of each unspent Ironwood note at `height`, `None` for ordinary notes.
+fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
+    st.wallet()
+        .db()
+        .get_unspent_ironwood_notes_at_historical_height(st.test_account().unwrap().id(), height)
+        .unwrap()
+        .iter()
+        .map(|n| n.swap_key_id())
+        .collect()
+}
+
+/// A test-block recipient for `key`, derived without registering it.
+fn recipient(st: &State, key: KeyId) -> IronwoodFvk {
+    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+    IronwoodFvk(key.derive(&parent).unwrap())
+}
+
+/// Reports a finished swap on each of `keys` and closes them once the grace period has passed.
+fn close(st: &mut State, keys: &[KeyId]) {
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    for key in keys {
+        let finished = OperationStatus::Terminal(ReceiptExpectation::None);
+        db.observe_swap_operation(account, *key, "swap", finished, 0)
+            .unwrap();
+    }
+    let grace = CompletionPolicy::default().grace_secs;
+    assert_eq!(
+        db.close_finished_swap_keys(account, grace).unwrap(),
+        keys.len()
+    );
+}
+
+/// Starts or extends trial decryption of `key` from `from`, as registration and
+/// finished refund sweeps do.
+fn activate_key(st: &mut State, key: KeyId, from: BlockHeight) {
+    let account = st.test_account().unwrap().id();
+    st.wallet_mut()
+        .db_mut()
+        .transactionally::<_, _, Error>(|db| {
+            let id = super::super::payments::key_ref(db.conn.0, account, key)?;
+            activate(db.conn.0, id, from)
+        })
+        .unwrap();
+}
 
 #[test]
 fn swap_receiving_scan_reopen_and_spend_into_ordinary_change() {
@@ -6,66 +94,38 @@ fn swap_receiving_scan_reopen_and_spend_into_ordinary_change() {
 }
 
 #[test]
-fn retired_swap_keys_still_spend_into_ordinary_change() {
+fn closed_swap_keys_still_spend_into_ordinary_change() {
     scan_reopen_and_spend(true);
 }
 
-fn scan_reopen_and_spend(private: bool) {
+/// Scans payments to both purposes beside an ordinary note, optionally closes the
+/// swap keys, then spends all three notes into ordinary change.
+fn scan_reopen_and_spend(close_keys: bool) {
     use std::convert::Infallible;
     use zcash_client_backend::{
-        data_api::{
-            WalletRead,
-            testing::{AddressType, IronwoodFvk},
-            wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
-        },
+        data_api::wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
         fees::{DustOutputPolicy, StandardFeeRule, standard},
         wallet::OvkPolicy,
     };
     use zcash_keys::address::{Address, UnifiedAddress};
-    use zcash_protocol::{ShieldedPool, value::Zatoshis};
+    use zcash_protocol::ShieldedPool;
     use zip321::{Payment, TransactionRequest};
 
-    let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
-    let mut st = TestBuilder::new()
-        .with_network(network)
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = fixture();
+    let network = *st.network();
     let account = st.test_account().cloned().unwrap();
-    let ordinary = orchard::keys::FullViewingKey::from(account.usk().orchard());
+    let ordinary = FullViewingKey::from(account.usk().orchard());
+    let start = st.sapling_activation_height();
     let refund = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account.id(), Purpose::Refund, activation)
+        .reserve_swap_receiving_key(account.id(), Purpose::Refund, start)
         .unwrap();
     let incoming = st
         .wallet_mut()
         .db_mut()
-        .watch_swap_receive_key(account.id(), 9, activation)
+        .reserve_swap_receiving_key(account.id(), Purpose::Receive, start)
         .unwrap();
-
-    if private {
-        let db = st.wallet_mut().db_mut();
-        db.enable_private_swap_recovery(account.id()).unwrap();
-        db.observe_swap_operation(account.id(), refund.key_id(), "outgoing", false, activation)
-            .unwrap();
-        db.observe_swap_operation(
-            account.id(),
-            incoming.key_id(),
-            "incoming",
-            false,
-            activation,
-        )
-        .unwrap();
-    }
 
     // Both purposes and the ordinary key coexist in one account's batch runner.
     let (first, _, refund_nf) = st.generate_next_block(
@@ -121,44 +181,15 @@ fn scan_reopen_and_spend(private: bool) {
         incoming_nf
     );
     assert!(notes.iter().any(|n| n.swap_key_id().is_none()));
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .reserve_swap_receiving_key(account.id(), Purpose::Receive, height + 1)
-            .unwrap()
-            .key_id()
-            .index(),
-        10
-    );
 
-    if private {
-        for (key, operation) in [
-            (refund.key_id(), "outgoing"),
-            (incoming.key_id(), "incoming"),
-        ] {
-            st.wallet_mut()
-                .db_mut()
-                .observe_swap_operation(account.id(), key, operation, true, height)
-                .unwrap();
-        }
-        for _ in 0..11 {
-            let (h, _) = st.generate_empty_block();
-            st.scan_cached_blocks(h, 1);
-        }
-        assert!(
-            st.wallet()
-                .db()
-                .get_swap_scan_window(height + 11)
-                .unwrap()
-                .0
-                .is_empty()
-        );
+    if close_keys {
+        close(&mut st, &[refund.key_id(), incoming.key_id()]);
+        assert!(st.wallet().get_swap_scanning_keys().unwrap().is_empty());
     }
 
-    let receiver = orchard::keys::FullViewingKey::from(
-        &orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap(),
-    )
-    .address_at(0u32, Scope::External);
+    let receiver =
+        FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap())
+            .address_at(0u32, Scope::External);
     let address =
         Address::Unified(UnifiedAddress::from_receivers(Some(receiver), None, None).unwrap());
     let request = TransactionRequest::new(vec![Payment::without_memo(
@@ -206,33 +237,28 @@ fn scan_reopen_and_spend(private: bool) {
         notes[0].note().recipient(),
         ordinary.address_at(0u32, Scope::Internal)
     );
+
+    // Only a key that is still open trial-decrypts a late payment.
     let (late_height, _, _) = st.generate_next_block(
         &IronwoodFvk(refund.full_viewing_key().clone()),
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(70_000),
     );
     st.scan_cached_blocks(late_height, 1);
-    let notes = st
-        .wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(account.id(), late_height)
-        .unwrap();
-    assert_eq!(notes.len(), if private { 1 } else { 2 });
+    let late = unspent_keys(&st, late_height);
+    assert_eq!(late.len(), if close_keys { 1 } else { 2 });
     assert_eq!(
-        notes
-            .iter()
-            .filter(|n| n.swap_key_id() == Some(refund.key_id()))
-            .count(),
-        usize::from(!private)
+        late.iter().filter(|k| **k == Some(refund.key_id())).count(),
+        usize::from(!close_keys)
     );
-    // Spending does not retire a receiver or forget the next allocation.
+    // Spending and closing keep both registrations.
     assert_eq!(
         st.wallet()
             .db()
             .get_swap_receiving_keys(account.id())
             .unwrap()
             .len(),
-        3
+        2
     );
 }
 
@@ -354,75 +380,222 @@ fn swap_receiving_reconstructs_only_with_the_registered_account() {
 }
 
 #[test]
-fn incoming_seed_lookahead_replays_payments_before_the_window_edge() {
-    use zcash_client_backend::data_api::{
-        WalletRead,
-        testing::{AddressType, IronwoodFvk},
-    };
-    use zcash_protocol::value::Zatoshis;
-    let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
-    let mut st = TestBuilder::new()
-        .with_network(network)
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-    let account = st.test_account().cloned().unwrap();
-    let parent = orchard::keys::FullViewingKey::from(account.usk().orchard());
-    // Index 50 was paid before 49, so extending only future scanning loses it.
+fn lookahead_keys_are_swept_instead_of_scanned() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let key = KeyId::new(Purpose::Receive, 1);
     let (first, _, _) = st.generate_next_block(
-        &IronwoodFvk(KeyId::new(Purpose::Receive, 50).derive(&parent).unwrap()),
+        &recipient(&st, key),
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(50_000),
     );
-    st.generate_next_block(
-        &IronwoodFvk(KeyId::new(Purpose::Receive, 49).derive(&parent).unwrap()),
+    st.scan_cached_blocks(first, 1);
+    st.wallet_mut()
+        .db_mut()
+        .maintain_swap_receive_lookahead(account, 2, first)
+        .unwrap();
+    // Unlike activation, registering for a sweep replays no scanned history.
+    assert!(queued(&st).is_empty());
+    assert!(st.wallet().get_swap_scanning_keys().unwrap().is_empty());
+    assert!(
+        st.wallet()
+            .db()
+            .swap_history_pending(account, first)
+            .unwrap()
+    );
+    let (later, _, _) = st.generate_next_block(
+        &recipient(&st, key),
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(60_000),
     );
-    st.wallet_mut()
+    st.scan_cached_blocks(later, 1);
+    assert!(unspent_keys(&st, later).is_empty());
+}
+
+#[test]
+fn active_keys_scan_whole_batches_across_their_start() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let (first, _) = st.generate_empty_block();
+    st.scan_cached_blocks(first, 1);
+    let key = st
+        .wallet_mut()
         .db_mut()
-        .maintain_swap_receive_lookahead(account.id(), 50, first)
+        .reserve_swap_receiving_key(account, Purpose::Receive, first + 2)
         .unwrap();
-    st.scan_cached_blocks(first, 2);
-    let notes = st
-        .wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(account.id(), first + 1)
-        .unwrap();
-    assert_eq!(notes.len(), 1);
+    st.generate_empty_block();
+    let (paid, _, _) = st.generate_next_block(
+        &IronwoodFvk(key.full_viewing_key().clone()),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(50_000),
+    );
+    st.generate_empty_block();
     assert_eq!(
-        notes[0].swap_key_id(),
-        Some(KeyId::new(Purpose::Receive, 49))
+        st.scan_cached_blocks(first + 1, 3).scanned_range(),
+        first + 1..first + 4
     );
+    assert_eq!(unspent_keys(&st, paid + 1), vec![Some(key.key_id())]);
+    // The key was in the batch's snapshot, so nothing is requeued.
+    assert!(queued(&st).is_empty());
+}
+
+#[test]
+fn activation_rescans_scanned_blocks_from_its_start_and_survives_reopen() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let key = KeyId::new(Purpose::Refund, 0);
+    let (first, _) = st.generate_empty_block();
+    let (paid, _, _) = st.generate_next_block(
+        &recipient(&st, key),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(70_000),
+    );
+    st.generate_empty_block();
+    st.scan_cached_blocks(first, 3);
+    assert!(unspent_keys(&st, paid + 1).is_empty());
+    assert!(queued(&st).is_empty());
+
     st.wallet_mut()
         .db_mut()
-        .maintain_swap_receive_lookahead(account.id(), 50, first)
+        .reserve_swap_receiving_key(account, Purpose::Refund, paid)
         .unwrap();
-    assert!(
+    assert_eq!(queued(&st), vec![paid..paid + 2]);
+    assert_eq!(
         st.wallet()
-            .suggest_scan_ranges()
+            .block_fully_scanned()
             .unwrap()
-            .iter()
-            .any(|r| r.block_range().contains(&first))
+            .map(|b| b.block_height()),
+        Some(first)
     );
-    st.scan_cached_blocks(first, 2);
-    let notes = st
-        .wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(account.id(), first + 1)
+
+    let reopened = WalletDb::for_path(
+        st.wallet().data_file_path(),
+        *st.network(),
+        test_clock(),
+        test_rng(),
+    )
+    .unwrap();
+    *st.wallet_mut().db_mut() = reopened;
+    st.scan_cached_blocks(paid, 2);
+    assert!(queued(&st).is_empty());
+    assert_eq!(unspent_keys(&st, paid + 1), vec![Some(key)]);
+}
+
+#[test]
+fn reopening_a_closed_key_rescans_blocks_scanned_without_it() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let (first, _) = st.generate_empty_block();
+    let key = st
+        .wallet_mut()
+        .db_mut()
+        .reserve_swap_receiving_key(account, Purpose::Refund, first)
         .unwrap();
-    assert_eq!(notes.len(), 2);
-    assert!(
-        notes
-            .iter()
-            .any(|n| n.swap_key_id() == Some(KeyId::new(Purpose::Receive, 50)))
+    st.scan_cached_blocks(first, 1);
+    close(&mut st, &[key.key_id()]);
+    let (paid, _, _) = st.generate_next_block(
+        &IronwoodFvk(key.full_viewing_key().clone()),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(70_000),
     );
+    st.generate_empty_block();
+    st.scan_cached_blocks(paid, 2);
+    assert!(unspent_keys(&st, paid + 1).is_empty());
+
+    activate_key(&mut st, key.key_id(), paid);
+    assert_eq!(queued(&st), vec![paid..paid + 2]);
+    st.scan_cached_blocks(paid, 2);
+    assert_eq!(unspent_keys(&st, paid + 1), vec![Some(key.key_id())]);
+}
+
+#[test]
+fn reactivating_an_open_key_rescans_only_blocks_below_its_start() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let (first, _) = st.generate_empty_block();
+    for _ in 0..3 {
+        st.generate_empty_block();
+    }
+    st.scan_cached_blocks(first, 4);
+    let key = st
+        .wallet_mut()
+        .db_mut()
+        .reserve_swap_receiving_key(account, Purpose::Receive, first + 2)
+        .unwrap()
+        .key_id();
+    assert_eq!(queued(&st), vec![first + 2..first + 4]);
+    st.scan_cached_blocks(first + 2, 2);
+
+    // A later start never narrows the active range.
+    activate_key(&mut st, key, first + 3);
+    assert!(queued(&st).is_empty());
+    activate_key(&mut st, key, first);
+    assert_eq!(queued(&st), vec![first..first + 2]);
+}
+
+/// Registers a key after the scanner captures its keys, before its first cache read.
+struct RegisterDuringScan<'a, B, F> {
+    inner: &'a B,
+    register: F,
+    ran: Cell<bool>,
+}
+
+impl<B: BlockSource, F: Fn()> BlockSource for RegisterDuringScan<'_, B, F> {
+    type Error = B::Error;
+
+    fn with_blocks<C, E>(
+        &self,
+        from: Option<BlockHeight>,
+        limit: Option<usize>,
+        callback: C,
+    ) -> Result<(), error::Error<E, Self::Error>>
+    where
+        C: FnMut(CompactBlock) -> Result<(), error::Error<E, Self::Error>>,
+    {
+        if !self.ran.replace(true) {
+            (self.register)();
+        }
+        self.inner.with_blocks(from, limit, callback)
+    }
+}
+
+#[test]
+fn key_activated_mid_batch_is_requeued_for_the_blocks_it_missed() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let key = KeyId::new(Purpose::Receive, 0);
+    let (first, _) = st.generate_empty_block();
+    let (paid, _, _) = st.generate_next_block(
+        &recipient(&st, key),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(50_000),
+    );
+    st.generate_empty_block();
+    let network = *st.network();
+    let path = st.wallet().data_file_path();
+    let mut scanning_db = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
+    let source = RegisterDuringScan {
+        inner: st.cache(),
+        ran: Cell::new(false),
+        register: || {
+            let mut db = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
+            db.reserve_swap_receiving_key(account, Purpose::Receive, paid)
+                .unwrap();
+        },
+    };
+    scan_cached_blocks(
+        &network,
+        &source,
+        &mut scanning_db,
+        first,
+        &ChainState::empty(first - 1, BlockHash([0; 32])),
+        3,
+    )
+    .unwrap();
+    assert!(unspent_keys(&st, paid + 1).is_empty());
+    assert_eq!(queued(&st), vec![paid..paid + 2]);
+
+    st.scan_cached_blocks(paid, 2);
+    assert_eq!(unspent_keys(&st, paid + 1), vec![Some(key)]);
+    assert!(queued(&st).is_empty());
 }

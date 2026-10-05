@@ -2,13 +2,13 @@
 
 use std::borrow::BorrowMut;
 
-use crate::wallet;
-use rusqlite::{Connection, params};
+use crate::{util::Clock, wallet};
+use rusqlite::{Connection, OptionalExtension, params};
 use zakura_swap_receiving::RefundMemo;
 use zcash_keys::encoding::AddressCodec as _;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use super::{Error, KeyId, Purpose, account_key, decode_index, register};
+use super::{Discovery, Error, KeyId, Purpose, account_key, decode_index, register, unix_now};
 use crate::{AccountUuid, SqlTransaction, WalletDb};
 
 /// A confirmed funding record recovered from an ordinary internal Ironwood note.
@@ -23,12 +23,15 @@ pub struct RecoveredRefund {
     pub funding_height: BlockHeight,
 }
 
-impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
+impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
     /// Registers refund keys from confirmed, authenticated internal funding memos.
     ///
-    /// Run after scanning and memo enhancement, including during restore. Own-send
-    /// evidence must include an input belonging to the same account. Records whose
-    /// inputs or memos are not yet available remain eligible on subsequent calls.
+    /// Run after scanning and memo enhancement, including during restore. A key this
+    /// wallet was already scanning when the funding transaction was mined needs
+    /// nothing more. Any other key is restored: it is queued for a receiver-directory
+    /// sweep and a provider-status watch. Own-send evidence must include an input
+    /// belonging to the same account. Records whose inputs or memos are not yet
+    /// available remain eligible on subsequent calls.
     /// Spent and zero-value marker notes are included. Unsupported records, and
     /// funding transactions without a single transparent deposit output, return
     /// an error and remain stored, rather than silently completing recovery.
@@ -44,7 +47,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 
     /// Claims due provider lookups for authenticated refund records. Call at sync
     /// time, including when no new blocks arrive. The persisted retry time also
-    /// bounds failed requests across restarts. Unknown responses leave watches active.
+    /// bounds failed requests across restarts. Unknown responses and inconclusive
+    /// terminal statuses, such as `FAILED`, leave watches active.
     /// Applications pass a Unix timestamp and perform network I/O after this returns.
     /// Unchecked records are returned first, up to `limit`, so old failed requests
     /// cannot starve newly restored records.
@@ -62,9 +66,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             let mut stmt = db.conn.0.prepare_cached(
                 "SELECT k.key_index,w.operation_id FROM ironwood_swap_refund_watches w
                  JOIN ironwood_receiving_keys k ON k.id=w.receiving_key_id
-                 JOIN ironwood_swap_scan_uses s ON s.receiving_key_id=w.receiving_key_id
+                 JOIN ironwood_swap_operations s ON s.receiving_key_id=w.receiving_key_id
                     AND s.operation_id=w.operation_id
-                 WHERE k.account_id=?1 AND s.terminal_at IS NULL AND w.next_check_at<=?2
+                 WHERE k.account_id=?1 AND k.closed_at IS NULL
+                   AND (s.terminal_at IS NULL OR s.expectation=0) AND w.next_check_at<=?2
                  ORDER BY w.next_check_at,w.receiving_key_id,w.operation_id LIMIT ?3",
             )?;
             let rows = stmt
@@ -90,11 +95,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         })
     }
 
-    /// Ensures `count` incoming keys beyond the highest reserved or paid index.
+    /// Ensures `count` incoming keys beyond the highest reserved or paid index, queued
+    /// for a receiver-directory sweep.
     ///
-    /// Call before scanning and after storing payments. New keys queue replay
-    /// from `scan_from`, so a payment found at the edge can reveal earlier payments
-    /// to the next window. This is bounded-gap recovery, not a completeness proof.
+    /// Call after scanning and after storing payments. The first window, and any
+    /// window above a paid key found by restore and never reserved, extends restore
+    /// recovery. Indices above a key this wallet issued were never handed out by it,
+    /// so they need no sweep. This is bounded-gap recovery, not a completeness proof.
     pub fn maintain_swap_receive_lookahead(
         &mut self,
         account: AccountUuid,
@@ -105,7 +112,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 }
 
-impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
+impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
     /// See [`WalletDb::recover_swap_refund_memos`] on a connection-backed handle.
     pub fn recover_swap_refund_memos(
         &mut self,
@@ -136,7 +143,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
-        let restored_through = wallet::fully_scanned_height(self.conn.0)?;
+        let now = unix_now(&self.clock);
         let mut recovered = Vec::new();
         for (bytes, height, note_id, raw) in records {
             // SQLite omits trailing zero padding when storing MemoBytes.
@@ -154,54 +161,52 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             .ok_or_else(|| super::corrupt("invalid swap funding deposit output"))?
             .encode(&self.params);
             let key_id = KeyId::new(Purpose::Refund, memo.index());
-            let needs_registration: bool = self.conn.0.query_row(
-                "SELECT NOT EXISTS (SELECT 1 FROM ironwood_receiving_keys
-                 WHERE account_id = ?1 AND purpose = 0 AND derivation_version = 1
-                   AND key_index = ?2 AND scan_from <= ?3 AND advances_allocation = 1)",
-                params![account_ref.0, key_id.index().to_be_bytes(), height],
-                |row| row.get(0),
-            )?;
-            if needs_registration {
-                register(
+            let scanned_locally = self
+                .conn
+                .0
+                .query_row(
+                    "SELECT active_from <= ?3 FROM ironwood_receiving_keys
+                     WHERE account_id = ?1 AND purpose = 0 AND derivation_version = 1 AND key_index = ?2",
+                    params![account_ref.0, key_id.index().to_be_bytes(), height],
+                    |row| row.get::<_, Option<bool>>(0),
+                )
+                .optional()?
+                .flatten()
+                .unwrap_or(false);
+            if !scanned_locally {
+                let key = register(
                     self.conn.0,
                     &self.params,
                     account,
                     key_id,
                     height.into(),
                     true,
+                    Discovery::Sweep,
+                    now,
                 )?;
-            }
-            // Seed restoration has no local activity record. Persist its provider
-            // identity for directory follow-ups without activating historical keys.
-            if let Some(scanned) = restored_through {
-                let id = super::payments::key_ref(self.conn.0, account, key_id)?;
-                let local: bool = self.conn.0.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM
-                    ironwood_swap_scan_uses WHERE receiving_key_id=?1 AND operation_id=?2)",
+                let id = super::payments::key_ref(self.conn.0, account, key.key_id())?;
+                // Restoring a seed has no local activity record. The provider
+                // identity schedules status polling for the restored refund.
+                self.conn.0.execute(
+                    "INSERT OR IGNORE INTO ironwood_swap_refund_watches (receiving_key_id, operation_id)
+                     VALUES (?1, ?2)",
                     params![id, deposit_address],
-                    |r| r.get(0),
-                )?;
-                let initial = (!local).then_some(u32::from(scanned));
-                self.conn.0.execute(
-                    "INSERT OR IGNORE INTO ironwood_swap_refund_watches
-                    (receiving_key_id,operation_id,initial_height) VALUES(?1,?2,?3)",
-                    params![id, deposit_address, initial],
-                )?;
-                // Never reset a locally observed terminal deadline on another scan.
-                self.conn.0.execute(
-                    "INSERT OR IGNORE INTO ironwood_swap_scan_uses
-                    (receiving_key_id,operation_id,scan_from,scan_through) VALUES(?1,?2,?3,NULL)",
-                    params![id, deposit_address, height],
                 )?;
                 self.conn.0.execute(
-                    "INSERT INTO ironwood_swap_refund_memo_progress
-                    (note_id,receiving_key_id,funding_height) VALUES(?1,?2,?3)
-                    ON CONFLICT(note_id) DO UPDATE SET
-                        receiving_key_id=excluded.receiving_key_id,
-                        funding_height=excluded.funding_height",
-                    params![note_id, id, height],
+                    "INSERT OR IGNORE INTO ironwood_swap_operations (receiving_key_id, operation_id)
+                     VALUES (?1, ?2)",
+                    params![id, deposit_address],
                 )?;
             }
+            let id = super::payments::key_ref(self.conn.0, account, key_id)?;
+            self.conn.0.execute(
+                "INSERT INTO ironwood_swap_refund_memo_progress
+                (note_id,receiving_key_id,funding_height) VALUES(?1,?2,?3)
+                ON CONFLICT(note_id) DO UPDATE SET
+                    receiving_key_id=excluded.receiving_key_id,
+                    funding_height=excluded.funding_height",
+                params![note_id, id, height],
+            )?;
             recovered.push(RecoveredRefund {
                 index: memo.index(),
                 deposit_address,
@@ -219,13 +224,25 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         scan_from: BlockHeight,
     ) -> Result<(), Error> {
         let (account_ref, _) = account_key(self.conn.0, &self.params, account)?;
-        let last: Option<Vec<u8>> = self.conn.0.query_row(
-            "SELECT MAX(key_index) FROM ironwood_receiving_keys
-             WHERE account_id = ?1 AND purpose = 1 AND derivation_version = 1
-               AND advances_allocation = 1",
-            [account_ref.0],
-            |row| row.get(0),
-        )?;
+        let top: Option<(Vec<u8>, bool)> = self
+            .conn
+            .0
+            .query_row(
+                "SELECT k.key_index,
+                    EXISTS(SELECT 1 FROM ironwood_swap_sweeps s WHERE s.receiving_key_id = k.id)
+                    AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r WHERE r.receiving_key_id = k.id)
+                 FROM ironwood_receiving_keys k
+                 WHERE k.account_id = ?1 AND k.purpose = 1 AND k.derivation_version = 1
+                   AND k.advances_allocation = 1
+                 ORDER BY k.key_index DESC LIMIT 1",
+                [account_ref.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if top.as_ref().is_some_and(|(_, restored)| !restored) {
+            return Ok(());
+        }
+        let last = top.map(|(index, _)| index);
         let start = last
             .map(decode_index)
             .transpose()?

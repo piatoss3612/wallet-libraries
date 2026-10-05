@@ -1,13 +1,12 @@
 //! Incoming allocation fills old holes without forgetting issued payment instructions.
 use super::{
-    Error, KeyId, Purpose, RegisteredKey, account_key, corrupt, decode_index, payments::key_ref,
-    register,
+    Discovery, Error, KeyId, Purpose, RegisteredKey, account_key, corrupt, decode_index,
+    payments::key_ref, register,
 };
 use crate::{AccountUuid, WalletDb, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::{Borrow, BorrowMut};
-use zakura_swap_receiving::lifecycle::{ChainAnchor, CompletionPolicy};
-use zcash_primitives::block::BlockHash;
+use zakura_swap_receiving::lifecycle::{ProviderStatus, near_observation};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 /// Incoming seed recovery must search at least this many consecutive empty indices.
@@ -57,23 +56,25 @@ fn used(conn: &Connection, key: i64) -> Result<bool, Error> {
     )?)
 }
 
-// New payment evidence invalidates absence claims independently of closeout.
-pub(super) fn request_recheck(
-    conn: &Connection,
-    key: i64,
-    anchor: ChainAnchor,
-) -> Result<(), Error> {
-    conn.execute(
-        "DELETE FROM ironwood_swap_receive_checks WHERE receiving_key_id=?1",
+// Reuse relies on the key having been scanned since issuance, so its whole
+// active range must be scanned and free of payments and queued candidates.
+fn scanned_empty(conn: &Connection, key: i64) -> Result<bool, Error> {
+    let active: bool = conn.query_row(
+        "SELECT active_from IS NOT NULL AND closed_at IS NULL FROM ironwood_receiving_keys WHERE id=?1",
         [key],
+        |r| r.get(0),
     )?;
-    conn.execute(
-        "DELETE FROM ironwood_swap_directory_checks WHERE receiving_key_id=?1",
+    let pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery WHERE receiving_key_id=?1)",
         [key],
+        |r| r.get(0),
     )?;
-    conn.execute("INSERT INTO ironwood_swap_recovery_targets(receiving_key_id,height,block_hash) VALUES (?1,?2,?3)
-        ON CONFLICT(receiving_key_id) DO UPDATE SET height=excluded.height,block_hash=excluded.block_hash",params![key,u32::from(anchor.height),anchor.hash])?;
-    Ok(())
+    let tip = wallet::chain_tip_height(conn)?;
+    Ok(active
+        && !pending
+        && !used(conn, key)?
+        && tip.is_some()
+        && wallet::fully_scanned_height(conn)? == tip)
 }
 
 // Local issuance and provider deposits cannot move the seed recovery boundary.
@@ -95,28 +96,22 @@ fn recovery_end(conn: &Connection, account: i64) -> Result<u64, Error> {
         .ok_or(Error::IndexExhausted)
 }
 
-// Closing retains all quote associations and the original terminal grace deadline.
-fn close_reservation(
-    conn: &Connection,
-    id: i64,
-    key: i64,
-    now: i64,
-    tip: BlockHeight,
-) -> Result<(), Error> {
+// Closing retains all quote associations. The key's scanning ends separately,
+// under `close_finished_swap_keys`. Closed quotes are no longer polled, and both
+// callers admit only expired unfunded deposits as still open, which expect no receipt.
+fn close_reservation(conn: &Connection, id: i64, now: i64) -> Result<(), Error> {
     conn.execute(
         "UPDATE ironwood_swap_receive_reservations SET closed_at=?2 WHERE id=?1",
         params![id, now],
     )?;
-    let end = u32::from(
-        CompletionPolicy::default()
-            .scan_through(tip)
-            .map_err(|e| corrupt(&e.to_string()))?,
-    );
-    conn.execute("UPDATE ironwood_swap_scan_uses SET scan_through=COALESCE(scan_through,?2)
-        WHERE receiving_key_id=?1 AND operation_id IN (SELECT 'receive-quote:'||request_id FROM ironwood_swap_receive_quotes WHERE reservation_id=?3)",params![key,end,id])?;
     conn.execute(
-        "DELETE FROM ironwood_swap_recovery_targets WHERE receiving_key_id=?1",
-        [key],
+        "UPDATE ironwood_swap_operations SET terminal_at=?2, expectation=1, expected_value=NULL,
+            observed_at=MAX(observed_at, ?2)
+         WHERE terminal_at IS NULL
+           AND receiving_key_id=(SELECT receiving_key_id FROM ironwood_swap_receive_reservations WHERE id=?1)
+           AND operation_id IN (SELECT 'receive-quote:'||request_id FROM ironwood_swap_receive_quotes
+               WHERE reservation_id=?1)",
+        params![id, now],
     )?;
     Ok(())
 }
@@ -124,7 +119,7 @@ fn close_reservation(
 fn reusable(conn: &Connection, id: i64, now: i64) -> Result<bool, Error> {
     // Unknown request outcomes and unknown statuses stay reserved. A clock change
     // cannot turn a response from the future into a fresh observation.
-    Ok(conn.query_row("SELECT r.closed_at IS NULL AND r.legacy_unknown=0
+    Ok(conn.query_row("SELECT r.closed_at IS NULL
         AND r.created_at<=?2-?3
         AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_used u WHERE u.receiving_key_id=r.receiving_key_id)
         AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q WHERE q.reservation_id=r.id AND q.rejected=0 AND (
@@ -173,7 +168,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             .collect::<Result<_, _>>()?)
     }
 
-    /// Unpaid reservations old enough for an on-demand PIR recheck. This does not release them.
+    /// Unpaid reservations old enough to reclaim. This does not release them.
     pub fn swap_receive_reclaim_candidates(
         &self,
         account: AccountUuid,
@@ -230,43 +225,22 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     ) -> Result<(), Error> {
         self.transactionally(|db| {
             let (a,_)=account_key(db.conn.0,&db.params,account)?;
-            let ids={let mut s=db.conn.0.prepare("SELECT r.id,r.receiving_key_id FROM ironwood_swap_receive_reservations r
+            let ids={let mut s=db.conn.0.prepare("SELECT r.id FROM ironwood_swap_receive_reservations r
                 JOIN ironwood_receiving_keys k ON k.id=r.receiving_key_id JOIN ironwood_swap_receive_used u ON u.receiving_key_id=k.id
-                WHERE k.account_id=?1 AND r.closed_at IS NULL AND r.legacy_unknown=0
+                WHERE k.account_id=?1 AND r.closed_at IS NULL
                 AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q WHERE q.reservation_id=r.id AND q.rejected=0 AND (
                     q.operation_id IS NULL OR q.status IS NULL OR q.checked_at IS NULL OR q.checked_at>?2
                     OR (q.status NOT IN ('SUCCESS','REFUNDED','FAILED') AND NOT (q.status='PENDING_DEPOSIT' AND q.funded=0
                         AND q.deadline IS NOT NULL AND q.deadline<=?2-?3 AND q.checked_at>=?2-?4))))")?;
-                s.query_map(params![a.0,now,RECEIVE_RECLAIM_SECONDS,STATUS_FRESH_SECONDS],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?.collect::<Result<Vec<_>,_>>()?};
-            let Some(tip)=wallet::chain_tip_height(db.conn.0)? else {return Ok(());};
-            for (id,key) in ids {close_reservation(db.conn.0,id,key,now,tip)?;}
+                s.query_map(params![a.0,now,RECEIVE_RECLAIM_SECONDS,STATUS_FRESH_SECONDS],|r|r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?};
+            for id in ids {close_reservation(db.conn.0,id,now)?;}
             Ok(())
         })
     }
 
-    /// Requests an explicit fresh directory pass without reviving ordinary scanning.
-    pub fn request_swap_receive_recheck(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        anchor: ChainAnchor,
-    ) -> Result<(), Error> {
-        if key.purpose() != Purpose::Receive {
-            return Err(corrupt("expected receive key"));
-        }
-        self.transactionally(|db| {
-            let id = key_ref(db.conn.0, account, key)?;
-            if wallet::get_block_hash(db.conn.0, anchor.height)? != Some(BlockHash(anchor.hash)) {
-                return Err(corrupt("receive check anchor changed"));
-            }
-            request_recheck(db.conn.0, id, anchor)?;
-            Ok(())
-        })
-    }
-
-    /// Atomically resumes the single draft or locks the lowest never-paid free index.
-    /// Does not expose the address. Complete canonical history and per-key tail verification
-    /// before quoting.
+    /// Atomically resumes the single draft or locks the lowest never-paid free index,
+    /// whose key is then scanned from `scan_from`. Does not expose the address.
+    /// Waits for pending incoming restore sweeps, which may reveal paid indices.
     /// Only canonical received notes advance the recovery bound; local issuance never does.
     pub fn prepare_swap_receive_reservation(
         &mut self,
@@ -276,6 +250,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     ) -> Result<ReceiveReservation, Error> {
         let id=self.transactionally(|db| {
             let (a,_)=account_key(db.conn.0,&db.params,account)?;
+            let sweeping:bool=db.conn.0.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_swap_sweeps s
+                JOIN ironwood_receiving_keys k ON k.id=s.receiving_key_id
+                WHERE k.account_id=?1 AND k.purpose=1 AND s.done_height IS NULL)",[a.0],|r|r.get(0))?;
+            if sweeping {return Err(Error::ReservationPolicy(super::ReservationPolicy::Gap));}
             // A received address is permanently excluded, even if later spent or rewound.
             db.conn.0.execute("UPDATE ironwood_swap_receive_reservations SET started=1
                 WHERE receiving_key_id IN (SELECT receiving_key_id FROM ironwood_swap_receive_used)",[])?;
@@ -298,7 +276,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                     OR EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r WHERE r.receiving_key_id=k.id AND r.closed_at IS NULL)
                     OR EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery p WHERE p.receiving_key_id=k.id)))",params![a.0,index.to_be_bytes()],|r|r.get(0))?;
                 if blocked {continue;}
-                let key=register(db.conn.0,&db.params,account,KeyId::new(Purpose::Receive,index),scan_from,true)?;
+                let key=register(db.conn.0,&db.params,account,KeyId::new(Purpose::Receive,index),scan_from,true,Discovery::Scan(scan_from),now)?;
                 let key_id=key_ref(db.conn.0,account,key.key_id())?;
                 db.conn.0.execute("INSERT INTO ironwood_swap_receive_reservations(receiving_key_id,created_at) VALUES (?1,?2)",params![key_id,now])?;
                 return Ok(db.conn.0.last_insert_rowid());
@@ -309,7 +287,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 
     /// Saves an unknown quote outcome before a network request. A lost response cannot free it.
-    /// Rechecks complete address verification through the current scan frontier atomically.
+    /// Requires the address to be scanned empty through the chain tip, checked atomically.
     pub fn begin_swap_receive_quote(
         &mut self,
         account: AccountUuid,
@@ -326,15 +304,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             if !open || used(db.conn.0,key)? {return Err(Error::ReservationPolicy(super::ReservationPolicy::Stale));}
             let (owner,index):(i64,Vec<u8>)=db.conn.0.query_row("SELECT account_id,key_index FROM ironwood_receiving_keys WHERE id=?1",[key],|r|Ok((r.get(0)?,r.get(1)?)))?;
             if decode_index(index)? >= recovery_end(db.conn.0,owner)? {return Err(Error::ReservationPolicy(super::ReservationPolicy::Gap));}
-            if super::verification::verified(db.conn.0,&db.params,key)?.is_none() {
+            if !scanned_empty(db.conn.0,key)? {
                 return Err(Error::ReservationPolicy(super::ReservationPolicy::Coverage));
             }
             db.conn.0.execute("INSERT INTO ironwood_swap_receive_quotes(request_id,reservation_id,requested_at) VALUES (?1,?2,?3)",params![request,reservation,now])?;
-            let tip=wallet::chain_tip_height(db.conn.0)?.ok_or_else(||corrupt("missing chain tip"))?;
-            let from=wallet::block_fully_scanned(db.conn.0,&db.params)?.ok_or_else(||corrupt("missing scan frontier"))?.block_height()+1;
-            db.conn.0.execute("INSERT INTO ironwood_swap_scan_uses(receiving_key_id,operation_id,scan_from,local,observed_at) VALUES (?1,?2,?3,1,?4)",params![key,format!("receive-quote:{request}"),u32::from(from.min(tip)),now])?;
-            db.conn.0.execute("DELETE FROM ironwood_swap_recovery_targets WHERE receiving_key_id=?1",[key])?;
-            db.conn.0.execute("UPDATE ironwood_swap_discovery SET closed=0,next_attempt_at=0,completed_at=NULL WHERE receiving_key_id=?1",[key])?;
+            db.conn.0.execute("INSERT INTO ironwood_swap_operations(receiving_key_id,operation_id,observed_at) VALUES (?1,?2,?3)",params![key,format!("receive-quote:{request}"),now])?;
             Ok(())
         })
     }
@@ -353,10 +327,14 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         }
         self.transactionally(|db| {
             let id:i64=db.conn.0.query_row("SELECT reservation_id FROM ironwood_swap_receive_quotes WHERE request_id=?1",[request],|r|r.get(0))?;
-            reservation_key(db.conn.0,account,id)?;
+            let key=reservation_key(db.conn.0,account,id)?;
             let changed=db.conn.0.execute("UPDATE ironwood_swap_receive_quotes SET operation_id=?2,deposit_memo=?3,deadline=?4
                 WHERE request_id=?1 AND rejected=0 AND (operation_id IS NULL OR operation_id=?2)",params![request,operation,memo,deadline])?;
-            if changed!=1 {return Err(corrupt("receive quote identity changed"));} Ok(())
+            if changed!=1 {return Err(corrupt("receive quote identity changed"));}
+            // The accepted deadline bounds the key's scanning even if status responses omit it.
+            db.conn.0.execute("UPDATE ironwood_swap_operations SET deadline=COALESCE(deadline,?3)
+                WHERE receiving_key_id=?1 AND operation_id=?2",params![key,format!("receive-quote:{request}"),deadline])?;
+            Ok(())
         })
     }
 
@@ -370,7 +348,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             let id:i64=db.conn.0.query_row("SELECT reservation_id FROM ironwood_swap_receive_quotes WHERE request_id=?1",[request],|r|r.get(0))?;
             let key=reservation_key(db.conn.0,account,id)?;
             db.conn.0.execute("UPDATE ironwood_swap_receive_quotes SET rejected=1 WHERE request_id=?1 AND operation_id IS NULL",[request])?;
-            db.conn.0.execute("DELETE FROM ironwood_swap_scan_uses WHERE receiving_key_id=?1 AND operation_id=?2
+            db.conn.0.execute("DELETE FROM ironwood_swap_operations WHERE receiving_key_id=?1 AND operation_id=?2
                 AND EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes WHERE request_id=?3 AND rejected=1)",params![key,format!("receive-quote:{request}"),request])?;
             Ok(())
         })
@@ -392,12 +370,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 
     /// Provider observations are monotonic in request time; deposit evidence is sticky.
-    /// Unknown statuses hold the reservation and leave the existing scan deadline alone.
+    /// Unknown statuses hold the reservation and leave the key's operation alone.
     pub fn observe_swap_receive_quote(
         &mut self,
         account: AccountUuid,
         request: &str,
-        status: &str,
+        status: &ProviderStatus<'_>,
         funded: bool,
         checked_at: i64,
     ) -> Result<(), Error> {
@@ -405,36 +383,30 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             let id:i64=db.conn.0.query_row("SELECT reservation_id FROM ironwood_swap_receive_quotes WHERE request_id=?1",[request],|r|r.get(0))?;
             let key=reservation_key(db.conn.0,account,id)?;
             let changed=db.conn.0.execute("UPDATE ironwood_swap_receive_quotes SET status=?2,funded=MAX(funded,?3),checked_at=?4
-                WHERE request_id=?1 AND operation_id IS NOT NULL AND (checked_at IS NULL OR checked_at<=?4)",params![request,status,funded,checked_at])?;
+                WHERE request_id=?1 AND operation_id IS NOT NULL AND (checked_at IS NULL OR checked_at<=?4)",params![request,status.status,funded,checked_at])?;
             if changed==0 {return Ok(());}
-            if let Some(status)=zakura_swap_receiving::lifecycle::near_status(super::Purpose::Receive,status) {
-                super::lifecycle::record_observation(db.conn.0,key,&format!("receive-quote:{request}"),status,checked_at,true)?;
+            if let Some(observation)=near_observation(Purpose::Receive,status) {
+                super::lifecycle::record_observation(db.conn.0,key,&format!("receive-quote:{request}"),observation,checked_at)?;
             }
             Ok(())
         })
     }
 
-    /// Releases only after successful provider reconciliation and a fresh, complete empty PIR lookup.
-    /// The caller performs a fresh empty PIR lookup and any bounded local tail check,
-    /// then supplies their verified through-anchor, not an unchecked freshness boolean.
+    /// Releases an unpaid reservation after successful provider reconciliation, once
+    /// local scanning has covered its address through the chain tip without a payment.
+    /// The key stays active, so a later reservation reuses it without a scanning gap.
     pub fn reclaim_swap_receive_reservation(
         &mut self,
         account: AccountUuid,
         id: i64,
         now: i64,
-        anchor: ChainAnchor,
     ) -> Result<bool, Error> {
         self.transactionally(|db| {
-            let key=reservation_key(db.conn.0,account,id)?;
-            if !reusable(db.conn.0,id,now)? {return Ok(false);}
-            let tip=wallet::chain_tip_height(db.conn.0)?.ok_or_else(||corrupt("missing chain tip"))?;
-            if anchor.height<tip || wallet::get_block_hash(db.conn.0,anchor.height)?!=Some(BlockHash(anchor.hash)) {
-                return Err(Error::ReservationPolicy(super::ReservationPolicy::Coverage));
+            let key = reservation_key(db.conn.0, account, id)?;
+            if !reusable(db.conn.0, id, now)? || !scanned_empty(db.conn.0, key)? {
+                return Ok(false);
             }
-            let checked=super::verification::verified(db.conn.0,&db.params,key)?==Some(anchor);
-            let pending:bool=db.conn.0.query_row("SELECT EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery WHERE receiving_key_id=?1)",[key],|r|r.get(0))?;
-            if !checked||pending||used(db.conn.0,key)? {return Ok(false);}
-            close_reservation(db.conn.0,id,key,now,tip)?;
+            close_reservation(db.conn.0, id, now)?;
             Ok(true)
         })
     }
