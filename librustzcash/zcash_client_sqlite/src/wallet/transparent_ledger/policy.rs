@@ -113,6 +113,7 @@ pub(crate) fn apply_transparent_policy(
                     [],
                 )?;
                 // Their received memos remain privately recoverable.
+                #[cfg(feature = "orchard")]
                 crate::wallet::enhance_pir::queue_unsupported_memos(conn, None)?;
             } else if mode.retains_public_authority() {
                 // Sticky route 2 was assigned while public enhancement was forbidden. With
