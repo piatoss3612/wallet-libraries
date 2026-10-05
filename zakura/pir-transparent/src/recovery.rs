@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -8,19 +8,21 @@ use std::{
 use transparent::{address::TransparentAddress, bundle::OutPoint};
 use transparent_events::{FeeState, TransparentEvent};
 use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap, ShardMapEntry};
-use transparent_wallet::transport::{FilterSource, ShardTransport};
+use transparent_wallet::transport::{BoxError, FilterSource, ShardTransport};
 use transparent_wallet::{
     Acceptance, Anchor, ChainView, Completion, IncompleteReason, ScriptEntry, ScriptOrigin,
-    StaticScripts, SyncReport, WalletStore, WorkLimits,
+    SetIdentity, StaticScripts, SyncError, SyncReport, WalletStore, WorkLimits,
 };
 use transparent_wallet_store::SqliteStore;
 use zcash_client_backend::data_api::transparent_ledger::{
-    AddressRange, ChainPoint, PageRequest, PublicationAnchor, ReceiveEvent, RecoveryRevision,
-    SpendEvent, TransactionMetadata, TransparentLedgerCommit, TransparentWatchSet,
+    AddressRange, ChainPoint, PageRequest, ReceiveEvent, RecoveryRevision, SpendEvent,
+    TransactionMetadata, TransparentLedgerCommit, TransparentRecoveryContext, TransparentWatchSet,
     WholeTransactionFee,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
+
+use crate::catalog::{self, BatchState, Published};
 
 /// The only shard schema this adapter reads.
 ///
@@ -106,19 +108,41 @@ fn progress(report: &SyncReport, clamped: bool) -> Progress {
 }
 
 /// A failed pass grants no candidate progress or source authority.
+///
+/// The messages of [`RecoveryError::Invalid`] and [`RecoveryError::Failure`]
+/// are diagnostics that may quote the wallet's transparent history (a txid or
+/// outpoint from the companion's ledger) or the caller's transport errors.
+/// Never log or report them; log the variant.
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryError {
     /// Configuration, accepted-chain, context or source-content failure.
     #[error("transparent PIR recovery: {0}")]
     Invalid(String),
-    /// Reference retrieval or companion persistence failure.
+    /// Reference retrieval or companion persistence failure. Keep the companion
+    /// and retry later.
     #[error("transparent PIR recovery: {0}")]
     Failure(String),
+    /// The shard map a pass started from has a set identity that no longer
+    /// continues the one the companion's store is bound to (another profile,
+    /// start height, envelope or seal for a geometry in use). Only this check,
+    /// made before the sync, reports it. A map ending below the store's anchor,
+    /// while the caller's chain still accepts the anchor, is instead a replica
+    /// that has not caught up, and the pass is [`BatchState::Pending`].
+    ///
+    /// Before returning it, the adapter reset the companion's store in one
+    /// transaction and kept its catalog, so each source keeps its highest
+    /// lineage. It forgot the export intents of sources the map no longer
+    /// names, including [`RecoveryBatch::retired_revisions`] a batch listed and
+    /// nobody acknowledged: no successor can resolve them, and the wallet keeps
+    /// their provisional evidence. Retry the pass once with the same companion;
+    /// never recreate it.
+    #[error("transparent PIR recovery: publication set changed; companion store reset, retry")]
+    PublicationChanged,
 }
-fn failure(error: impl std::fmt::Display) -> RecoveryError {
+pub(crate) fn failure(error: impl std::fmt::Display) -> RecoveryError {
     RecoveryError::Failure(error.to_string())
 }
-fn require(ok: bool, message: &str) -> Result<(), RecoveryError> {
+pub(crate) fn require(ok: bool, message: &str) -> Result<(), RecoveryError> {
     if ok {
         Ok(())
     } else {
@@ -126,32 +150,56 @@ fn require(ok: bool, message: &str) -> Result<(), RecoveryError> {
     }
 }
 
-/// Candidate observations and reference progress. Apply through the existing wallet writer.
+/// Candidate observations and reference progress from one pass.
 ///
-/// Neither the batch nor a server withdrawal is authority to change local facts
-/// or promote an account.
+/// Apply a [`BatchState::Ready`] batch's commits, then acknowledge it: with
+/// [`ReferenceRecovery::acknowledge_applied`] when it lists no
+/// [`RecoveryBatch::retired_revisions`], otherwise with
+/// [`ReferenceRecovery::acknowledge_reconciled`] after the wallet's trusted
+/// operation resolved them. Neither the batch nor a server withdrawal is
+/// authority to change local facts or promote an account.
 pub struct RecoveryBatch<AccountId> {
-    /// Source-bound normalized commits, including unfinished page work.
+    /// Source-bound normalized commits, including unfinished page work. Empty
+    /// unless `state` is [`BatchState::Ready`].
     pub commits: Vec<TransparentLedgerCommit<AccountId>>,
     /// How far this pass covered the watch set, and why it stopped. Anything but
     /// [`Outcome::Complete`] is never synchronized.
     pub progress: Progress,
-    /// Revisions previously exported but no longer named by the current map.
-    /// The companion retains them until a batch is acknowledged.
-    reconciliation: Vec<RecoveryRevision>,
+    /// Whether the commits may be applied: only a [`BatchState::Ready`] batch
+    /// has commits or can be acknowledged.
+    pub state: BatchState,
+    /// The retired revisions this batch's commits resolve, as its pass recorded
+    /// them. Acknowledging the batch forgets them.
+    replaced: Vec<RecoveryRevision>,
     token: [u8; 32],
 }
 
 impl<A> RecoveryBatch<A> {
-    /// Revisions previously exported but absent from the current publication.
+    /// Exactly the retired provisional revisions this batch resolves: each was
+    /// exported by an earlier batch, is no longer published, and has a successor
+    /// among [`Self::commits`] for the same source at a higher lineage. Empty
+    /// unless `state` is [`BatchState::Ready`].
     ///
-    /// These are notifications, not authority to withdraw wallet evidence. Resolve
-    /// them through independently trusted wallet qualification or rewind controls
-    /// before applying this batch and calling
-    /// [`ReferenceRecovery::acknowledge_reconciled`]. Ordinary acknowledgement
-    /// refuses a batch while this list is nonempty.
+    /// These are notifications, not authority to withdraw wallet evidence. The
+    /// wallet resolves them when it applies every commit through its trusted
+    /// operation, `TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`,
+    /// which qualifies each successor and withdraws its source's older
+    /// provisional evidence in the same wallet transaction. Acknowledge such a
+    /// batch only with [`ReferenceRecovery::acknowledge_reconciled`];
+    /// [`ReferenceRecovery::acknowledge_applied`] refuses it. The trusted
+    /// operation requires `PrivateRequired`, so a caller that cannot use it,
+    /// such as one under `PrivateShadow`, never acknowledges a batch with
+    /// retirements.
+    ///
+    /// Until the batch is acknowledged the companion keeps them: the next pass
+    /// lists them again, with any retirement found since, or is
+    /// [`BatchState::Pending`] while it cannot export their successors. Only a
+    /// publication change forgets them unacknowledged:
+    /// [`RecoveryError::PublicationChanged`] drops those of sources the new map
+    /// no longer names, which no successor can resolve, and the wallet keeps
+    /// their provisional evidence.
     pub fn retired_revisions(&self) -> &[RecoveryRevision] {
-        &self.reconciliation
+        &self.replaced
     }
 }
 
@@ -162,9 +210,73 @@ impl<A> RecoveryBatch<A> {
 /// normalized commit. No method here changes qualification, activation or spending.
 pub struct ReferenceRecovery {
     config: RecoveryConfig,
+    /// The companion binding every derived source includes.
+    binding: [u8; 32],
     store: SqliteStore,
     catalog: Connection,
     pending_export: Option<[u8; 32]>,
+}
+
+/// A filter source that keeps the bytes of the last shard map it served.
+///
+/// A pass normalizes against that map, the one its sync finished with, and
+/// never fetches another: a second fetch can see a newer publication than the
+/// one whose facts the sync stored.
+struct Recorded<'a, F> {
+    inner: &'a mut F,
+    map: Vec<u8>,
+}
+
+impl<'a, F: FilterSource> Recorded<'a, F> {
+    /// Fetches the map a pass starts from, with what it cost.
+    fn fetch(inner: &'a mut F) -> Result<(Self, u64), BoxError> {
+        let (map, cost) = inner.shard_map()?;
+        Ok((Self { inner, map }, cost))
+    }
+
+    /// The last map served.
+    fn map(&self) -> &[u8] {
+        &self.map
+    }
+}
+
+impl<F: FilterSource> FilterSource for Recorded<'_, F> {
+    fn uses_parents(&self) -> bool {
+        self.inner.uses_parents()
+    }
+
+    fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+        let (map, cost) = self.inner.shard_map()?;
+        self.map.clone_from(&map);
+        Ok((map, cost))
+    }
+
+    fn filter(&mut self, shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
+        self.inner.filter(shard_id)
+    }
+
+    fn prefetch(&mut self, shard_ids: &[u64]) {
+        self.inner.prefetch(shard_ids)
+    }
+
+    fn prepare_parents(
+        &mut self,
+        map: &ShardMap,
+        uncached: &[u64],
+        store: &mut dyn WalletStore,
+    ) -> Result<u64, BoxError> {
+        self.inner.prepare_parents(map, uncached, store)
+    }
+
+    fn parent_negative(
+        &mut self,
+        map: &ShardMap,
+        shard_id: u64,
+        scripts: &[Vec<u8>],
+        store: &mut dyn WalletStore,
+    ) -> Result<(bool, u64), BoxError> {
+        self.inner.parent_negative(map, shard_id, scripts, store)
+    }
 }
 
 fn address_script(address: TransparentAddress) -> Vec<u8> {
@@ -177,7 +289,7 @@ fn address_script(address: TransparentAddress) -> Vec<u8> {
         }
     }
 }
-fn block(height: u64) -> Result<BlockHeight, RecoveryError> {
+pub(crate) fn block(height: u64) -> Result<BlockHeight, RecoveryError> {
     Ok(BlockHeight::from(u32::try_from(height).map_err(failure)?))
 }
 pub(crate) fn block_hash(display: &str) -> Result<BlockHash, RecoveryError> {
@@ -213,14 +325,189 @@ fn page_id(shard: u64, digest: &str, script: &[u8], first: u32) -> Vec<u8> {
     hash.update(first.to_le_bytes());
     hash.finalize().to_vec()
 }
-/// The companion's binding: length-prefixed source, account, origin and schema.
-fn binding(parts: [&[u8]; 4]) -> Vec<u8> {
-    let mut hash = Sha256::new();
-    for value in parts {
-        hash.update((value.len() as u64).to_le_bytes());
-        hash.update(value);
+/// The entry `map` publishes for `shard_id`, if any.
+fn shard(map: &ShardMap, shard_id: u64) -> Option<&ShardMapEntry> {
+    usize::try_from(shard_id)
+        .ok()
+        .and_then(|index| map.shards.get(index))
+        .filter(|entry| entry.shard_id == shard_id)
+}
+
+/// The commit a stored fact belongs to, if this pass exports one for its shard.
+///
+/// A fact naming a shard the map does not publish, or a revision the map no
+/// longer names, defers the batch; a stale revision also drops its shard's
+/// commit, whose facts can no longer be complete.
+fn place<'c, A>(
+    commits: &'c mut BTreeMap<u64, TransparentLedgerCommit<A>>,
+    map: &ShardMap,
+    pass: &mut catalog::Pass<'_>,
+    shard_id: u64,
+    digest: &str,
+) -> Option<&'c mut TransparentLedgerCommit<A>> {
+    match shard(map, shard_id) {
+        None => {
+            pass.defer();
+            None
+        }
+        Some(entry) if entry.manifest_digest != digest => {
+            commits.remove(&shard_id);
+            pass.defer();
+            None
+        }
+        Some(_) => commits.get_mut(&shard_id),
     }
-    hash.finalize().to_vec()
+}
+
+/// A batch that is not [`BatchState::Ready`]: no commits, and nothing to
+/// acknowledge.
+fn unready<A>(state: BatchState, progress: Progress) -> RecoveryBatch<A> {
+    RecoveryBatch {
+        commits: vec![],
+        progress,
+        state,
+        replaced: vec![],
+        token: [0; 32],
+    }
+}
+
+/// A [`BatchState::Pending`] batch for a pass that read nothing from a
+/// publication it must wait for. Like the reference client stopping before it
+/// reads anything, it claims no coverage.
+fn behind_unread<A>() -> RecoveryBatch<A> {
+    unready(
+        BatchState::Pending,
+        Progress {
+            covered_through: 0,
+            outcome: Outcome::Behind,
+        },
+    )
+}
+
+/// Whether `ranges` of `address` together cover every height from `from`
+/// through `through`.
+fn spans<'r>(
+    ranges: impl IntoIterator<Item = &'r AddressRange>,
+    address: TransparentAddress,
+    from: BlockHeight,
+    through: BlockHeight,
+) -> bool {
+    let mut ranges: Vec<(u32, u32)> = ranges
+        .into_iter()
+        .filter(|range| range.address == address)
+        .map(|range| (u32::from(range.from), u32::from(range.through)))
+        .collect();
+    ranges.sort_unstable();
+    // The lowest height not covered yet.
+    let mut next = u32::from(from);
+    for (start, end) in ranges {
+        if start > next {
+            break;
+        }
+        if end >= u32::from(through) {
+            return true;
+        }
+        next = next.max(end + 1);
+    }
+    false
+}
+
+/// Completion-only commits for the wallet's pages under a source `published`
+/// does not name, as after a set or origin change.
+///
+/// No commit of such a page's revision follows, and every pending page blocks
+/// its account, so a page is completed under its own revision once `commits`,
+/// under the map's sources, cover each of its addresses over its whole range.
+/// The commit carries nothing else. Its anchor is the wallet's block at the
+/// lower of the revision's publication height and the target, which at the
+/// publication height must be the publication's own block; a page whose
+/// anchor the wallet's chain does not hold waits.
+fn complete_stranded<A: Copy>(
+    watch: &TransparentWatchSet<A>,
+    context: TransparentRecoveryContext<A>,
+    published: &[Published],
+    commits: &[TransparentLedgerCommit<A>],
+    chain: &impl ChainView,
+) -> Result<Vec<TransparentLedgerCommit<A>>, RecoveryError> {
+    let named: BTreeSet<&[u8]> = published
+        .iter()
+        .map(|entry| entry.revision.source.as_slice())
+        .collect();
+    let mut stranded: Vec<TransparentLedgerCommit<A>> = vec![];
+    for page in &watch.pending_pages {
+        // A named source's own revisions settle its pages: a qualified
+        // successor withdraws them.
+        if named.contains(page.revision.source.as_slice()) {
+            continue;
+        }
+        let request = &page.request;
+        let covered = request.addresses.iter().all(|address| {
+            spans(
+                commits.iter().flat_map(|commit| &commit.coverage),
+                *address,
+                request.from,
+                request.through,
+            )
+        });
+        if !covered {
+            continue;
+        }
+        if let Some(commit) = stranded
+            .iter_mut()
+            .find(|commit| commit.revision == page.revision)
+        {
+            commit.completed_pages.push(request.page.clone());
+            continue;
+        }
+        let publication = page.revision.publication;
+        let height = publication.height.min(context.target.height);
+        let Some(hash) = chain.hash_at(u64::from(u32::from(height))) else {
+            continue;
+        };
+        if chain.is_accepted(u64::from(u32::from(height)), &hash) != Acceptance::Accepted {
+            continue;
+        }
+        let hash = block_hash(&hash)?;
+        if height == publication.height && hash != publication.hash {
+            continue;
+        }
+        stranded.push(TransparentLedgerCommit {
+            context,
+            revision: page.revision.clone(),
+            anchor: ChainPoint { height, hash },
+            receives: vec![],
+            spends: vec![],
+            coverage: vec![],
+            unsupported: vec![],
+            opened_pages: vec![],
+            completed_pages: vec![request.page.clone()],
+        });
+    }
+    Ok(stranded)
+}
+
+/// What an acknowledgment must present: the batch's binding, store position,
+/// commits and replaced revisions.
+fn export_token<A>(
+    binding: &[u8; 32],
+    last_commit: u64,
+    commits: &[TransparentLedgerCommit<A>],
+    replaced: &[RecoveryRevision],
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"transparent-reference-export-v2");
+    hash.update(binding);
+    hash.update(last_commit.to_le_bytes());
+    hash.update((commits.len() as u64).to_le_bytes());
+    for commit in commits {
+        hash.update(&commit.revision.source);
+        hash.update(&commit.revision.revision);
+    }
+    for row in replaced {
+        hash.update(&row.source);
+        hash.update(&row.revision);
+    }
+    hash.finalize().into()
 }
 
 /// The lowest height a pass needs the wallet's chain for: the lowest required
@@ -327,6 +614,11 @@ fn sync_target(
 
 impl ReferenceRecovery {
     /// Open a compatible companion store and fence its account, origin and schema binding.
+    ///
+    /// A new companion is created in format `transparent-reference-companion-v2`.
+    /// One in the earlier format, whose lineage was a local counter no recreated
+    /// companion can reproduce, is refused with
+    /// `Invalid("companion format v1; recreate")`.
     pub fn open(path: impl AsRef<Path>, config: RecoveryConfig) -> Result<Self, RecoveryError> {
         require(
             !config.source.is_empty()
@@ -358,115 +650,19 @@ impl ReferenceRecovery {
         catalog
             .busy_timeout(Duration::from_secs(5))
             .map_err(failure)?;
-        catalog.execute_batch("CREATE TABLE IF NOT EXISTS pir_bridge_binding (key TEXT PRIMARY KEY, value BLOB NOT NULL);
-            CREATE TABLE IF NOT EXISTS pir_bridge_revisions (source BLOB NOT NULL CHECK(length(source)=32), revision BLOB NOT NULL CHECK(length(revision)=32),
-                lineage INTEGER NOT NULL CHECK(lineage>0), sealed INTEGER NOT NULL, height INTEGER NOT NULL CHECK(height>=0 AND height<=4294967295), hash BLOB NOT NULL CHECK(length(hash)=32),
-                exported INTEGER NOT NULL DEFAULT 0, current INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(source,revision), UNIQUE(source,lineage));").map_err(failure)?;
-        let tx = catalog
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failure)?;
-        let binding = binding([
+        let binding = catalog::binding([
             &config.source,
             &config.account_binding,
             config.origin.as_bytes(),
             SCHEMA.as_bytes(),
         ]);
-        let prior: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT value FROM pir_bridge_binding WHERE key='account-source'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(failure)?;
-        require(
-            prior.as_ref().is_none_or(|value| *value == binding),
-            "companion account/source/origin/schema binding mismatch",
-        )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO pir_bridge_binding VALUES ('account-source',?1)",
-            [binding],
-        )
-        .map_err(failure)?;
-        tx.commit().map_err(failure)?;
+        catalog::prepare(&mut catalog, &binding)?;
         Ok(Self {
             config,
+            binding,
             store,
             catalog,
             pending_export: None,
-        })
-    }
-
-    fn revision(
-        &mut self,
-        identity: &[u8],
-        entry: &ShardMapEntry,
-    ) -> Result<RecoveryRevision, RecoveryError> {
-        let mut hash = Sha256::new();
-        hash.update(b"transparent-reference-source-v1");
-        hash.update(&self.config.source);
-        hash.update(identity);
-        hash.update(entry.shard_id.to_le_bytes());
-        let source = hash.finalize().to_vec();
-        let mut hash = Sha256::new();
-        hash.update(entry.manifest_digest.as_bytes());
-        hash.update([u8::from(entry.sealed)]);
-        let revision = hash.finalize().to_vec();
-        let height = block(entry.end_height)?;
-        let block_hash = block_hash(&entry.terminal_block_hash)?;
-        let tx = self
-            .catalog
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failure)?;
-        let existing: Option<(u64, bool, u32, Vec<u8>)> = tx.query_row(
-            "SELECT lineage,sealed,height,hash FROM pir_bridge_revisions WHERE source=?1 AND revision=?2",
-            params![source, revision], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional().map_err(failure)?;
-        let lineage = if let Some((lineage, sealed, known_height, known_hash)) = existing {
-            require(
-                sealed == entry.sealed
-                    && known_height == u32::from(height)
-                    && known_hash == block_hash.0,
-                "revision identity contradicts stored publication",
-            )?;
-            lineage
-        } else {
-            let count: u64 = tx
-                .query_row("SELECT COUNT(*) FROM pir_bridge_revisions", [], |r| {
-                    r.get(0)
-                })
-                .map_err(failure)?;
-            require(count < 65536, "retained revision catalog limit reached")?;
-            let prior: u64 = tx
-                .query_row(
-                    "SELECT COALESCE(MAX(lineage),0) FROM pir_bridge_revisions WHERE source=?1",
-                    [&source],
-                    |r| r.get(0),
-                )
-                .map_err(failure)?;
-            let lineage = prior
-                .checked_add(1)
-                .ok_or_else(|| RecoveryError::Invalid("lineage overflow".into()))?;
-            require(lineage <= i64::MAX as u64, "lineage overflow")?;
-            tx.execute("INSERT INTO pir_bridge_revisions(source,revision,lineage,sealed,height,hash) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![source,revision,lineage,entry.sealed,u32::from(height),block_hash.0.as_slice()]).map_err(failure)?;
-            lineage
-        };
-        tx.execute(
-            "UPDATE pir_bridge_revisions SET current=1 WHERE source=?1 AND revision=?2",
-            params![source, revision],
-        )
-        .map_err(failure)?;
-        tx.commit().map_err(failure)?;
-        Ok(RecoveryRevision {
-            source,
-            revision,
-            lineage,
-            sealed: entry.sealed,
-            publication: PublicationAnchor {
-                height,
-                hash: block_hash,
-            },
         })
     }
 
@@ -491,6 +687,21 @@ impl ReferenceRecovery {
     /// holds nothing above it; completing there reports [`Outcome::Behind`].
     /// Otherwise the pass is [`Outcome::Behind`] at once. Commits keep the watch
     /// set's context either way.
+    ///
+    /// The batch is built from the shard map the sync finished with, which is the
+    /// first one fetched unless the sync refreshed it; no further map is fetched.
+    /// Its [`BatchState`] says whether the commits may be applied.
+    ///
+    /// When the first map's set identity no longer continues the one the
+    /// companion's store is bound to, the pass resets the store, keeps the
+    /// catalog, and fails with [`RecoveryError::PublicationChanged`] before the
+    /// sync; retry once with the same companion. If that map ends below the
+    /// store's anchor while `chain` still accepts the anchor, the pass instead
+    /// keeps the store and waits for the map to catch up. That, and any
+    /// divergence the sync itself finds (a shard with pending pages withdrawn,
+    /// or a map refreshed mid-pass that does not continue the first), is a
+    /// [`BatchState::Pending`] batch with [`Outcome::Behind`] that claims no
+    /// coverage, keeping companion and catalog.
     pub fn recover<A, C, F, T>(
         &mut self,
         watch: &TransparentWatchSet<A>,
@@ -521,10 +732,14 @@ impl ReferenceRecovery {
             // wallet's hash for every shard from the map's start, since nothing
             // raises the floor, and the reference client reports a sync with no
             // scripts as unbounded discovery.
-            return self.empty(Progress {
-                covered_through: target.height,
-                outcome: Outcome::Complete,
-            });
+            return self.ready(
+                vec![],
+                vec![],
+                Progress {
+                    covered_through: target.height,
+                    outcome: Outcome::Complete,
+                },
+            );
         }
         require(
             watch.addresses.len() <= self.config.scripts
@@ -545,8 +760,8 @@ impl ReferenceRecovery {
             !filters.uses_parents(),
             "parent filter sources are not supported",
         )?;
-        let (raw_map, map_bytes) = filters.shard_map().map_err(failure)?;
-        let map: ShardMap = serde_json::from_slice(&raw_map).map_err(failure)?;
+        let (mut filters, map_bytes) = Recorded::fetch(filters).map_err(failure)?;
+        let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
         require(
             map.shards.len() <= self.config.shards,
             "publication shard limit exceeded",
@@ -562,6 +777,38 @@ impl ReferenceRecovery {
             geometry.schema == SCHEMA,
             "service serves an unsupported shard schema",
         )?;
+        // The set check the sync would make when binding, made here so that a
+        // changed publication restarts the store rather than stopping the sync.
+        let set = SetIdentity::of_schema(&map, SCHEMA);
+        if self
+            .store
+            .set_identity()
+            .map_err(failure)?
+            .is_some_and(|bound| !bound.continues(&set))
+        {
+            map.check_shape().map_err(failure)?;
+            // As the reference client refuses a map ending below the anchor the
+            // wallet's chain still accepts, a map under another set ending there
+            // is a replica that has not caught up, perhaps still serving the
+            // previous set. Wait for it: a reset would empty the store again
+            // each time such replicas alternate.
+            if let Some(anchor) = self.store.anchor().map_err(failure)?
+                && map
+                    .shards
+                    .last()
+                    .is_none_or(|last| last.end_height < anchor.height)
+                && chain.is_accepted(anchor.height, &anchor.hash) == Acceptance::Accepted
+            {
+                return Ok(behind_unread());
+            }
+            let published = map
+                .shards
+                .iter()
+                .map(|entry| Published::of(&self.binding, &set, entry))
+                .collect::<Result<Vec<_>, _>>()?;
+            catalog::reset(&mut self.catalog, &published)?;
+            return Err(RecoveryError::PublicationChanged);
+        }
         let floor = required_floor(watch, target.height);
         let stored = self.store.anchor().map_err(failure)?;
         let retained = self
@@ -594,30 +841,38 @@ impl ReferenceRecovery {
             max_queries: Some(self.config.queries),
             max_private_bytes: Some(self.config.private_bytes),
         };
-        let report = transparent_wallet::sync_into(
+        let report = match transparent_wallet::sync_into(
             &mut self.store,
             &map,
             map_bytes,
             &geometry,
             &below_floor,
             &mut scripts,
-            filters,
+            &mut filters,
             transport,
             &limits,
             &sync_anchor,
-        )
-        .map_err(failure)?;
-        // A refresh may have replaced the first map. Export only provenance still
-        // named in an independently validated current map; stale facts fail closed.
-        let (raw_map, _) = filters.shard_map().map_err(failure)?;
-        let current_map: ShardMap = serde_json::from_slice(&raw_map).map_err(failure)?;
+        ) {
+            Ok(report) => report,
+            // Not a set change, which was checked above: a lagging replica's map
+            // lacks a shard with pending pages, or a map refreshed mid-pass does
+            // not continue the first. A later pass starts from the publication it
+            // then finds.
+            Err(SyncError::MapDiverged(_)) => return Ok(behind_unread()),
+            Err(other) => return Err(failure(other)),
+        };
+        // A stale revision may have refreshed the map mid-sync. The stored facts
+        // are the ones that map described.
+        let map: ShardMap = serde_json::from_slice(filters.map()).map_err(failure)?;
         require(
-            current_map.shards.len() <= self.config.shards,
+            map.shards.len() <= self.config.shards,
             "publication shard limit exceeded",
         )?;
-        self.normalize(watch, current_map, progress(&report, clamped), chain)
+        self.normalize(watch, map, progress(&report, clamped), chain)
     }
 
+    /// One catalog transaction over `map`: classify its revisions, export the
+    /// companion's facts as commits, and decide the batch's state.
     fn normalize<A: Copy>(
         &mut self,
         watch: &TransparentWatchSet<A>,
@@ -625,42 +880,41 @@ impl ReferenceRecovery {
         progress: Progress,
         chain: &impl ChainView,
     ) -> Result<RecoveryBatch<A>, RecoveryError> {
-        let context = watch.context().expect("validated before retrieval");
-        let Some(identity) = self.store.set_identity().map_err(failure)? else {
+        let context = watch
+            .context()
+            .ok_or_else(|| RecoveryError::Invalid("no locally accepted recovery target".into()))?;
+        let Some(bound) = self.store.set_identity().map_err(failure)? else {
             // The client stopped before binding this companion to a publication
-            // (one behind the target, or an unknown target), so it holds no facts.
-            return self.empty(progress);
+            // (one behind the target, or an unknown target), so its store holds
+            // no facts. A fresh companion has exported nothing either. One whose
+            // store a publication change reset may have, and this pass read
+            // nothing to check that against.
+            if catalog::exported_any(&self.catalog)? {
+                return Ok(unready(BatchState::Pending, progress));
+            }
+            return self.ready(vec![], vec![], progress);
         };
         map.check_shape().map_err(failure)?;
-        require(
-            identity.continues(&transparent_wallet::SetIdentity::of_schema(&map, SCHEMA)),
-            "refreshed publication lineage diverged",
-        )?;
-        let prior: Option<Vec<u8>> = self
-            .catalog
-            .query_row(
-                "SELECT value FROM pir_bridge_binding WHERE key='lineage'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(failure)?;
-        let identity = prior.unwrap_or_else(|| identity.digest().into_bytes());
-        self.catalog
-            .execute(
-                "INSERT OR IGNORE INTO pir_bridge_binding VALUES ('lineage',?1)",
-                [&identity],
-            )
-            .map_err(failure)?;
-        self.catalog
-            .execute("UPDATE pir_bridge_revisions SET current=0", [])
-            .map_err(failure)?;
+        let set = SetIdentity::of_schema(&map, SCHEMA);
+        if !bound.continues(&set) {
+            // `recover` checked the set before its sync, which refreshes only to
+            // maps continuing the first, so this is never the map a sync ended
+            // with. Defer rather than export facts read under another set; the
+            // next pass's set check resets the store.
+            return Ok(unready(BatchState::Pending, progress));
+        }
+        let published = map
+            .shards
+            .iter()
+            .map(|entry| Published::of(&self.binding, &set, entry))
+            .collect::<Result<Vec<_>, _>>()?;
         let target = u64::from(u32::from(context.target.height));
         let floor = required_floor(watch, target);
-        let mut commits = BTreeMap::new();
-        for entry in &map.shards {
-            // Only shards meeting [floor, target]. One ending below the floor holds
-            // nothing the watch set requires, and the wallet holds no hash for it.
+        // Only shards meeting [floor, target]. One ending below the floor holds
+        // nothing the watch set requires, and the wallet holds no hash for it.
+        let mut relevant = vec![];
+        let mut off_branch = false;
+        for (entry, published) in map.shards.iter().zip(&published) {
             if entry.start_height > target || entry.end_height < floor {
                 continue;
             }
@@ -669,30 +923,48 @@ impl ReferenceRecovery {
                 .hash_at(height)
                 .ok_or_else(|| RecoveryError::Invalid("missing independent shard anchor".into()))?;
             require(
-                chain.is_accepted(height, &hash) == Acceptance::Accepted
-                    && (height != entry.end_height || hash == entry.terminal_block_hash),
-                "publication anchor disagrees with accepted chain",
+                chain.is_accepted(height, &hash) == Acceptance::Accepted,
+                "shard anchor is not independently accepted",
             )?;
+            if height == entry.end_height && hash != entry.terminal_block_hash {
+                // The shard ends on a block the wallet's chain does not hold, as
+                // when the publication or the wallet has yet to follow a reorg.
+                // Its facts rest on that branch: export none, and wait.
+                off_branch = true;
+                continue;
+            }
             let anchor = ChainPoint {
                 height: block(height)?,
                 hash: block_hash(&hash)?,
             };
-            let revision = self.revision(&identity, entry)?;
-            commits.insert(
-                entry.shard_id,
-                TransparentLedgerCommit {
-                    context,
-                    revision,
-                    anchor,
-                    receives: vec![],
-                    spends: vec![],
-                    coverage: vec![],
-                    unsupported: vec![],
-                    opened_pages: vec![],
-                    completed_pages: vec![],
-                },
-            );
+            relevant.push((published, anchor));
         }
+        let mut pass = catalog::Pass::begin(&mut self.catalog, &published)?;
+        if off_branch {
+            pass.defer();
+        }
+        let mut commits = BTreeMap::new();
+        // Highest first, so a withdrawal reports the newest contradiction.
+        for (published, anchor) in relevant.into_iter().rev() {
+            if pass.classify(published)? {
+                commits.insert(
+                    published.shard_id,
+                    TransparentLedgerCommit {
+                        context,
+                        revision: published.revision.clone(),
+                        anchor,
+                        receives: vec![],
+                        spends: vec![],
+                        coverage: vec![],
+                        unsupported: vec![],
+                        opened_pages: vec![],
+                        completed_pages: vec![],
+                    },
+                );
+            }
+        }
+        // Stored facts, looked up in the map without assuming the map still
+        // publishes their shard or revision.
         let addresses: BTreeMap<_, _> = watch
             .addresses
             .iter()
@@ -711,18 +983,15 @@ impl ReferenceRecovery {
             if height < u64::from(u32::from(address.required_from)) || height > target {
                 continue;
             }
-            let commit = commits.get_mut(&stored.shard_id).ok_or_else(|| {
-                RecoveryError::Invalid("stored event absent from current map".into())
-            })?;
-            let entry = map
-                .shards
-                .iter()
-                .find(|entry| entry.shard_id == stored.shard_id)
-                .unwrap();
-            require(
-                stored.revision_digest == entry.manifest_digest,
-                "stored event revision withdrawn; retrieve again",
-            )?;
+            let Some(commit) = place(
+                &mut commits,
+                &map,
+                &mut pass,
+                stored.shard_id,
+                &stored.revision_digest,
+            ) else {
+                continue;
+            };
             match stored.event {
                 TransparentEvent::Receive(event) => commit.receives.push(ReceiveEvent {
                     metadata: metadata(event.metadata)?,
@@ -744,103 +1013,104 @@ impl ReferenceRecovery {
         }
         for (script, address) in &addresses {
             for range in self.store.coverage(script).map_err(failure)? {
-                let Some(commit) = commits.get_mut(&range.shard_id) else {
-                    continue;
-                };
-                let entry = map
-                    .shards
-                    .iter()
-                    .find(|entry| entry.shard_id == range.shard_id)
-                    .unwrap();
-                require(
-                    range.revision_digest == entry.manifest_digest,
-                    "coverage revision withdrawn; retrieve again",
-                )?;
                 let from = range
                     .start_height
                     .max(u64::from(u32::from(address.required_from)));
                 let through = range.end_height.min(target);
-                if from <= through {
-                    commit.coverage.push(AddressRange {
-                        address: address.address,
-                        from: block(from)?,
-                        through: block(through)?,
-                    });
+                if from > through {
+                    continue;
                 }
+                let Some(commit) = place(
+                    &mut commits,
+                    &map,
+                    &mut pass,
+                    range.shard_id,
+                    &range.revision_digest,
+                ) else {
+                    continue;
+                };
+                commit.coverage.push(AddressRange {
+                    address: address.address,
+                    from: block(from)?,
+                    through: block(through)?,
+                });
             }
         }
-        let mut pending = BTreeSet::new();
+        let mut opened = BTreeSet::new();
         for page in self.store.pending().map_err(failure)? {
             let Some(address) = addresses.get(&page.script) else {
                 continue;
             };
-            let entry = map
-                .shards
-                .iter()
-                .find(|entry| entry.shard_id == page.shard_id)
-                .ok_or_else(|| RecoveryError::Invalid("pending shard withdrawn".into()))?;
-            require(
-                page.revision_digest == entry.manifest_digest,
-                "pending revision withdrawn",
-            )?;
+            let Some(entry) = shard(&map, page.shard_id) else {
+                pass.defer();
+                continue;
+            };
+            let from = entry
+                .start_height
+                .max(u64::from(u32::from(address.required_from)));
+            let through = entry.end_height.min(target);
+            if from > through {
+                continue;
+            }
+            let Some(commit) = place(
+                &mut commits,
+                &map,
+                &mut pass,
+                page.shard_id,
+                &page.revision_digest,
+            ) else {
+                continue;
+            };
             let id = page_id(
                 page.shard_id,
                 &page.revision_digest,
                 &page.script,
                 page.first_page,
             );
-            let from = entry
-                .start_height
-                .max(u64::from(u32::from(address.required_from)));
-            let through = entry.end_height.min(target);
-            if from <= through {
-                commits
-                    .get_mut(&page.shard_id)
-                    .unwrap()
-                    .opened_pages
-                    .push(PageRequest {
-                        page: id.clone(),
-                        addresses: vec![address.address],
-                        from: block(from)?,
-                        through: block(through)?,
-                    });
-                pending.insert(id);
-            }
+            commit.opened_pages.push(PageRequest {
+                page: id.clone(),
+                addresses: vec![address.address],
+                from: block(from)?,
+                through: block(through)?,
+            });
+            opened.insert(id);
         }
         for page in &watch.pending_pages {
             for commit in commits.values_mut() {
-                if page.revision == commit.revision && !pending.contains(&page.request.page) {
+                if page.revision == commit.revision && !opened.contains(&page.request.page) {
                     // Completion needs coverage, not merely absence of pending work.
                     if page.request.addresses.iter().all(|address| {
-                        commit.coverage.iter().any(|range| {
-                            range.address == *address
-                                && range.from <= page.request.from
-                                && range.through >= page.request.through
-                        })
+                        spans(
+                            &commit.coverage,
+                            *address,
+                            page.request.from,
+                            page.request.through,
+                        )
                     }) {
                         commit.completed_pages.push(page.request.page.clone());
                     }
                 }
             }
         }
-        let mut statement = self.catalog.prepare("SELECT source,revision,lineage,sealed,height,hash FROM pir_bridge_revisions WHERE exported=1 AND current=0 ORDER BY source,lineage").map_err(failure)?;
-        let reconciliation = statement
-            .query_map([], |row| {
-                Ok(RecoveryRevision {
-                    source: row.get(0)?,
-                    revision: row.get(1)?,
-                    lineage: row.get(2)?,
-                    sealed: row.get(3)?,
-                    publication: PublicationAnchor {
-                        height: BlockHeight::from(row.get::<_, u32>(4)?),
-                        hash: BlockHash::from_slice(&row.get::<_, Vec<u8>>(5)?),
-                    },
+        // A revision an earlier batch exported may already be covered in the
+        // wallet, as when the store retrieves it again after a publication
+        // change, and the wallet refuses a page opened over its own coverage.
+        // Hold such a revision back while it opens a page the wallet does not
+        // hold; a later pass exports it once its page work is done.
+        let mut held_back = vec![];
+        for (shard_id, commit) in &commits {
+            let unheld = commit.opened_pages.iter().any(|opened| {
+                !watch.pending_pages.iter().any(|held| {
+                    held.revision == commit.revision && held.request.page == opened.page
                 })
-            })
-            .map_err(failure)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)?;
-        drop(statement);
+            });
+            if unheld && pass.was_exported(&commit.revision)? {
+                held_back.push(*shard_id);
+            }
+        }
+        for shard_id in held_back {
+            commits.remove(&shard_id);
+        }
         let commits: Vec<_> = commits
             .into_values()
             .filter(|commit| {
@@ -851,59 +1121,67 @@ impl ReferenceRecovery {
                     || !commit.completed_pages.is_empty()
             })
             .collect();
-        // Persist the conservative export intent before handing facts to the caller.
-        // Wallet commits and this companion database cannot share a transaction:
-        // a crash before acknowledgment must still report later withdrawal of
-        // any batch that might have reached the wallet. Unapplied intents are safe
-        // to reconcile through the same trusted wallet controls.
-        let tx = self
-            .catalog
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failure)?;
-        for commit in &commits {
-            tx.execute(
-                "UPDATE pir_bridge_revisions SET exported=1 WHERE source=?1 AND revision=?2",
-                params![commit.revision.source, commit.revision.revision],
-            )
-            .map_err(failure)?;
+        let committed: BTreeMap<&[u8], u64> = commits
+            .iter()
+            .map(|commit| (commit.revision.source.as_slice(), commit.revision.lineage))
+            .collect();
+        let replaced = pass.settle(&published, &committed)?;
+        let state = pass.state();
+        let digests: Vec<&str> = map
+            .shards
+            .iter()
+            .map(|entry| entry.manifest_digest.as_str())
+            .collect();
+        if state != BatchState::Ready {
+            pass.finish(&digests)?;
+            return Ok(unready(state, progress));
         }
-        tx.commit().map_err(failure)?;
-        let mut hash = Sha256::new();
-        hash.update(identity);
-        hash.update(self.store.last_commit().map_err(failure)?.to_le_bytes());
-        for commit in &commits {
-            hash.update(&commit.revision.source);
-            hash.update(&commit.revision.revision);
-        }
-        let token = hash.finalize().into();
+        // Completions of pages under sources the map no longer names follow the
+        // commits that cover them. They carry no evidence, so they are not
+        // recorded as exported: no later map could succeed their revisions.
+        let stranded = complete_stranded(watch, context, &published, &commits, chain)?;
+        pass.export(commits.iter().map(|commit| &commit.revision))?;
+        pass.finish(&digests)?;
+        let mut commits = commits;
+        commits.extend(stranded);
+        self.ready(commits, replaced, progress)
+    }
+
+    /// A ready batch, whose token the next acknowledgment must present.
+    fn ready<A>(
+        &mut self,
+        commits: Vec<TransparentLedgerCommit<A>>,
+        replaced: Vec<RecoveryRevision>,
+        progress: Progress,
+    ) -> Result<RecoveryBatch<A>, RecoveryError> {
+        let last_commit = self.store.last_commit().map_err(failure)?;
+        let token = export_token(&self.binding, last_commit, &commits, &replaced);
         self.pending_export = Some(token);
         Ok(RecoveryBatch {
             commits,
             progress,
-            reconciliation,
+            state: BatchState::Ready,
+            replaced,
             token,
         })
     }
 
-    /// A batch exporting nothing, whose token the next acknowledgment must present.
-    fn empty<A>(&mut self, progress: Progress) -> Result<RecoveryBatch<A>, RecoveryError> {
-        let last_commit = self.store.last_commit().map_err(failure)?;
-        let token = Sha256::digest(last_commit.to_le_bytes()).into();
-        self.pending_export = Some(token);
-        Ok(RecoveryBatch {
-            commits: vec![],
-            progress,
-            reconciliation: vec![],
-            token,
-        })
-    }
-
-    /// Acknowledge the latest batch after every wallet commit succeeded.
+    /// Acknowledge the latest batch after every wallet commit succeeded, when it
+    /// lists no retired revision.
     ///
-    /// Refuses batches with retired revisions without changing their durable
-    /// notifications. Use [`Self::acknowledge_reconciled`] only after trusted wallet
-    /// reconciliation succeeds. A stale receipt is also refused. A crash before
-    /// acknowledgement replays the candidate facts; this never grants authority.
+    /// Only a [`BatchState::Ready`] batch from this companion's latest pass, with
+    /// no [`RecoveryBatch::retired_revisions`], is acknowledged. A batch with
+    /// retirements is refused, even when its commits applied, and its durable
+    /// notifications are left unchanged; acknowledge it with
+    /// [`Self::acknowledge_reconciled`] once its commits went through the
+    /// wallet's trusted operation. A [`BatchState::Pending`] or
+    /// [`BatchState::Withdrawn`] batch, or the receipt of an earlier pass, is
+    /// refused too.
+    ///
+    /// The batch's own revisions were recorded as exported before it was
+    /// returned, so a crash before this acknowledgment replays the same candidate
+    /// facts. It never advances a wallet's qualification, coverage or financial
+    /// authority.
     pub fn acknowledge_applied<A>(
         &mut self,
         batch: &RecoveryBatch<A>,
@@ -915,14 +1193,29 @@ impl ReferenceRecovery {
         self.acknowledge_reconciled(batch)
     }
 
-    /// Acknowledge the latest batch after trusted reconciliation and wallet commits.
+    /// Acknowledge the latest batch after its commits went through the wallet's
+    /// trusted operation, resolving its retired revisions.
     ///
-    /// The caller must first resolve every [`RecoveryBatch::retired_revisions`]
-    /// notification through independently trusted wallet controls, then apply all
-    /// commits successfully. Calling this method explicitly confirms both steps;
-    /// it cannot verify the separate wallet transaction. Clears only this batch's
-    /// retired export intents, preserving notifications across failed reconciliation
-    /// or a crash before acknowledgement. A stale receipt is refused.
+    /// Call it only once every commit was applied with
+    /// `TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`,
+    /// which qualifies the successor and withdraws the provisional evidence of
+    /// each [`RecoveryBatch::retired_revisions`] entry in the same wallet
+    /// transaction, and every such transaction committed. Calling it is the
+    /// caller's confirmation of both: the adapter cannot verify the separate
+    /// wallet transaction. A batch without retirements may be acknowledged here
+    /// or with [`Self::acknowledge_applied`].
+    ///
+    /// Only a [`BatchState::Ready`] batch from this companion's latest pass is
+    /// acknowledged; a [`BatchState::Pending`] or [`BatchState::Withdrawn`]
+    /// batch, or the receipt of an earlier pass, is refused. It forgets exactly
+    /// the retired revisions the batch's pass recorded, whatever the caller did
+    /// to the batch's public fields, and prunes the catalog. Until then the
+    /// notifications are durable: after a failed reconciliation or a crash, the
+    /// next pass reports them again, with any retirement found since, or is
+    /// [`BatchState::Pending`] while it cannot export their successors, and
+    /// replaying the trusted operation on its commits changes nothing. The one
+    /// exception is [`RecoveryError::PublicationChanged`], which forgets those
+    /// of sources the new map no longer names.
     ///
     /// This method never qualifies revisions or withdraws wallet evidence itself.
     pub fn acknowledge_reconciled<A>(
@@ -930,28 +1223,14 @@ impl ReferenceRecovery {
         batch: &RecoveryBatch<A>,
     ) -> Result<(), RecoveryError> {
         require(
+            batch.state == BatchState::Ready,
+            "only a ready batch is acknowledged",
+        )?;
+        require(
             self.pending_export == Some(batch.token),
             "export receipt is stale",
         )?;
-        let tx = self
-            .catalog
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failure)?;
-        for retired in &batch.reconciliation {
-            tx.execute(
-                "UPDATE pir_bridge_revisions SET exported=0 WHERE source=?1 AND revision=?2 AND current=0",
-                params![retired.source, retired.revision],
-            )
-            .map_err(failure)?;
-        }
-        for commit in &batch.commits {
-            tx.execute(
-                "UPDATE pir_bridge_revisions SET exported=1 WHERE source=?1 AND revision=?2",
-                params![commit.revision.source, commit.revision.revision],
-            )
-            .map_err(failure)?;
-        }
-        tx.commit().map_err(failure)?;
+        catalog::acknowledge(&mut self.catalog, &batch.replaced)?;
         self.pending_export = None;
         Ok(())
     }
@@ -960,12 +1239,14 @@ impl ReferenceRecovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::WithdrawnCause;
     use std::cell::Cell;
+    use transparent_filter::SealParameters;
     use transparent_wallet::client::Table;
-    use transparent_wallet::transport::BoxError;
-    use transparent_wallet::{Ledger, SetIdentity, StaticChain, StoredEvent};
+    use transparent_wallet::{Ledger, PendingPages, SetupBlob, SetupKey, StaticChain, StoredEvent};
+    use zcash_client_backend::data_api::transparent_ledger::RecoveryRevision;
     use zcash_client_backend::data_api::transparent_ledger::{
-        AccountLifecycle, WatchOrigin, WatchedAddress,
+        AccountLifecycle, PendingPage, WatchOrigin, WatchedAddress,
     };
 
     const MORE: Progress = Progress {
@@ -1160,12 +1441,13 @@ mod tests {
                 .unwrap()
                 .execute(
                     "UPDATE pir_bridge_binding SET value=?1 WHERE key='account-source'",
-                    [binding([
+                    [catalog::binding([
                         &config.source,
                         &config.account_binding,
                         config.origin.as_bytes(),
                         schema.as_bytes(),
-                    ])],
+                    ])
+                    .to_vec()],
                 )
                 .unwrap()
         };
@@ -1461,6 +1743,7 @@ mod tests {
         let first = adapter
             .normalize(&watch, map.clone(), MORE, &StaticChain::from_map(&map))
             .unwrap();
+        assert_eq!(first.state, BatchState::Ready);
         assert_eq!(first.commits.len(), 1);
         let commit = &first.commits[0];
         assert_eq!(commit.anchor.height, block(entry.end_height).unwrap());
@@ -1496,6 +1779,8 @@ mod tests {
                 "controlled fixture reorg",
             )
             .unwrap();
+        // Other sealed content under the same revision number is withdrawn, and
+        // stays withdrawn after a restart.
         let mut replacement = map.clone();
         replacement.shards[0].manifest_digest = "ab".repeat(32);
         let changed = adapter
@@ -1506,10 +1791,9 @@ mod tests {
                 &StaticChain::from_map(&replacement),
             )
             .unwrap();
-        assert_eq!(
-            changed.reconciliation,
-            vec![first.commits[0].revision.clone()]
-        );
+        let withdrawn = BatchState::Withdrawn(WithdrawnCause::Equivocation);
+        assert_eq!(changed.state, withdrawn);
+        assert!(changed.commits.is_empty());
         drop(adapter);
         let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
         let after_restart = adapter
@@ -1520,115 +1804,75 @@ mod tests {
                 &StaticChain::from_map(&replacement),
             )
             .unwrap();
-        assert_eq!(after_restart.reconciliation, changed.reconciliation);
+        assert_eq!(after_restart.state, withdrawn);
+        assert!(adapter.acknowledge_applied(&after_restart).is_err());
     }
 
     #[test]
     fn possible_wallet_export_survives_crash_before_ack_and_withdrawal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("companion.sqlite");
+        let mut map = map();
+        let mut adapter = covering(&path, &map);
+        let batch = pass(&mut adapter, &map);
+        assert_eq!(batch.state, BatchState::Ready);
+        let possibly_applied = batch.commits[1].revision.clone();
+        // The application may have applied this batch, then died before acknowledging it.
+        drop(adapter);
+
+        // The tail is republished. The companion withdrew its old coverage but has
+        // not retrieved the successor, so nothing replaces what may be in the wallet.
+        map.shards[1].revision = 1;
+        map.shards[1].manifest_digest = "5a".repeat(32);
         let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
-        let map = map();
-        let entry = &map.shards[0];
-        let watch = watch();
-        let script = address_script(watch.addresses[0].address);
-        adapter.store.bind_set(&SetIdentity::of(&map)).unwrap();
-        adapter
-            .store
-            .add_scripts(&[ScriptEntry {
-                script: script.clone(),
-                origin: ScriptOrigin::Imported,
-                required_from: map.start_height,
-            }])
-            .unwrap();
-        adapter
-            .store
-            .commit_shard(transparent_wallet::ShardCommit {
-                source_anchor: None,
-                shard_id: entry.shard_id,
-                revision_digest: entry.manifest_digest.clone(),
-                sealed: entry.sealed,
-                start_height: entry.start_height,
-                end_height: entry.end_height,
-                terminal_block_hash: entry.terminal_block_hash.clone(),
-                events: vec![],
-                covered_scripts: vec![script],
-                pending_upsert: vec![],
-                pending_complete: vec![],
-            })
-            .unwrap();
-        let batch = adapter
-            .normalize(&watch, map.clone(), MORE, &StaticChain::from_map(&map))
-            .unwrap();
-        assert_eq!(batch.commits.len(), 1);
-        let possibly_applied = batch.commits[0].revision.clone();
-        // The application may have committed this batch, then died before acknowledging it.
+        withdraw_tail(&mut adapter, &map);
+        let pending = pass(&mut adapter, &map);
+        assert_eq!(pending.state, BatchState::Pending);
+        assert!(pending.commits.is_empty());
+        assert!(adapter.acknowledge_applied(&pending).is_err());
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 1)]);
+        // The export intent survives a restart.
         drop(adapter);
         let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
-        adapter
-            .store
-            .rollback_above(
-                &Anchor {
-                    height: map.start_height - 1,
-                    hash: entry.parent_block_hash.clone(),
-                },
-                "controlled revision withdrawal",
-            )
-            .unwrap();
-        let mut replacement = map;
-        replacement.shards[0].manifest_digest = "ab".repeat(32);
-        let withdrawn = adapter
-            .normalize(
-                &watch,
-                replacement.clone(),
-                MORE,
-                &StaticChain::from_map(&replacement),
-            )
-            .unwrap();
-        assert_eq!(withdrawn.reconciliation, vec![possibly_applied.clone()]);
+        assert_eq!(pass(&mut adapter, &map).state, BatchState::Pending);
+
+        // Once the successor is retrieved it replaces the possibly applied tail.
+        retrieve_tail(&mut adapter, &map);
+        let ready = pass(&mut adapter, &map);
+        assert_eq!(ready.state, BatchState::Ready);
+        let successor = &ready.commits[1].revision;
+        assert_eq!(successor.source, possibly_applied.source);
+        assert_eq!(successor.lineage, possibly_applied.lineage + 1);
+        // A crash before this acknowledgment replays the same batch.
         drop(adapter);
         let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
-        let repeated = adapter
-            .normalize(
-                &watch,
-                replacement.clone(),
-                MORE,
-                &StaticChain::from_map(&replacement),
-            )
-            .unwrap();
-        assert!(repeated.commits.is_empty());
+        let replayed = pass(&mut adapter, &map);
+        assert_eq!(replayed.state, BatchState::Ready);
+        assert_eq!(replayed.commits, ready.commits);
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 1), (1, 2)]);
+        // The possibly applied tail is a notification the wallet must reconcile.
         assert_eq!(
-            repeated.retired_revisions(),
+            replayed.retired_revisions(),
             std::slice::from_ref(&possibly_applied)
         );
         assert!(matches!(
-            adapter.acknowledge_applied(&repeated),
+            adapter.acknowledge_applied(&replayed),
             Err(RecoveryError::Invalid(_))
         ));
         // Rejection must preserve the notification even across another crash.
         drop(adapter);
         let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
-        let repeated = adapter
-            .normalize(
-                &watch,
-                replacement.clone(),
-                MORE,
-                &StaticChain::from_map(&replacement),
-            )
-            .unwrap();
-        assert_eq!(repeated.retired_revisions(), &[possibly_applied]);
+        let replayed = pass(&mut adapter, &map);
+        assert_eq!(replayed.retired_revisions(), &[possibly_applied]);
         assert!(adapter.acknowledge_reconciled(&batch).is_err());
-        adapter.acknowledge_reconciled(&repeated).unwrap();
-        assert!(adapter.acknowledge_reconciled(&repeated).is_err());
-        let acknowledged = adapter
-            .normalize(
-                &watch,
-                replacement.clone(),
-                MORE,
-                &StaticChain::from_map(&replacement),
-            )
-            .unwrap();
-        assert!(acknowledged.reconciliation.is_empty());
+        adapter.acknowledge_reconciled(&replayed).unwrap();
+        assert!(adapter.acknowledge_reconciled(&replayed).is_err());
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 2)]);
+        assert_eq!(cataloged(&adapter), 2);
+        let acknowledged = pass(&mut adapter, &map);
+        assert_eq!(acknowledged.state, BatchState::Ready);
+        assert!(acknowledged.retired_revisions().is_empty());
+        adapter.acknowledge_applied(&acknowledged).unwrap();
     }
 
     #[test]
@@ -1716,7 +1960,7 @@ mod tests {
                 end_height: entry.end_height,
                 terminal_block_hash: entry.terminal_block_hash.clone(),
                 events: vec![],
-                covered_scripts: scripts,
+                covered_scripts: scripts.clone(),
                 pending_upsert: vec![],
                 pending_complete: vec![],
             })
@@ -1724,6 +1968,7 @@ mod tests {
         let first = adapter
             .normalize(&watch, publication.clone(), MORE, &chain)
             .unwrap();
+        assert_eq!(first.state, BatchState::Ready);
         let retired = first.commits[0].revision.clone();
         for commit in &first.commits {
             wallet
@@ -1737,6 +1982,19 @@ mod tests {
             .db_mut()
             .qualify_transparent_revision(&retired)
             .unwrap();
+        let wallet_path = wallet.wallet().conn().path().unwrap().to_owned();
+        // Coverage rows the wallet durably holds under `revision`.
+        let coverage_of = |revision: &RecoveryRevision| -> u64 {
+            Connection::open(&wallet_path)
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM tpir_coverage c JOIN tpir_revisions r ON r.id = c.revision_id
+                     WHERE r.source = ?1 AND r.revision = ?2",
+                    rusqlite::params![revision.source, revision.revision],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
         let before = wallet
             .wallet()
             .db()
@@ -1756,16 +2014,18 @@ mod tests {
                 "fixture withdrawal",
             )
             .unwrap();
+        publication.shards[0].revision += 1;
         publication.shards[0].manifest_digest = "ab".repeat(32);
+        // Until the companion retrieves a successor, the empty replacement keeps
+        // the possibly applied revision's notice and hands the wallet nothing.
         let replacement = adapter
             .normalize(&watch, publication.clone(), MORE, &chain)
             .unwrap();
+        assert_eq!(replacement.state, BatchState::Pending);
         assert!(replacement.commits.is_empty());
-        assert_eq!(
-            replacement.retired_revisions(),
-            std::slice::from_ref(&retired)
-        );
+        assert!(replacement.retired_revisions().is_empty());
         assert!(adapter.acknowledge_applied(&replacement).is_err());
+        assert!(adapter.acknowledge_reconciled(&replacement).is_err());
         assert_eq!(
             wallet
                 .wallet()
@@ -1775,22 +2035,45 @@ mod tests {
             before
         );
 
-        // This controlled fixture independently authorizes the replacement identity.
-        // A publication change alone is never authorization in an application.
-        let successor = RecoveryRevision {
-            revision: Sha256::digest(
-                [publication.shards[0].manifest_digest.as_bytes(), &[0]].concat(),
-            )
-            .to_vec(),
-            lineage: retired.lineage + 1,
-            ..retired.clone()
-        };
+        // Once retrieved, the successor resolves the retired revision.
+        let entry = &publication.shards[0];
+        adapter
+            .store
+            .commit_shard(transparent_wallet::ShardCommit {
+                source_anchor: None,
+                shard_id: entry.shard_id,
+                revision_digest: entry.manifest_digest.clone(),
+                sealed: false,
+                start_height: start,
+                end_height: entry.end_height,
+                terminal_block_hash: entry.terminal_block_hash.clone(),
+                events: vec![],
+                covered_scripts: scripts,
+                pending_upsert: vec![],
+                pending_complete: vec![],
+            })
+            .unwrap();
+        let replacement = adapter
+            .normalize(&watch, publication.clone(), MORE, &chain)
+            .unwrap();
+        assert_eq!(replacement.state, BatchState::Ready);
+        assert_eq!(
+            replacement.retired_revisions(),
+            std::slice::from_ref(&retired)
+        );
+        let successor = replacement.commits[0].clone();
+        assert_eq!(successor.revision.source, retired.source);
+        assert_eq!(successor.revision.lineage, retired.lineage + 1);
+        assert!(adapter.acknowledge_applied(&replacement).is_err());
+
+        // A trusted reconciliation that fails changes nothing, and the notice
+        // survives a crash.
         wallet.wallet().conn().execute_batch("CREATE TEMP TRIGGER fail_reconciliation BEFORE DELETE ON tpir_coverage BEGIN SELECT RAISE(ABORT, 'fixture reconciliation failure'); END;").unwrap();
         assert!(
             wallet
                 .wallet_mut()
                 .db_mut()
-                .qualify_transparent_revision(&successor)
+                .qualify_transparent_revision(&successor.revision)
                 .is_err()
         );
         assert_eq!(
@@ -1806,7 +2089,10 @@ mod tests {
         let replacement = adapter
             .normalize(&watch, publication.clone(), MORE, &chain)
             .unwrap();
-        assert_eq!(replacement.retired_revisions(), &[retired]);
+        assert_eq!(
+            replacement.retired_revisions(),
+            std::slice::from_ref(&retired)
+        );
         assert!(adapter.acknowledge_applied(&replacement).is_err());
 
         wallet
@@ -1814,34 +2100,38 @@ mod tests {
             .conn()
             .execute_batch("DROP TRIGGER fail_reconciliation")
             .unwrap();
+        // This controlled fixture trusts the successor, standing in for the
+        // wallet's trusted operation, which qualifies and applies it in one
+        // transaction. A publication change alone is never authorization in an
+        // application.
         wallet
             .wallet_mut()
             .db_mut()
-            .qualify_transparent_revision(&successor)
+            .qualify_transparent_revision(&successor.revision)
             .unwrap();
-        assert_eq!(
-            wallet
-                .wallet()
-                .db()
-                .transparent_candidate_recovery(account)
-                .unwrap()
-                .covered_through,
-            None
-        );
-        // A reopened wallet must observe the committed reconciliation before acknowledgement.
+        wallet
+            .wallet_mut()
+            .db_mut()
+            .apply_transparent_ledger_commit(successor.clone())
+            .unwrap();
+        // A reopened wallet must observe the committed reconciliation before
+        // acknowledgement: the retired evidence is withdrawn, and the successor
+        // covers the target.
         let reopened = WalletDb::from_connection(
-            Connection::open(wallet.wallet().conn().path().unwrap()).unwrap(),
+            Connection::open(&wallet_path).unwrap(),
             *wallet.network(),
             SystemClock,
             TestRng::seed_from_u64(0),
         )
         .with_transparent_ledger_mode(PrivateShadow);
+        assert_eq!(coverage_of(&retired), 0);
+        assert!(coverage_of(&successor.revision) > 0);
         assert_eq!(
             reopened
                 .transparent_candidate_recovery(account)
                 .unwrap()
                 .covered_through,
-            None
+            Some(target.height)
         );
         adapter.acknowledge_reconciled(&replacement).unwrap();
         drop(adapter);
@@ -1849,8 +2139,40 @@ mod tests {
         let final_batch = adapter
             .normalize(&watch, publication, MORE, &chain)
             .unwrap();
+        assert_eq!(final_batch.state, BatchState::Ready);
         assert!(final_batch.retired_revisions().is_empty());
         adapter.acknowledge_applied(&final_batch).unwrap();
+    }
+
+    #[test]
+    fn spans_needs_contiguous_coverage_of_the_address() {
+        let (ours, theirs) = (
+            TransparentAddress::PublicKeyHash([7; 20]),
+            TransparentAddress::PublicKeyHash([8; 20]),
+        );
+        let range = |address, from: u64, through: u64| AddressRange {
+            address,
+            from: block(from).unwrap(),
+            through: block(through).unwrap(),
+        };
+        let covers = |ranges: &[AddressRange], from, through| {
+            spans(ranges, ours, block(from).unwrap(), block(through).unwrap())
+        };
+        // Adjacent ranges, in any order, cover their union.
+        let adjacent = [range(ours, 20, 29), range(ours, 10, 19)];
+        assert!(covers(&adjacent, 12, 25));
+        assert!(covers(&adjacent, 10, 29));
+        assert!(!covers(&adjacent, 9, 25));
+        assert!(!covers(&adjacent, 12, 30));
+        // A one-block gap, or another address's range filling it, does not.
+        let gap = [
+            range(ours, 10, 19),
+            range(theirs, 20, 20),
+            range(ours, 21, 29),
+        ];
+        assert!(!covers(&gap, 12, 25));
+        assert!(covers(&gap, 21, 25));
+        assert!(!covers(&[], 12, 12));
     }
 
     #[test]
@@ -1992,14 +2314,6 @@ mod tests {
                 .commit_shard(covered(entry, &entry.manifest_digest, end, &script, events))
                 .unwrap();
         }
-        let cataloged = |adapter: &ReferenceRecovery| -> u64 {
-            adapter
-                .catalog
-                .query_row("SELECT COUNT(*) FROM pir_bridge_revisions", [], |r| {
-                    r.get(0)
-                })
-                .unwrap()
-        };
 
         // The wallet's chain starts at the floor, so it has no hash for the low shard.
         watch.addresses[0].required_from = block(high.start_height).unwrap();
@@ -2062,9 +2376,11 @@ mod tests {
                 outcome: Outcome::Complete,
             }
         );
+        assert_eq!(batch.state, BatchState::Ready);
         assert!(batch.commits.is_empty());
         assert_eq!((filters.calls(), shards.calls()), (0, 0));
         assert!(adapter.store.set_identity().unwrap().is_none());
+        assert_eq!(cataloged(&adapter), 0);
         adapter.acknowledge_applied(&batch).unwrap();
         // The target must still be accepted.
         assert!(matches!(
@@ -2228,6 +2544,21 @@ mod tests {
                 }]
             );
         }
+
+        // After a reorg the wallet holds another block at the map's end. The pass
+        // cannot clamp to it and is behind, and the tail's facts, which rest on
+        // the old branch, wait for the publication to follow.
+        let mut reorged = chain.clone();
+        reorged.hashes.insert(t, "aa".repeat(32));
+        let mut filters = CountingFilters::default();
+        let mut shards = CountingShards::serving(SCHEMA);
+        let batch = adapter
+            .recover(&watch, &reorged, &mut filters, &mut shards)
+            .unwrap();
+        assert_eq!((filters.filters, shards.calls()), (0, 1));
+        assert_eq!(batch.progress.outcome, Outcome::Behind);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(batch.commits.is_empty());
     }
 
     #[test]
@@ -2300,5 +2631,2011 @@ mod tests {
             assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 0));
             assert!(adapter.store.set_identity().unwrap().is_none());
         }
+    }
+
+    /// A companion at `path` opened under `config` and bound to `map`, covering
+    /// the watched script on every shard under the revision `map` publishes.
+    fn covering_as(path: &Path, config: RecoveryConfig, map: &ShardMap) -> ReferenceRecovery {
+        let mut adapter = ReferenceRecovery::open(path, config).unwrap();
+        cover(&mut adapter, map);
+        adapter
+    }
+
+    /// Binds the companion's store to `map` and covers the watched script on
+    /// every shard under the revision `map` publishes, as a sync would.
+    fn cover(adapter: &mut ReferenceRecovery, map: &ShardMap) {
+        let script = address_script(watch().addresses[0].address);
+        adapter.store.bind_set(&SetIdentity::of(map)).unwrap();
+        adapter
+            .store
+            .add_scripts(&[ScriptEntry {
+                script: script.clone(),
+                origin: ScriptOrigin::Imported,
+                required_from: map.start_height,
+            }])
+            .unwrap();
+        for entry in &map.shards {
+            let end = (entry.end_height, entry.terminal_block_hash.as_str());
+            adapter
+                .store
+                .commit_shard(covered(entry, &entry.manifest_digest, end, &script, vec![]))
+                .unwrap();
+        }
+    }
+
+    /// Starts a pass from `map`, which must stop at the set check: before any
+    /// filter or private request, with the store reset.
+    fn publication_change(adapter: &mut ReferenceRecovery, map: &ShardMap) {
+        let mut filters = CountingFilters::serving(serde_json::to_vec(map).unwrap());
+        let mut shards = CountingShards::serving(SCHEMA);
+        assert!(matches!(
+            adapter.recover(
+                &watch(),
+                &StaticChain::from_map(map),
+                &mut filters,
+                &mut shards
+            ),
+            Err(RecoveryError::PublicationChanged)
+        ));
+        assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 1));
+        assert_eq!(adapter.store.set_identity().unwrap(), None);
+    }
+
+    /// `(table, rows)` for every table of the companion's store, the catalog's
+    /// excluded, by name.
+    fn store_rows(adapter: &ReferenceRecovery) -> Vec<(String, u64)> {
+        let mut statement = adapter
+            .catalog
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table'
+                 AND name NOT LIKE 'pir_bridge_%' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .unwrap();
+        let tables: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        tables
+            .into_iter()
+            .map(|table| {
+                let rows = adapter
+                    .catalog
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                    .unwrap();
+                (table, rows)
+            })
+            .collect()
+    }
+
+    fn covering(path: &Path, map: &ShardMap) -> ReferenceRecovery {
+        covering_as(path, config(), map)
+    }
+
+    /// Normalizes the fixture watch set against `map`, accepted as the chain.
+    fn pass(adapter: &mut ReferenceRecovery, map: &ShardMap) -> RecoveryBatch<u32> {
+        adapter
+            .normalize(&watch(), map.clone(), MORE, &StaticChain::from_map(map))
+            .unwrap()
+    }
+
+    /// `map` with shard `index` republished as `revision` under `digest`.
+    fn republished(map: &ShardMap, index: usize, revision: u32, digest: String) -> ShardMap {
+        let mut map = map.clone();
+        map.shards[index].revision = revision;
+        map.shards[index].manifest_digest = digest;
+        map
+    }
+
+    /// Rolls the companion's tail facts back, as a sync does when the tail it
+    /// covered is replaced.
+    fn withdraw_tail(adapter: &mut ReferenceRecovery, map: &ShardMap) {
+        let tail = map.shards.last().unwrap();
+        adapter
+            .store
+            .rollback_above(
+                &Anchor {
+                    height: tail.start_height - 1,
+                    hash: tail.parent_block_hash.clone(),
+                },
+                "replaced tail",
+            )
+            .unwrap();
+    }
+
+    /// Replaces the companion's tail facts with coverage under `map`'s tail.
+    fn retrieve_tail(adapter: &mut ReferenceRecovery, map: &ShardMap) {
+        withdraw_tail(adapter, map);
+        let tail = map.shards.last().unwrap();
+        let script = address_script(watch().addresses[0].address);
+        let end = (tail.end_height, tail.terminal_block_hash.as_str());
+        adapter
+            .store
+            .commit_shard(covered(tail, &tail.manifest_digest, end, &script, vec![]))
+            .unwrap();
+    }
+
+    /// `(shard_id, lineage)` of every catalog row recorded as exported.
+    fn exported(adapter: &ReferenceRecovery) -> Vec<(u64, u64)> {
+        let mut statement = adapter
+            .catalog
+            .prepare(
+                "SELECT shard_id, lineage FROM pir_bridge_catalog WHERE exported=1
+                 ORDER BY shard_id, lineage",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Every catalog row as `(source, shard_id, lineage, exported, current)`, so
+    /// a test can tell that a call recorded nothing.
+    fn catalog_rows(adapter: &ReferenceRecovery) -> Vec<(Vec<u8>, u64, u64, bool, bool)> {
+        let mut statement = adapter
+            .catalog
+            .prepare(
+                "SELECT source, shard_id, lineage, exported, current FROM pir_bridge_catalog
+                 ORDER BY source, lineage",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn cataloged(adapter: &ReferenceRecovery) -> u64 {
+        adapter
+            .catalog
+            .query_row("SELECT COUNT(*) FROM pir_bridge_catalog", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn revisions(batch: &RecoveryBatch<u32>) -> Vec<RecoveryRevision> {
+        batch
+            .commits
+            .iter()
+            .map(|commit| commit.revision.clone())
+            .collect()
+    }
+
+    #[test]
+    fn source_identity_binds_account_origin_and_schema() {
+        let map = map();
+        let dir = tempfile::tempdir().unwrap();
+        let sources = |name: &str, config: RecoveryConfig| -> Vec<Vec<u8>> {
+            let mut adapter = covering_as(&dir.path().join(name), config, &map);
+            let batch = pass(&mut adapter, &map);
+            assert_eq!(batch.state, BatchState::Ready);
+            batch
+                .commits
+                .iter()
+                .map(|commit| commit.revision.source.clone())
+                .collect()
+        };
+        let base = sources("base.sqlite", config());
+        assert_eq!(base.len(), 2);
+        assert_ne!(base[0], base[1]);
+        // Reopening the companion derives the same sources.
+        let mut reopened =
+            ReferenceRecovery::open(dir.path().join("base.sqlite"), config()).unwrap();
+        let again: Vec<_> = revisions(&pass(&mut reopened, &map))
+            .into_iter()
+            .map(|revision| revision.source)
+            .collect();
+        assert_eq!(again, base);
+        // Another account or origin derives other sources for every shard.
+        let mut account = config();
+        account.account_binding = vec![2];
+        let mut origin = config();
+        origin.origin = "https://another-origin.test".into();
+        let account = sources("account.sqlite", account);
+        let origin = sources("origin.sqlite", origin);
+        for other in [&account, &origin] {
+            for (theirs, ours) in other.iter().zip(&base) {
+                assert_ne!(theirs, ours);
+            }
+        }
+        assert_ne!(account, origin);
+        // So does another schema under the same account and origin.
+        let config = config();
+        let set = SetIdentity::of_schema(&map, SCHEMA);
+        let schema = |schema: &str| {
+            let binding = catalog::binding([
+                &config.source,
+                &config.account_binding,
+                config.origin.as_bytes(),
+                schema.as_bytes(),
+            ]);
+            catalog::source(&binding, &set, &map.shards[1])
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(schema(SCHEMA), base[1]);
+        assert_ne!(schema("transparent-shard-v10"), base[1]);
+    }
+
+    #[test]
+    fn source_identity_survives_a_new_geometry_tier() {
+        let map = map();
+        let mut grown = map.clone();
+        grown.seal.insert(
+            "recent-1k-2k".into(),
+            SealParameters {
+                max_scripts: 1,
+                max_page_rows: 2,
+                max_txids: 3,
+            },
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        let before = pass(&mut adapter, &map);
+        adapter.acknowledge_applied(&before).unwrap();
+        // The bound companion continues into the grown set with the same sources.
+        let after = pass(&mut adapter, &grown);
+        assert_eq!(after.state, BatchState::Ready);
+        assert_eq!(revisions(&after), revisions(&before));
+        assert_eq!(cataloged(&adapter), 2);
+        // A companion first bound after the tier appeared derives identical triples.
+        let mut recreated = covering(&dir.path().join("recreated.sqlite"), &grown);
+        assert_eq!(revisions(&pass(&mut recreated, &grown)), revisions(&before));
+    }
+
+    #[test]
+    fn a_changed_seal_changes_only_its_geometrys_sources() {
+        let map = map();
+        let (archive, recent) = (&map.shards[0], &map.shards[1]);
+        assert_ne!(archive.geometry, recent.geometry);
+        let mut resealed = map.clone();
+        resealed.seal.get_mut(&recent.geometry).unwrap().max_scripts += 1;
+        let config = config();
+        let binding = catalog::binding([
+            &config.source,
+            &config.account_binding,
+            config.origin.as_bytes(),
+            SCHEMA.as_bytes(),
+        ]);
+        let set = SetIdentity::of_schema(&map, SCHEMA);
+        let reset = SetIdentity::of_schema(&resealed, SCHEMA);
+        let source = |set: &SetIdentity, entry| catalog::source(&binding, set, entry).unwrap();
+        assert_eq!(source(&set, archive), source(&reset, &resealed.shards[0]));
+        assert_ne!(source(&set, recent), source(&reset, &resealed.shards[1]));
+        // A bound companion does not continue into the resealed set.
+        assert!(!set.continues(&reset));
+    }
+
+    #[test]
+    fn a_recreated_companion_distinguishes_a_shifted_shard_boundary() {
+        let original = map();
+        let recent = &original.shards[1];
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("original.sqlite"), &original);
+        let before = pass(&mut adapter, &original);
+        assert_eq!(before.state, BatchState::Ready);
+        let prior = revisions(&before)[1].clone();
+
+        // Re-cutting the archive geometry can reuse a recent shard's id for a
+        // different height range, without changing its geometry or revision
+        // number. Both directions must give that range another source.
+        for start in [recent.start_height - 1, recent.start_height + 1] {
+            let mut recut = original.clone();
+            recut
+                .seal
+                .get_mut(&original.shards[0].geometry)
+                .unwrap()
+                .max_scripts += 1;
+            recut.shards[0].end_height = start - 1;
+            recut.shards[1].start_height = start;
+            recut.shards[1].manifest_digest = "77".repeat(32);
+            recut.check_shape().unwrap();
+            assert!(
+                !SetIdentity::of_schema(&original, SCHEMA)
+                    .continues(&SetIdentity::of_schema(&recut, SCHEMA))
+            );
+
+            let path = dir.path().join(format!("recut-{start}.sqlite"));
+            let mut recreated = covering(&path, &recut);
+            let batch = pass(&mut recreated, &recut);
+            assert_eq!(batch.state, BatchState::Ready);
+            let next = revisions(&batch)[1].clone();
+            assert_eq!(next.lineage, prior.lineage);
+            assert_ne!(next.revision, prior.revision);
+            assert_ne!(next.source, prior.source);
+
+            // Reopening unchanged data still reproduces the same identity.
+            drop(recreated);
+            let mut reopened = ReferenceRecovery::open(&path, config()).unwrap();
+            assert_eq!(revisions(&pass(&mut reopened, &recut))[1], next);
+        }
+    }
+
+    #[test]
+    fn lineage_follows_the_published_revision() {
+        let map = republished(&map(), 1, 7, map().shards[1].manifest_digest.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        let batch = pass(&mut adapter, &map);
+        assert_eq!(batch.state, BatchState::Ready);
+        let lineages: Vec<_> = revisions(&batch)
+            .iter()
+            .map(|revision| revision.lineage)
+            .collect();
+        assert_eq!(lineages, vec![1, 8]);
+        for (revision, entry) in revisions(&batch).iter().zip(&map.shards) {
+            let mut identity = Sha256::new();
+            identity.update(b"transparent-reference-revision-v2");
+            identity.update(entry.manifest_digest.as_bytes());
+            identity.update([u8::from(entry.sealed)]);
+            assert_eq!(revision.revision, identity.finalize().to_vec());
+            assert_eq!(revision.sealed, entry.sealed);
+            assert_eq!(
+                revision.publication.height,
+                block(entry.end_height).unwrap()
+            );
+            assert_eq!(
+                revision.publication.hash,
+                block_hash(&entry.terminal_block_hash).unwrap()
+            );
+        }
+        // A recreated companion reproduces identical triples.
+        let mut recreated = covering(&dir.path().join("recreated.sqlite"), &map);
+        assert_eq!(revisions(&pass(&mut recreated, &map)), revisions(&batch));
+    }
+
+    #[test]
+    fn a_lagging_tail_is_pending_not_withdrawn() {
+        let base = map();
+        let ahead = republished(&base, 1, 5, "a5".repeat(32));
+        let lagging = republished(&base, 1, 3, "a3".repeat(32));
+        // A companion that covers only the sealed shard, so the lagging tail is the
+        // only finding.
+        let dir = tempfile::tempdir().unwrap();
+        let script = address_script(watch().addresses[0].address);
+        let mut adapter = seeded(&dir, &script, base.start_height);
+        let sealed = &base.shards[0];
+        let end = (sealed.end_height, sealed.terminal_block_hash.as_str());
+        adapter
+            .store
+            .commit_shard(covered(
+                sealed,
+                &sealed.manifest_digest,
+                end,
+                &script,
+                vec![],
+            ))
+            .unwrap();
+        let first = pass(&mut adapter, &ahead);
+        assert_eq!(first.state, BatchState::Ready);
+        adapter.acknowledge_applied(&first).unwrap();
+        assert_eq!(cataloged(&adapter), 2);
+        // An unseen tail revision below the one recorded: a lagging replica.
+        let batch = pass(&mut adapter, &lagging);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(batch.commits.is_empty());
+        assert_eq!(cataloged(&adapter), 2);
+        assert!(adapter.acknowledge_applied(&batch).is_err());
+        // Once the replica catches up the same companion is ready again.
+        assert_eq!(pass(&mut adapter, &ahead).state, BatchState::Ready);
+
+        // A map missing the newest shard, whose facts the companion exported.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        let first = pass(&mut adapter, &base);
+        assert_eq!(first.commits.len(), 2);
+        adapter.acknowledge_applied(&first).unwrap();
+        let mut behind = base.clone();
+        behind.shards.pop();
+        let batch = pass(&mut adapter, &behind);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(batch.commits.is_empty());
+        assert_eq!(cataloged(&adapter), 2);
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 1)]);
+
+        // A replica that has not caught up with the tail's seal: it still serves
+        // the tail unsealed, below the sealed revision the companion exported.
+        let mut sealed = republished(&base, 1, 1, "5e".repeat(32));
+        sealed.shards[1].sealed = true;
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &sealed);
+        let first = pass(&mut adapter, &sealed);
+        assert_eq!(first.state, BatchState::Ready);
+        adapter.acknowledge_applied(&first).unwrap();
+        let batch = pass(&mut adapter, &base);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(batch.commits.is_empty());
+        assert_eq!(cataloged(&adapter), 2);
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 2)]);
+        assert_eq!(pass(&mut adapter, &sealed).state, BatchState::Ready);
+    }
+
+    #[test]
+    fn a_regressed_sealed_publication_is_withdrawn() {
+        let mut sealed = map();
+        sealed.shards[1].sealed = true;
+        sealed.shards[1].revision = 4;
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &sealed);
+        let first = pass(&mut adapter, &sealed);
+        assert_eq!(revisions(&first)[1].lineage, 5);
+        adapter.acknowledge_applied(&first).unwrap();
+        let regressed = republished(&sealed, 1, 2, "b2".repeat(32));
+        let batch = pass(&mut adapter, &regressed);
+        assert_eq!(
+            batch.state,
+            BatchState::Withdrawn(WithdrawnCause::Regression)
+        );
+        assert!(batch.commits.is_empty());
+        assert_eq!(cataloged(&adapter), 2);
+        assert!(adapter.acknowledge_applied(&batch).is_err());
+    }
+
+    #[test]
+    fn an_equivocating_revision_is_withdrawn() {
+        let base = map();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        let first = pass(&mut adapter, &base);
+        adapter.acknowledge_applied(&first).unwrap();
+        let equivocation = BatchState::Withdrawn(WithdrawnCause::Equivocation);
+        // Other content under the same revision number.
+        let other = republished(&base, 1, 0, "e0".repeat(32));
+        // The same content sealed under the same revision number.
+        let mut resealed = base.clone();
+        resealed.shards[1].sealed = true;
+        // The same content and revision number ending at another block.
+        let mut moved = base.clone();
+        moved.shards[1].terminal_block_hash = "77".repeat(32);
+        for map in [other, resealed, moved] {
+            let batch = pass(&mut adapter, &map);
+            assert_eq!(batch.state, equivocation);
+            assert!(batch.commits.is_empty());
+        }
+        // Nothing equivocating was recorded: the original publication is still ready.
+        assert_eq!(cataloged(&adapter), 2);
+        assert_eq!(pass(&mut adapter, &base).state, BatchState::Ready);
+    }
+
+    #[test]
+    fn a_changed_sealed_revision_is_withdrawn() {
+        let base = map();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        let first = pass(&mut adapter, &base);
+        adapter.acknowledge_applied(&first).unwrap();
+        // The exported sealed shard is published again with other content.
+        let changed = republished(&base, 0, 1, "c1".repeat(32));
+        let batch = pass(&mut adapter, &changed);
+        assert_eq!(
+            batch.state,
+            BatchState::Withdrawn(WithdrawnCause::ChangedSealed)
+        );
+        assert!(batch.commits.is_empty());
+        assert!(adapter.acknowledge_applied(&batch).is_err());
+    }
+
+    #[test]
+    fn an_exported_shard_under_another_geometry_is_retired() {
+        let base = map();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        let first = pass(&mut adapter, &base);
+        adapter.acknowledge_applied(&first).unwrap();
+        // The tail is republished under the archive geometry, so another source.
+        let mut regeometried = republished(&base, 1, 1, "f1".repeat(32));
+        regeometried.shards[1].geometry = base.shards[0].geometry.clone();
+        retrieve_tail(&mut adapter, &regeometried);
+        let batch = pass(&mut adapter, &regeometried);
+        assert_eq!(batch.state, BatchState::Withdrawn(WithdrawnCause::Retired));
+        assert!(batch.commits.is_empty());
+    }
+
+    #[test]
+    fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
+        let map = map();
+        let mut resealed = map.clone();
+        resealed
+            .seal
+            .get_mut(&map.shards[1].geometry)
+            .unwrap()
+            .max_scripts += 1;
+        let (sealed, tail) = (&map.shards[0], &map.shards[1]);
+        let script = address_script(watch().addresses[0].address);
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        // Every store table holds something: a receive and its spend, a pending
+        // page, cached filter and setup, and a committed anchor.
+        let receive = TransparentEvent::Receive(transparent_events::ReceiveEvent {
+            metadata: None,
+            height: sealed.start_height as u32,
+            txid: transparent_events::Txid([1; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 100,
+            coinbase: false,
+        });
+        let spend = TransparentEvent::Spend(transparent_events::SpendEvent {
+            metadata: None,
+            height: sealed.start_height as u32 + 1,
+            spending_txid: transparent_events::Txid([2; 32]),
+            transaction_index: 2,
+            input_index: 0,
+            spent_txid: transparent_events::Txid([1; 32]),
+            spent_output_index: 0,
+        });
+        let end = (sealed.end_height, sealed.terminal_block_hash.as_str());
+        let mut events = covered(
+            sealed,
+            &sealed.manifest_digest,
+            end,
+            &script,
+            vec![receive, spend],
+        );
+        events.covered_scripts.clear();
+        adapter.store.commit_shard(events).unwrap();
+        let end = (tail.end_height, tail.terminal_block_hash.as_str());
+        let mut open = covered(tail, &tail.manifest_digest, end, &script, vec![]);
+        open.covered_scripts.clear();
+        open.pending_upsert = vec![PendingPages {
+            id: None,
+            shard_id: tail.shard_id,
+            revision_digest: tail.manifest_digest.clone(),
+            script: script.clone(),
+            first_page: 3,
+            page_count: 0,
+            inline: vec![],
+            next_ordinal: 0,
+            attempts: 0,
+            validated_events: 0,
+            boundary: None,
+            target_anchor: None,
+        }];
+        adapter.store.commit_shard(open).unwrap();
+        adapter
+            .store
+            .put_filter(&sealed.manifest_digest, "ff", true, b"filter")
+            .unwrap();
+        adapter
+            .store
+            .put_setup(
+                &SetupKey {
+                    set_digest: "set".into(),
+                    revision_digest: sealed.manifest_digest.clone(),
+                    table: Table::Directory,
+                    segment: 0,
+                },
+                &SetupBlob {
+                    public_params_base64: "AA==".into(),
+                    public_params_sha256: "00".into(),
+                },
+            )
+            .unwrap();
+        let anchor = Anchor {
+            height: tail.end_height,
+            hash: tail.terminal_block_hash.clone(),
+        };
+        adapter
+            .store
+            .commit_anchor(&anchor, tail.end_height, tail.end_height)
+            .unwrap();
+        let first = pass(&mut adapter, &map);
+        assert_eq!(first.state, BatchState::Ready);
+        assert_eq!(first.commits[0].receives.len(), 1);
+        assert_eq!(first.commits[1].opened_pages.len(), 1);
+        adapter.acknowledge_applied(&first).unwrap();
+        let original = revisions(&first);
+        // Facts read under the bound set are never exported under another one.
+        let deferred = adapter
+            .normalize(
+                &watch(),
+                resealed.clone(),
+                MORE,
+                &StaticChain::from_map(&resealed),
+            )
+            .unwrap();
+        assert_eq!(deferred.state, BatchState::Pending);
+        assert!(deferred.commits.is_empty());
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 1)]);
+        let held = store_rows(&adapter);
+        assert_eq!(held.len(), 9);
+        for (table, rows) in held {
+            assert!(rows > 0, "{table}");
+        }
+
+        // A pass starting from the resealed map stops at the set check, having
+        // emptied every store table but the schema version.
+        publication_change(&mut adapter, &resealed);
+        let reset = store_rows(&adapter);
+        assert_eq!(reset.len(), 9);
+        for (table, rows) in reset {
+            assert_eq!(rows, u64::from(table == "wallet_meta"), "{table}");
+        }
+        let kept: String = adapter
+            .catalog
+            .query_row("SELECT key FROM wallet_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, "schema_version");
+        // The catalog keeps every row. Only the tail's revision, whose source the
+        // resealed map no longer names, stops counting as exported.
+        assert_eq!(cataloged(&adapter), 2);
+        assert_eq!(exported(&adapter), vec![(0, 1)]);
+        drop(adapter);
+
+        // The retried pass, on the same companion reopened, gets past the check
+        // and binds the store to the resealed set.
+        let mut adapter =
+            ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        let mut filters = CountingFilters::serving(serde_json::to_vec(&resealed).unwrap());
+        let mut shards = CountingShards::serving(SCHEMA);
+        assert!(matches!(
+            adapter.recover(
+                &watch(),
+                &StaticChain::from_map(&resealed),
+                &mut filters,
+                &mut shards
+            ),
+            Err(RecoveryError::Failure(_))
+        ));
+        assert!(filters.filters > 0);
+        assert_eq!(
+            adapter.store.set_identity().unwrap(),
+            Some(SetIdentity::of_schema(&resealed, SCHEMA))
+        );
+        // Once the publication is retrieved again, the pass is ready. The
+        // unchanged source reproduces its triple; the resealed geometry's shard
+        // has a new source.
+        cover(&mut adapter, &resealed);
+        let retried = pass(&mut adapter, &resealed);
+        assert_eq!(retried.state, BatchState::Ready);
+        let retried_revisions = revisions(&retried);
+        assert_eq!(retried_revisions[0], original[0]);
+        assert_ne!(retried_revisions[1].source, original[1].source);
+        adapter.acknowledge_applied(&retried).unwrap();
+        // The changed source keeps its highest row, neither current nor exported.
+        assert_eq!(cataloged(&adapter), 3);
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 1)]);
+    }
+
+    #[test]
+    fn an_unchanged_source_keeps_its_history_across_a_publication_change() {
+        let base = map();
+        let (archive, recent) = (&base.shards[0].geometry, &base.shards[1].geometry);
+        // A publisher at sealed revision 4 and tail revision 6.
+        let first = republished(&base, 0, 4, base.shards[0].manifest_digest.clone());
+        let first = republished(&first, 1, 6, base.shards[1].manifest_digest.clone());
+        let resealed = |geometry: &str| {
+            let mut map = first.clone();
+            map.seal.get_mut(geometry).unwrap().max_scripts += 1;
+            map
+        };
+        let exporting = |dir: &tempfile::TempDir| {
+            let mut adapter = covering(&dir.path().join("companion.sqlite"), &first);
+            let batch = pass(&mut adapter, &first);
+            adapter.acknowledge_applied(&batch).unwrap();
+            assert_eq!(exported(&adapter), vec![(0, 5), (1, 7)]);
+            adapter
+        };
+
+        // A re-cut that reseals the tail's geometry and restarts revision
+        // numbers. The sealed shard keeps its source, so its restarted revision
+        // is a regression rather than a lineage that collides in the wallet.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = exporting(&dir);
+        let recut = republished(&resealed(recent), 0, 0, "c0".repeat(32));
+        publication_change(&mut adapter, &recut);
+        assert_eq!(exported(&adapter), vec![(0, 5)]);
+        cover(&mut adapter, &recut);
+        let batch = pass(&mut adapter, &recut);
+        assert_eq!(
+            batch.state,
+            BatchState::Withdrawn(WithdrawnCause::Regression)
+        );
+        assert!(batch.commits.is_empty());
+
+        // A re-cut that reseals the sealed shard's geometry. The tail keeps its
+        // source, so its restarted revisions are pending below the old maximum,
+        // equivocate at it, and replace the exported tail only above it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = exporting(&dir);
+        let recut = resealed(archive);
+        let restarted =
+            |revision: u32| republished(&recut, 1, revision, format!("{revision:064x}"));
+        publication_change(&mut adapter, &restarted(2));
+        assert_eq!(exported(&adapter), vec![(1, 7)]);
+        cover(&mut adapter, &restarted(2));
+        let batch = pass(&mut adapter, &restarted(2));
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(batch.commits.is_empty());
+        retrieve_tail(&mut adapter, &restarted(6));
+        let batch = pass(&mut adapter, &restarted(6));
+        assert_eq!(
+            batch.state,
+            BatchState::Withdrawn(WithdrawnCause::Equivocation)
+        );
+        assert!(batch.commits.is_empty());
+        retrieve_tail(&mut adapter, &restarted(7));
+        let batch = pass(&mut adapter, &restarted(7));
+        assert_eq!(batch.state, BatchState::Ready);
+        assert_eq!(revisions(&batch)[1].lineage, 8);
+        let retired: Vec<_> = batch
+            .retired_revisions()
+            .iter()
+            .map(|revision| revision.lineage)
+            .collect();
+        assert_eq!(retired, vec![7]);
+        assert!(adapter.acknowledge_applied(&batch).is_err());
+        adapter.acknowledge_reconciled(&batch).unwrap();
+        assert_eq!(exported(&adapter), vec![(0, 5), (1, 8)]);
+    }
+
+    #[test]
+    fn a_shard_id_reused_for_other_content_gets_a_new_source() {
+        let before = map();
+        // Resealing the archive geometry re-shards it: its shard ends later, and
+        // shard id 1 names other content under the same geometry and seal.
+        let mut after = before.clone();
+        after
+            .seal
+            .get_mut(&before.shards[0].geometry)
+            .unwrap()
+            .max_scripts += 1;
+        let moved = "3c".repeat(32);
+        after.shards[0].end_height += 100;
+        after.shards[0].terminal_block_hash = moved.clone();
+        after.shards[0].manifest_digest = "a0".repeat(32);
+        after.shards[1].start_height += 100;
+        after.shards[1].parent_block_hash = moved;
+        after.shards[1].manifest_digest = "a1".repeat(32);
+        let config = config();
+        let binding = catalog::binding([
+            &config.source,
+            &config.account_binding,
+            config.origin.as_bytes(),
+            SCHEMA.as_bytes(),
+        ]);
+        let source = |map: &ShardMap, entry: &ShardMapEntry| {
+            catalog::source(&binding, &SetIdentity::of_schema(map, SCHEMA), entry).unwrap()
+        };
+        assert_ne!(
+            source(&before, &before.shards[1]),
+            source(&after, &after.shards[1])
+        );
+        // The start height alone tells them apart.
+        let mut unmoved = after.shards[1].clone();
+        unmoved.start_height = before.shards[1].start_height;
+        assert_eq!(source(&before, &before.shards[1]), source(&after, &unmoved));
+
+        // So the new tail, at the revision number the companion exported for
+        // the old one, is a new source after the publication change rather than
+        // an equivocation.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &before);
+        let first = pass(&mut adapter, &before);
+        adapter.acknowledge_applied(&first).unwrap();
+        publication_change(&mut adapter, &after);
+        assert!(exported(&adapter).is_empty());
+        cover(&mut adapter, &after);
+        let batch = pass(&mut adapter, &after);
+        assert_eq!(batch.state, BatchState::Ready);
+        let (old, new) = (revisions(&first), revisions(&batch));
+        assert_eq!(new[1].lineage, old[1].lineage);
+        assert_ne!(new[1].revision, old[1].revision);
+        assert_ne!(new[1].source, old[1].source);
+    }
+
+    /// Page work the store still owes for `script` on `entry`, from `first_page`.
+    fn store_page(entry: &ShardMapEntry, script: &[u8], first_page: u32) -> PendingPages {
+        PendingPages {
+            id: None,
+            shard_id: entry.shard_id,
+            revision_digest: entry.manifest_digest.clone(),
+            script: script.to_vec(),
+            first_page,
+            page_count: 0,
+            inline: vec![],
+            next_ordinal: 0,
+            attempts: 0,
+            validated_events: 0,
+            boundary: None,
+            target_anchor: None,
+        }
+    }
+
+    /// `map` with the seal parameters of `shard`'s geometry changed.
+    fn resealing(map: &ShardMap, shard: usize) -> ShardMap {
+        let mut resealed = map.clone();
+        resealed
+            .seal
+            .get_mut(&map.shards[shard].geometry)
+            .unwrap()
+            .max_scripts += 1;
+        resealed
+    }
+
+    #[test]
+    fn a_page_under_a_source_the_map_no_longer_names_is_completed_once_covered() {
+        let map = map();
+        let (sealed, tail) = (&map.shards[0], &map.shards[1]);
+        let resealed = resealing(&map, 1);
+        let script = address_script(watch().addresses[0].address);
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = seeded(&dir, &script, map.start_height);
+        // The sealed shard is covered; a budget-limited pass left a page on the tail.
+        let end = (sealed.end_height, sealed.terminal_block_hash.as_str());
+        adapter
+            .store
+            .commit_shard(covered(
+                sealed,
+                &sealed.manifest_digest,
+                end,
+                &script,
+                vec![],
+            ))
+            .unwrap();
+        let end = (tail.end_height, tail.terminal_block_hash.as_str());
+        let mut open = covered(tail, &tail.manifest_digest, end, &script, vec![]);
+        open.covered_scripts.clear();
+        open.pending_upsert = vec![store_page(tail, &script, 3)];
+        adapter.store.commit_shard(open).unwrap();
+        let first = pass(&mut adapter, &map);
+        assert_eq!(first.state, BatchState::Ready);
+        let opening = first.commits[1].clone();
+        assert_eq!(opening.opened_pages.len(), 1);
+        adapter.acknowledge_applied(&first).unwrap();
+        // The wallet applied it and holds the page under the tail's revision.
+        let mut holding = watch();
+        holding.pending_pages = vec![PendingPage {
+            request: opening.opened_pages[0].clone(),
+            revision: opening.revision.clone(),
+            target: opening.context.target,
+        }];
+
+        // Resealing the tail's geometry gives the tail a new source, so no
+        // commit of the page's revision follows. While the retried retrieval
+        // covers only the sealed shard, the page stays open.
+        publication_change(&mut adapter, &resealed);
+        adapter.store.bind_set(&SetIdentity::of(&resealed)).unwrap();
+        adapter
+            .store
+            .add_scripts(&[ScriptEntry {
+                script: script.clone(),
+                origin: ScriptOrigin::Imported,
+                required_from: map.start_height,
+            }])
+            .unwrap();
+        let end = (sealed.end_height, sealed.terminal_block_hash.as_str());
+        adapter
+            .store
+            .commit_shard(covered(
+                sealed,
+                &sealed.manifest_digest,
+                end,
+                &script,
+                vec![],
+            ))
+            .unwrap();
+        let chain = StaticChain::from_map(&resealed);
+        let partial = adapter
+            .normalize(&holding, resealed.clone(), MORE, &chain)
+            .unwrap();
+        assert_eq!(partial.state, BatchState::Ready);
+        assert_eq!(revisions(&partial), vec![first.commits[0].revision.clone()]);
+        adapter.acknowledge_applied(&partial).unwrap();
+
+        // Once the batch covers the page's range under the new source, a
+        // completion-only commit under the page's own revision follows the
+        // commits that cover it, anchored at that revision's publication.
+        let end = (tail.end_height, tail.terminal_block_hash.as_str());
+        adapter
+            .store
+            .commit_shard(covered(
+                &resealed.shards[1],
+                &tail.manifest_digest,
+                end,
+                &script,
+                vec![],
+            ))
+            .unwrap();
+        let batch = adapter
+            .normalize(&holding, resealed.clone(), MORE, &chain)
+            .unwrap();
+        assert_eq!(batch.state, BatchState::Ready);
+        assert_eq!(batch.commits.len(), 3);
+        assert_ne!(batch.commits[1].revision.source, opening.revision.source);
+        let completion = &batch.commits[2];
+        assert_eq!(
+            completion,
+            &TransparentLedgerCommit {
+                context: opening.context,
+                revision: opening.revision.clone(),
+                anchor: ChainPoint {
+                    height: block(tail.end_height).unwrap(),
+                    hash: block_hash(&tail.terminal_block_hash).unwrap(),
+                },
+                receives: vec![],
+                spends: vec![],
+                coverage: vec![],
+                unsupported: vec![],
+                opened_pages: vec![],
+                completed_pages: vec![opening.opened_pages[0].page.clone()],
+            }
+        );
+        // It is not recorded as exported, so later passes never settle it
+        // against the map, which publishes its shard under another source.
+        let old_exported: bool = adapter
+            .catalog
+            .query_row(
+                "SELECT exported FROM pir_bridge_catalog WHERE source=?1",
+                [&opening.revision.source],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!old_exported);
+        adapter.acknowledge_applied(&batch).unwrap();
+        let after = pass(&mut adapter, &resealed);
+        assert_eq!(after.state, BatchState::Ready);
+        assert_eq!(revisions(&after), revisions(&batch)[..2].to_vec());
+
+        // A page whose revision's publication block the wallet's chain does
+        // not hold waits.
+        let mut elsewhere = holding.clone();
+        elsewhere.pending_pages[0].revision.publication.hash = BlockHash([0x55; 32]);
+        let waiting = adapter
+            .normalize(&elsewhere, resealed.clone(), MORE, &chain)
+            .unwrap();
+        assert_eq!(waiting.state, BatchState::Ready);
+        assert_eq!(revisions(&waiting), revisions(&after));
+    }
+
+    #[test]
+    fn a_page_under_a_source_the_map_names_is_left_to_its_revisions() {
+        let map = map();
+        let tail = &map.shards[1];
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        let first = pass(&mut adapter, &map);
+        adapter.acknowledge_applied(&first).unwrap();
+        // The wallet holds a page under the tail's first revision, and the
+        // companion covers the tail's successor over the page's range.
+        let mut holding = watch();
+        holding.pending_pages = vec![PendingPage {
+            request: PageRequest {
+                page: vec![1],
+                addresses: vec![holding.addresses[0].address],
+                from: block(tail.start_height).unwrap(),
+                through: block(tail.end_height).unwrap(),
+            },
+            revision: first.commits[1].revision.clone(),
+            target: holding.target.unwrap(),
+        }];
+        let successor = republished(&map, 1, 1, "5a".repeat(32));
+        retrieve_tail(&mut adapter, &successor);
+        // Qualifying the successor withdraws that page in the wallet, which
+        // would refuse a completion under the superseded revision.
+        let batch = adapter
+            .normalize(
+                &holding,
+                successor.clone(),
+                MORE,
+                &StaticChain::from_map(&successor),
+            )
+            .unwrap();
+        assert_eq!(batch.state, BatchState::Ready);
+        assert_eq!(batch.commits.len(), 2);
+        assert_eq!(batch.commits[1].revision.lineage, 2);
+        assert!(
+            batch
+                .commits
+                .iter()
+                .all(|commit| commit.completed_pages.is_empty())
+        );
+    }
+
+    #[test]
+    fn a_reset_store_that_stops_before_binding_is_pending() {
+        let map = map();
+        let t = map.shards.last().unwrap().end_height;
+        let resealed = resealing(&map, 1);
+        // The wallet's target is above the resealed map's end, and its chain
+        // holds another block at that end, so the pass cannot clamp and the
+        // reference client stops before binding the store.
+        let mut watch = watch();
+        let target = ChainPoint {
+            height: block(t + 10).unwrap(),
+            hash: BlockHash([9; 32]),
+        };
+        watch.target = Some(target);
+        let mut chain = StaticChain::from_map(&resealed);
+        chain.hashes.insert(t + 10, target.hash.to_string());
+        chain.hashes.insert(t, "aa".repeat(32));
+        let behind = |adapter: &mut ReferenceRecovery| {
+            let mut filters = CountingFilters::serving(serde_json::to_vec(&resealed).unwrap());
+            let mut shards = CountingShards::serving(SCHEMA);
+            let batch = adapter
+                .recover(&watch, &chain, &mut filters, &mut shards)
+                .unwrap();
+            assert_eq!((filters.filters, shards.calls()), (0, 1));
+            assert_eq!(batch.progress.outcome, Outcome::Behind);
+            assert!(batch.commits.is_empty());
+            assert_eq!(adapter.store.set_identity().unwrap(), None);
+            batch
+        };
+
+        // A fresh companion has exported nothing, so nothing can disagree.
+        let dir = tempfile::tempdir().unwrap();
+        let mut fresh = ReferenceRecovery::open(dir.path().join("fresh.sqlite"), config()).unwrap();
+        assert_eq!(behind(&mut fresh).state, BatchState::Ready);
+
+        // A reset companion still holds exported revisions the pass never
+        // checked against the publication.
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        let first = pass(&mut adapter, &map);
+        adapter.acknowledge_applied(&first).unwrap();
+        publication_change(&mut adapter, &resealed);
+        assert_eq!(exported(&adapter), vec![(0, 1)]);
+        let batch = behind(&mut adapter);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(adapter.acknowledge_applied(&batch).is_err());
+        assert_eq!(exported(&adapter), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn a_revision_exported_before_a_reset_is_held_back_while_it_reopens_a_page() {
+        let map = map();
+        let (sealed, tail) = (&map.shards[0], &map.shards[1]);
+        let resealed = resealing(&map, 1);
+        let address = watch().addresses[0].address;
+        let script = address_script(address);
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        let first = pass(&mut adapter, &map);
+        adapter.acknowledge_applied(&first).unwrap();
+        let (sealed_revision, old_tail) = (&first.commits[0].revision, &first.commits[1].revision);
+
+        // After the reset the store retrieves again. It covers the new tail,
+        // but a budget-limited pass left page work on the sealed shard, whose
+        // source is unchanged and which the wallet already covers.
+        publication_change(&mut adapter, &resealed);
+        adapter.store.bind_set(&SetIdentity::of(&resealed)).unwrap();
+        adapter
+            .store
+            .add_scripts(&[ScriptEntry {
+                script: script.clone(),
+                origin: ScriptOrigin::Imported,
+                required_from: map.start_height,
+            }])
+            .unwrap();
+        let sealed_end = (sealed.end_height, sealed.terminal_block_hash.as_str());
+        let mut open = covered(sealed, &sealed.manifest_digest, sealed_end, &script, vec![]);
+        open.covered_scripts.clear();
+        open.pending_upsert = vec![store_page(sealed, &script, 3)];
+        adapter.store.commit_shard(open).unwrap();
+        let end = (tail.end_height, tail.terminal_block_hash.as_str());
+        adapter
+            .store
+            .commit_shard(covered(
+                &resealed.shards[1],
+                &tail.manifest_digest,
+                end,
+                &script,
+                vec![],
+            ))
+            .unwrap();
+        let chain = StaticChain::from_map(&resealed);
+        // The wallet would refuse that page over its own coverage, so the
+        // sealed shard's revision is held back; the new tail is exported.
+        let batch = pass(&mut adapter, &resealed);
+        assert_eq!(batch.state, BatchState::Ready);
+        assert_eq!(batch.commits.len(), 1);
+        let new_tail = &batch.commits[0].revision;
+        assert!(new_tail.source != sealed_revision.source && new_tail.source != old_tail.source);
+        assert!(batch.commits[0].opened_pages.is_empty());
+        adapter.acknowledge_applied(&batch).unwrap();
+
+        // A page the wallet holds for that revision is replayed instead.
+        let mut holding = watch();
+        holding.pending_pages = vec![PendingPage {
+            request: PageRequest {
+                page: page_id(sealed.shard_id, &sealed.manifest_digest, &script, 3),
+                addresses: vec![address],
+                from: block(sealed.start_height).unwrap(),
+                through: block(sealed.end_height).unwrap(),
+            },
+            revision: sealed_revision.clone(),
+            target: holding.target.unwrap(),
+        }];
+        let replayed = adapter
+            .normalize(&holding, resealed.clone(), MORE, &chain)
+            .unwrap();
+        assert_eq!(replayed.state, BatchState::Ready);
+        assert_eq!(&replayed.commits[0].revision, sealed_revision);
+        assert_eq!(
+            replayed.commits[0].opened_pages,
+            vec![holding.pending_pages[0].request.clone()]
+        );
+
+        // Once the page work is done, the revision is exported again with its
+        // coverage.
+        let pending = adapter.store.pending().unwrap();
+        let mut done = covered(sealed, &sealed.manifest_digest, sealed_end, &script, vec![]);
+        done.pending_complete = vec![pending[0].id.unwrap()];
+        adapter.store.commit_shard(done).unwrap();
+        let batch = pass(&mut adapter, &resealed);
+        assert_eq!(batch.state, BatchState::Ready);
+        assert_eq!(&batch.commits[0].revision, sealed_revision);
+        assert!(batch.commits[0].opened_pages.is_empty());
+        assert_eq!(batch.commits[0].coverage, first.commits[0].coverage);
+    }
+
+    #[test]
+    fn a_map_under_the_previous_set_below_the_anchor_does_not_reset_the_store() {
+        let map = map();
+        let tail = &map.shards[1];
+        let t = tail.end_height;
+        let resealed = resealing(&map, 1);
+        // A companion bound to the new set, synced through the tail's end.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &resealed);
+        let anchor = Anchor {
+            height: t,
+            hash: tail.terminal_block_hash.clone(),
+        };
+        adapter.store.commit_anchor(&anchor, t, t).unwrap();
+        let first = pass(&mut adapter, &resealed);
+        adapter.acknowledge_applied(&first).unwrap();
+        let held = store_rows(&adapter);
+        let catalog = (cataloged(&adapter), exported(&adapter));
+
+        // A replica that has not caught up still serves the previous set and
+        // ends below the anchor: the pass waits, keeping store and catalog.
+        let mut lagging = map.clone();
+        lagging.shards.pop();
+        let mut filters = CountingFilters::serving(serde_json::to_vec(&lagging).unwrap());
+        let mut shards = CountingShards::serving(SCHEMA);
+        let batch = adapter
+            .recover(
+                &watch(),
+                &StaticChain::from_map(&resealed),
+                &mut filters,
+                &mut shards,
+            )
+            .unwrap();
+        assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 1));
+        assert_eq!(batch.state, BatchState::Pending);
+        assert_eq!(
+            batch.progress,
+            Progress {
+                covered_through: 0,
+                outcome: Outcome::Behind,
+            }
+        );
+        assert!(batch.commits.is_empty());
+        assert_eq!(
+            adapter.store.set_identity().unwrap(),
+            Some(SetIdentity::of_schema(&resealed, SCHEMA))
+        );
+        assert_eq!(store_rows(&adapter), held);
+        assert_eq!((cataloged(&adapter), exported(&adapter)), catalog);
+
+        // Once the wallet's chain no longer holds the anchor, as after a reorg,
+        // the same map is a publication change.
+        let mut watch = watch();
+        let target = ChainPoint {
+            height: block(t + 10).unwrap(),
+            hash: BlockHash([9; 32]),
+        };
+        watch.target = Some(target);
+        let mut reorged = StaticChain::from_map(&resealed);
+        reorged.hashes.insert(t + 10, target.hash.to_string());
+        reorged.hashes.insert(t, "aa".repeat(32));
+        let mut filters = CountingFilters::serving(serde_json::to_vec(&lagging).unwrap());
+        let mut shards = CountingShards::serving(SCHEMA);
+        assert!(matches!(
+            adapter.recover(&watch, &reorged, &mut filters, &mut shards),
+            Err(RecoveryError::PublicationChanged)
+        ));
+        assert_eq!(adapter.store.set_identity().unwrap(), None);
+
+        // So is a map under the previous set that reaches the anchor.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &resealed);
+        adapter.store.commit_anchor(&anchor, t, t).unwrap();
+        publication_change(&mut adapter, &map);
+    }
+
+    #[test]
+    fn exported_rows_are_classified_by_the_first_matching_rule() {
+        let base = map();
+        let mut sealed = republished(&base, 1, 1, "5e".repeat(32));
+        sealed.shards[1].sealed = true;
+
+        // A sealed shard published under another source is retired, not changed.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        let first = pass(&mut adapter, &base);
+        adapter.acknowledge_applied(&first).unwrap();
+        let mut moved = base.clone();
+        moved.shards[0].geometry = base.shards[1].geometry.clone();
+        let batch = pass(&mut adapter, &moved);
+        assert_eq!(batch.state, BatchState::Withdrawn(WithdrawnCause::Retired));
+
+        // A sealed shard beyond the map's last shard is pending, not changed.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &sealed);
+        let first = pass(&mut adapter, &sealed);
+        adapter.acknowledge_applied(&first).unwrap();
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 2)]);
+        let mut behind = sealed.clone();
+        behind.shards.pop();
+        let batch = pass(&mut adapter, &behind);
+        assert_eq!(batch.state, BatchState::Pending);
+
+        // A changed sealed shard is withdrawn even when this batch commits its
+        // source at a higher lineage, which would replace an unsealed one.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        let first = pass(&mut adapter, &base);
+        adapter.acknowledge_applied(&first).unwrap();
+        let changed = republished(&base, 0, 1, "c1".repeat(32));
+        adapter
+            .store
+            .rollback_above(
+                &Anchor {
+                    height: base.start_height - 1,
+                    hash: base.shards[0].parent_block_hash.clone(),
+                },
+                "changed sealed shard",
+            )
+            .unwrap();
+        cover(&mut adapter, &changed);
+        let batch = pass(&mut adapter, &changed);
+        assert_eq!(
+            batch.state,
+            BatchState::Withdrawn(WithdrawnCause::ChangedSealed)
+        );
+        assert!(batch.commits.is_empty());
+        // The same row, settled against a commit of its source at a higher lineage.
+        let set = SetIdentity::of_schema(&changed, SCHEMA);
+        let published: Vec<_> = changed
+            .shards
+            .iter()
+            .map(|entry| Published::of(&adapter.binding, &set, entry).unwrap())
+            .collect();
+        assert_eq!(published[0].revision.source, revisions(&first)[0].source);
+        let committed = BTreeMap::from([(published[0].revision.source.as_slice(), 2)]);
+        let mut settling = catalog::Pass::begin(&mut adapter.catalog, &published).unwrap();
+        assert!(settling.settle(&published, &committed).unwrap().is_empty());
+        assert_eq!(
+            settling.state(),
+            BatchState::Withdrawn(WithdrawnCause::ChangedSealed)
+        );
+    }
+
+    #[test]
+    fn retired_revisions_are_pruned_after_acknowledgment() {
+        let mut map = map();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        let first = pass(&mut adapter, &map);
+        adapter.acknowledge_applied(&first).unwrap();
+        for revision in 1..=50u32 {
+            map = republished(&map, 1, revision, format!("{revision:064x}"));
+            retrieve_tail(&mut adapter, &map);
+            let batch = pass(&mut adapter, &map);
+            assert_eq!(batch.state, BatchState::Ready);
+            assert_eq!(revisions(&batch)[1].lineage, u64::from(revision) + 1);
+            assert_eq!(batch.retired_revisions().len(), 1);
+            adapter.acknowledge_reconciled(&batch).unwrap();
+            assert!(cataloged(&adapter) <= map.shards.len() as u64 + 2);
+        }
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 51)]);
+        assert_eq!(cataloged(&adapter), 2);
+    }
+
+    #[test]
+    fn store_caches_keep_only_named_revisions() {
+        let map = map();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        let retired = "0d".repeat(32);
+        let setup = |digest: &str| SetupKey {
+            set_digest: "set".into(),
+            revision_digest: digest.into(),
+            table: Table::Directory,
+            segment: 0,
+        };
+        let named: Vec<&str> = map
+            .shards
+            .iter()
+            .map(|entry| entry.manifest_digest.as_str())
+            .collect();
+        for digest in named.iter().copied().chain([retired.as_str()]) {
+            adapter
+                .store
+                .put_filter(digest, "ff", false, b"filter")
+                .unwrap();
+            adapter
+                .store
+                .put_setup(
+                    &setup(digest),
+                    &SetupBlob {
+                        public_params_base64: "AA==".into(),
+                        public_params_sha256: "00".into(),
+                    },
+                )
+                .unwrap();
+        }
+        let last = adapter.store.last_commit().unwrap();
+        assert!(last > 1);
+        assert_eq!(pass(&mut adapter, &map).state, BatchState::Ready);
+        // Only revisions the map names keep their cached filters and setup.
+        for digest in named {
+            assert!(adapter.store.filter(digest, "ff").unwrap().is_some());
+            assert!(adapter.store.setup(&setup(digest)).unwrap().is_some());
+        }
+        assert!(adapter.store.filter(&retired, "ff").unwrap().is_none());
+        assert!(adapter.store.setup(&setup(&retired)).unwrap().is_none());
+        // The commit log keeps only its last entry, the one the store reads.
+        let commits: u64 = adapter
+            .catalog
+            .query_row("SELECT COUNT(*) FROM commits", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(commits, 1);
+        assert_eq!(adapter.store.last_commit().unwrap(), last);
+    }
+
+    #[test]
+    fn a_version_one_companion_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("companion.sqlite");
+        let config = config();
+        // A v1 companion: a binding with no format, beside the per-companion
+        // revision table.
+        drop(SqliteStore::open(&path).unwrap());
+        let v1 = Connection::open(&path).unwrap();
+        v1.execute_batch(
+            "CREATE TABLE pir_bridge_binding (key TEXT PRIMARY KEY, value BLOB NOT NULL);
+             CREATE TABLE pir_bridge_revisions (source BLOB NOT NULL);",
+        )
+        .unwrap();
+        v1.execute(
+            "INSERT INTO pir_bridge_binding VALUES ('account-source', ?1)",
+            [catalog::binding([
+                &config.source,
+                &config.account_binding,
+                config.origin.as_bytes(),
+                SCHEMA.as_bytes(),
+            ])
+            .to_vec()],
+        )
+        .unwrap();
+        let refused = |path: &Path| {
+            matches!(
+                ReferenceRecovery::open(path, config.clone()),
+                Err(RecoveryError::Invalid(message)) if message == "companion format v1; recreate"
+            )
+        };
+        assert!(refused(&path));
+        // Either mark alone identifies the old format.
+        v1.execute_batch("DROP TABLE pir_bridge_revisions").unwrap();
+        assert!(refused(&path));
+        v1.execute_batch(
+            "INSERT INTO pir_bridge_binding VALUES ('format', 'transparent-reference-companion-v2');
+             CREATE TABLE pir_bridge_revisions (source BLOB NOT NULL);",
+        )
+        .unwrap();
+        assert!(refused(&path));
+        // A recreated companion opens, records its format, and reopens.
+        let fresh = dir.path().join("recreated.sqlite");
+        drop(ReferenceRecovery::open(&fresh, config.clone()).unwrap());
+        let format: String = Connection::open(&fresh)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM pir_bridge_binding WHERE key='format'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(format, "transparent-reference-companion-v2");
+        ReferenceRecovery::open(&fresh, config).unwrap();
+    }
+
+    #[test]
+    fn a_replaced_tail_is_ready_when_its_successor_is_exported() {
+        let map = map();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        let first = pass(&mut adapter, &map);
+        adapter.acknowledge_applied(&first).unwrap();
+        let predecessor = revisions(&first)[1].clone();
+        let successor = republished(&map, 1, 1, "5a".repeat(32));
+        retrieve_tail(&mut adapter, &successor);
+        let batch = pass(&mut adapter, &successor);
+        assert_eq!(batch.state, BatchState::Ready);
+        let replacing = &revisions(&batch)[1];
+        assert_eq!(replacing.source, predecessor.source);
+        assert_eq!(replacing.lineage, predecessor.lineage + 1);
+        assert_eq!(
+            batch.retired_revisions(),
+            std::slice::from_ref(&predecessor)
+        );
+        // The predecessor stays recorded as exported until the wallet acknowledges
+        // reconciling it, and is forgotten then, whatever the caller did to the
+        // batch's commits.
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 1), (1, 2)]);
+        let mut batch = batch;
+        batch.commits.extend(first.commits.iter().cloned());
+        assert!(adapter.acknowledge_applied(&batch).is_err());
+        adapter.acknowledge_reconciled(&batch).unwrap();
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 2)]);
+        assert_eq!(cataloged(&adapter), 2);
+    }
+
+    #[test]
+    fn a_replaced_tail_without_a_retrieved_successor_is_pending() {
+        let map = map();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &map);
+        let first = pass(&mut adapter, &map);
+        adapter.acknowledge_applied(&first).unwrap();
+        let successor = republished(&map, 1, 1, "5a".repeat(32));
+        withdraw_tail(&mut adapter, &successor);
+        let batch = pass(&mut adapter, &successor);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert!(batch.commits.is_empty());
+        assert!(adapter.acknowledge_applied(&batch).is_err());
+        // The successor is recorded, but the predecessor is still the export.
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 1)]);
+        assert_eq!(cataloged(&adapter), 3);
+    }
+
+    #[test]
+    fn a_ready_batch_lists_exactly_the_retirements_its_commits_resolve() {
+        let base = map();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        let first = pass(&mut adapter, &base);
+        assert_eq!(first.state, BatchState::Ready);
+        assert!(first.retired_revisions().is_empty());
+        adapter.acknowledge_applied(&first).unwrap();
+        let original = first.commits[1].revision.clone();
+
+        // The tail is republished, and the batch exporting it is never
+        // acknowledged.
+        let next = republished(&base, 1, 1, "b1".repeat(32));
+        retrieve_tail(&mut adapter, &next);
+        let unacknowledged = pass(&mut adapter, &next);
+        assert_eq!(unacknowledged.state, BatchState::Ready);
+        let intermediate = unacknowledged.commits[1].revision.clone();
+
+        // It is republished again, skipping revision numbers. Until the
+        // successor is retrieved, the batch lists and exports nothing.
+        let last = republished(&base, 1, 4, "b4".repeat(32));
+        withdraw_tail(&mut adapter, &last);
+        let pending = pass(&mut adapter, &last);
+        assert_eq!(pending.state, BatchState::Pending);
+        assert!(pending.commits.is_empty());
+        assert!(pending.retired_revisions().is_empty());
+
+        // Retrieved, the successor resolves both earlier tails, listed exactly
+        // as the wallet holds them; the still published sealed shard is not.
+        retrieve_tail(&mut adapter, &last);
+        let batch = pass(&mut adapter, &last);
+        assert_eq!(batch.state, BatchState::Ready);
+        let successor = &batch.commits[1].revision;
+        assert_eq!(successor.source, original.source);
+        assert_eq!(successor.lineage, 5);
+        let mut listed = batch.retired_revisions().to_vec();
+        listed.sort_by_key(|revision| revision.lineage);
+        assert_eq!(listed, vec![original, intermediate]);
+        assert!(
+            !batch
+                .retired_revisions()
+                .contains(&first.commits[0].revision)
+        );
+
+        // Ordinary acknowledgment refuses it and records nothing; the reconciled
+        // one forgets the earlier tails.
+        let recorded = catalog_rows(&adapter);
+        assert!(matches!(
+            adapter.acknowledge_applied(&batch),
+            Err(RecoveryError::Invalid(_))
+        ));
+        assert_eq!(catalog_rows(&adapter), recorded);
+        adapter.acknowledge_reconciled(&batch).unwrap();
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 5)]);
+
+        // The next batch resolves nothing, and ordinary acknowledgment applies.
+        let after = pass(&mut adapter, &last);
+        assert_eq!(after.state, BatchState::Ready);
+        assert_eq!(after.commits, batch.commits);
+        assert!(after.retired_revisions().is_empty());
+        adapter.acknowledge_applied(&after).unwrap();
+    }
+
+    #[test]
+    fn pending_and_withdrawn_batches_list_nothing_and_refuse_both_acknowledgments() {
+        let base = map();
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
+        let first = pass(&mut adapter, &base);
+        adapter.acknowledge_applied(&first).unwrap();
+        let refused = |adapter: &mut ReferenceRecovery, batch: &RecoveryBatch<u32>| {
+            assert!(batch.commits.is_empty());
+            assert!(batch.retired_revisions().is_empty());
+            let recorded = catalog_rows(adapter);
+            assert!(adapter.acknowledge_applied(batch).is_err());
+            assert!(adapter.acknowledge_reconciled(batch).is_err());
+            assert_eq!(catalog_rows(adapter), recorded);
+        };
+
+        // The tail is republished, and its successor is not retrieved yet.
+        let replaced = republished(&base, 1, 1, "5a".repeat(32));
+        withdraw_tail(&mut adapter, &replaced);
+        let pending = pass(&mut adapter, &replaced);
+        assert_eq!(pending.state, BatchState::Pending);
+        refused(&mut adapter, &pending);
+
+        // Retrieved, the successor would resolve the old tail, but the sealed
+        // shard equivocates.
+        retrieve_tail(&mut adapter, &replaced);
+        let equivocating = republished(&replaced, 0, 0, "e0".repeat(32));
+        let withdrawn = pass(&mut adapter, &equivocating);
+        assert_eq!(
+            withdrawn.state,
+            BatchState::Withdrawn(WithdrawnCause::Equivocation)
+        );
+        refused(&mut adapter, &withdrawn);
+
+        // Neither forgot the old tail: without the equivocation it is listed.
+        let ready = pass(&mut adapter, &replaced);
+        assert_eq!(ready.state, BatchState::Ready);
+        assert_eq!(
+            ready.retired_revisions(),
+            std::slice::from_ref(&first.commits[1].revision)
+        );
+    }
+
+    #[test]
+    fn retired_revisions_survive_until_reconciled_and_replay_identically() {
+        let mut map = map();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("companion.sqlite");
+        let mut adapter = covering(&path, &map);
+        let first = pass(&mut adapter, &map);
+        adapter.acknowledge_applied(&first).unwrap();
+        let original = first.commits[1].revision.clone();
+        map = republished(&map, 1, 1, "5a".repeat(32));
+        retrieve_tail(&mut adapter, &map);
+        let ready = pass(&mut adapter, &map);
+        assert_eq!(ready.retired_revisions(), std::slice::from_ref(&original));
+        let recorded = catalog_rows(&adapter);
+
+        // Replaying the pass, before or after a crash, returns the same batch,
+        // notifications and receipt, and records nothing new.
+        let replayed = pass(&mut adapter, &map);
+        drop(adapter);
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        let reopened = pass(&mut adapter, &map);
+        for batch in [&replayed, &reopened] {
+            assert_eq!(batch.state, BatchState::Ready);
+            assert_eq!(batch.commits, ready.commits);
+            assert_eq!(batch.retired_revisions(), ready.retired_revisions());
+            assert_eq!(batch.token, ready.token);
+        }
+        assert_eq!(catalog_rows(&adapter), recorded);
+        // Without trusted reconciliation the batch stays unacknowledged.
+        assert!(adapter.acknowledge_applied(&reopened).is_err());
+        assert_eq!(catalog_rows(&adapter), recorded);
+
+        // The tail moves again before the wallet reconciled. The newer batch
+        // lists both unacknowledged revisions, and the older receipt is stale.
+        map = republished(&map, 1, 2, "5b".repeat(32));
+        retrieve_tail(&mut adapter, &map);
+        let newer = pass(&mut adapter, &map);
+        assert_eq!(newer.state, BatchState::Ready);
+        let mut lineages: Vec<_> = newer
+            .retired_revisions()
+            .iter()
+            .map(|revision| revision.lineage)
+            .collect();
+        lineages.sort_unstable();
+        assert_eq!(lineages, vec![1, 2]);
+        assert!(newer.retired_revisions().contains(&original));
+        assert!(adapter.acknowledge_reconciled(&reopened).is_err());
+        adapter.acknowledge_reconciled(&newer).unwrap();
+        // A receipt is acknowledged once.
+        assert!(adapter.acknowledge_reconciled(&newer).is_err());
+        assert!(adapter.acknowledge_applied(&newer).is_err());
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 3)]);
+
+        // Once reconciled, replay lists nothing and is idempotent.
+        let settled = pass(&mut adapter, &map);
+        let recorded = catalog_rows(&adapter);
+        let again = pass(&mut adapter, &map);
+        assert_eq!(settled.commits, newer.commits);
+        assert!(settled.retired_revisions().is_empty());
+        assert!(again.retired_revisions().is_empty());
+        assert_eq!(again.token, settled.token);
+        assert_eq!(catalog_rows(&adapter), recorded);
+        adapter.acknowledge_applied(&again).unwrap();
+        // A batch without retirements may also be acknowledged as reconciled.
+        let last = pass(&mut adapter, &map);
+        adapter.acknowledge_reconciled(&last).unwrap();
+    }
+
+    #[test]
+    fn a_publication_change_forgets_retirements_of_sources_it_drops() {
+        let base = map();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("companion.sqlite");
+        let mut adapter = covering(&path, &base);
+        let first = pass(&mut adapter, &base);
+        adapter.acknowledge_applied(&first).unwrap();
+        let next = republished(&base, 1, 1, "5a".repeat(32));
+        retrieve_tail(&mut adapter, &next);
+        let listed = pass(&mut adapter, &next);
+        assert_eq!(listed.state, BatchState::Ready);
+        assert_eq!(
+            listed.retired_revisions(),
+            std::slice::from_ref(&first.commits[1].revision)
+        );
+        assert_eq!(exported(&adapter), vec![(0, 1), (1, 1), (1, 2)]);
+
+        // The wallet crashes before reconciling, and the tail's geometry is
+        // resealed. The reset forgets the listed retirement unacknowledged: no
+        // successor under the dropped source can resolve it.
+        drop(adapter);
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        let resealed = resealing(&next, 1);
+        publication_change(&mut adapter, &resealed);
+        assert_eq!(exported(&adapter), vec![(0, 1)]);
+        assert_eq!(cataloged(&adapter), 3);
+
+        // No later batch lists it, and ordinary acknowledgment applies.
+        cover(&mut adapter, &resealed);
+        let retried = pass(&mut adapter, &resealed);
+        assert_eq!(retried.state, BatchState::Ready);
+        assert!(retried.retired_revisions().is_empty());
+        assert_ne!(
+            retried.commits[1].revision.source,
+            listed.commits[1].revision.source
+        );
+        adapter.acknowledge_applied(&retried).unwrap();
+        assert!(pass(&mut adapter, &resealed).retired_revisions().is_empty());
+    }
+
+    #[test]
+    fn stale_store_facts_drop_their_shard_instead_of_failing() {
+        let map = map();
+        let (sealed, tail) = (&map.shards[0], &map.shards[1]);
+        let script = address_script(watch().addresses[0].address);
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = seeded(&dir, &script, map.start_height);
+        // Coverage and a receive on each shard, and an open page on the tail.
+        let receive = |entry: &ShardMapEntry, txid| {
+            TransparentEvent::Receive(transparent_events::ReceiveEvent {
+                metadata: None,
+                height: entry.start_height as u32,
+                txid: transparent_events::Txid([txid; 32]),
+                transaction_index: 1,
+                output_index: 0,
+                value: 100,
+                coinbase: false,
+            })
+        };
+        let end = (sealed.end_height, sealed.terminal_block_hash.as_str());
+        adapter
+            .store
+            .commit_shard(covered(
+                sealed,
+                &sealed.manifest_digest,
+                end,
+                &script,
+                vec![receive(sealed, 1)],
+            ))
+            .unwrap();
+        let end = (tail.end_height, tail.terminal_block_hash.as_str());
+        let mut open = covered(
+            tail,
+            &tail.manifest_digest,
+            end,
+            &script,
+            vec![receive(tail, 2)],
+        );
+        open.pending_upsert = vec![PendingPages {
+            id: None,
+            shard_id: tail.shard_id,
+            revision_digest: tail.manifest_digest.clone(),
+            script: script.clone(),
+            first_page: 3,
+            page_count: 0,
+            inline: vec![],
+            next_ordinal: 0,
+            attempts: 0,
+            validated_events: 0,
+            boundary: None,
+            target_anchor: None,
+        }];
+        adapter.store.commit_shard(open).unwrap();
+        let first = pass(&mut adapter, &map);
+        assert_eq!(first.state, BatchState::Ready);
+        assert_eq!(first.commits[1].opened_pages.len(), 1);
+        adapter.acknowledge_applied(&first).unwrap();
+
+        // The tail is replaced before the companion retrieves it again, and then
+        // withdrawn from the map altogether: every tail fact is stale.
+        let replaced = republished(&map, 1, 1, "5a".repeat(32));
+        let mut behind = map.clone();
+        behind.shards.pop();
+        for map in [&replaced, &behind] {
+            let batch = pass(&mut adapter, map);
+            assert_eq!(batch.state, BatchState::Pending);
+            assert!(batch.commits.is_empty());
+            assert!(adapter.acknowledge_applied(&batch).is_err());
+        }
+        // A stale fact drops only its own shard's commit.
+        let set = SetIdentity::of_schema(&replaced, SCHEMA);
+        let published: Vec<_> = replaced
+            .shards
+            .iter()
+            .map(|entry| Published::of(&adapter.binding, &set, entry).unwrap())
+            .collect();
+        let mut commits: BTreeMap<u64, TransparentLedgerCommit<u32>> =
+            (0..).zip(first.commits.iter().cloned()).collect();
+        let mut stale = catalog::Pass::begin(&mut adapter.catalog, &published).unwrap();
+        assert!(
+            place(
+                &mut commits,
+                &replaced,
+                &mut stale,
+                0,
+                &sealed.manifest_digest
+            )
+            .is_some()
+        );
+        assert_eq!(stale.state(), BatchState::Ready);
+        assert!(
+            place(
+                &mut commits,
+                &replaced,
+                &mut stale,
+                1,
+                &tail.manifest_digest
+            )
+            .is_none()
+        );
+        assert_eq!(commits.keys().copied().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(stale.state(), BatchState::Pending);
+        drop(stale);
+
+        // Retrieving the replacement repairs the companion.
+        retrieve_tail(&mut adapter, &replaced);
+        assert_eq!(pass(&mut adapter, &replaced).state, BatchState::Ready);
+    }
+
+    /// A filter source that serves `maps` in turn and then repeats the last, and
+    /// answers every filter request with bytes no map names, which the client
+    /// reads as a revision withdrawn mid-sync.
+    struct Republishing {
+        maps: Vec<Vec<u8>>,
+        served: usize,
+        filters: usize,
+    }
+    impl FilterSource for Republishing {
+        fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
+            let map = self.maps[self.served.min(self.maps.len() - 1)].clone();
+            self.served += 1;
+            let cost = map.len() as u64;
+            Ok((map, cost))
+        }
+        fn filter(&mut self, _shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
+            self.filters += 1;
+            Ok((b"withdrawn".to_vec(), 9))
+        }
+    }
+
+    #[test]
+    fn a_publication_diverging_from_the_sync_is_pending_and_keeps_the_companion() {
+        let first = map();
+        let behind_by_divergence = Progress {
+            covered_through: 0,
+            outcome: Outcome::Behind,
+        };
+        let script = address_script(watch().addresses[0].address);
+        // A companion that exported the sealed shard; the tail is still to retrieve.
+        let companion = |dir: &tempfile::TempDir| {
+            let mut adapter = seeded(dir, &script, first.start_height);
+            let sealed = &first.shards[0];
+            let end = (sealed.end_height, sealed.terminal_block_hash.as_str());
+            adapter
+                .store
+                .commit_shard(covered(
+                    sealed,
+                    &sealed.manifest_digest,
+                    end,
+                    &script,
+                    vec![],
+                ))
+                .unwrap();
+            let batch = pass(&mut adapter, &first);
+            assert_eq!(batch.commits.len(), 1);
+            adapter.acknowledge_applied(&batch).unwrap();
+            adapter
+        };
+        // Reading the tail's withdrawn revision makes the sync refresh to `then`.
+        let refreshing = |adapter: &mut ReferenceRecovery, then: &ShardMap| {
+            let mut filters = Republishing {
+                maps: [&first, then]
+                    .map(|map| serde_json::to_vec(map).unwrap())
+                    .to_vec(),
+                served: 0,
+                filters: 0,
+            };
+            let mut shards = CountingShards::serving(SCHEMA);
+            let batch = adapter
+                .recover(
+                    &watch(),
+                    &StaticChain::from_map(&first),
+                    &mut filters,
+                    &mut shards,
+                )
+                .unwrap();
+            assert_eq!((filters.served, filters.filters), (2, 1));
+            batch
+        };
+
+        // The refreshed map republishes the covered sealed shard with other
+        // content under the same revision. The kept catalog sees the
+        // equivocation a recreated one could not, and recovers if the
+        // publisher reverts.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = companion(&dir);
+        let equivocating = republished(&first, 0, 0, "e0".repeat(32));
+        let batch = refreshing(&mut adapter, &equivocating);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert_eq!(batch.progress, behind_by_divergence);
+        assert!(batch.commits.is_empty());
+        assert!(adapter.acknowledge_applied(&batch).is_err());
+        assert_eq!(
+            pass(&mut adapter, &equivocating).state,
+            BatchState::Withdrawn(WithdrawnCause::Equivocation)
+        );
+        assert_eq!(pass(&mut adapter, &first).state, BatchState::Ready);
+
+        // A refreshed map under another set identity leaves the store bound to
+        // the first; the next pass, starting from it, resets the store.
+        let mut resealed = first.clone();
+        resealed
+            .seal
+            .get_mut(&first.shards[1].geometry)
+            .unwrap()
+            .max_scripts += 1;
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = companion(&dir);
+        let batch = refreshing(&mut adapter, &resealed);
+        assert_eq!(batch.state, BatchState::Pending);
+        assert_eq!(batch.progress, behind_by_divergence);
+        assert_eq!(
+            adapter.store.set_identity().unwrap(),
+            Some(SetIdentity::of_schema(&first, SCHEMA))
+        );
+        publication_change(&mut adapter, &resealed);
+        assert_eq!(cataloged(&adapter), 2);
+
+        // A budget-limited pass left a pending page on the tail, and a lagging
+        // replica's map no longer has it. The pass clamps to that map's end and
+        // finds the page's shard withdrawn: the batch is pending, behind, and
+        // the companion keeps its page and catalog.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = companion(&dir);
+        let tail = &first.shards[1];
+        let end = (tail.end_height, tail.terminal_block_hash.as_str());
+        let mut open = covered(tail, &tail.manifest_digest, end, &script, vec![]);
+        open.covered_scripts.clear();
+        open.pending_upsert = vec![PendingPages {
+            id: None,
+            shard_id: tail.shard_id,
+            revision_digest: tail.manifest_digest.clone(),
+            script: script.clone(),
+            first_page: 0,
+            page_count: 0,
+            inline: vec![],
+            next_ordinal: 0,
+            attempts: 0,
+            validated_events: 0,
+            boundary: None,
+            target_anchor: None,
+        }];
+        adapter.store.commit_shard(open).unwrap();
+        let catalog = (cataloged(&adapter), exported(&adapter));
+        let mut behind = first.clone();
+        behind.shards.pop();
+        let mut filters = CountingFilters::serving(serde_json::to_vec(&behind).unwrap());
+        let mut shards = CountingShards::serving(SCHEMA);
+        let batch = adapter
+            .recover(
+                &watch(),
+                &StaticChain::from_map(&first),
+                &mut filters,
+                &mut shards,
+            )
+            .unwrap();
+        assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 1));
+        assert_eq!(batch.state, BatchState::Pending);
+        assert_eq!(batch.progress, behind_by_divergence);
+        assert!(batch.commits.is_empty());
+        assert_eq!(adapter.store.pending().unwrap().len(), 1);
+        assert_eq!(
+            adapter.store.set_identity().unwrap(),
+            Some(SetIdentity::of_schema(&first, SCHEMA))
+        );
+        assert_eq!((cataloged(&adapter), exported(&adapter)), catalog);
+    }
+
+    #[test]
+    fn normalization_uses_the_map_the_sync_finished_with() {
+        let first = map();
+        // The refreshed publication no longer advertises the tail; a later one
+        // republishes it.
+        let mut refreshed = first.clone();
+        refreshed.shards.pop();
+        let later = republished(&first, 1, 1, "5a".repeat(32));
+        // The companion covers the sealed shard; the tail is still to retrieve.
+        let script = address_script(watch().addresses[0].address);
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = seeded(&dir, &script, first.start_height);
+        let sealed = &first.shards[0];
+        let end = (sealed.end_height, sealed.terminal_block_hash.as_str());
+        adapter
+            .store
+            .commit_shard(covered(
+                sealed,
+                &sealed.manifest_digest,
+                end,
+                &script,
+                vec![],
+            ))
+            .unwrap();
+        let mut filters = Republishing {
+            maps: [&first, &refreshed, &later]
+                .map(|map| serde_json::to_vec(map).unwrap())
+                .to_vec(),
+            served: 0,
+            filters: 0,
+        };
+        let mut shards = CountingShards::serving(SCHEMA);
+        let batch = adapter
+            .recover(
+                &watch(),
+                &StaticChain::from_map(&first),
+                &mut filters,
+                &mut shards,
+            )
+            .unwrap();
+        // The tail's filter named a withdrawn revision, so the sync refreshed the
+        // map once and stopped behind it. Nothing fetched another map.
+        assert_eq!((filters.served, filters.filters), (2, 1));
+        assert_eq!(batch.progress.outcome, Outcome::Behind);
+        // The batch describes the refreshed map: the sealed shard only, with the
+        // tail neither cataloged nor exported.
+        assert_eq!(batch.state, BatchState::Ready);
+        assert_eq!(batch.commits.len(), 1);
+        assert_eq!(
+            batch.commits[0].anchor.height,
+            block(sealed.end_height).unwrap()
+        );
+        assert_eq!(cataloged(&adapter), 1);
     }
 }

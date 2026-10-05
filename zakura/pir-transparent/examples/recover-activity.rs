@@ -10,7 +10,7 @@ use std::{collections::BTreeMap, error::Error, fs, path::PathBuf, time::Duration
 use transparent::address::TransparentAddress;
 use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use transparent_wallet::{ChainView, StaticChain};
-use zakura_pir_transparent::{RecoveryConfig, ReferenceRecovery};
+use zakura_pir_transparent::{BatchState, RecoveryConfig, ReferenceRecovery};
 use zcash_client_backend::data_api::{
     Account as _,
     chain::ChainState,
@@ -205,6 +205,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("wallet target differs from independent chain".into());
         }
         let batch = reference.recover(&watch, &chain, &mut filters, &mut transport)?;
+        if let BatchState::Withdrawn(cause) = batch.state {
+            return Err(format!("publication withdrawn: {cause:?}").into());
+        }
+        // Only the wallet's trusted operation resolves retired revisions, and only
+        // `acknowledge_reconciled` acknowledges a batch listing them. This harness
+        // never qualifies, so it stops before applying such a batch and leaves
+        // the notifications in the companion.
         if !batch.retired_revisions().is_empty() {
             return Err(
                 "frozen fixture unexpectedly requires trusted revision reconciliation".into(),
@@ -227,13 +234,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .apply_transparent_ledger_commit(commit.clone())?
                 .window_grew;
         }
-        reference.acknowledge_applied(&batch)?;
-        passes.push(json!({"pass":pass,"receives":receives,"spends":spends,"covered_through":batch.progress.covered_through,
-            "outcome":format!("{:?}",batch.progress.outcome),"window_grew":grew}));
+        // A `Pending` batch has no commits and is not acknowledged. A `Ready` one
+        // without retirements is acknowledged once every commit applied.
+        if batch.state == BatchState::Ready {
+            reference.acknowledge_applied(&batch)?;
+        }
+        passes.push(json!({"pass":pass,"state":format!("{:?}",batch.state),"receives":receives,"spends":spends,
+            "covered_through":batch.progress.covered_through,"outcome":format!("{:?}",batch.progress.outcome),"window_grew":grew}));
         // Exercise durable companion reopen between passes.
         drop(reference);
         reference = ReferenceRecovery::open(&companion_path, config.clone())?;
-        if !grew && batch.progress.covered_through >= u64::from(through) {
+        if batch.state == BatchState::Ready
+            && !grew
+            && batch.progress.covered_through >= u64::from(through)
+        {
             finished = true;
             break;
         }

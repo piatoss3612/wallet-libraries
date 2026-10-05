@@ -1,8 +1,12 @@
 //! Bounded transparent PIR retrieval. Candidate evidence never grants financial authority.
 #[cfg(feature = "wallet")]
+mod catalog;
+#[cfg(feature = "wallet")]
 mod chain;
 #[cfg(feature = "wallet")]
 mod recovery;
+#[cfg(feature = "wallet")]
+pub use catalog::{BatchState, WithdrawnCause};
 #[cfg(feature = "wallet")]
 pub use chain::WalletChain;
 #[cfg(feature = "wallet")]

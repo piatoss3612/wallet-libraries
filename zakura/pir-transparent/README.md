@@ -51,21 +51,126 @@ Every pass has script, publication, query, byte and export bounds. Its
 | `Stalled` | An unknown chain block, unresolved spends or unbounded script discovery. |
 
 The companion store owns reference page continuation and revision-bound caches;
-the wallet store owns candidate evidence, qualification and activation.
-Replaying a pass after a crash is idempotent. Export intent is persisted before
-returning a batch, and revisions a later map no longer names stay recorded in
-the companion until trusted reconciliation is acknowledged. Inspect
-`batch.retired_revisions()` before applying commits. Resolve any notifications
-through independently trusted wallet qualification or rewind controls, apply
-returned commits with the existing wallet writer, then call
-`acknowledge_reconciled`. Retain failures and leave the batch unacknowledged when
-either step fails. For a batch without retirements, apply its commits and call
-`acknowledge_applied`; that method refuses any batch with retirements, including
-an empty replacement batch. The adapter never qualifies a revision, promotes an
-account or authorizes a spend.
-A server's revision counter cannot authorize withdrawal. Reader-schema and
-publication lineage changes fail closed and require a compatible companion
-store.
+the wallet store owns candidate evidence, qualification and activation. The
+adapter never qualifies a revision, promotes an account or authorizes a spend.
+
+Every commit's `RecoveryRevision` is derived from the publication, never
+counted, so a recreated companion reproduces the triples the wallet holds:
+
+- `source` hashes the companion binding with the set-identity fields that never
+  change while the publication continues (shard schema, network, genesis block,
+  profile, envelope version and start height), the shard's geometry, that
+  geometry's seal parameters, the shard id and the shard's start height. A set
+  growing into a new geometry tier changes no existing source. Re-cutting an
+  earlier geometry can move a later shard's start height while reusing its id;
+  that different height range gets a new source.
+- `revision` hashes the shard's manifest digest and whether it is sealed.
+- `lineage` is the published revision number plus one.
+
+The companion catalogs each source's published revisions and records which
+ones a batch exported. Each pass classifies the map its sync finished with,
+without fetching another, and returns a `BatchState`. Commits are returned
+only when it is `Ready`:
+
+| `BatchState` | Meaning |
+| --- | --- |
+| `Ready` | The map agrees with the catalog, and every exported revision is still published or has a successor at a higher lineage in this batch. |
+| `Pending` | A lagging replica (an unsealed revision below one already seen, sealed or not), a map missing a shard, stored facts naming a revision the map no longer names, a shard ending on a block the chain view does not hold, an exported tail whose successor is not retrieved yet, or a publication that diverged from what the sync read (reported as `Behind`). Nothing to apply; a later pass can be ready. |
+| `Withdrawn(cause)` | The publication contradicts the catalog. Nothing to apply. Keep the companion and retry later. |
+
+| `WithdrawnCause` | Meaning |
+| --- | --- |
+| `Regression` | A sealed shard is published below a revision already seen. |
+| `Equivocation` | One revision number is published with other content, seal state or endpoint. |
+| `ChangedSealed` | An exported sealed revision is no longer published, and the map does not merely name an older unsealed revision of its shard. |
+| `Retired` | An exported shard is published under another source, as after a geometry change. |
+
+`Ready` assumes the trusted operation. A successor withdraws its predecessor's
+provisional evidence from the wallet only when the wallet qualifies it and
+applies it in one transaction
+(`TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`).
+`batch.retired_revisions()` lists exactly the predecessors a `Ready` batch
+resolves: provisional revisions an earlier batch exported, which the map no
+longer publishes, and for whose source the batch's commits carry a successor at
+a higher lineage. They are notifications, not authority: the adapter withdraws
+no wallet evidence, and a `Pending` or `Withdrawn` batch lists none.
+Acknowledge a `Ready` batch only after every commit applied:
+
+- Without retirements, call `acknowledge_applied` (or `acknowledge_reconciled`,
+  which also accepts such a batch).
+- With retirements, apply every commit through the trusted operation, which
+  resolves them, then call `acknowledge_reconciled`; `acknowledge_applied`
+  refuses such a batch and changes nothing. The adapter cannot see the wallet's
+  transaction, so calling `acknowledge_reconciled` is the caller's confirmation
+  that each one committed. Acknowledging forgets the retired revisions.
+
+Both refuse a `Pending` or `Withdrawn` batch and the receipt of any pass but the
+latest. Export intent is persisted before a batch is returned, and retired
+revisions stay recorded until acknowledged, so after a failed reconciliation or
+a crash before acknowledgment the next pass reports those notifications again,
+with any retirement found since, and replaying the trusted operation changes
+nothing. A pass that would forget a possibly applied revision stays `Pending`
+until its successor is retrieved. Only a publication change, below, forgets
+retirements unacknowledged: those of sources the new map no longer names, which
+no successor can resolve.
+
+The trusted operation requires `PrivateRequired`, on the handle and durably, and
+qualifies whatever it is given, so call it only for commits from an origin the
+caller trusts. A caller that cannot, as under `PrivateShadow` or with another
+origin, can never acknowledge a batch with retirements: until a pass under
+`PrivateRequired` reconciles them, each later pass that sees a new revision of
+their source adds one more to `retired_revisions()` and one row to the catalog.
+Such a caller should stop passing the account at its first batch with
+retirements instead of applying the same commits again.
+
+Before the sync, a pass checks that the store's set identity continues to the
+shard map's (the same profile, start height, envelope, and seal for every
+geometry in use). When it does not, the pass resets the companion in one
+transaction, emptying every store table but the schema version and clearing the
+export mark of catalog rows whose source the map no longer names, keeps the
+catalog rows, and fails with `RecoveryError::PublicationChanged`. Retry the pass
+once with the same companion. The changed fields are part of every affected
+source, so the retried pass exports those shards under new sources, while each
+unchanged source keeps its catalog history: a publisher that restarted its
+revision numbers is caught as `Withdrawn(Regression)`, `Withdrawn(Equivocation)`
+or `Pending`, never as a lineage that collides in the wallet. The wallet keeps
+the changed sources' old provisional evidence, which nothing supersedes and no
+later batch reports as retired revisions, even one an earlier batch listed and
+nobody acknowledged. A page the wallet holds under a source the
+map no longer names would block its account for good, so once a batch covers the
+page's range under the map's sources, the batch also completes the page in a
+commit of the page's own revision that carries nothing else.
+
+Until the retried pass binds the store again, a reset companion that still
+records exported revisions returns `Pending`. A revision an earlier batch
+exported is held back while the store opens a page on it that the wallet does
+not hold, as when a reset store retrieves it again: the wallet may already
+cover that range, and refuses a page opened over its own coverage.
+
+A map under another set that ends below the store's anchor, while the chain
+view still accepts that anchor, is a replica that has not caught up, perhaps
+still serving the previous set; the pass keeps the store. That, and every other
+divergence the reference client finds, a lagging replica withdrawing a shard
+with pending pages or a map refreshed mid-pass that does not continue the
+first, makes the batch `Pending` with `Outcome::Behind`, keeping the companion
+and catalog; a later pass starts from the publication it then finds.
+
+Never recreate a companion, whether a batch is `Withdrawn` or after
+`PublicationChanged`. A publisher that re-cuts a set without changing its
+identity restarts revision numbers; the catalog reports that as `Regression`,
+`Equivocation` or `Pending`, but a recreated companion cannot detect it, and the
+wallet refuses its colliding revisions as an integrity failure.
+
+The messages of `RecoveryError::Invalid` and `RecoveryError::Failure` may quote
+the companion's transparent history or the caller's transport errors. Log the
+variant only.
+
+Companions are format `transparent-reference-companion-v2`. An earlier
+companion, whose lineage was a local counter, is refused with
+`companion format v1; recreate`. Each pass prunes catalog rows that are neither
+published nor exported, keeping each source's newest row; the store's filter
+and setup caches down to revisions the map names; and the store's commit log
+down to its last entry. Acknowledgment prunes the catalog again.
 
 This is recovery plumbing; sending, Vizor and public transaction-details fetching
 are outside its scope. The headless real-source harness and final qualification
