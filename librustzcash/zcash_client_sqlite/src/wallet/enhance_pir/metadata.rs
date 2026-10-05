@@ -36,10 +36,20 @@ pub(super) fn queue(
             candidate.output_index() as u32,
         )?;
     }
-    conn.execute("INSERT INTO tx_retrieval_queue (txid, query_type)
-        SELECT t.txid, :enhancement FROM transactions t JOIN ironwood_enhance_metadata_queue q ON q.transaction_id = t.id_tx
+    let expected = crate::wallet::transparent_ledger::capture_policy_generation(conn)?;
+    crate::wallet::transparent_ledger::ensure_policy_generation(conn, expected)?;
+    conn.execute(
+        "INSERT INTO tx_retrieval_queue (txid, query_type, policy_generation)
+        SELECT t.txid, :enhancement, :generation FROM transactions t JOIN ironwood_enhance_metadata_queue q ON q.transaction_id = t.id_tx
         WHERE t.id_tx = :tx ON CONFLICT(txid, query_type) DO NOTHING",
-        named_params![":tx": tx_ref.0, ":enhancement": TxQueryType::Enhancement.code()])?;
+        named_params![
+            ":tx": tx_ref.0,
+            ":enhancement": TxQueryType::Enhancement.code(),
+            ":generation": i64::try_from(expected).map_err(|_| {
+                SqliteClientError::CorruptedData("policy_generation does not fit i64".into())
+            })?,
+        ],
+    )?;
     Ok(())
 }
 

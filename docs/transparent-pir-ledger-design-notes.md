@@ -8,6 +8,138 @@ provenance, and authority-snapshot surface. The decisions below are recorded so
 that later phases start from them. They are not implemented contracts. Each
 phase should confirm or revise them alongside the code that uses them.
 
+## Phase 3 outcome
+
+Phase 3 implements candidate recovery and settles these notes as follows.
+
+- **Implemented as written:**
+  - opaque identifiers and lineage;
+  - supersession and accepted-revision matching;
+  - event identities and spend attribution;
+  - unsupported coverage;
+  - pending pages, recorded with their target and scripts;
+  - resuming from durable pages and coverage.
+- **Revised:**
+  - **Recovery bound.** Every watched script is required from the account
+    birthday. This is Roman's call, and it deviates from the architecture,
+    which accepts a birthday only as a justified transparent bound.
+    Completeness is computed from the current birthday, so lowering it makes the
+    account incomplete without a hook.
+  - **Watch-set generation.** It is replaced by per-address checks. A commit
+    must name only addresses the account still watches. New addresses are
+    uncovered rather than invalidating work. Coordinators repeat while the
+    watch set changes or a commit reports `window_grew`.
+  - **Pending-page policy context.** Pages do not store a policy generation.
+    A policy transition deletes them, and a commit checks the generation it
+    captured.
+  - **Commit destination.** Every Phase 3 commit is a candidate commit. Account
+    lifecycle arrives with promotion.
+- **Left open for Phase 4**, settled below: integrity quarantine and trust
+  epochs; qualification and privileged verification; promotion blockers beyond
+  the candidate blockers; history completeness.
+
+## Phase 4 outcome
+
+Phase 4 implements activation for the library and settles these notes as
+follows.
+
+- **Implemented:**
+  - integrity quarantine of the source and every account holding its evidence,
+    in the rejecting transaction, removing their pending pages;
+  - store-held qualification bound to exact revisions (a test and development
+    hook only; empty required intervals can promote without granting funds);
+  - promotion requiring every revision that contributed coverage or events to be
+    qualified, and active commits refusing unqualified revisions;
+  - the commit destination by account lifecycle (candidate or active), captured
+    in the watch set and checked at commit;
+  - promotion blockers for pending pages, unresolved spends, unsupported
+    ranges, incomplete coverage including window growth, an underivable window,
+    quarantine, unqualified revisions, legacy discrepancies, and a scanned
+    chain behind the tip.
+- **Revised:**
+  - **Epochs.** Not implemented. With no way to clear a quarantine or requalify
+    a source, the per-account quarantine epoch and per-source trust epoch would
+    guard nothing. They arrive with privileged verification.
+  - **Pending-page context.** Pages still record only their target and
+    scripts. A transition deletes them, and a lifecycle change makes a commit
+    stale, so the extra context has nothing left to protect.
+  - **Publication lag.** No separate blocker: a revision's publication bounds
+    its anchor, and coverage short of the local target is `IncompleteCoverage`.
+- **Still open:**
+  - privileged verification: clearing quarantine, requalifying, and explaining
+    legacy discrepancies (Phase 6 or later);
+  - history completeness (Phase 5, settled below);
+  - the Vizor transition fence: stopping and draining in-flight public lookups
+    before a transition to `PrivateRequired` commits.
+
+## Phase 5 outcome
+
+Phase 5 implements the library's history read, and settles the history note
+under "Readiness and blockers" as follows.
+
+- **Implemented:** one entry per account, transaction, and supported pool, so
+  an undiscovered effect is explicit. Unknown, zero, and not-applicable fees
+  are distinct. Public discovery is reported as its own completeness state.
+- **Revised:** completeness is derived on every read from stored facts. There
+  is no stored completion marker. Unmined shielded effects require scanning
+  through the tip and a spend link for every known owned nullifier in the
+  stored payload; finding a funding note after ingestion does not itself
+  reconcile its unmined spender.
+- **Still open:**
+  - per-output recipient completeness for external payments, which needs the
+    payload capability in the architecture's capability gate;
+  - a per-account shielded bound for accounts born after the wallet birthday;
+  - upgrading an incoming-viewing-key account to a full viewing key does not
+    recompute nullifiers or rescan, so spends that scanning missed stay
+    unlinked, in balances as in history. Completeness trusts the current key,
+    as balances do.
+
+## Phase 6 outcome
+
+Phase 6 qualifies the library against a block-derived oracle, pre-ledger
+upgrade fixtures, failure injection, and repair, and settles these notes as
+follows.
+
+- **Implemented:** the qualification suite, including WAL recovery before and
+  after commit for candidate commits, promotion, active commits, rewind, and
+  demotion. Compatibility checks also cover account deletion, outbox creation
+  evidence, and transparent output/spend ingestion, alongside rewinds,
+  re-attribution, and qualification. These operations refuse an incompatible
+  reader before writing; provenance checks run in the same transaction as the
+  wallet writes.
+- **Revised:**
+  - **Rollback.** The schema migrator accepts a database carrying migrations it
+    does not know, so the reader version is the only guard between an older
+    build and newer ledger state. Supported rollback targets are builds with
+    the fix whose reader version meets the wallet's requirement; earlier
+    builds rewind without checking it. The plan pins a source rollback candidate;
+    a published artifact and the exact library/Vizor revision pair must pass the
+    documented release gates before production activation.
+- **Still open:**
+  - privileged verification and trust and quarantine epochs, which need real
+    source verification (next stage);
+  - verifying coverage anchors against local blocks when reading, as defense
+    in depth against a build that rewinds without clipping coverage.
+
+## Trusted-indexer qualification (deviation)
+
+Private recovery temporarily trusts the configured indexer for accuracy and
+completeness, including negative results. The architecture's
+[independent publication verifier](transparent-pir-ledger-architecture.md#trust-and-privacy-model)
+does not exist yet. Production activation still requires it and the owner's
+acceptance of the trusted-indexer model.
+
+`qualify_and_apply_transparent_ledger_commit` requires `PrivateRequired` on the
+handle and durably. It qualifies the exact revision, withdraws older provisional
+evidence of the same source across the wallet, and applies the commit in one
+transaction. Failure rolls back qualification and facts; an integrity failure
+also persists quarantine. Qualification is the caller's trust decision, not
+publication verification.
+
+The application must restrict qualification to its configured origin behind
+Vizor's development flag, `ZCASH_PRIVATE_TRANSPARENT_RECOVERY`. Quarantine cannot
+be cleared yet; `qualify_transparent_revision` remains a test/development hook.
+
 ## Recovery sources and revisions
 
 - **Opaque identifiers.** Sources, revisions, and pages are opaque byte strings,
@@ -15,8 +147,10 @@ phase should confirm or revise them alongside the code that uses them.
 - **Lineage.** Each revision carries a lineage that strictly increases with
   each replacement. Keep lineage within `i64::MAX` so SQLite can store it and
   order it numerically.
-- **Supersession.** A provisional revision is superseded once the store accepts
-  a newer revision of the same source. A sealed revision is never superseded.
+- **Supersession.** A provisional revision is superseded only when a trusted qualification
+  transition authorizes a newer revision of the same source. Its coverage, pages, and event
+  observations are removed; an event remains only if another active revision
+  observed it. A sealed revision is never superseded.
   Its commits stay acceptable after later revisions, including resumed pages and
   recovery for newly added accounts.
 - **Accepted revision.** Store the complete accepted revision per source:
@@ -61,14 +195,19 @@ phase should confirm or revise them alongside the code that uses them.
   - Runs capture both epochs before I/O, so work started before a quarantine is
     never accepted after revalidation.
 - **Qualification.**
-  - Qualification is store-held and binds to exact verified revisions. Each
-    revision is qualified separately, and fixture sources are never qualified.
+  - Qualification is store-held and binds to exact revisions the caller trusts
+    (see
+    [Trusted-indexer qualification](#trusted-indexer-qualification-deviation)).
+    Each revision is qualified separately, and fixture sources are never
+    qualified.
   - Promotion requires every revision that contributed coverage to be qualified.
   - Active commits must also reject or isolate events from unqualified
     revisions.
-- **Privileged verification.** Qualifying a revision, clearing a quarantine, and
-  advancing the trust epoch need a privileged verification operation separate
-  from commits. It is added with source verification in Phase 6.
+- **Privileged verification.** Clearing a quarantine and advancing the trust
+  epoch still need a privileged verification operation separate from commits,
+  added with real source verification. Qualification no longer waits for it:
+  a trusted commit qualifies its own revision, as recorded under
+  [Trusted-indexer qualification](#trusted-indexer-qualification-deviation).
 
 ## Readiness and blockers
 

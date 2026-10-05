@@ -5,9 +5,11 @@ clients.
 
 ## Building
 
-Note that in order to (re)build the GRPC interface, you will need `protoc` on
-your `$PATH`. This is not required unless you make changes to any of the files
-in `./proto/`.
+Ordinary builds use checked-in GRPC bindings, without requiring `protoc` or
+modifying source files. From the repository root, run
+`python3 scripts/proto.py check` to verify them or
+`python3 scripts/proto.py write` after changing `.proto` files. Generation
+requires the pinned compiler in `scripts/protoc-version.txt`.
 
 ## License
 

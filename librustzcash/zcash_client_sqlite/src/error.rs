@@ -18,6 +18,10 @@ use zcash_client_backend::data_api::NoteFilter;
 use zcash_client_backend::data_api::error::RewindError;
 use zcash_client_backend::data_api::ll;
 use zcash_client_backend::data_api::ll::wallet::PutBlocksError;
+#[cfg(feature = "transparent-inputs")]
+use zcash_client_backend::data_api::transparent_ledger::CommitRejection;
+#[cfg(feature = "transparent-inputs")]
+use zcash_client_backend::data_api::transparent_ledger::RecoveryBlocker;
 use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
 use zcash_client_backend::wallet::OutputRef;
 use zcash_keys::address::UnifiedAddress;
@@ -68,6 +72,25 @@ pub enum SqliteClientError {
         /// The minimum reader version the wallet requires.
         required: i64,
     },
+    /// An operation captured a durable policy generation that no longer matches the wallet.
+    /// Another connection applied a policy transition first; the queue is left unchanged.
+    StaleTransparentPolicy {
+        /// The generation the operation captured at the start of its SQLite transaction.
+        expected: u64,
+        /// The generation currently stored on the wallet.
+        applied: u64,
+    },
+    /// Candidate recovery commits require a `PrivateShadow` or `PrivateRequired` policy, both
+    /// durably applied and configured on the handle. Trusted commits and promotion require
+    /// `PrivateRequired` in both places.
+    TransparentRecoveryNotEnabled,
+    /// A candidate recovery commit was refused; none of its facts were applied.
+    #[cfg(feature = "transparent-inputs")]
+    TransparentLedgerCommitRejected(CommitRejection),
+    /// An account could not be promoted to private transparent authority for the listed
+    /// reasons; nothing was changed.
+    #[cfg(feature = "transparent-inputs")]
+    TransparentPromotionBlocked(Vec<RecoveryBlocker>),
 
     /// A queued note needs experimental swap support that this build lacks.
     #[cfg(feature = "orchard")]
@@ -382,10 +405,26 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "Transparent ledger state requires reader version {required}; this build cannot operate on this wallet's transparent funds"
             ),
+            SqliteClientError::StaleTransparentPolicy { expected, applied } => write!(
+                f,
+                "Transparent policy generation {expected} is stale; the wallet is now at generation {applied}"
+            ),
             SqliteClientError::TransparentAuthorityUnavailable => write!(
                 f,
                 "Transparent funds are unavailable: private transparent authority is required but not available"
             ),
+            SqliteClientError::TransparentRecoveryNotEnabled => write!(
+                f,
+                "Transparent recovery is not enabled for this operation: candidate commits need PrivateShadow or PrivateRequired, and trusted commits and promotion need PrivateRequired, both durably and on the handle"
+            ),
+            #[cfg(feature = "transparent-inputs")]
+            SqliteClientError::TransparentLedgerCommitRejected(rejection) => {
+                write!(f, "Transparent ledger commit rejected: {rejection:?}")
+            }
+            #[cfg(feature = "transparent-inputs")]
+            SqliteClientError::TransparentPromotionBlocked(blockers) => {
+                write!(f, "Transparent ledger promotion blocked: {blockers:?}")
+            }
             SqliteClientError::CorruptedData(reason) => {
                 write!(f, "Data DB is corrupted: {reason}")
             }

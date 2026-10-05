@@ -19,6 +19,7 @@ members = [
     "zakura/pir-native",
     "zakura/pir-status",
     "zakura/transaction-status",
+    "zakura/pir-transparent",
     "zakura/swap-receiving",
 ]
 

@@ -1,0 +1,7 @@
+---
+description: wallet-libraries development and validation workflow
+alwaysApply: true
+---
+Read and follow [AGENTS.md](../../AGENTS.md) and
+[docs/development.md](../../docs/development.md).
+They are the authoritative repository workflow for every agent.

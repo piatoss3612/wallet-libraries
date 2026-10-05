@@ -317,6 +317,11 @@ CREATE TABLE blocks (
 /// - `trust_status`: A flag indicating whether the transaction should be considered "trusted".
 ///   When set to `1`, outputs of this transaction will be considered spendable with `trusted`
 ///   confirmations instead of `untrusted` confirmations.
+/// - `zip318_kind`: unused legacy column. Published zakura-client-sqlite 0.1.0-rc5 and 0.1.0-rc7
+///   write how each transaction they store classifies against ZIP 318 here, and read it through
+///   `v_transactions`; this build never reads it, and new rows hold the default, `0` (not
+///   classified). Upgrades retain its existing values. TODO(zakura-core/wallet-libraries#85):
+///   drop it once no supported build writes it.
 pub(super) const TABLE_TRANSACTIONS: &str = r#"
 CREATE TABLE "transactions" (
     id_tx INTEGER PRIMARY KEY,
@@ -332,6 +337,7 @@ CREATE TABLE "transactions" (
     min_observed_height INTEGER NOT NULL,
     confirmed_unmined_at_height INTEGER,
     trust_status INTEGER,
+    zip318_kind INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (block) REFERENCES blocks(height),
     CONSTRAINT height_consistency CHECK (
         block IS NULL OR mined_height = block
@@ -663,13 +669,13 @@ CREATE TABLE ironwood_enhance_outgoing_accounts (
     PRIMARY KEY(commitment_tree_position, account_id)
 )";
 
-pub(super) const TABLE_IRONWOOD_ENHANCE_ROUTING: &str = "
-CREATE TABLE ironwood_enhance_routing (
+pub(super) const TABLE_IRONWOOD_ENHANCE_ROUTING: &str = r#"
+CREATE TABLE "ironwood_enhance_routing" (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
-    route INTEGER NOT NULL CHECK (route IN (0, 1)),
+    route INTEGER NOT NULL CHECK (route IN (0, 1, 2)),
     history_expiry_height INTEGER
         CHECK (history_expiry_height >= 0 AND history_expiry_height < 500000000)
-)";
+)"#;
 
 /// Stores the transparent outputs received by the wallet.
 ///
@@ -837,6 +843,198 @@ CREATE TABLE tpir_spend_origins (
     origin INTEGER NOT NULL CHECK (origin IN (0, 1, 2, 3)),
     UNIQUE (spending_transaction_id, prevout_txid, prevout_output_index, origin)
 )"#;
+/// How far candidate recovery watches each derived scope of an account, beyond the addresses in
+/// [`TABLE_ADDRESSES`].
+///
+/// Candidate-window addresses are derived on read and never stored as wallet addresses, so they
+/// cannot be marked used or offered for receiving. A window never shrinks.
+///
+/// ### Columns
+/// - `key_scope`: 0 external, 1 internal, 2 ephemeral.
+/// - `end_index`: one past the highest child index watched in the scope.
+pub(super) const TABLE_TPIR_CANDIDATE_WINDOWS: &str = r#"
+CREATE TABLE tpir_candidate_windows (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    key_scope INTEGER NOT NULL CHECK (key_scope IN (0, 1, 2)),
+    end_index INTEGER NOT NULL CHECK (end_index >= 0 AND end_index <= 2147483648),
+    PRIMARY KEY (account_id, key_scope)
+)"#;
+/// Derivation origins retained when materialization skips another account's receiver.
+///
+/// These indices supply gap-expansion evidence only. They grant neither address ownership nor
+/// coverage, survive rewind and reopen, and disappear when the deriving account is deleted.
+pub(super) const TABLE_TPIR_SHARED_DERIVATIONS: &str = r#"
+CREATE TABLE tpir_shared_derivations (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    key_scope INTEGER NOT NULL CHECK (key_scope IN (0, 1, 2)),
+    child_index INTEGER NOT NULL CHECK (child_index >= 0 AND child_index < 2147483648),
+    PRIMARY KEY (account_id, key_scope, child_index)
+)"#;
+/// Source revisions that supplied candidate evidence.
+///
+/// Identifiers are opaque. Within a source, a higher `lineage` replaces a lower one; the
+/// accepted lineage is the highest stored. Superseding a provisional revision removes its
+/// coverage; a sealed revision is never superseded.
+///
+/// ### Columns
+/// - `publication_height`, `publication_hash`: the publisher's asserted position. They are not
+///   local chain evidence.
+pub(super) const TABLE_TPIR_REVISIONS: &str = r#"
+CREATE TABLE tpir_revisions (
+    id INTEGER PRIMARY KEY,
+    source BLOB NOT NULL,
+    revision BLOB NOT NULL,
+    lineage INTEGER NOT NULL CHECK (lineage >= 0),
+    sealed INTEGER NOT NULL CHECK (sealed IN (0, 1)),
+    publication_height INTEGER NOT NULL CHECK (publication_height >= 0),
+    publication_hash BLOB NOT NULL,
+    UNIQUE (source, revision),
+    UNIQUE (source, lineage)
+)"#;
+/// Candidate receives, identified by outpoint.
+///
+/// Content columns are immutable once stored; a contradiction is refused. `mined_height` is the
+/// canonical placement on the local chain: a rewind below it clears it, and a later commit can
+/// place the receive again.
+///
+/// ### Columns
+/// - `script`: the scriptPubKey of the watched address the output pays.
+/// - `coinbase`: whether a coinbase transaction created the output.
+pub(super) const TABLE_TPIR_RECEIVE_EVENTS: &str = r#"
+CREATE TABLE tpir_receive_events (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    txid BLOB NOT NULL,
+    output_index INTEGER NOT NULL CHECK (output_index >= 0),
+    script BLOB NOT NULL,
+    value_zat INTEGER NOT NULL CHECK (value_zat >= 0),
+    coinbase INTEGER NOT NULL CHECK (coinbase IN (0, 1)),
+    mined_height INTEGER CHECK (mined_height >= 0),
+    UNIQUE (txid, output_index)
+)"#;
+/// The revisions that reported each candidate receive. Reports from several revisions are not a
+/// contradiction.
+pub(super) const TABLE_TPIR_RECEIVE_OBSERVATIONS: &str = r#"
+CREATE TABLE tpir_receive_observations (
+    receive_id INTEGER NOT NULL REFERENCES tpir_receive_events(id) ON DELETE CASCADE,
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id),
+    PRIMARY KEY (receive_id, revision_id)
+)"#;
+/// Candidate spends, identified by spending txid and input index.
+///
+/// The spent outpoint and its script are checked content. A spend whose output has no
+/// [`TABLE_TPIR_RECEIVE_EVENTS`] row is unresolved. `mined_height` behaves as for receives.
+///
+/// ### Columns
+/// - `prevout_script`: the scriptPubKey of the watched address whose output is spent; it
+///   attributes the spend to the account before the output is recovered.
+pub(super) const TABLE_TPIR_SPEND_EVENTS: &str = r#"
+CREATE TABLE tpir_spend_events (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    spending_txid BLOB NOT NULL,
+    input_index INTEGER NOT NULL CHECK (input_index >= 0),
+    prevout_txid BLOB NOT NULL,
+    prevout_output_index INTEGER NOT NULL CHECK (prevout_output_index >= 0),
+    prevout_script BLOB NOT NULL,
+    mined_height INTEGER CHECK (mined_height >= 0),
+    UNIQUE (spending_txid, input_index)
+)"#;
+/// The revisions that reported each candidate spend.
+pub(super) const TABLE_TPIR_SPEND_OBSERVATIONS: &str = r#"
+CREATE TABLE tpir_spend_observations (
+    spend_id INTEGER NOT NULL REFERENCES tpir_spend_events(id) ON DELETE CASCADE,
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id),
+    PRIMARY KEY (spend_id, revision_id)
+)"#;
+/// Checked height ranges per watched script.
+///
+/// A supported range means the revision reported every receive and spend of the script in the
+/// range, including none. An unsupported range means the revision cannot check it. Absent rows
+/// never imply coverage.
+///
+/// ### Columns
+/// - `anchor_height`, `anchor_hash`: the local block the revision was verified to agree with.
+///   A rewind whose rescan floor is below the anchor clips the range to the floor and
+///   re-anchors it there, or deletes it when the floor block is unknown.
+pub(super) const TABLE_TPIR_COVERAGE: &str = r#"
+CREATE TABLE tpir_coverage (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    script BLOB NOT NULL,
+    from_height INTEGER NOT NULL CHECK (from_height >= 0),
+    through_height INTEGER NOT NULL,
+    anchor_height INTEGER NOT NULL,
+    anchor_hash BLOB NOT NULL,
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id),
+    supported INTEGER NOT NULL CHECK (supported IN (0, 1)),
+    CHECK (from_height <= through_height AND through_height <= anchor_height)
+)"#;
+/// Retrieval pages opened and not yet completed. A page blocks coverage of its scripts over its
+/// range. A rewind below its target or a policy transition removes it.
+///
+/// ### Columns
+/// - `target_height`, `target_hash`: the target of the run that opened the page.
+pub(super) const TABLE_TPIR_PENDING_PAGES: &str = r#"
+CREATE TABLE tpir_pending_pages (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id),
+    page BLOB NOT NULL,
+    from_height INTEGER NOT NULL CHECK (from_height >= 0),
+    through_height INTEGER NOT NULL,
+    target_height INTEGER NOT NULL,
+    target_hash BLOB NOT NULL,
+    UNIQUE (account_id, revision_id, page),
+    CHECK (from_height <= through_height AND through_height <= target_height)
+)"#;
+/// The watched scripts each pending page answers for.
+pub(super) const TABLE_TPIR_PENDING_PAGE_SCRIPTS: &str = r#"
+CREATE TABLE tpir_pending_page_scripts (
+    page_id INTEGER NOT NULL REFERENCES tpir_pending_pages(id) ON DELETE CASCADE,
+    script BLOB NOT NULL,
+    PRIMARY KEY (page_id, script)
+)"#;
+/// Accounts whose transparent authority is private. An account without a row is a candidate:
+/// its recovery is isolated from the projection. Promotion inserts the row, projecting the
+/// account's candidate events in the same transaction; leaving `PrivateRequired` deletes every
+/// row.
+pub(super) const TABLE_TPIR_ACTIVE_ACCOUNTS: &str = r#"
+CREATE TABLE tpir_active_accounts (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
+)"#;
+/// Revisions qualified to support private authority. Promotion requires every revision that
+/// contributed an account's coverage or events to be qualified, and an active account accepts
+/// commits only from qualified revisions. Written only by trusted commits
+/// (`qualify_and_apply_transparent_ledger_commit`, `PrivateRequired` only) and by the
+/// test/development hook `qualify_transparent_revision`.
+pub(super) const TABLE_TPIR_QUALIFIED_REVISIONS: &str = r#"
+CREATE TABLE tpir_qualified_revisions (
+    revision_id INTEGER PRIMARY KEY REFERENCES tpir_revisions(id)
+)"#;
+/// Sources quarantined by an integrity rejection. Their commits are refused, and they can
+/// support no authority. Nothing clears a quarantine yet.
+pub(super) const TABLE_TPIR_QUARANTINED_SOURCES: &str = r#"
+CREATE TABLE tpir_quarantined_sources (
+    source BLOB PRIMARY KEY
+)"#;
+/// Accounts quarantined by an integrity rejection involving their evidence. They accept no
+/// commits and hold no private authority.
+pub(super) const TABLE_TPIR_QUARANTINED_ACCOUNTS: &str = r#"
+CREATE TABLE tpir_quarantined_accounts (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
+)"#;
+/// Candidate coverage by account and script, for coverage deduplication and diagnostics.
+pub(super) const INDEX_TPIR_COVERAGE_SCRIPT: &str =
+    r#"CREATE INDEX idx_tpir_coverage_script ON tpir_coverage (account_id, script)"#;
+/// Candidate receives by account, for window growth, diagnostics, and account deletion.
+pub(super) const INDEX_TPIR_RECEIVE_EVENTS_ACCOUNT: &str =
+    r#"CREATE INDEX idx_tpir_receive_events_account ON tpir_receive_events (account_id)"#;
+/// Candidate spends by account, for window growth, diagnostics, and account deletion.
+pub(super) const INDEX_TPIR_SPEND_EVENTS_ACCOUNT: &str =
+    r#"CREATE INDEX idx_tpir_spend_events_account ON tpir_spend_events (account_id)"#;
+/// Candidate spends by the outpoint they consume, for the per-event consistency checks.
+pub(super) const INDEX_TPIR_SPEND_EVENTS_PREVOUT: &str = r#"CREATE INDEX idx_tpir_spend_events_prevout ON tpir_spend_events (prevout_txid, prevout_output_index)"#;
 
 /// Stores the outputs of transactions created by the wallet.
 ///
@@ -893,6 +1091,18 @@ CREATE INDEX idx_sent_notes_transaction_id ON sent_notes (
     transaction_id
 )"#;
 
+/// Historical inclusion evidence awaiting an accepted scan; it grants no mined authority.
+pub(super) const TABLE_TX_RECONFIRMATION_RECEIPTS: &str = r#"
+CREATE TABLE tx_reconfirmation_receipts (
+    transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    mined_height INTEGER NOT NULL CHECK (typeof(mined_height) = 'integer' AND mined_height BETWEEN 0 AND 4294967295),
+    block_hash BLOB NOT NULL CHECK (typeof(block_hash) = 'blob' AND length(block_hash) = 32),
+    tx_index INTEGER CHECK (tx_index IS NULL OR (typeof(tx_index) = 'integer' AND tx_index BETWEEN 0 AND 65535)),
+    replacement_observed INTEGER NOT NULL DEFAULT 0 CHECK (replacement_observed IN (0, 1))
+)"#;
+pub(super) const INDEX_TX_RECONFIRMATION_RECEIPTS_HEIGHT: &str = r#"
+CREATE INDEX idx_tx_reconfirmation_receipts_height ON tx_reconfirmation_receipts(mined_height)"#;
+
 /// Stores the set of transaction ids for which the backend required additional data.
 ///
 /// ### Columns:
@@ -904,12 +1114,21 @@ CREATE INDEX idx_sent_notes_transaction_id ON sent_notes (
 ///   about transparent inputs to a transaction, this is a reference to that transaction record.
 ///   NULL for transactions where the request for enhancement data is based on discovery due
 ///   to blockchain scanning.
+/// - `policy_generation`: The durable transparent-policy generation that produced this row.
+///   Public dispatch requires a matching current generation.
+/// - `reconfirm_mined`: `1` for a status obligation whose transaction was mined before a rewind
+///   un-mined it, and whose mined state has not been observed since. Compact-block rescanning
+///   cannot re-observe such a transaction. A matching accepted block may restore inclusion
+///   from a retained receipt. Otherwise the obligation is exempt from expiry dormancy until
+///   one status observation completes, whatever its result. The observation resets it to `0`, after which the ordinary
+///   rules apply.
 pub(super) const TABLE_TX_RETRIEVAL_QUEUE: &str = r#"
 CREATE TABLE "tx_retrieval_queue" (
     txid BLOB NOT NULL,
     query_type INTEGER NOT NULL,
     dependent_transaction_id INTEGER
         REFERENCES transactions(id_tx) ON DELETE CASCADE,
+    policy_generation INTEGER NOT NULL DEFAULT 0, reconfirm_mined INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT tx_retrieval_intent UNIQUE (txid, query_type)
 )"#;
 pub(super) const INDEX_TX_RETIREVAL_QUEUE_DEPENDENT_TX: &str = r#"
@@ -1326,175 +1545,7 @@ SELECT
 FROM transparent_received_output_spends s
 JOIN transparent_received_outputs rn ON rn.id = s.transparent_received_output_id";
 
-pub(super) const VIEW_TRANSACTIONS: &str = "
-CREATE VIEW v_transactions AS
-WITH
-notes AS (
-    -- Outputs received in this transaction
-    SELECT ro.account_id              AS account_id,
-           ro.transaction_id          AS transaction_id,
-           ro.pool                    AS pool,
-           id_within_pool_table,
-           ro.value                   AS value,
-           ro.value                   AS received_value,
-           0                          AS spent_value,
-           0                          AS spent_note_count,
-           CASE
-                WHEN ro.is_change THEN 1
-                ELSE 0
-           END AS change_note_count,
-           CASE
-                WHEN ro.is_change THEN 0
-                ELSE 1
-           END AS received_count,
-           CASE
-             WHEN (ro.memo IS NULL OR ro.memo = X'F6')
-               THEN 0
-             ELSE 1
-           END AS memo_present,
-           -- The wallet cannot receive transparent outputs in shielding transactions.
-           CASE
-             WHEN ro.pool = 0
-               THEN 1
-             ELSE 0
-           END AS does_not_match_shielding
-    FROM v_received_outputs ro
-    UNION
-    -- Outputs spent in this transaction
-    SELECT ro.account_id              AS account_id,
-           ros.transaction_id         AS transaction_id,
-           ro.pool                    AS pool,
-           id_within_pool_table,
-           -ro.value                  AS value,
-           0                          AS received_value,
-           ro.value                   AS spent_value,
-           1                          AS spent_note_count,
-           0                          AS change_note_count,
-           0                          AS received_count,
-           0                          AS memo_present,
-           -- The wallet cannot spend shielded outputs in shielding transactions.
-           CASE
-             WHEN ro.pool != 0
-               THEN 1
-             ELSE 0
-           END AS does_not_match_shielding
-    FROM v_received_outputs ro
-    JOIN v_received_output_spends ros
-         ON ros.pool = ro.pool
-         AND ros.received_output_id = ro.id_within_pool_table
-),
--- What each account spent and received in each pool, per transaction. A pool the account
--- received value in but spent nothing from is a pool that value crossed into from
--- elsewhere, which is what `pool_crossings` below is built on.
-notes_by_pool AS (
-    SELECT account_id, transaction_id, pool,
-           SUM(spent_note_count)                   AS spent_note_count,
-           SUM(received_count + change_note_count) AS received_note_count,
-           SUM(received_value)                     AS received_value
-    FROM notes
-    GROUP BY account_id, transaction_id, pool
-),
--- Obtain a count of the notes that the wallet created in each transaction,
--- not counting change notes.
-sent_note_counts AS (
-    SELECT sent_notes.from_account_id     AS account_id,
-           sent_notes.transaction_id      AS transaction_id,
-           COUNT(DISTINCT sent_notes.id)  AS sent_notes,
-           SUM(
-             CASE
-               WHEN (sent_notes.memo IS NULL OR sent_notes.memo = X'F6' OR ro.transaction_id IS NOT NULL)
-                 THEN 0
-               ELSE 1
-             END
-           ) AS memo_count
-    FROM sent_notes
-    LEFT JOIN v_received_outputs ro ON sent_notes.id = ro.sent_note_id
-    WHERE COALESCE(ro.is_change, 0) = 0
-    GROUP BY account_id, sent_notes.transaction_id
-),
--- Identifies the transactions that are wallet-internal transfers moving an account's own
--- funds between shielded pools, and reports the value that crossed. `crossing_value` is
--- non-NULL exactly for such a transaction, so it carries both the classification and the
--- amount; see the `pool_crossing_value` column below.
-pool_crossings AS (
-    SELECT notes_by_pool.account_id     AS account_id,
-           notes_by_pool.transaction_id AS transaction_id,
-           CASE WHEN (
-                -- Every note spent and every output received by the wallet is shielded.
-                SUM(CASE WHEN notes_by_pool.pool = 0 THEN notes_by_pool.spent_note_count + notes_by_pool.received_note_count ELSE 0 END) = 0
-                -- The transaction spends at least one of the account's notes.
-                AND SUM(notes_by_pool.spent_note_count) > 0
-                -- At least one output was received in a pool the account spent nothing
-                -- from, so value crossed between pools.
-                AND SUM(CASE WHEN notes_by_pool.spent_note_count = 0 THEN notes_by_pool.received_note_count ELSE 0 END) > 0
-                -- We do not know about any external outputs of the transaction.
-                AND MAX(COALESCE(sent_note_counts.sent_notes, 0)) = 0
-           )
-           -- The total value received in the pools the account did not spend from. The
-           -- condition above guarantees at least one such output, so when this branch is
-           -- taken the sum is never NULL.
-           THEN SUM(CASE WHEN notes_by_pool.spent_note_count = 0 THEN notes_by_pool.received_value ELSE 0 END)
-           END AS crossing_value
-    FROM notes_by_pool
-    LEFT JOIN sent_note_counts
-         ON sent_note_counts.account_id = notes_by_pool.account_id
-         AND sent_note_counts.transaction_id = notes_by_pool.transaction_id
-    GROUP BY notes_by_pool.account_id, notes_by_pool.transaction_id
-),
-blocks_max_height AS (
-    SELECT MAX(blocks.height) AS max_height FROM blocks
-)
-SELECT accounts.uuid                AS account_uuid,
-       transactions.mined_height    AS mined_height,
-       transactions.txid            AS txid,
-       transactions.tx_index        AS tx_index,
-       COALESCE(transactions.expiry_height, (SELECT history_expiry_height
-        FROM ironwood_enhance_routing WHERE transaction_id = transactions.id_tx AND route = 0))
-           AS expiry_height,
-       transactions.raw             AS raw,
-       SUM(notes.value)             AS account_balance_delta,
-       SUM(notes.spent_value)       AS total_spent,
-       SUM(notes.received_value)    AS total_received,
-       transactions.fee             AS fee_paid,
-       SUM(notes.change_note_count) > 0  AS has_change,
-       MAX(COALESCE(sent_note_counts.sent_notes, 0))  AS sent_note_count,
-       SUM(notes.received_count)         AS received_note_count,
-       SUM(notes.memo_present) + MAX(COALESCE(sent_note_counts.memo_count, 0)) AS memo_count,
-       blocks.time                       AS block_time,
-       (
-            transactions.mined_height IS NULL
-            AND transactions.expiry_height BETWEEN 1 AND blocks_max_height.max_height
-       ) AS expired_unmined,
-       SUM(notes.spent_note_count) AS spent_note_count,
-       (
-            -- All of the wallet-spent and wallet-received notes are consistent with a
-            -- shielding transaction.
-            SUM(notes.does_not_match_shielding) = 0
-            -- The transaction contains at least one wallet-spent output.
-            AND SUM(notes.spent_note_count) > 0
-            -- The transaction contains at least one wallet-received note.
-            AND (SUM(notes.received_count) + SUM(notes.change_note_count)) > 0
-            -- We do not know about any external outputs of the transaction.
-            AND MAX(COALESCE(sent_note_counts.sent_notes, 0)) = 0
-       ) AS is_shielding,
-       -- The value that crossed pools, when this transaction is a wallet-internal transfer
-       -- between shielded pools; NULL when it is not such a transfer. A transaction is one
-       -- exactly when this column is non-NULL.
-       pool_crossings.crossing_value AS pool_crossing_value,
-       transactions.trust_status
-FROM notes
-JOIN accounts ON accounts.id = notes.account_id
-JOIN transactions ON transactions.id_tx = notes.transaction_id
-LEFT JOIN blocks_max_height
-LEFT JOIN blocks ON blocks.height = transactions.mined_height
-LEFT JOIN sent_note_counts
-     ON sent_note_counts.account_id = notes.account_id
-     AND sent_note_counts.transaction_id = notes.transaction_id
-LEFT JOIN pool_crossings
-     ON pool_crossings.account_id = notes.account_id
-     AND pool_crossings.transaction_id = notes.transaction_id
-GROUP BY notes.account_id, notes.transaction_id
-";
+pub(super) const VIEW_TRANSACTIONS: &str = super::history::VIEW_TRANSACTIONS;
 
 /// Selects all outputs received by the wallet, plus any outputs sent from the wallet to
 /// external recipients.
@@ -2052,3 +2103,19 @@ pub(super) const INDEX_ONE_OPEN_SWAP_RECEIVE_RESERVATION: &str =
 #[cfg(test)]
 pub(super) const INDEX_SWAP_RECEIVE_QUOTE_OPERATION: &str =
     "CREATE INDEX swap_receive_quote_operation ON ironwood_swap_receive_quotes(operation_id)";
+
+/// Source-bound transaction facts. No fee is attributed to an account by this table.
+pub(super) const TABLE_TPIR_TRANSACTION_METADATA: &str = r#"
+CREATE TABLE tpir_transaction_metadata (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    txid BLOB NOT NULL CHECK (length(txid) = 32),
+    revision_id INTEGER NOT NULL REFERENCES tpir_revisions(id) ON DELETE CASCADE,
+    mined_height INTEGER NOT NULL CHECK (mined_height >= 0),
+    fee_state INTEGER NOT NULL CHECK (fee_state IN (0, 1, 2)),
+    fee_zat INTEGER CHECK (fee_zat >= 0 AND fee_zat <= 2100000000000000),
+    input_count INTEGER NOT NULL CHECK (input_count >= 0 AND input_count <= 4294967295),
+    shielded INTEGER NOT NULL CHECK (shielded IN (0, 1)),
+    CHECK ((fee_state = 0 AND fee_zat IS NOT NULL) OR (fee_state != 0 AND fee_zat IS NULL)),
+    CHECK (fee_state != 2 OR input_count = 0),
+    PRIMARY KEY (account_id, txid, revision_id)
+)"#;

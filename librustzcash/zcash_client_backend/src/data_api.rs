@@ -1775,6 +1775,22 @@ pub trait InputSource {
     /// For example, this might be a database identifier type or a UUID.
     type NoteRef: Copy + Debug + Eq + Ord;
 
+    /// Returns the interval on which this wallet retains note commitment tree checkpoints as
+    /// durable anchors.
+    ///
+    /// Input selection judges an ordinary payment a canonical [ZIP 318] crossing only when its
+    /// anchor lies on this grid (see [`Step::is_canonical_crossing`]), so the grid must be the one
+    /// the wallet actually retains. The default returns [`AnchorRetentionInterval::ZIP_318`], which
+    /// matches a backend that does not configure retention. A backend that does must override
+    /// this, and a wrapper around another `InputSource` should forward it.
+    ///
+    /// [ZIP 318]: https://zips.z.cash/zip-0318
+    /// [`Step::is_canonical_crossing`]: crate::proposal::Step::is_canonical_crossing
+    /// [`AnchorRetentionInterval::ZIP_318`]: anchor_retention::AnchorRetentionInterval::ZIP_318
+    fn anchor_retention_interval(&self) -> anchor_retention::AnchorRetentionInterval {
+        anchor_retention::AnchorRetentionInterval::ZIP_318
+    }
+
     /// Fetches a spendable note by indexing into a transaction's shielded outputs for the
     /// specified shielded protocol.
     ///

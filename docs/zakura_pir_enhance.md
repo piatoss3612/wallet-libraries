@@ -56,8 +56,14 @@ The application chooses limits for its least capable device. `max_shard_rows` bo
 ```rust,ignore
 use zakura_pir_enhance::wallet::PreparedWork;
 use zcash_client_backend::data_api::enhance_pir::{
-    EnhancePirBatchResult, TransactionEnhancementWork,
+    EnhancePirBatchResult, EnhancementMode, TransactionEnhancementWork,
 };
+use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
+
+// SQLite requires both modes before enumerating enhancement work, including for
+// shielded-only wallets.
+db.set_enhancement_mode(EnhancementMode::PrivateIronwood);
+db.set_transparent_ledger_mode(TransparentLedgerMode::Public);
 
 let (mut public, mut private) = (vec![], vec![]);
 for work in db.transaction_enhancement_work()? {

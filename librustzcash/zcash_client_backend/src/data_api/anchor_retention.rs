@@ -309,3 +309,41 @@ mod tests {
         }
     }
 }
+
+/// The [ZIP 318] pool-migration parameters in force for a particular wallet: the specified values,
+/// with the anchor bucket grid taken from the grid that wallet actually retains.
+///
+/// The wallet is the authority on the grid, because it is the side that keeps the checkpoints
+/// alive, and `zcash_protocol` deliberately offers no network-level implementor of
+/// [`PoolMigrationConstants`]. Every decision that depends on the grid, here whether an ordinary
+/// payment is a canonical crossing, must consult the same source.
+///
+/// Obtained from [`InputSource::anchor_retention_interval`].
+///
+/// [ZIP 318]: https://zips.z.cash/zip-0318
+/// [`PoolMigrationConstants`]: zcash_protocol::zip318::PoolMigrationConstants
+/// [`InputSource::anchor_retention_interval`]: super::InputSource::anchor_retention_interval
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolMigrationParams {
+    interval: AnchorRetentionInterval,
+}
+
+impl PoolMigrationParams {
+    /// Constructs the parameters for a wallet retaining anchors on `interval`. Every other ZIP 318
+    /// value takes its specified default.
+    pub fn new(interval: AnchorRetentionInterval) -> Self {
+        Self { interval }
+    }
+}
+
+impl From<AnchorRetentionInterval> for PoolMigrationParams {
+    fn from(interval: AnchorRetentionInterval) -> Self {
+        Self::new(interval)
+    }
+}
+
+impl zcash_protocol::zip318::PoolMigrationConstants for PoolMigrationParams {
+    fn anchor_bucket_interval(&self) -> AnchorRetentionInterval {
+        self.interval
+    }
+}

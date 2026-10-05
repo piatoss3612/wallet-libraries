@@ -341,6 +341,14 @@ pub(crate) fn oldest_note_is_selected_first<T: ShieldedPoolTester>() {
 /// Runs the empty-boundary retention check at a short interval, so a handful of filler blocks
 /// crosses two boundaries.
 #[cfg(feature = "orchard")]
+pub(crate) fn ordinary_canonical_crossing_is_unpadded_with_rolling_expiry() {
+    zcash_client_backend::data_api::testing::pool::ordinary_canonical_crossing_is_unpadded_with_rolling_expiry(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+#[cfg(feature = "orchard")]
 pub(crate) fn empty_boundary_blocks_are_checkpointed_and_retained<T: ShieldedPoolTester>() {
     zcash_client_backend::data_api::testing::pool::empty_boundary_blocks_are_checkpointed_and_retained::<
         T,

@@ -16,44 +16,119 @@ workspace.
   The default remains conservative for stores without a specialized selector.
 - `SwapScanningKey::full_viewing_key` exposes the already derived viewing key so
   stores can validate registrations and reuse it for scanning.
+- `tor::Client::connect_lightwalletd_channel` returns the Tor-routed `tonic` channel that
+  `connect_to_lightwalletd` wraps, so callers can layer `tower` services over it.
 - `data_api::transparent_ledger`: the storage-neutral contract for transparent
   ledger configuration and financial authority. It adds `ChainPoint`,
   `TransparentLedgerMode`, the atomic `TransparentLedgerSnapshot`, and the
   `TransparentLedgerRead` trait. Stores must reject unconfigured handles and must
-  not fabricate a spendable private balance. Recovery commits and promotion are
-  added with the work that implements them.
+  not fabricate a spendable private balance.
+- `AppliedTransparentPolicy`, `PrivateTransparentDetail`, and
+  `TransparentLedgerWrite::apply_transparent_policy`. `TransparentLedgerRead`
+  gains `applied_transparent_policy`, `check_transparent_policy_generation`, and
+  `pending_private_transparent_details`. Mixed `PrivateTransparentDetail`s
+  describe unresolved transactions (no stored raw), not sticky markers after
+  payload completion.
+- `EnhancePirStoreResult::PrivateDetailsUnsupported` for mixed transactions
+  whose transparent details cannot be recovered over a public request under
+  `PrivateRequired`.
+- Candidate transparent recovery, behind `transparent-inputs`:
+  - `TransparentLedgerRead::transparent_watch_set` returns an account's watched
+    addresses (`WatchedAddress`, `WatchOrigin`), each required from the account
+    birthday. It also returns the capture context
+    (`TransparentRecoveryContext`: policy generation and the highest
+    contiguously scanned block) and any open `PendingPage`s.
+  - `TransparentLedgerWrite::apply_transparent_ledger_commit` atomically applies
+    one `TransparentLedgerCommit`, which can carry:
+    - receive and spend events (`ReceiveEvent`, `SpendEvent`);
+    - checked and unsupported `AddressRange`s;
+    - opened and completed pages (`PageRequest`), all attributed to a
+      `RecoveryRevision` and a locally accepted anchor.
+
+    It returns `CommitOutcome`. A refused commit applies nothing and reports a
+    `CommitRejection`: `Stale`, `Integrity`, or `Invalid`.
+  - `TransparentLedgerRead::transparent_candidate_recovery` returns unverified
+    development diagnostics (`CandidateRecovery`, `CandidateBlocker`).
+  - Candidate state never changes balances, spend links, locks, address use,
+    receiving-address selection, or history.
+- Private transparent activation, behind `transparent-inputs`:
+  - `TransparentLedgerWrite::promote_transparent_account` promotes an account's
+    complete, qualified ledger to private authority, projecting its events into
+    the wallet.
+  - `AccountLifecycle` (`Candidate`, `Active`) in `TransparentWatchSet` and
+    `TransparentRecoveryContext`, with `StaleCommit::LifecycleChanged`.
+  - `CommitRejection::Refused(RefusedCommit)` for quarantined sources and
+    accounts and for unqualified revisions on active accounts, and
+    `IntegrityFailure::ProjectionContent`. An integrity rejection quarantines
+    the source and the accounts holding its evidence.
+- `TransparentAuthority::Private`, `RecoveryCompletion::Complete`,
+  `LastKnownSource::PrivateLedger`, and the snapshot fields `covered_through`
+  and `recovered_unverified`.
+- `RecoveryBlocker` variants `Recovery(CandidateBlocker)`, `NotActivated`,
+  `Quarantined`, `UnqualifiedRevision`, `LegacyDiscrepancy`, and
+  `ChainBehindTip`. `CandidateBlocker` moved to `data_api::transparent_ledger`
+  and is available in every build.
+- History completeness: `TransparentLedgerRead::transaction_history_details`
+  returns an account's `TransactionHistoryDetails` for requested transactions:
+  a `PoolEffect` with `EffectCompleteness` (`Complete`, `PublicDiscovery`,
+  `Incomplete`) for every supported pool, `DetailCompleteness` for recipients,
+  payment amounts, and memos, a `FeeState` that keeps unknown distinct from
+  zero and from not applicable, a `HistoryClassification` (`LocalIntent`,
+  `Reconstructed`, `Provisional`), and the transaction's pending private
+  details.
+- `TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`, behind
+  `transparent-inputs`, atomically qualifies a commit's revision as trusted and
+  applies the commit. It requires `PrivateRequired` on the handle and durably.
+  Qualification is the caller's trust decision; it does not verify the
+  publication. This is a new required trait method: external implementors of
+  `TransparentLedgerWrite` must add it.
 
 ### Changed
 - `sync::run` requires `TransparentLedgerRead` and refreshes UTXOs only when the
   configured transparent ledger mode retains public authority. The mode is
   resolved before any request, so an unconfigured store fails instead of
   disclosing its transparent receivers.
+- Public UTXO refresh captures the durable transparent-policy generation and
+  revalidates it immediately before each network request. A stricter transition
+  cannot start another account refresh; callers must cancel and join any request
+  already in flight before applying `PrivateRequired`.
+- `validate_and_apply_records` treats `PrivateDetailsUnsupported` as sticky for
+  later actions in the same batch without rewriting it as `LwdRequired`.
+
+- `InputSource::anchor_retention_interval`, the grid on which the wallet
+  retains durable anchors. It defaults to `AnchorRetentionInterval::ZIP_318`;
+  wrappers around another `InputSource` should forward it.
 
 ### Removed
-- ZIP 318 transaction classification and the canonical-crossing send policy.
-  Vizor schedules its own Orchard -> Ironwood migration transfers, so the
-  library no longer classifies transactions or reshapes ordinary sends to look
-  like migration transfers:
+- ZIP 318 transaction classification and the pool-migration policy of
+  `propose_transfer`. Vizor schedules its own Orchard -> Ironwood migration
+  transfers, so the library no longer classifies transactions or steers sends
+  toward the migration shape:
   - `data_api::zip318` and `LowLevelWalletWrite::put_zip318_classification`.
-  - `anchor_retention::PoolMigrationParams`,
-    `WalletRead::anchor_retention_interval` and
+  - `WalletRead::anchor_retention_interval` and
     `WalletRead::pool_migration_params`.
-  - `fees::canonical_crossing_fee`, `proposal::Step::is_canonical_crossing`,
-    `ConfirmationsPolicy::bucketed` and
-    `data_api::error::Error::ExpiryHeightConflictsWithCanonicalCrossing`.
+  - `ConfirmationsPolicy::bucketed`.
   - `NoteSelection::PreferSingle`, `InputSource::select_single_spendable_note`,
     `InputSource::anchor_computable` and `ReceivedNotes::into_single_covering`.
-  Ironwood bundles are now always padded to the default floor, and
   `propose_transfer` always proposes against the ordinary anchor. Anchor
   retention in `put_blocks` is unchanged.
+
+  An ordinary send that already has the canonical-crossing shape is still
+  built as one: an unpadded Ironwood bundle with the ZIP 318 rolling expiry.
+  `anchor_retention::PoolMigrationParams`, `fees::canonical_crossing_fee`,
+  `proposal::Step::is_canonical_crossing` and
+  `data_api::error::Error::ExpiryHeightConflictsWithCanonicalCrossing` remain
+  for that. See `docs/zip318_removal.md`.
 
 ### Changed
 - Replace the experimental full-nullifier-history switch with a pool-specific
   Ironwood retention height. Late discovery no longer disables ordinary Sapling
   and Orchard insertion limits.
-- `ChangeStrategy::compute_balance` no longer takes `anchor_height` or ZIP 318
-  parameters, and `InputSelector::propose_transaction` and
-  `InputSelector::propose_shielding` no longer take ZIP 318 parameters.
+- `InputSelector::propose_transaction` and `InputSelector::propose_shielding`
+  no longer take ZIP 318 parameters; they read the grid from
+  `InputSource::anchor_retention_interval`.
+- `EnhancePirRead::transaction_enhancement_work` documents that SQLite stores
+  require an explicit transparent ledger mode in addition to enhancement mode.
 
 ## [0.1.0-rc7] - 2026-09-27
 

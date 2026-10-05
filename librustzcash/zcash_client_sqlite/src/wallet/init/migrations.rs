@@ -48,26 +48,36 @@ mod shardtree_support;
 mod spend_key_available;
 mod standalone_p2sh;
 mod status_inclusion_evidence;
+mod status_reconfirmation;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod swap_receiving;
+mod transaction_reconfirmation_receipts;
+mod transparent_activation_schema;
+mod transparent_activity_metadata;
 mod transparent_gap_limit_handling;
 mod transparent_ledger_schema;
+mod transparent_policy_generation;
+mod transparent_recovery_schema;
+mod transparent_shared_derivations;
 mod tree_retained_checkpoints;
 mod tx_observation_height;
 mod tx_retrieval_queue;
 mod tx_retrieval_queue_expiry;
 mod tx_status_observation_intent;
 mod ufvk_support;
+mod unmined_status_obligations;
 mod utxos_table;
 mod utxos_to_txos;
 mod v_address_uses_ironwood;
 mod v_received_output_spends_account;
 mod v_sapling_shard_unscanned_ranges;
 mod v_transactions_additional_totals;
+mod v_transactions_legacy_projection;
 mod v_transactions_net;
 mod v_transactions_note_uniqueness;
 mod v_transactions_pool_crossing;
+mod v_transactions_sender_grouping;
 mod v_transactions_shielding_balance;
 mod v_transactions_transparent_history;
 mod v_transactions_zip318_kind;
@@ -155,25 +165,35 @@ pub mod ids {
         spend_key_available::MIGRATION_ID as SPEND_KEY_AVAILABLE,
         standalone_p2sh::MIGRATION_ID as STANDALONE_P2SH,
         status_inclusion_evidence::MIGRATION_ID as STATUS_INCLUSION_EVIDENCE,
+        status_reconfirmation::MIGRATION_ID as STATUS_RECONFIRMATION,
         support_legacy_sqlite::MIGRATION_ID as SUPPORT_LEGACY_SQLITE,
         support_zcashd_wallet_import::MIGRATION_ID as SUPPORT_ZCASHD_WALLET_IMPORT,
         swap_receiving::MIGRATION_ID as SWAP_RECEIVING,
+        transaction_reconfirmation_receipts::MIGRATION_ID as TRANSACTION_RECONFIRMATION_RECEIPTS,
+        transparent_activation_schema::MIGRATION_ID as TRANSPARENT_ACTIVATION_SCHEMA,
+        transparent_activity_metadata::MIGRATION_ID as TRANSPARENT_ACTIVITY_METADATA,
         transparent_gap_limit_handling::MIGRATION_ID as TRANSPARENT_GAP_LIMIT_HANDLING,
         transparent_ledger_schema::MIGRATION_ID as TRANSPARENT_LEDGER_SCHEMA,
+        transparent_policy_generation::MIGRATION_ID as TRANSPARENT_POLICY_GENERATION,
+        transparent_recovery_schema::MIGRATION_ID as TRANSPARENT_RECOVERY_SCHEMA,
+        transparent_shared_derivations::MIGRATION_ID as TRANSPARENT_SHARED_DERIVATIONS,
         tree_retained_checkpoints::MIGRATION_ID as TREE_RETAINED_CHECKPOINTS,
         tx_observation_height::MIGRATION_ID as TX_OBSERVATION_HEIGHT,
         tx_retrieval_queue::MIGRATION_ID as TX_RETRIEVAL_QUEUE,
         tx_retrieval_queue_expiry::MIGRATION_ID as TX_RETRIEVAL_QUEUE_EXPIRY,
         tx_status_observation_intent::MIGRATION_ID as TX_STATUS_OBSERVATION_INTENT,
-        ufvk_support::MIGRATION_ID as UFVK_SUPPORT, utxos_table::MIGRATION_ID as UTXOS_TABLE,
-        utxos_to_txos::MIGRATION_ID as UTXOS_TO_TXOS,
+        ufvk_support::MIGRATION_ID as UFVK_SUPPORT,
+        unmined_status_obligations::MIGRATION_ID as UNMINED_STATUS_OBLIGATIONS,
+        utxos_table::MIGRATION_ID as UTXOS_TABLE, utxos_to_txos::MIGRATION_ID as UTXOS_TO_TXOS,
         v_address_uses_ironwood::MIGRATION_ID as V_ADDRESS_USES_IRONWOOD,
         v_received_output_spends_account::MIGRATION_ID as V_RECEIVED_OUTPUT_SPENDS_ACCOUNT,
         v_sapling_shard_unscanned_ranges::MIGRATION_ID as V_SAPLING_SHARD_UNSCANNED_RANGES,
         v_transactions_additional_totals::MIGRATION_ID as V_TRANSACTIONS_ADDITIONAL_TOTALS,
+        v_transactions_legacy_projection::MIGRATION_ID as V_TRANSACTIONS_LEGACY_PROJECTION,
         v_transactions_net::MIGRATION_ID as V_TRANSACTIONS_NET,
         v_transactions_note_uniqueness::MIGRATION_ID as V_TRANSACTIONS_NOTE_UNIQUENESS,
         v_transactions_pool_crossing::MIGRATION_ID as V_TRANSACTIONS_POOL_CROSSING,
+        v_transactions_sender_grouping::MIGRATION_ID as V_TRANSACTIONS_SENDER_GROUPING,
         v_transactions_shielding_balance::MIGRATION_ID as V_TRANSACTIONS_SHIELDING_BALANCE,
         v_transactions_transparent_history::MIGRATION_ID as V_TRANSACTIONS_TRANSPARENT_HISTORY,
         v_transactions_zip318_kind::MIGRATION_ID as V_TRANSACTIONS_ZIP318_KIND,
@@ -274,7 +294,8 @@ pub(super) fn all_migrations<
     // ironwood_enhance, and ironwood_received_notes -> orchard_ironwood_migration_tables ->
     // orchard_ironwood_migration_anchor_interval -> orchard_ironwood_migration_unsatisfiability.
     // Both chains meet at status_inclusion_evidence, which is followed by
-    // drop_zip318_pool_migration, which drops the schema the ZIP 318 migrations created.
+    // drop_zip318_pool_migration, which drops only the pool-migration tables and retains
+    // the published ZIP 318 classification column and view field.
     //
     let rng = Rc::new(Mutex::new(rng));
     vec![
@@ -395,6 +416,16 @@ pub(super) fn all_migrations<
         Box::new(orchard_ironwood_migration_unsatisfiability::Migration),
         Box::new(drop_zip318_pool_migration::Migration),
         Box::new(transparent_ledger_schema::Migration),
+        Box::new(transparent_policy_generation::Migration),
+        Box::new(transparent_recovery_schema::Migration),
+        Box::new(transparent_activation_schema::Migration),
+        Box::new(transparent_activity_metadata::Migration),
+        Box::new(transparent_shared_derivations::Migration),
+        Box::new(v_transactions_sender_grouping::Migration),
+        Box::new(v_transactions_legacy_projection::Migration),
+        Box::new(unmined_status_obligations::Migration),
+        Box::new(status_reconfirmation::Migration),
+        Box::new(transaction_reconfirmation_receipts::Migration),
     ]
 }
 
@@ -430,6 +461,7 @@ const PUBLIC_MIGRATION_STATES: &[&[Uuid]] = &[
     V_0_22_0_RC1,
     V_0_22_0_RC2,
     V_ZAKURA_0_1_0_RC5,
+    V_ZAKURA_0_1_0_RC7,
 ];
 
 /// Leaf migrations in the 0.4.0 release.
@@ -599,12 +631,25 @@ pub const V_ZAKURA_0_1_0_RC5: &[Uuid] = &[
     v_transactions_zip318_kind::MIGRATION_ID,
 ];
 
+/// Leaf migrations in the published zakura-client-sqlite 0.1.0-rc7 release.
+///
+/// 0.1.0-rc6 is omitted: its `ironwood_compact_encryption` migration was withdrawn in rc7, so
+/// no later build can open a database that applied it.
+pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
+    status_inclusion_evidence::MIGRATION_ID,
+    v_tx_outputs_transparent_addresses::MIGRATION_ID,
+    ivk_item_cache::MIGRATION_ID,
+    add_transparent_receiver_address_index::MIGRATION_ID,
+    add_transparent_value_index::MIGRATION_ID,
+];
+
 /// The migration that creates the transparent ledger schema.
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    transparent_ledger_schema::MIGRATION_ID,
+    v_transactions_legacy_projection::MIGRATION_ID,
+    transaction_reconfirmation_receipts::MIGRATION_ID,
     swap_receiving::MIGRATION_ID,
 ];
 
@@ -676,6 +721,11 @@ pub(crate) mod tests {
     };
     use schemerz::Migration;
 
+    /// The migration state just before the transparent ledger schema, for upgrade fixtures.
+    #[cfg(feature = "transparent-inputs")]
+    pub(crate) const BEFORE_TRANSPARENT_LEDGER: &[Uuid] =
+        super::transparent_ledger_schema::DEPENDENCIES;
+
     /// `CURRENT_LEAF_MIGRATIONS` must list exactly the leaves of the migration dependency graph
     /// (the migrations that no other migration depends on), so that migrating to the current
     /// state reaches every migration. This recomputes the leaves from the graph and checks them
@@ -744,8 +794,13 @@ pub(crate) mod tests {
             ids::SUPPORT_LEGACY_SQLITE,
             ids::SUPPORT_ZCASHD_WALLET_IMPORT,
             ids::SWAP_RECEIVING,
+            ids::TRANSPARENT_ACTIVITY_METADATA,
+            ids::TRANSPARENT_ACTIVATION_SCHEMA,
+            ids::TRANSPARENT_SHARED_DERIVATIONS,
             ids::TRANSPARENT_GAP_LIMIT_HANDLING,
             ids::TRANSPARENT_LEDGER_SCHEMA,
+            ids::TRANSPARENT_POLICY_GENERATION,
+            ids::TRANSPARENT_RECOVERY_SCHEMA,
             ids::TREE_RETAINED_CHECKPOINTS,
             ids::TX_OBSERVATION_HEIGHT,
             ids::TX_RETRIEVAL_QUEUE,
@@ -771,6 +826,11 @@ pub(crate) mod tests {
             ids::V_TRANSACTIONS_ZIP318_KIND,
             ids::WALLET_SUMMARIES,
             ids::WITNESS_STABILIZED_NOTES,
+            ids::V_TRANSACTIONS_SENDER_GROUPING,
+            ids::V_TRANSACTIONS_LEGACY_PROJECTION,
+            ids::UNMINED_STATUS_OBLIGATIONS,
+            ids::STATUS_RECONFIRMATION,
+            ids::TRANSACTION_RECONFIRMATION_RECEIPTS,
             ids::ZIP318_CLASSIFICATION,
         ]);
 

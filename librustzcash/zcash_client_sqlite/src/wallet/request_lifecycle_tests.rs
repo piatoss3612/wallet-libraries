@@ -301,7 +301,7 @@ fn successful_payload_ingestion_preserves_status_in_both_response_orders() {
 }
 
 #[test]
-fn rewind_reactivates_mined_status_without_completing_enhancement() {
+fn rewind_waits_for_local_reconfirmation_without_completing_enhancement() {
     let (mut st, prior_height) = fixture();
     let (mined_height, _) = st.generate_empty_block();
     st.scan_cached_blocks(mined_height, 1);
@@ -323,13 +323,18 @@ fn rewind_reactivates_mined_status_without_completing_enhancement() {
         .truncate_to_height(prior_height)
         .unwrap();
     assert!(
-        st.wallet()
+        !st.wallet()
             .transaction_status_work()
             .unwrap()
             .iter()
             .any(|work| work.txid() == txid)
     );
     assert!(payload_pending(&st, txid));
+    assert!(queued(&st, txid, 0));
+    st.scan_cached_blocks(mined_height, 1);
+    assert_eq!(st.wallet().get_tx_height(txid).unwrap(), Some(mined_height));
+    assert!(payload_pending(&st, txid));
+    assert!(queued(&st, txid, 0));
 }
 
 /// The routed payload snapshot never carries status work, and status responses and rewinds
@@ -405,14 +410,18 @@ fn routed_enhancement_work_is_independent_of_status_lifecycle() {
         .db_mut()
         .truncate_to_height(prior_height)
         .unwrap();
-    assert_eq!(statuses(&st), 2);
+    assert_eq!(statuses(&st), 0);
     assert_eq!(public(&st), vec![ordinary]);
 
     st.wallet_mut()
         .notify_transaction_enhancement_not_found(ordinary)
         .unwrap();
     assert!(public(&st).is_empty());
-    assert_eq!(statuses(&st), 2);
+    assert_eq!(statuses(&st), 0);
+    st.scan_cached_blocks(mined_height, 1);
+    assert_eq!(statuses(&st), 0);
+    assert!(public(&st).is_empty());
+    assert!(queued(&st, protected, 1));
 }
 
 fn private_bound(st: &State, txid: TxId) -> Option<BlockHeight> {
@@ -474,7 +483,11 @@ fn status_policy_is_explicit_and_unknown_evidence_stays_private() {
         db.transaction_status_work_for(imported),
         Err(SqliteClientError::StatusModeNotConfigured)
     ));
-    let db = db.with_status_mode(TransactionStatusMode::Private);
+    let db = db
+        .with_status_mode(TransactionStatusMode::Private)
+        .with_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+        );
     assert_eq!(
         db.transaction_status_work().unwrap(),
         st.wallet().transaction_status_work().unwrap()
@@ -551,7 +564,10 @@ fn local_creation_evidence_survives_existing_rows_ingestion_reopen_and_rewind() 
     assert_eq!(private_bound(&st, txid), Some(prior));
     let reopened = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();
     let db = crate::WalletDb::from_connection(reopened, params, (), ())
-        .with_status_mode(TransactionStatusMode::Private);
+        .with_status_mode(TransactionStatusMode::Private)
+        .with_transparent_ledger_mode(
+            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+        );
     assert_eq!(
         db.transaction_status_work_for(txid).unwrap(),
         st.wallet().transaction_status_work_for(txid).unwrap()
@@ -796,7 +812,10 @@ fn expiry_dormancy_preserves_obligations_and_reactivates_after_rewind() {
         }
         let reopened = rusqlite::Connection::open(st.wallet().conn().path().unwrap()).unwrap();
         let db = crate::WalletDb::from_connection(reopened, *st.network(), (), ())
-            .with_status_mode(mode);
+            .with_status_mode(mode)
+            .with_transparent_ledger_mode(
+                zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
+            );
         assert_eq!(
             db.transaction_status_work().unwrap(),
             st.wallet().transaction_status_work().unwrap()

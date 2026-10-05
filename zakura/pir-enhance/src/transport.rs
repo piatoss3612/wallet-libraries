@@ -139,6 +139,7 @@ impl PendingClient {
             cache: SessionCache::default(),
             expired: false,
             accepted_at: std::time::Instant::now(),
+            monotonic_now: Arc::new(std::time::Instant::now),
         })
     }
 }
@@ -188,6 +189,14 @@ pub struct Client {
     cache: SessionCache,
     expired: bool,
     accepted_at: std::time::Instant,
+    // Private time source: production uses Instant, tests advance their own clock.
+    monotonic_now: Arc<
+        dyn Fn() -> std::time::Instant
+            + Send
+            + Sync
+            + std::panic::RefUnwindSafe
+            + std::panic::UnwindSafe,
+    >,
 }
 /// Persist expiration on completion or cancellation without interrupting cover
 /// dispatch within a round after a query rejection.
@@ -238,13 +247,15 @@ impl Client {
         self.manifest = pending.manifest;
         self.acceptance = acceptance.clone();
         self.expired = false;
-        self.accepted_at = std::time::Instant::now();
+        self.accepted_at = (self.monotonic_now)();
         Ok(())
     }
 
     /// Refresh before starting new work; an in-flight operation retains its accepted view.
     pub fn refresh_due(&self) -> bool {
-        self.expired || self.accepted_at.elapsed() >= std::time::Duration::from_secs(30)
+        self.expired
+            || (self.monotonic_now)().duration_since(self.accepted_at)
+                >= std::time::Duration::from_secs(30)
     }
 
     /// Opt-in birthday cover policy. One interval is one accepted routing view.
@@ -1190,6 +1201,7 @@ mod cover_tests {
     use base64::Engine;
     use sha2::{Digest, Sha256};
     use std::cell::{Cell, RefCell};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     struct Mock {
         manifest: Manifest,
@@ -1198,7 +1210,8 @@ mod cover_tests {
         retry: Cell<bool>,
         retry_domain: u64,
         corrupt: bool,
-        delay_once: Cell<bool>,
+        advance_once: Cell<bool>,
+        elapsed: Arc<AtomicU64>,
         post_statuses: RefCell<VecDeque<Option<u16>>>,
         session_statuses: RefCell<VecDeque<Option<u16>>>,
         pending_post: Option<usize>,
@@ -1224,13 +1237,21 @@ mod cover_tests {
                 retry: Cell::new(false),
                 retry_domain: 1,
                 corrupt: false,
-                delay_once: Cell::new(false),
+                advance_once: Cell::new(false),
+                elapsed: Arc::new(AtomicU64::new(0)),
                 post_statuses: RefCell::new(VecDeque::new()),
                 session_statuses: RefCell::new(VecDeque::new()),
                 pending_post: None,
                 pending_session: None,
                 oversized_post: false,
             }
+        }
+        fn bind_clock(&self, client: &mut Client) {
+            let accepted_at = client.accepted_at;
+            let elapsed = self.elapsed.clone();
+            client.monotonic_now = Arc::new(move || {
+                accepted_at + std::time::Duration::from_secs(elapsed.load(Ordering::SeqCst))
+            });
         }
         fn acceptance(&self) -> GenerationAcceptance {
             GenerationAcceptance::new(
@@ -1294,8 +1315,9 @@ mod cover_tests {
                     // A custom transport that ignores the request's collector.
                     return Ok(ResponseBody(vec![0; MAX_RESPONSE_BYTES + 1]));
                 }
-                if self.delay_once.replace(false) {
-                    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+                if self.advance_once.replace(false) {
+                    // Advance after dispatch, while the cover round is in flight.
+                    self.elapsed.fetch_add(31, Ordering::SeqCst);
                 }
                 if binding.shard_id == self.retry_domain && self.retry.replace(false) {
                     return Err(ClientError::HttpStatus(429));
@@ -1407,6 +1429,32 @@ mod cover_tests {
     }
 
     #[test]
+    fn refresh_boundary_and_routing_reset_use_the_same_clock() {
+        futures::executor::block_on(async {
+            let transport = Mock::new();
+            let mut client = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap()
+                .accept(&transport.acceptance())
+                .unwrap();
+            transport.bind_clock(&mut client);
+            transport.elapsed.store(29, Ordering::SeqCst);
+            assert!(!client.refresh_due());
+            transport.elapsed.store(30, Ordering::SeqCst);
+            assert!(client.refresh_due());
+            let pending = PendingClient::fetch(&transport, "https://example.test")
+                .await
+                .unwrap();
+            client
+                .accept_routing(pending, &transport.acceptance())
+                .unwrap();
+            assert!(!client.refresh_due());
+            transport.elapsed.store(60, Ordering::SeqCst);
+            assert!(client.refresh_due());
+        });
+    }
+
+    #[test]
     fn cover_finishes_after_refresh_becomes_due() {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1414,12 +1462,14 @@ mod cover_tests {
             .unwrap()
             .block_on(async {
                 let transport = Mock::new();
-                transport.delay_once.set(true);
+                transport.advance_once.set(true);
                 let mut client = PendingClient::fetch(&transport, "https://example.test")
                     .await
                     .unwrap()
                     .accept(&transport.acceptance())
                     .unwrap();
+                transport.bind_clock(&mut client);
+                assert!(!client.refresh_due());
                 assert_eq!(
                     client
                         .query_positions_with_cover(&transport, &[0, 33], 0)
@@ -1511,12 +1561,14 @@ mod cover_tests {
             .block_on(async {
                 use futures_util::StreamExt;
                 let transport = Mock::new();
-                transport.delay_once.set(true);
+                transport.advance_once.set(true);
                 let mut client = PendingClient::fetch(&transport, "https://example.test")
                     .await
                     .unwrap()
                     .accept(&transport.acceptance())
                     .unwrap();
+                transport.bind_clock(&mut client);
+                assert!(!client.refresh_due());
                 let results: Vec<_> = client
                     .query_batch(&transport, [0, 33])
                     .unwrap()

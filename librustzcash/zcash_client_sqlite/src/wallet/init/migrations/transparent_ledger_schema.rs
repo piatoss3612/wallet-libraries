@@ -21,7 +21,7 @@ pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x8f290af0_eb5a_4f1e_88d4_3550fc0
 // The ledger tables reference `accounts`, `addresses`, `transactions`, and
 // `transparent_received_outputs`, whose current shapes are established by earlier migrations.
 // Depending on every current leaf keeps this migration last in the DAG.
-const DEPENDENCIES: &[Uuid] = &[
+pub(super) const DEPENDENCIES: &[Uuid] = &[
     drop_zip318_pool_migration::MIGRATION_ID,
     v_tx_outputs_transparent_addresses::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
@@ -219,6 +219,32 @@ mod tests {
     }
 
     /// Every row of every table that is not ledger-owned or migration bookkeeping.
+    /// Wallet tables are unchanged by the upgrade, except that later migrations may add status
+    /// observations to the retrieval queue; every row queued before is kept.
+    fn assert_retained(
+        mut after: BTreeMap<String, Vec<Vec<Value>>>,
+        before: &BTreeMap<String, Vec<Vec<Value>>>,
+    ) {
+        let mut before = before.clone();
+        // The additive receipt migration starts empty, without manufacturing historical evidence.
+        assert!(
+            after
+                .remove("tx_reconfirmation_receipts")
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert!(
+            before
+                .remove("tx_reconfirmation_receipts")
+                .unwrap_or_default()
+                .is_empty()
+        );
+        let queued_before = before.remove("tx_retrieval_queue").unwrap_or_default();
+        let queued_after = after.remove("tx_retrieval_queue").unwrap_or_default();
+        assert!(queued_before.iter().all(|row| queued_after.contains(row)));
+        assert_eq!(after, before);
+    }
+
     fn wallet_tables(conn: &Connection) -> BTreeMap<String, Vec<Vec<Value>>> {
         let names: Vec<String> = conn
             .prepare(
@@ -302,7 +328,7 @@ mod tests {
 
         // Balances, locks, local sends, and sent-note details are read from these tables only;
         // none changed.
-        assert_eq!(wallet_tables(&db.conn), before);
+        assert_retained(wallet_tables(&db.conn), &before);
 
         // Every record is legacy evidence; records with local creation evidence are also local.
         // A mined observation (the coinbase and remote receive) does not make a record local.
@@ -329,14 +355,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(meta, (0, 0, 1));
-        assert_eq!(
-            ledger_table_names(&db.conn),
-            BTreeSet::from([
-                "tpir_meta".to_string(),
-                "tpir_output_origins".to_string(),
-                "tpir_spend_origins".to_string(),
-            ])
-        );
+        // Later migrations add the recovery tables, empty.
+        let ledger_tables = ledger_table_names(&db.conn);
+        assert!(ledger_tables.is_superset(&BTreeSet::from([
+            "tpir_meta".to_string(),
+            "tpir_output_origins".to_string(),
+            "tpir_spend_origins".to_string(),
+        ])));
+        for table in &ledger_tables {
+            if !["tpir_meta", "tpir_output_origins", "tpir_spend_origins"].contains(&&**table) {
+                assert_eq!(count(&db.conn, table), 0, "{table} must start empty");
+            }
+        }
     }
 
     #[test]
@@ -361,14 +391,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(recorded, 0);
-        assert_eq!(wallet_tables(&db.conn), before);
+        assert_retained(wallet_tables(&db.conn), &before);
 
         // After the obstacle is removed, the migration completes from the untouched state.
         db.conn
             .execute_batch("DROP VIEW tpir_spend_origins")
             .unwrap();
         WalletMigrator::new().init_or_migrate(&mut db).unwrap();
-        assert_eq!(wallet_tables(&db.conn), before);
+        assert_retained(wallet_tables(&db.conn), &before);
         assert_eq!(count(&db.conn, "tpir_output_origins"), 4);
     }
 }

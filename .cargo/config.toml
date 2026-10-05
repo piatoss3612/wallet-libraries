@@ -1,0 +1,15 @@
+# Opt-in candidate for iteration measurements. Final CI uses the test profile.
+[profile.iteration]
+inherits = "test"
+opt-level = 1
+debug = 1
+
+[profile.iteration.package."*"]
+opt-level = 3
+
+# valar-spiral-rs's reduction relies on u64 arithmetic wrapping, which the IPIR
+# path exceeds by design, so it panics under overflow checks. wallet-pir exempts
+# this crate alone the same way. It applies to every test build that compiles
+# it, Enhance PIR's included.
+[profile.test.package.valar-spiral-rs]
+overflow-checks = false
