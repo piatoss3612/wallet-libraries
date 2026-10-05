@@ -73,6 +73,12 @@ workspace.
   zero and from not applicable, a `HistoryClassification` (`LocalIntent`,
   `Reconstructed`, `Provisional`), and the transaction's pending private
   details.
+- `TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`, behind
+  `transparent-inputs`, atomically qualifies a commit's revision as trusted and
+  applies the commit. It requires `PrivateRequired` on the handle and durably.
+  Qualification is the caller's trust decision; it does not verify the
+  publication. This is a new required trait method: external implementors of
+  `TransparentLedgerWrite` must add it.
 
 ### Changed
 - `sync::run` requires `TransparentLedgerRead` and refreshes UTXOs only when the

@@ -81,7 +81,8 @@ pub enum SqliteClientError {
         applied: u64,
     },
     /// Candidate recovery commits require a `PrivateShadow` or `PrivateRequired` policy, both
-    /// durably applied and configured on the handle.
+    /// durably applied and configured on the handle. Trusted commits and promotion require
+    /// `PrivateRequired` in both places.
     TransparentRecoveryNotEnabled,
     /// A candidate recovery commit was refused; none of its facts were applied.
     #[cfg(feature = "transparent-inputs")]

@@ -80,7 +80,7 @@ mod watch;
 mod work;
 
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use commit::{apply_commit, qualify_revision};
+pub(crate) use commit::{CommitTrust, apply_commit, qualify_revision};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use diagnostics::candidate_recovery;
 #[cfg(feature = "transparent-inputs")]
