@@ -209,12 +209,12 @@ impl Published {
 
 /// The stable identity of one shard of a publication, for one companion binding.
 ///
-/// It hashes only what [`SetIdentity::continues`] holds fixed: the shard schema,
-/// network, genesis block, profile, envelope version and start height, plus the
-/// shard's geometry and that geometry's seal parameters, which `continues` holds
-/// fixed once the geometry is in use. A set growing into a new geometry tier
-/// therefore changes no existing source, and a set-identity change `continues`
-/// refuses changes every source it affects.
+/// It hashes the set-identity fields [`SetIdentity::continues`] holds fixed,
+/// plus the shard's geometry, that geometry's seal parameters, shard id and
+/// start height. A set growing into a new geometry tier changes no existing
+/// source. Re-cutting another geometry can reuse an id for a different height
+/// range; its start height gives that range a new source even when its own
+/// geometry and seal parameters remain unchanged.
 pub(crate) fn source(
     binding: &[u8; 32],
     set: &SetIdentity,
@@ -238,6 +238,7 @@ pub(crate) fn source(
     length_prefixed(&mut hash, entry.geometry.as_bytes());
     length_prefixed(&mut hash, &seal);
     hash.update(entry.shard_id.to_le_bytes());
+    hash.update(entry.start_height.to_le_bytes());
     Ok(hash.finalize().into())
 }
 

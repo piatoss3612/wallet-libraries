@@ -60,9 +60,10 @@
 - Revision identities are stable across companions. `source` covers the
   companion binding, the set-identity fields that never change while the
   publication continues, the shard's geometry and that geometry's seal
-  parameters, and the shard id, so a new geometry tier changes no existing
-  source. `revision` covers the manifest digest and seal state, and `lineage`
-  is the published revision number plus one instead of a per-companion
+  parameters, the shard id and the shard's start height, so a new geometry tier
+  changes no existing source, while reusing an id for a different height range
+  gives that range a new source. `revision` covers the manifest digest and seal
+  state, and `lineage` is the published revision number plus one instead of a per-companion
   counter, so a recreated companion reproduces the wallet's triples.
 - Companions are format `transparent-reference-companion-v2`, with a
   `pir_bridge_catalog` table. Earlier companions are refused at open with

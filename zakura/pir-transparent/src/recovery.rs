@@ -2600,6 +2600,51 @@ mod tests {
     }
 
     #[test]
+    fn a_recreated_companion_distinguishes_a_shifted_shard_boundary() {
+        let original = map();
+        let recent = &original.shards[1];
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = covering(&dir.path().join("original.sqlite"), &original);
+        let before = pass(&mut adapter, &original);
+        assert_eq!(before.state, BatchState::Ready);
+        let prior = revisions(&before)[1].clone();
+
+        // Re-cutting the archive geometry can reuse a recent shard's id for a
+        // different height range, without changing its geometry or revision
+        // number. Both directions must give that range another source.
+        for start in [recent.start_height - 1, recent.start_height + 1] {
+            let mut recut = original.clone();
+            recut
+                .seal
+                .get_mut(&original.shards[0].geometry)
+                .unwrap()
+                .max_scripts += 1;
+            recut.shards[0].end_height = start - 1;
+            recut.shards[1].start_height = start;
+            recut.shards[1].manifest_digest = "77".repeat(32);
+            recut.check_shape().unwrap();
+            assert!(
+                !SetIdentity::of_schema(&original, SCHEMA)
+                    .continues(&SetIdentity::of_schema(&recut, SCHEMA))
+            );
+
+            let path = dir.path().join(format!("recut-{start}.sqlite"));
+            let mut recreated = covering(&path, &recut);
+            let batch = pass(&mut recreated, &recut);
+            assert_eq!(batch.state, BatchState::Ready);
+            let next = revisions(&batch)[1].clone();
+            assert_eq!(next.lineage, prior.lineage);
+            assert_ne!(next.revision, prior.revision);
+            assert_ne!(next.source, prior.source);
+
+            // Reopening unchanged data still reproduces the same identity.
+            drop(recreated);
+            let mut reopened = ReferenceRecovery::open(&path, config()).unwrap();
+            assert_eq!(revisions(&pass(&mut reopened, &recut))[1], next);
+        }
+    }
+
+    #[test]
     fn lineage_follows_the_published_revision() {
         let map = republished(&map(), 1, 7, map().shards[1].manifest_digest.clone());
         let dir = tempfile::tempdir().unwrap();
