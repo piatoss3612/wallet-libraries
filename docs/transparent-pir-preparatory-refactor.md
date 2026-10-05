@@ -1,10 +1,12 @@
 # Preparatory refactor for a transparent PIR ledger
 
-Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
-its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64).
-Phases 3–6 are merged (#68–#71); consumer qualification remains pending. The Vizor halves
-of Phases 2–6 are in draft review or in progress. Production transparent
-authority stays public during preparation.
+Status: Phase 0 is done, and the wallet-libraries halves of Phases 1–6 are
+merged (#60–#62, #64, #68–#71). The Vizor halves of Phases 1–5 are in
+`roman/tpir` (chainapsis/vizor-wallet#783, open); its Phase 6 suite is
+unmerged, so consumer qualification remains pending. Production transparent
+authority stays public during preparation. Real PIR integration, behind a
+development flag, is planned in
+[private transparent recovery](transparent-pir-private-recovery.md).
 
 ## Objective and fixed boundaries
 
@@ -44,7 +46,7 @@ in the final qualification phase.
 | 1. Contract and migration (library merged) | Read contract, policy/provenance schema, configured handles. | Dependency upgrade and explicit handle configuration. | Schema upgrades; private transparent input use remains unavailable. |
 | 2. Privacy boundaries | Durable policy transitions and guarded follow-on work. | Shared policy, dispatch guards, native/preview coverage. | Required-private fixtures fail closed before any unsupported request. |
 | 3. Candidate recovery | Watched scripts, candidate events, coverage, resumable commits. | Disabled/fixture source and bounded coordinator. | Isolated shadow recovery; no production projection changes. |
-| 4. Safe activation (library in review) | Atomic projection, rewind, promotion, and all financial gates. | Balance/operation integration and activation fixtures. | Per-account private activation and spending exercised with fixtures. |
+| 4. Safe activation | Atomic projection, rewind, promotion, and all financial gates. | Balance/operation integration and activation fixtures. | Per-account private activation and spending exercised with fixtures. |
 | 5. History integration | Evidence-backed history reads and detail state. | Partial-history classification, FFI, and UI. | Mixed transactions and restored history represented accurately. |
 | 6. Qualification | Lifecycle/failure evidence and repair compatibility. | Cross-repository regression and request-capture results. | Preparatory refactor complete; real PIR integration still gated. |
 
