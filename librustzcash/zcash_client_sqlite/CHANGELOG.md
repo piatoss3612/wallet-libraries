@@ -20,11 +20,13 @@ workspace.
   authority is absent and is dropped when a policy transition restores it (route 1).
   The additive `ironwood_unsupported_memo_retry` migration requeues the unknown memos of
   route-2 transactions in existing wallets, without resetting notes, spend links, or routes.
-- History reconstructs a mixed transaction without full data only as a transparent-to-shielded
-  self-transfer: every owned effect complete, qualified metadata counting exactly the account's
+- History reconstructs a mixed transaction without full data, as
+  `HistoryClassification::NetReconstructed`, only as a transparent-to-shielded self-transfer: every owned effect complete, qualified metadata counting exactly the account's
   published transparent inputs, its exact whole-transaction fee equal to the stored one, only
   transparent spends and shielded receipts, and the spent value equal to the receipts plus that
-  fee. Otherwise it stays provisional. The stored fee of such a transaction is the whole
+  fee. Otherwise it stays provisional. A net reconstruction does not prove the debit was the
+  fee: another party's shielded spend paying an equal output at a padding action has the same
+  evidence. The stored fee of such a transaction is the whole
   transaction's: `FeeState` stays `Unknown` and the aggregate payment is not inferred.
 
 - Transparent spend discovery retains work for unmined local spenders and resumes after they

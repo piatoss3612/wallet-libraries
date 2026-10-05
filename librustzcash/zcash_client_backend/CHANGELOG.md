@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `transparent_ledger::HistoryClassification::NetReconstructed`: the account's effects and the
+  exact whole-transaction fee balance, but the wallet lacks the full transaction and cannot
+  exclude another party's self-balanced shielded participation, so the account's movement is
+  final while its payment and fee attribution are not.
+
 ### Changed
 - `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
   has-transparent records too, so storage can compare it before keeping such a record's
