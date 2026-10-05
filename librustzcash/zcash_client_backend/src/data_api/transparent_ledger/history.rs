@@ -86,6 +86,16 @@ pub enum HistoryClassification {
     /// only received or the value it spent is accounted for. A missing memo alone does not make a
     /// transaction provisional.
     Reconstructed,
+    /// Reconstructed as a net movement only. Every effect is complete and the account's spent
+    /// value equals its receipts plus the exact whole-transaction fee, so the account's movement
+    /// is final; but the wallet lacks the full transaction, and no available evidence excludes
+    /// another party's self-balanced shielded participation (a foreign shielded spend paying an
+    /// equal foreign output that looks like padding). Whether the account's debit was the fee or
+    /// a payment while the other party paid the fee is therefore not established. The fee is not
+    /// attributed to the account and no aggregate payment is inferred. A privately recovered
+    /// transparent-to-shielded self-transfer whose transparent inputs are all the account's is
+    /// reported this way.
+    NetReconstructed,
     /// Reconstructed from incomplete evidence. Later discovery or enhancement can change it; a
     /// provisional net debit is not a final payment amount.
     Provisional,

@@ -12,7 +12,9 @@ use zcash_client_backend::data_api::{
         EnhancePirWork, EnhancePirWrite as _, EnhanceRecord, EnhanceRecordParts,
         EnhanceTransactionMetadata, EnhancementMode, TransactionEnhancementWork,
     },
-    testing::{IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester},
+    testing::{
+        FakeCompactOutput, IronwoodFvk, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+    },
     transparent_ledger::{
         AggregatePayment, DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification,
         PoolEffect, PrivateTransparentDetail, TransactionHistoryDetails, TransactionMetadata,
@@ -73,6 +75,16 @@ struct Shielding {
 /// internal address is compact-scanned, and private transparent recovery publishes both spends
 /// with `metadata`. Enhance PIR has not run yet.
 fn shielding(shape: &Shape, metadata: Option<TransactionMetadata>) -> Shielding {
+    padded_shielding(shape, metadata, None)
+}
+
+/// Like [`shielding`], with `action0` (if any) as a first Ironwood action to a key the wallet
+/// does not hold: a standard builder's zero-value padding, or another party's output.
+fn padded_shielding(
+    shape: &Shape,
+    metadata: Option<TransactionMetadata>,
+    action0: Option<u64>,
+) -> Shielding {
     let mut st = TestBuilder::new()
         .with_network(ironwood_network())
         .with_data_store_factory(TestDbFactory::default())
@@ -100,7 +112,23 @@ fn shielding(shape: &Shape, metadata: Option<TransactionMetadata>) -> Shielding 
     // The shielding transaction's only owned shielded effect: its Ironwood output to the
     // account's internal address. Compact scanning finds it without its memo.
     let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
-    let (height, _, _) = st.generate_next_block(&fvk, AddressType::Internal, zat(shape.shielded));
+    let foreign = IronwoodFvk(orchard::keys::FullViewingKey::from(
+        &orchard::keys::SpendingKey::from_bytes([0x77; 32]).unwrap(),
+    ));
+    let mut outputs = vec![];
+    if let Some(value) = action0 {
+        outputs.push(FakeCompactOutput::new(
+            &foreign,
+            AddressType::DefaultExternal,
+            zat(value),
+        ));
+    }
+    outputs.push(FakeCompactOutput::new(
+        &fvk,
+        AddressType::Internal,
+        zat(shape.shielded),
+    ));
+    let (height, _, _) = st.generate_next_block_multi(&outputs);
     st.scan_cached_blocks(height, 1);
     scan_new_blocks(&mut st, 2);
     let (tx_ref, txid): (i64, [u8; 32]) = conn(&st)
@@ -318,7 +346,11 @@ fn assert_reconstructed_shielding(case: &Shielding, shape: &Shape) {
     let entry = history(&case.st, case.account, case.txid);
     // The received memo is recovered, so the payment details are complete.
     assert_eq!(entry.payment_details, DetailCompleteness::Complete);
-    assert_eq!(entry.classification, HistoryClassification::Reconstructed);
+    // The account's net movement is final; whether its debit was the fee is not proven.
+    assert_eq!(
+        entry.classification,
+        HistoryClassification::NetReconstructed
+    );
     // The whole-transaction fee is exact; the account's share of it is not attributed.
     assert_eq!(
         entry.transaction_metadata.as_ref().unwrap().metadata.fee,
@@ -335,7 +367,7 @@ fn assert_reconstructed_shielding(case: &Shielding, shape: &Shape) {
 }
 
 /// Both reported shapes recover their memo and whole-transaction fee privately and reconstruct
-/// as a shielding: the account's transparent inputs became its Ironwood output and the fee.
+/// as a net shielding: the account's transparent inputs became its Ironwood output and the fee.
 #[test]
 fn reported_shielding_shapes_reconstruct_from_private_evidence() {
     for shape in &CASES {
@@ -664,4 +696,47 @@ fn coverage_loss_and_reorg_reevaluate_the_classification() {
             false
         )
     );
+}
+
+/// The standard padded shape and the adversarial one have identical evidence. Both spend the
+/// account's two transparent inputs (200,000), have no transparent outputs, a 20,000 fee, and
+/// two Ironwood actions with the account's 180,000 output at action 1. In the pure shielding,
+/// action 0 is the builder's zero-value padding (outgoing ciphertext encrypted to no key, spends
+/// enabled by default flags). In the other, another party spends 100,000 of its own shielded
+/// funds into action 0's output, leaving the pool's net inflow at 180,000. Neither action 0 is
+/// decryptable or OVK-recoverable by the wallet, so neither is even queued for recovery; the
+/// transparent metadata, Enhance PIR record, and owned effects agree, and so does the history.
+/// The result is a net movement in both cases, never a proven self-transfer.
+#[test]
+fn foreign_self_balanced_shielded_participation_is_indistinguishable() {
+    let shape = &CASES[0];
+    let details = [Some(0), Some(100_000)].map(|action0| {
+        let mut case = padded_shielding(shape, Some(reported_metadata()), action0);
+        // Action 0 is no outgoing candidate: the account spent no Ironwood note.
+        let outgoing: i64 = conn(&case.st)
+            .query_row(
+                "SELECT COUNT(*) FROM ironwood_enhance_outgoing_queue WHERE transaction_id = ?1",
+                [case.tx_ref],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outgoing, 0);
+        assert_eq!(
+            recover_memo(&mut case, Some(FEE)),
+            vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
+        );
+        let entry = history(&case.st, case.account, case.txid);
+        assert_eq!(
+            entry.classification,
+            HistoryClassification::NetReconstructed
+        );
+        assert_eq!(entry.fee, FeeState::Unknown);
+        assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+        TransactionHistoryDetails {
+            txid: TxId::from_bytes([0; 32]),
+            mined_height: None,
+            ..entry
+        }
+    });
+    assert_eq!(details[0], details[1]);
 }

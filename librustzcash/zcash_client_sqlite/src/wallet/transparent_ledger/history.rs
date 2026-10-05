@@ -479,10 +479,17 @@ fn has_unresolved_spend(
 /// - the account spent only transparent funds and received only shielded outputs, with no
 ///   recorded outputs to others.
 ///
-/// What remains unprovable without the full data is the same as for an Ironwood-only
-/// transaction balanced by its fee: a foreign shielded input exactly paying a foreign output.
-/// The fee is therefore not attributed to the account; `FeeState` stays unknown, and the
-/// whole-transaction fee remains available from the metadata.
+/// What no available evidence can exclude is another party's self-balanced shielded
+/// participation: a real foreign shielded spend paying an equal foreign shielded output in an
+/// action the wallet cannot decrypt. Standard builders pad bundles with dummy outputs whose
+/// outgoing ciphertext is encrypted to no key and enable spends, so a dummy and a foreign action
+/// look alike, and the transparent txid record, the Enhance PIR record, and the account's own
+/// events are identical in both cases. Payment details derived from the full data share this
+/// blind spot. The result is therefore classified as
+/// [`HistoryClassification::NetReconstructed`], not `Reconstructed`: the account's net movement
+/// is final, but its split between a self-transfer and the fee is not proven. The fee is not
+/// attributed to the account; `FeeState` stays unknown, and the whole-transaction fee remains
+/// available from the metadata.
 fn is_private_shielding(
     tx: &TransactionFacts,
     effects: &[PoolEffect],
@@ -675,18 +682,20 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         // Without the full data of a mixed transaction, the balance above does not show that the
         // account was its only funder: a foreign transparent input could have paid the fee while
         // the account's funds paid someone else the same amount. It stands only for the one shape
-        // the recovered evidence pins down; see `is_private_shielding`.
-        let payments_accounted = payments_accounted
-            && (!tx.mixed_without_full_data
-                || is_private_shielding(
-                    &tx,
-                    &effects,
-                    transaction_metadata.as_ref(),
-                    owned_inputs,
-                    sent_elsewhere(conn, account_id, tx.id)?,
-                ));
+        // the recovered evidence pins down, and then only as a net movement; see
+        // `is_private_shielding`.
+        let net_shielding = payments_accounted
+            && tx.mixed_without_full_data
+            && is_private_shielding(
+                &tx,
+                &effects,
+                transaction_metadata.as_ref(),
+                owned_inputs,
+                sent_elsewhere(conn, account_id, tx.id)?,
+            );
+        let payments_accounted = payments_accounted && !tx.mixed_without_full_data;
         let payment_details = if tx.constructed
-            || ((received_only || payments_accounted)
+            || ((received_only || payments_accounted || net_shielding)
                 && !has_unretrieved_memo(conn, account_id, tx.id)?)
         {
             DetailCompleteness::Complete
@@ -757,6 +766,8 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             HistoryClassification::LocalIntent
         } else if received_only || payments_accounted || inferred_payment.is_some() {
             HistoryClassification::Reconstructed
+        } else if net_shielding {
+            HistoryClassification::NetReconstructed
         } else {
             HistoryClassification::Provisional
         };
