@@ -14,6 +14,9 @@
 - Re-exports of `ChainView`, `FilterSource`, `ShardTransport`, `ShardRequest`,
   `Table`, `refusal`, `StaleRevision`, `Overloaded` and `BoxError`, so an
   application can implement its transports without naming wallet-pir crates.
+- `WalletChain`, a `ChainView` over the blocks a wallet scanned
+  (`WalletRead::get_block_hash`) that answers only through the watch set's
+  target and is `Unknown` above it or where the wallet holds no block.
 
 ### Changed
 
@@ -29,6 +32,20 @@
   the companion and remain observable until trusted reconciliation is acknowledged.
 - The wallet-pir crates move to `648264bb4801ae8faf7a61f4638ea049edb167cf`,
   whose client accepts maps and manifests that carry txid display fields.
+- `recover` refuses, before the service's init, a shard map whose network or
+  genesis block is not Zcash mainnet's.
+- A pass needs the chain view only from the watch set's floor, its lowest
+  required height. Shards ending below it are neither exported nor cataloged,
+  and the reference client may roll back below it without a wallet hash, so a
+  map that starts at genesis serves a wallet with a later birthday. A watch set
+  with no addresses sends no request and completes at its target.
+- When the publication ends below the target, a pass syncs to the map's end if
+  that end is at or above the floor, the chain view accepts its terminal block,
+  and the companion holds no anchor or event above it. Completing there reports
+  `Outcome::Behind` with `covered_through` at the map's end, and the commits
+  keep the watch set's context. A pass that cannot clamp, as for a wallet born
+  above the map's end, also reports `Behind`, including on a companion no
+  earlier pass has bound.
 
 ### Removed
 
