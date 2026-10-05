@@ -123,94 +123,22 @@ follows.
 
 ## Trusted-indexer qualification (deviation)
 
-The architecture's
-[trust and privacy model](transparent-pir-ledger-architecture.md#trust-and-privacy-model)
-requires an independent verifier before production publication: one that reads
-blocks from an independently operated node, reconstructs receives and spends,
-and binds its checks to the exact publication being promoted. No such verifier
-exists yet. Private mode deviates from that requirement and trusts the indexer
-instead.
+Private recovery temporarily trusts the configured indexer for accuracy and
+completeness, including negative results. The architecture's
+[independent publication verifier](transparent-pir-ledger-architecture.md#trust-and-privacy-model)
+does not exist yet. Production activation still requires it and the owner's
+acceptance of the trusted-indexer model.
 
-- `qualify_and_apply_transparent_ledger_commit` qualifies a commit's exact
-  revision and applies the commit in one transaction. It requires
-  `PrivateRequired` on the handle and durably. Qualification is the caller's
-  trust decision: the library does not verify the publication.
-- The application qualifies only commits from its configured origin, and only
-  behind a development flag (Vizor's `ZCASH_PRIVATE_TRANSPARENT_RECOVERY`).
-  Builds without the flag never qualify a revision.
-- Qualifying a newer provisional revision withdraws its source's older
-  provisional evidence in the same transaction as the replacement facts, so a
-  reader never sees the gap between them. A failure rolls back both; an
-  integrity failure also quarantines, exactly as an ordinary commit does.
-- There is no quarantine clearing and no trust or quarantine epoch. A
-  quarantined source or account stays quarantined.
-- `WalletDb::qualify_transparent_revision` remains a test and development hook.
+`qualify_and_apply_transparent_ledger_commit` requires `PrivateRequired` on the
+handle and durably. It qualifies the exact revision, withdraws older provisional
+evidence of the same source across the wallet, and applies the commit in one
+transaction. Failure rolls back qualification and facts; an integrity failure
+also persists quarantine. Qualification is the caller's trust decision, not
+publication verification.
 
-This trusts the publisher for accuracy and completeness, including negative
-results. Production activation still needs the independent verifier and the
-owner's acceptance of the trusted-indexer model.
-
-## Private mode limitations (development flag)
-
-These are accepted while private mode stays behind the development flag, with
-their remedies where one exists.
-
-- **Authority between passes.** Spends and shields can fail between a new
-  block and the next private pass, and during a scan. The store-time recheck
-  refuses them, so funds are not at risk.
-- **Publication lag.** If publication lags sync completion by more than about
-  90 seconds, a run ends behind the target. Authority returns only when a later
-  run catches the tail. The lag in blocks and the seconds waited are logged.
-- **Ledger accounts.** Ledger accounts are stopped, because their history from
-  before the birthday would be missed.
-- **Seed reuse.** Unresolved spends caused by the same seed being used
-  elsewhere are permanent. After three stalled runs the account is held for an
-  hour and shown as stalled.
-- **Quarantine.** Nothing clears a quarantine. Delete and re-import the
-  account (a new account identifier gives new sources), or turn the setting
-  off.
-- **Outputs below the birthday.** Legacy public outputs mined below the
-  birthday are a permanent `LegacyDiscrepancy`. The account is stopped and held
-  for an hour; turn the setting off.
-- **Publisher re-cut.** A re-cut under an unchanged set identity restarts
-  revision numbers. Sealed shards are then withdrawn as a regression, and the
-  tail stays pending until its revision passes the old maximum, so every
-  account with evidence stops. Turn the setting off, or delete and re-import.
-  The publisher rule is that a re-cut changes the set identity.
-- **Re-cut after companion loss.** The adapter's catalog cannot detect the
-  regression, so a colliding lineage is an integrity failure and quarantines.
-  The remedy is the same as for quarantine.
-- **Set-identity change.** A profile, start height, envelope, or seal change
-  recreates the adapter's companion automatically. Older provisional evidence
-  of the changed sources stays in the wallet and is never superseded. It is
-  consistent data, and reorgs still rewind it.
-- **Origin change.** A debug origin override creates new sources. The previous
-  origin's provisional tail evidence is never withdrawn. This affects debug
-  builds only.
-- **Withdrawn publications.** Every withdrawal cause holds the account for an
-  hour, shown as withdrawn, and then retries. A lagging replica is pending, not
-  withdrawn.
-- **Holds** are kept in memory, so a restart retries once.
-- **Filter downloads.** Filters are downloaded per account, about 0.8–28 MB.
-- **Hard caps** on scripts, shards, events, queries, and bytes pause recovery.
-- **Rescans.** Passes fail during a rescan. This fails closed.
-- **Restores.** A restore under private mode does not find accounts that have
-  only transparent history.
-- **Server edge cases.** When the server is ahead of the wallet, tail events up
-  to the target are not hash-bound to the wallet's chain. A server rollback
-  stalls recovery. Published rc7 and older builds cannot open a database with
-  the ledger migrations, so the flag needs an isolated data directory.
-- **Accepted leaks.** The shard service sees shard ids, the filter range,
-  timing, and the network origin unless Tor hides it. Broadcasting a shield or
-  spend publishes its transparent outpoints. Turning the setting off restamps
-  the retrieval queue and queues public payload lookups, so privately learned
-  transaction ids are disclosed publicly at once.
-- **Write volume.** About 91 commits are re-applied per account per pass, and
-  about one revision row is added per block per account.
-- **Follow-up time.** Up to 180 seconds of recovery after sync completion
-  delays the next sync.
-- **Test builds.** `valar-spiral-rs` runs without overflow checks in every test
-  build of this repository.
+The application must restrict qualification to its configured origin behind
+Vizor's development flag, `ZCASH_PRIVATE_TRANSPARENT_RECOVERY`. Quarantine cannot
+be cleared yet; `qualify_transparent_revision` remains a test/development hook.
 
 ## Recovery sources and revisions
 
