@@ -25,10 +25,10 @@ sha2.workspace = true
 serde_json = { workspace = true, optional = true }
 thiserror = "2"
 url = "2"
-transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "3cfbc4848b92b1385b9215174251f8e51fbfa804", optional = true, features = ["reqwest"] }
-transparent-wallet-store = { git = "https://github.com/valargroup/wallet-pir", rev = "3cfbc4848b92b1385b9215174251f8e51fbfa804", optional = true }
-transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "3cfbc4848b92b1385b9215174251f8e51fbfa804", optional = true }
-transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "3cfbc4848b92b1385b9215174251f8e51fbfa804", optional = true }
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "648264bb4801ae8faf7a61f4638ea049edb167cf", optional = true }
+transparent-wallet-store = { git = "https://github.com/valargroup/wallet-pir", rev = "648264bb4801ae8faf7a61f4638ea049edb167cf", optional = true }
+transparent-events = { git = "https://github.com/valargroup/wallet-pir", rev = "648264bb4801ae8faf7a61f4638ea049edb167cf", optional = true }
+transparent-filter = { git = "https://github.com/valargroup/wallet-pir", rev = "648264bb4801ae8faf7a61f4638ea049edb167cf", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -36,6 +36,8 @@ serde_json.workspace = true
 zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "transparent-inputs", "test-dependencies", "unstable"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
 zcash_keys = { workspace = true, features = ["transparent-inputs"] }
+# The example builds the reference HTTP adapters; the library takes caller transports.
+transparent-wallet = { git = "https://github.com/valargroup/wallet-pir", rev = "648264bb4801ae8faf7a61f4638ea049edb167cf", features = ["reqwest"] }
 
 [[example]]
 name = "recover-activity"
