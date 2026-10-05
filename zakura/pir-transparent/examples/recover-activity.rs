@@ -205,6 +205,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("wallet target differs from independent chain".into());
         }
         let batch = reference.recover(&watch, &chain, &mut filters, &mut transport)?;
+        if !batch.retired_revisions().is_empty() {
+            return Err(
+                "frozen fixture unexpectedly requires trusted revision reconciliation".into(),
+            );
+        }
         let mut grew = false;
         let mut receives = 0;
         let mut spends = 0;

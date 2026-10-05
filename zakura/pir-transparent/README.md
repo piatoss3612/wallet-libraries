@@ -39,9 +39,15 @@ The companion store owns reference page continuation and revision-bound caches;
 the wallet store owns candidate evidence, qualification and activation.
 Replaying a pass after a crash is idempotent. Export intent is persisted before
 returning a batch, and revisions a later map no longer names stay recorded in
-the companion until a batch is acknowledged. Apply returned commits with the
-existing wallet writer and retain its failures, then acknowledge the batch; the
-adapter never qualifies a revision, promotes an account or authorizes a spend.
+the companion until trusted reconciliation is acknowledged. Inspect
+`batch.retired_revisions()` before applying commits. Resolve any notifications
+through independently trusted wallet qualification or rewind controls, apply
+returned commits with the existing wallet writer, then call
+`acknowledge_reconciled`. Retain failures and leave the batch unacknowledged when
+either step fails. For a batch without retirements, apply its commits and call
+`acknowledge_applied`; that method refuses any batch with retirements, including
+an empty replacement batch. The adapter never qualifies a revision, promotes an
+account or authorizes a spend.
 A server's revision counter cannot authorize withdrawal. Reader-schema and
 publication lineage changes fail closed and require a compatible companion
 store.

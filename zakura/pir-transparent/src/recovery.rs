@@ -138,6 +138,19 @@ pub struct RecoveryBatch<AccountId> {
     token: [u8; 32],
 }
 
+impl<A> RecoveryBatch<A> {
+    /// Revisions previously exported but absent from the current publication.
+    ///
+    /// These are notifications, not authority to withdraw wallet evidence. Resolve
+    /// them through independently trusted wallet qualification or rewind controls
+    /// before applying this batch and calling
+    /// [`ReferenceRecovery::acknowledge_reconciled`]. Ordinary acknowledgement
+    /// refuses a batch while this list is nonempty.
+    pub fn retired_revisions(&self) -> &[RecoveryRevision] {
+        &self.reconciliation
+    }
+}
+
 /// Durable reference retrieval and normalization for one wallet/account.
 ///
 /// The companion store retains cache and page continuation. It is deliberately
@@ -726,12 +739,34 @@ impl ReferenceRecovery {
         })
     }
 
-    /// Acknowledge only after every wallet commit of the latest batch succeeded.
-    /// Clears the export intents of revisions that batch found retired; current
-    /// intents were persisted before return. A crash before this acknowledgement
-    /// replays the same candidate facts. It never advances a wallet's
-    /// qualification, coverage or financial authority.
+    /// Acknowledge the latest batch after every wallet commit succeeded.
+    ///
+    /// Refuses batches with retired revisions without changing their durable
+    /// notifications. Use [`Self::acknowledge_reconciled`] only after trusted wallet
+    /// reconciliation succeeds. A stale receipt is also refused. A crash before
+    /// acknowledgement replays the candidate facts; this never grants authority.
     pub fn acknowledge_applied<A>(
+        &mut self,
+        batch: &RecoveryBatch<A>,
+    ) -> Result<(), RecoveryError> {
+        require(
+            batch.retired_revisions().is_empty(),
+            "retired revisions require trusted wallet reconciliation",
+        )?;
+        self.acknowledge_reconciled(batch)
+    }
+
+    /// Acknowledge the latest batch after trusted reconciliation and wallet commits.
+    ///
+    /// The caller must first resolve every [`RecoveryBatch::retired_revisions`]
+    /// notification through independently trusted wallet controls, then apply all
+    /// commits successfully. Calling this method explicitly confirms both steps;
+    /// it cannot verify the separate wallet transaction. Clears only this batch's
+    /// retired export intents, preserving notifications across failed reconciliation
+    /// or a crash before acknowledgement. A stale receipt is refused.
+    ///
+    /// This method never qualifies revisions or withdraws wallet evidence itself.
+    pub fn acknowledge_reconciled<A>(
         &mut self,
         batch: &RecoveryBatch<A>,
     ) -> Result<(), RecoveryError> {
@@ -1373,8 +1408,30 @@ mod tests {
                 &StaticChain::from_map(&replacement),
             )
             .unwrap();
-        assert_eq!(repeated.reconciliation, vec![possibly_applied]);
-        adapter.acknowledge_applied(&repeated).unwrap();
+        assert!(repeated.commits.is_empty());
+        assert_eq!(
+            repeated.retired_revisions(),
+            std::slice::from_ref(&possibly_applied)
+        );
+        assert!(matches!(
+            adapter.acknowledge_applied(&repeated),
+            Err(RecoveryError::Invalid(_))
+        ));
+        // Rejection must preserve the notification even across another crash.
+        drop(adapter);
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        let repeated = adapter
+            .normalize(
+                &watch,
+                replacement.clone(),
+                MORE,
+                &StaticChain::from_map(&replacement),
+            )
+            .unwrap();
+        assert_eq!(repeated.retired_revisions(), &[possibly_applied]);
+        assert!(adapter.acknowledge_reconciled(&batch).is_err());
+        adapter.acknowledge_reconciled(&repeated).unwrap();
+        assert!(adapter.acknowledge_reconciled(&repeated).is_err());
         let acknowledged = adapter
             .normalize(
                 &watch,
@@ -1384,6 +1441,228 @@ mod tests {
             )
             .unwrap();
         assert!(acknowledged.reconciliation.is_empty());
+    }
+
+    #[test]
+    fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
+        use zcash_client_backend::data_api::{
+            Account as _,
+            chain::ChainState,
+            testing::{InitialChainState, TestBuilder, TestRng},
+            transparent_ledger::{
+                TransparentLedgerMode::PrivateShadow, TransparentLedgerRead as _,
+                TransparentLedgerWrite as _,
+            },
+        };
+        use zcash_client_sqlite::{
+            WalletDb,
+            testing::{BlockCache, db::TestDbFactory},
+            util::SystemClock,
+        };
+
+        let mut publication = map();
+        publication.shards.truncate(1);
+        publication.shards[0].sealed = false;
+        let start = publication.start_height;
+        let parent = block_hash(&publication.shards[0].parent_block_hash).unwrap();
+        let mut wallet = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::file_backed())
+            .with_block_cache(BlockCache::new())
+            .with_initial_chain_state(|_, _| InitialChainState {
+                chain_state: ChainState::empty(block(start - 1).unwrap(), parent),
+                prior_sapling_roots: vec![],
+                prior_orchard_roots: vec![],
+            })
+            .with_account_having_current_birthday()
+            .build();
+        wallet.generate_and_scan_empty_blocks(2);
+        let account = wallet.test_account().unwrap().id();
+        wallet
+            .wallet_mut()
+            .db_mut()
+            .apply_transparent_policy(PrivateShadow)
+            .unwrap();
+        wallet
+            .wallet_mut()
+            .db_mut()
+            .set_transparent_ledger_mode(PrivateShadow);
+        let watch = wallet.wallet().db().transparent_watch_set(account).unwrap();
+        let target = watch.target.unwrap();
+        publication.shards[0].end_height = u64::from(u32::from(target.height));
+        publication.shards[0].terminal_block_hash = target.hash.to_string();
+        let chain = StaticChain::from_map(&publication);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("companion.sqlite");
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        adapter
+            .store
+            .bind_set(&SetIdentity::of(&publication))
+            .unwrap();
+        let scripts: Vec<_> = watch
+            .addresses
+            .iter()
+            .map(|a| address_script(a.address))
+            .collect();
+        adapter
+            .store
+            .add_scripts(
+                &scripts
+                    .iter()
+                    .map(|script| ScriptEntry {
+                        script: script.clone(),
+                        origin: ScriptOrigin::Imported,
+                        required_from: start,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let entry = &publication.shards[0];
+        adapter
+            .store
+            .commit_shard(transparent_wallet::ShardCommit {
+                source_anchor: None,
+                shard_id: entry.shard_id,
+                revision_digest: entry.manifest_digest.clone(),
+                sealed: false,
+                start_height: start,
+                end_height: entry.end_height,
+                terminal_block_hash: entry.terminal_block_hash.clone(),
+                events: vec![],
+                covered_scripts: scripts,
+                pending_upsert: vec![],
+                pending_complete: vec![],
+            })
+            .unwrap();
+        let first = adapter
+            .normalize(&watch, publication.clone(), MORE, &chain)
+            .unwrap();
+        let retired = first.commits[0].revision.clone();
+        for commit in &first.commits {
+            wallet
+                .wallet_mut()
+                .db_mut()
+                .apply_transparent_ledger_commit(commit.clone())
+                .unwrap();
+        }
+        wallet
+            .wallet_mut()
+            .db_mut()
+            .qualify_transparent_revision(&retired)
+            .unwrap();
+        let before = wallet
+            .wallet()
+            .db()
+            .transparent_candidate_recovery(account)
+            .unwrap();
+        assert_eq!(before.covered_through, Some(target.height));
+        // Crash after the wallet commits but before the companion acknowledges.
+        drop(adapter);
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        adapter
+            .store
+            .rollback_above(
+                &Anchor {
+                    height: start - 1,
+                    hash: publication.shards[0].parent_block_hash.clone(),
+                },
+                "fixture withdrawal",
+            )
+            .unwrap();
+        publication.shards[0].manifest_digest = "ab".repeat(32);
+        let replacement = adapter
+            .normalize(&watch, publication.clone(), MORE, &chain)
+            .unwrap();
+        assert!(replacement.commits.is_empty());
+        assert_eq!(
+            replacement.retired_revisions(),
+            std::slice::from_ref(&retired)
+        );
+        assert!(adapter.acknowledge_applied(&replacement).is_err());
+        assert_eq!(
+            wallet
+                .wallet()
+                .db()
+                .transparent_candidate_recovery(account)
+                .unwrap(),
+            before
+        );
+
+        // This controlled fixture independently authorizes the replacement identity.
+        // A publication change alone is never authorization in an application.
+        let successor = RecoveryRevision {
+            revision: Sha256::digest(
+                [publication.shards[0].manifest_digest.as_bytes(), &[0]].concat(),
+            )
+            .to_vec(),
+            lineage: retired.lineage + 1,
+            ..retired.clone()
+        };
+        wallet.wallet().conn().execute_batch("CREATE TEMP TRIGGER fail_reconciliation BEFORE DELETE ON tpir_coverage BEGIN SELECT RAISE(ABORT, 'fixture reconciliation failure'); END;").unwrap();
+        assert!(
+            wallet
+                .wallet_mut()
+                .db_mut()
+                .qualify_transparent_revision(&successor)
+                .is_err()
+        );
+        assert_eq!(
+            wallet
+                .wallet()
+                .db()
+                .transparent_candidate_recovery(account)
+                .unwrap(),
+            before
+        );
+        drop(adapter);
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        let replacement = adapter
+            .normalize(&watch, publication.clone(), MORE, &chain)
+            .unwrap();
+        assert_eq!(replacement.retired_revisions(), &[retired]);
+        assert!(adapter.acknowledge_applied(&replacement).is_err());
+
+        wallet
+            .wallet()
+            .conn()
+            .execute_batch("DROP TRIGGER fail_reconciliation")
+            .unwrap();
+        wallet
+            .wallet_mut()
+            .db_mut()
+            .qualify_transparent_revision(&successor)
+            .unwrap();
+        assert_eq!(
+            wallet
+                .wallet()
+                .db()
+                .transparent_candidate_recovery(account)
+                .unwrap()
+                .covered_through,
+            None
+        );
+        // A reopened wallet must observe the committed reconciliation before acknowledgement.
+        let reopened = WalletDb::from_connection(
+            Connection::open(wallet.wallet().conn().path().unwrap()).unwrap(),
+            *wallet.network(),
+            SystemClock,
+            TestRng::seed_from_u64(0),
+        )
+        .with_transparent_ledger_mode(PrivateShadow);
+        assert_eq!(
+            reopened
+                .transparent_candidate_recovery(account)
+                .unwrap()
+                .covered_through,
+            None
+        );
+        adapter.acknowledge_reconciled(&replacement).unwrap();
+        drop(adapter);
+        let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+        let final_batch = adapter
+            .normalize(&watch, publication, MORE, &chain)
+            .unwrap();
+        assert!(final_batch.retired_revisions().is_empty());
+        adapter.acknowledge_applied(&final_batch).unwrap();
     }
 
     #[test]

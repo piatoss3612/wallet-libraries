@@ -5,6 +5,10 @@
 ### Added
 
 - `SCHEMA` (`transparent-shard-v11`), the only shard schema the adapter reads.
+- `RecoveryBatch::retired_revisions()` exposes withdrawal notifications without
+  granting authority to withdraw wallet evidence. `acknowledge_applied` refuses
+  batches with retirements; `acknowledge_reconciled` explicitly confirms successful
+  trusted wallet reconciliation and application of the batch's commits.
 - `Progress { covered_through, outcome }` and `Outcome { Complete, Behind,
   More, Overloaded, Stalled }`, the adapter's own report of a pass.
 - Re-exports of `ChainView`, `FilterSource`, `ShardTransport`, `ShardRequest`,
@@ -22,7 +26,7 @@
   source, account binding, origin and `SCHEMA`, so companions created before
   this change are refused at open and must be recreated.
 - `RecoveryBatch::progress` replaces `report`. Retired export intents stay in
-  the companion and are cleared on acknowledgment, but are no longer returned.
+  the companion and remain observable until trusted reconciliation is acknowledged.
 - The wallet-pir crates move to `648264bb4801ae8faf7a61f4638ea049edb167cf`,
   whose client accepts maps and manifests that carry txid display fields.
 
