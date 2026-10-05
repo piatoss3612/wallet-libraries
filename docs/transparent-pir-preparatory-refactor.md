@@ -829,8 +829,10 @@ Production release remains blocked until the release process records:
    exit-gate results below. The library fixtures alone do not qualify Vizor.
 3. Real-source verification and the privileged qualification operation. The
    current `qualify_transparent_revision` hook exists only under `test` or
-   `test-dependencies`; production cannot qualify a fresh source. Release
-   builds must not enable `test-dependencies` to bypass this gate. Quarantine
+   `test-dependencies`. Production qualifies a fresh source only through a
+   trusted commit, a development-flag deviation that verifies nothing (see the
+   [design notes](transparent-pir-ledger-design-notes.md#trusted-indexer-qualification-deviation)).
+   Release builds must not enable `test-dependencies` to bypass this gate. Quarantine
    clearing, requalification, and trust epochs remain owned by the source-
    verification stage; incomplete recovery never authorizes public fallback.
 

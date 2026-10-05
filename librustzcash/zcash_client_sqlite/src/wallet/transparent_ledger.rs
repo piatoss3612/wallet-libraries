@@ -53,9 +53,14 @@ pub(crate) use policy::{
 };
 #[cfg(all(feature = "transparent-inputs", feature = "transparent-key-import"))]
 pub(crate) use recovery::forget_other_candidates;
+#[cfg(all(
+    feature = "transparent-inputs",
+    any(test, feature = "test-dependencies")
+))]
+pub(crate) use recovery::qualify_revision;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use recovery::{
-    apply_commit, candidate_recovery, forget_reattributed_script, promote, qualify_revision,
+    CommitTrust, apply_commit, candidate_recovery, forget_reattributed_script, promote,
     recovery_work, watch_set,
 };
 pub(crate) use recovery::{clear_pending_pages, truncate as truncate_recovery};

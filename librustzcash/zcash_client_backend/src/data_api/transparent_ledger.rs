@@ -361,6 +361,26 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
         commit: TransparentLedgerCommit<Self::AccountId>,
     ) -> Result<CommitOutcome, Self::Error>;
 
+    /// Atomically qualifies `commit.revision` as trusted and applies `commit`.
+    ///
+    /// Requires `PrivateRequired` both on the handle and durably. In one transaction it makes
+    /// every check of [`apply_transparent_ledger_commit`], qualifies the exact revision,
+    /// withdraws older provisional evidence of the same source across the wallet, and applies
+    /// the commit's facts. Any failure changes nothing, except that an integrity failure
+    /// quarantines exactly as an ordinary commit does, without qualifying. Replaying a commit
+    /// this method already applied changes nothing; resubmitting a commit applied only by
+    /// [`apply_transparent_ledger_commit`] qualifies its revision and withdraws older provisional
+    /// evidence as above.
+    ///
+    /// Qualification is the caller's trust decision: this does not verify the publication.
+    ///
+    /// [`apply_transparent_ledger_commit`]: Self::apply_transparent_ledger_commit
+    #[cfg(feature = "transparent-inputs")]
+    fn qualify_and_apply_transparent_ledger_commit(
+        &mut self,
+        commit: TransparentLedgerCommit<Self::AccountId>,
+    ) -> Result<CommitOutcome, Self::Error>;
+
     /// Atomically promotes `account` to private transparent authority.
     ///
     /// Requires `PrivateRequired` both on the handle and durably. Promotion rechecks, in one

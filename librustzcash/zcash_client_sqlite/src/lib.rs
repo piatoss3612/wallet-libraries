@@ -1814,11 +1814,11 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// Qualifies `revision` so that it can support promotion and an active account's commits,
     /// recording it first if it is new, exactly as a commit would.
     ///
-    /// This is a test and development hook only: production builds cannot qualify a revision,
-    /// so nonempty unqualified recovery cannot support promotion. An empty required interval
-    /// can still promote without granting funds; later missing coverage withholds authority.
-    /// This hook also authorizes wallet-wide replacement of older provisional evidence.
-    /// Qualification of real sources arrives with source verification.
+    /// This is a test and development hook only. It qualifies outside any commit and under any
+    /// durable policy. Production qualification goes through
+    /// [`TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`], which requires
+    /// `PrivateRequired` and qualifies only together with the revision's commit. Like it, this
+    /// hook authorizes wallet-wide replacement of older provisional evidence.
     pub fn qualify_transparent_revision(
         &mut self,
         revision: &zcash_client_backend::data_api::transparent_ledger::RecoveryRevision,
@@ -2135,6 +2135,22 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
             &self.gap_limits,
             self.transparent_ledger_mode,
             commit,
+            wallet::transparent_ledger::CommitTrust::Observed,
+        )
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn qualify_and_apply_transparent_ledger_commit(
+        &mut self,
+        commit: TransparentLedgerCommit<Self::AccountId>,
+    ) -> Result<CommitOutcome, Self::Error> {
+        wallet::transparent_ledger::apply_commit(
+            self.conn.borrow(),
+            &self.params,
+            &self.gap_limits,
+            self.transparent_ledger_mode,
+            commit,
+            wallet::transparent_ledger::CommitTrust::Qualified,
         )
     }
 
