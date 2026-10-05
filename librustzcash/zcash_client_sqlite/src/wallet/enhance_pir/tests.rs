@@ -117,6 +117,10 @@ fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> En
 }
 
 fn wire_record(inputs: bool, outputs: bool) -> EnhanceRecord {
+    wire_record_with_fee(inputs, outputs, Some(0))
+}
+
+fn wire_record_with_fee(inputs: bool, outputs: bool, fee: Option<u64>) -> EnhanceRecord {
     let mut ciphertext = [0; 580];
     ciphertext[..52].copy_from_slice(&[4; 52]);
     EnhanceRecord::from_parts(EnhanceRecordParts {
@@ -126,8 +130,7 @@ fn wire_record(inputs: bool, outputs: bool) -> EnhanceRecord {
         has_transparent_inputs: inputs,
         has_transparent_outputs: outputs,
         metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
-            0,
-            Some(0),
+            0, fee,
         )
         .unwrap(),
     })
@@ -1919,15 +1922,28 @@ fn has_transparent_under_private_required_keeps_financial_facts() {
         .db_mut()
         .set_enhancement_mode(EnhancementMode::PrivateIronwood);
 
+    // A fee contradicting the stored one rejects the response without routing it.
     assert_eq!(
         apply_record(
             st.wallet_mut().db_mut(),
             outgoing,
-            &wire_record(true, false)
+            &wire_record_with_fee(true, false, Some(999))
+        )
+        .unwrap(),
+        EnhancePirStoreResult::Rejected
+    );
+    assert!(is_protected(st.wallet().conn(), txid).unwrap());
+    assert_eq!(
+        apply_record(
+            st.wallet_mut().db_mut(),
+            outgoing,
+            &wire_record_with_fee(true, false, Some(1000))
         )
         .unwrap(),
         EnhancePirStoreResult::PrivateDetailsUnsupported
     );
+    // The received note's memo remains privately recoverable; outgoing work does not.
+    assert_eq!(st.wallet().db().query_requests().unwrap(), vec![incoming]);
     // No public LWD request is inserted; any pre-existing enhancement intent is not
     // dispatched while public authority is absent.
     let route: i64 = st
@@ -2341,5 +2357,219 @@ fn private_completion_leaves_no_payload_work_in_either_mode() {
     for mode in [EnhancementMode::PrivateIronwood, EnhancementMode::Standard] {
         st.wallet_mut().db_mut().set_enhancement_mode(mode);
         assert_eq!(routed(&st), (vec![], vec![]), "{mode:?}");
+    }
+}
+
+/// Puts the wallet under a durable `PrivateRequired` policy with private Ironwood enhancement.
+fn private_required(st: &mut State) {
+    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerWrite;
+    let db = st.wallet_mut().db_mut();
+    db.set_transparent_ledger_mode(TransparentLedgerMode::PrivateRequired);
+    db.apply_transparent_policy(TransparentLedgerMode::PrivateRequired)
+        .unwrap();
+    db.set_enhancement_mode(EnhancementMode::PrivateIronwood);
+}
+
+fn route_of(st: &State, tx_ref: crate::TxRef) -> Option<i64> {
+    route(st.wallet().conn(), tx_ref).unwrap()
+}
+
+fn memo_of(st: &State, request: EnhancePirRequest) -> Option<Vec<u8>> {
+    st.wallet()
+        .conn()
+        .query_row(
+            "SELECT memo FROM ironwood_received_notes WHERE commitment_tree_position = ?1",
+            [u64::from(request.position())],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// An authentic record for the received note at `request` with the given shape and fee.
+fn authentic_record(
+    st: &State,
+    request: EnhancePirRequest,
+    transparent: bool,
+    fee: Option<u64>,
+) -> EnhanceRecord {
+    let pending = st
+        .wallet()
+        .db()
+        .pending_memo(request.position())
+        .unwrap()
+        .unwrap();
+    let encryptor =
+        orchard::note_encryption::IronwoodNoteEncryption::new(None, pending.note, [7; 512]);
+    EnhanceRecord::from_parts(EnhanceRecordParts {
+        enc_ciphertext_suffix: encryptor.encrypt_note_plaintext()[52..].try_into().unwrap(),
+        cv_net: [0; 32],
+        out_ciphertext: [0; 80],
+        has_transparent_inputs: transparent,
+        has_transparent_outputs: false,
+        metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata::new(
+            0, fee,
+        )
+        .unwrap(),
+    })
+}
+
+#[test]
+fn scan_time_mixed_routing_keeps_private_memo_work_under_private_required() {
+    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerRead;
+    let (mut st, tx_ref, incoming) = fixture();
+    let txid = incoming.request_id().txid();
+    private_required(&mut st);
+    // Explicit non-Ironwood compact fields route the transaction before any PIR query.
+    queue_transaction(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::PrivateRequired),
+        tx_ref,
+        &IronwoodEnhancementPlan::Ineligible,
+    )
+    .unwrap();
+    assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
+    // Only the received memo is queued, and only privately.
+    assert_eq!(routed(&st), (vec![], vec![EnhancePirWork::Query(incoming)]));
+
+    let record = authentic_record(&st, incoming, false, Some(500));
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), incoming, &record).unwrap(),
+        EnhancePirStoreResult::PrivateDetailsUnsupported
+    );
+    assert_eq!(memo_of(&st, incoming), Some(vec![7; 512]));
+    assert_eq!(stored_metadata(&st, incoming).fee_zatoshis, Some(500));
+    assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
+    assert_eq!(routed(&st), (vec![], vec![]));
+    assert!(
+        st.wallet()
+            .db()
+            .pending_private_transparent_details()
+            .unwrap()
+            .contains(
+                &zcash_client_backend::data_api::transparent_ledger::PrivateTransparentDetail::MixedTransaction { txid }
+            )
+    );
+    // Replayed scans neither requeue the recovered memo nor change the route.
+    queue_transaction(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::PrivateRequired),
+        tx_ref,
+        &IronwoodEnhancementPlan::Ineligible,
+    )
+    .unwrap();
+    assert_eq!(routed(&st), (vec![], vec![]));
+    assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
+}
+
+#[test]
+fn route_two_memo_work_follows_public_authority_across_policy_transitions() {
+    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerWrite;
+    let (mut st, tx_ref, incoming) = fixture();
+    let txid = incoming.request_id().txid();
+    private_required(&mut st);
+    queue_transaction(
+        st.wallet().conn(),
+        Some(TransparentLedgerMode::PrivateRequired),
+        tx_ref,
+        &IronwoodEnhancementPlan::Ineligible,
+    )
+    .unwrap();
+    assert_eq!(routed(&st), (vec![], vec![EnhancePirWork::Query(incoming)]));
+    let record = authentic_record(&st, incoming, true, Some(500));
+
+    // Restored public authority retrieves the full transaction instead: no private work remains.
+    {
+        let db = st.wallet_mut().db_mut();
+        db.set_transparent_ledger_mode(TransparentLedgerMode::Public);
+        db.apply_transparent_policy(TransparentLedgerMode::Public)
+            .unwrap();
+    }
+    assert_eq!(route_of(&st, tx_ref), Some(LWD_REQUIRED));
+    assert_eq!(routed(&st), (vec![txid], vec![]));
+    assert!(requests(st.wallet().conn()).unwrap().is_empty());
+    // A response fetched before the transition is stale.
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), incoming, &record).unwrap(),
+        EnhancePirStoreResult::AlreadyResolved
+    );
+    assert_eq!(memo_of(&st, incoming), None);
+
+    // Requiring privacy again withholds the transaction and resumes its private memo work.
+    private_required(&mut st);
+    assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
+    assert_eq!(routed(&st), (vec![], vec![EnhancePirWork::Query(incoming)]));
+    assert_eq!(
+        apply_record(st.wallet_mut().db_mut(), incoming, &record).unwrap(),
+        EnhancePirStoreResult::PrivateDetailsUnsupported
+    );
+    assert_eq!(memo_of(&st, incoming), Some(vec![7; 512]));
+}
+
+#[test]
+fn a_mixed_batch_stores_every_authenticated_memo_only_without_public_authority() {
+    use zcash_client_backend::data_api::testing::FakeCompactOutput;
+    for private in [true, false] {
+        let mut st = state_with_factory(TestDbFactory::default());
+        let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+        let (height, _, _) = st.generate_next_block_multi(&[
+            FakeCompactOutput::new(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(7_000),
+            ),
+            FakeCompactOutput::new(&fvk, AddressType::Internal, Zatoshis::const_from_u64(3_000)),
+        ]);
+        st.scan_cached_blocks(height, 1);
+        let tx_ref = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id_tx FROM transactions WHERE mined_height = ?1",
+                [u32::from(height)],
+                |row| row.get(0).map(crate::TxRef),
+            )
+            .unwrap();
+        if private {
+            private_required(&mut st);
+        } else {
+            st.wallet_mut()
+                .db_mut()
+                .set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        }
+        let requests = st.wallet().db().query_requests().unwrap();
+        assert_eq!(requests.len(), 2);
+        let records = requests
+            .iter()
+            .map(|r| (*r, authentic_record(&st, *r, true, Some(800))))
+            .collect::<Vec<_>>();
+        let results = match st
+            .wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_records(&records)
+            .unwrap()
+        {
+            zcash_client_backend::data_api::enhance_pir::EnhancePirBatchResult::Committed(r) => r,
+            rejected => panic!("{rejected:?}"),
+        };
+        if private {
+            assert_eq!(
+                results,
+                vec![EnhancePirStoreResult::PrivateDetailsUnsupported; 2]
+            );
+            for request in &requests {
+                assert_eq!(memo_of(&st, *request), Some(vec![7; 512]));
+            }
+            assert_eq!(stored_metadata(&st, requests[0]).fee_zatoshis, Some(800));
+            assert_eq!(route_of(&st, tx_ref), Some(PRIVATE_DETAILS_UNSUPPORTED));
+        } else {
+            // Public authority keeps the LWD route: nothing from the response is stored.
+            assert_eq!(results, vec![EnhancePirStoreResult::LwdRequired; 2]);
+            for request in &requests {
+                assert_eq!(memo_of(&st, *request), None);
+            }
+            assert_eq!(stored_metadata(&st, requests[0]).fee_zatoshis, None);
+            assert_eq!(route_of(&st, tx_ref), Some(LWD_REQUIRED));
+        }
+        assert!(st.wallet().db().query_requests().unwrap().is_empty());
     }
 }

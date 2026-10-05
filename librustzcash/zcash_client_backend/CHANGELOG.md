@@ -10,6 +10,12 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+- `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
+  has-transparent records too, so storage can compare it before keeping such a record's
+  authenticated memo and agreeing fee without public authority. A `PrivateDetailsUnsupported`
+  result no longer skips later records of the same batch; `LwdRequired` still does.
+
 ### Added
 - `tor::Client::connect_lightwalletd_channel` returns the Tor-routed `tonic` channel that
   `connect_to_lightwalletd` wraps, so callers can layer `tower` services over it.

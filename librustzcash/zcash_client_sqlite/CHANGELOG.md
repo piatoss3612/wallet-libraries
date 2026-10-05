@@ -10,6 +10,23 @@ workspace.
 
 ## [Unreleased]
 
+- Private recovery of mixed transparent/Ironwood transactions under `PrivateRequired` keeps
+  the details that do not depend on transparent data. A has-transparent Enhance PIR record (or
+  a compact scan with explicit non-Ironwood fields) still takes the sticky route-2
+  (`PrivateDetailsUnsupported`) marker, but the transaction keeps private memo work for its
+  received Ironwood notes. Each memo is authenticated by note decryption, and the whole-transaction
+  fee is filled only when it agrees with every known fee, expiry, and displayed expiry; a
+  disagreeing response is rejected without effect. Memo work is dispatched only while public
+  authority is absent and is dropped when a policy transition restores it (route 1).
+  The additive `ironwood_unsupported_memo_retry` migration requeues the unknown memos of
+  route-2 transactions in existing wallets, without resetting notes, spend links, or routes.
+- History reconstructs a mixed transaction without full data only as a transparent-to-shielded
+  self-transfer: every owned effect complete, qualified metadata counting exactly the account's
+  published transparent inputs, its exact whole-transaction fee equal to the stored one, only
+  transparent spends and shielded receipts, and the spent value equal to the receipts plus that
+  fee. Otherwise it stays provisional. The stored fee of such a transaction is the whole
+  transaction's: `FeeState` stays `Unknown` and the aggregate payment is not inferred.
+
 - Transparent spend discovery retains work for unmined local spenders and resumes after they
   expire. Address and per-outpoint completion advance past expired-spender links, using expiry
   at the current tip; an address range advances only the outputs whose search frontier it covers.
