@@ -18,7 +18,7 @@ python3 scripts/dev.py verify
 
 | Configuration | Packages and features |
 | --- | --- |
-| `default` | Workspace except the facade and Enhance PIR; default features |
+| `default` | Workspace except the facade, Enhance PIR and the transparent PIR adapter; default features |
 | `orchard` | Backend + SQLite; `orchard,test-dependencies` |
 | `transparent` | Backend + SQLite; `orchard,transparent-inputs,test-dependencies,unstable` |
 | `transparent-import` | Backend + SQLite; transparent features plus `transparent-key-import` |
@@ -26,6 +26,10 @@ python3 scripts/dev.py verify
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
+
+`default` builds the backend and SQLite crates without Orchard or transparent
+inputs, which `orchard` and `transparent` test, so items used only under those
+features warn as dead code in `default`.
 
 The Python configuration table is authoritative. `-p` replaces the package
 selection; features still come from the selected configuration. Test-name

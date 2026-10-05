@@ -201,3 +201,31 @@ persistence, not ownership of those public funds or shielded scan correctness.
 It requires nonempty metadata recovery and reader version 7, reopens both stores,
 and refuses qualification or account activation. Its output directory must be
 new; failed runs and partial stores remain available for diagnosis.
+
+`tests/private_recovery.rs` runs private recovery end to end against a
+`transparent-shard-server` in the test process, over loopback HTTP and real
+PIR, through the reference HTTP transports and the wallet's trusted operation.
+Its fixture publishes real shards for a synthetic chain at mainnet heights,
+taking block hashes from the test wallet's own scan, and records every request
+the service receives. Each publication gets its own server, while every
+companion stays bound to the origin label `https://fixture.test`.
+`private_mode_lifecycle_against_an_in_process_shard_service` goes from shadow
+observation through trusted commits and promotion, a moving tail, publication
+lag, a reopened and then a lost companion, a publication change retried with
+the same companion, and a sealed shard changed under its revision number. It
+then checks that every request used a service route with its method, carried no
+watched script in bytes or hex in its path, query, headers or body, and named no
+shard wholly below the birthday. `young_wallet_rolls_back_below_its_birthday`
+follows a wallet born inside the tail through a clamped pass, two
+republications and a reorg that rolls the companion back below its birthday.
+
+```sh
+python3 scripts/dev.py test --config transparent-pir
+```
+
+The service, with axum 0.7 and tower-http 0.5, is in the test graph only. The
+`default` lane excludes this crate: the `transparent-pir` lane runs its tests,
+and `zakura-graph` checks all of its targets with every feature and its library
+without features. Test builds compile `valar-spiral-rs` without overflow checks
+(`.cargo/config.toml`), as wallet-pir does, because its reduction relies on
+wrapping arithmetic.
