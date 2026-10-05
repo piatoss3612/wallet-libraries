@@ -274,6 +274,11 @@ Breaking storage release for independently routed transaction status and
 payload enhancement work.
 
 ### Fixed
+- History payment details recognize a recovered received memo for the exact same
+  owned sent output (account, transaction, pool, and output index), including an
+  empty memo. Private Ironwood recovery no longer leaves details incomplete solely
+  because the duplicate sent record's memo is unknown. Missing received or external
+  sent memos, unsettled effects, and incomplete accounting still prevent completeness.
 - Retire undecryptable Ironwood outgoing candidates once the wallet's value
   accounting proves no account it holds funded them: the wallet has a linked
   spend, no discovery work remains, every other output is recovered, the fee is
