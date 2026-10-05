@@ -86,7 +86,8 @@ explicit protobuf generation, and final validation. Agent guidance lives in
 ./scripts/verify-zakura-graph.sh
 ```
 
-Checks the workspace with all targets and all features, then reads
+Checks the workspace with all targets and all features, and the transparent PIR
+adapter's library without features, then reads
 `cargo metadata` to prove the resolved graph is Zakura-only: no crates.io
 original of a forked crate is present, and no vendored crate appears twice.
 Compiling alone would not prove this — an edge that escapes the rewiring builds

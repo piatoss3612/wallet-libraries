@@ -46,6 +46,11 @@
 - A completion-only commit for each page the wallet holds under a source the
   map no longer names, once the batch covers the page's range under the map's
   sources.
+- An end-to-end test of private recovery against an in-process
+  `transparent-shard-server` that records every request; see the README. Its
+  shard service is a development dependency only, and the crate leaves the
+  `default` development lane: the `transparent-pir` lane runs its tests and
+  `zakura-graph` checks its library without features.
 
 ### Changed
 
