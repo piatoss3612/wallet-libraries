@@ -86,18 +86,42 @@ only when it is `Ready`:
 | `Retired` | An exported shard is published under another source, as after a geometry change. |
 
 `Ready` assumes the trusted operation. A successor withdraws its predecessor's
-provisional evidence from the wallet only when the wallet qualifies it in the
-same transaction (`qualify_and_apply_transparent_ledger_commit`).
-`batch.retired_revisions()` lists those predecessors: revisions an earlier
-batch exported that this batch's commits succeed at a higher lineage. They are
-notifications, not authority to withdraw wallet evidence. Apply every commit
-through the trusted operation, then call `acknowledge_reconciled`, which makes
-the companion forget them. For a batch without retirements, apply its commits
-and call `acknowledge_applied`; that method refuses any batch with retirements.
-Only the latest `Ready` batch can be acknowledged. Export intent is persisted
-before a batch is returned, so a crash before acknowledgment replays the same
-batch, notifications included, and a pass that would forget a possibly applied
-revision stays `Pending` until its successor is retrieved.
+provisional evidence from the wallet only when the wallet qualifies it and
+applies it in one transaction
+(`TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`).
+`batch.retired_revisions()` lists exactly the predecessors a `Ready` batch
+resolves: provisional revisions an earlier batch exported, which the map no
+longer publishes, and for whose source the batch's commits carry a successor at
+a higher lineage. They are notifications, not authority: the adapter withdraws
+no wallet evidence, and a `Pending` or `Withdrawn` batch lists none.
+Acknowledge a `Ready` batch only after every commit applied:
+
+- Without retirements, call `acknowledge_applied` (or `acknowledge_reconciled`,
+  which also accepts such a batch).
+- With retirements, apply every commit through the trusted operation, which
+  resolves them, then call `acknowledge_reconciled`; `acknowledge_applied`
+  refuses such a batch and changes nothing. The adapter cannot see the wallet's
+  transaction, so calling `acknowledge_reconciled` is the caller's confirmation
+  that each one committed. Acknowledging forgets the retired revisions.
+
+Both refuse a `Pending` or `Withdrawn` batch and the receipt of any pass but the
+latest. Export intent is persisted before a batch is returned, and retired
+revisions stay recorded until acknowledged, so after a failed reconciliation or
+a crash before acknowledgment the next pass reports those notifications again,
+with any retirement found since, and replaying the trusted operation changes
+nothing. A pass that would forget a possibly applied revision stays `Pending`
+until its successor is retrieved. Only a publication change, below, forgets
+retirements unacknowledged: those of sources the new map no longer names, which
+no successor can resolve.
+
+The trusted operation requires `PrivateRequired`, on the handle and durably, and
+qualifies whatever it is given, so call it only for commits from an origin the
+caller trusts. A caller that cannot, as under `PrivateShadow` or with another
+origin, can never acknowledge a batch with retirements: until a pass under
+`PrivateRequired` reconciles them, each later pass that sees a new revision of
+their source adds one more to `retired_revisions()` and one row to the catalog.
+Such a caller should stop passing the account at its first batch with
+retirements instead of applying the same commits again.
 
 Before the sync, a pass checks that the store's set identity continues to the
 shard map's (the same profile, start height, envelope, and seal for every
@@ -108,13 +132,14 @@ catalog rows, and fails with `RecoveryError::PublicationChanged`. Retry the pass
 once with the same companion. The changed fields are part of every affected
 source, so the retried pass exports those shards under new sources, while each
 unchanged source keeps its catalog history: a publisher that restarted its
-revision numbers is caught as `Withdrawn(Regression)`,
-`Withdrawn(Equivocation)` or `Pending`, never as a lineage that collides in the
-wallet. The wallet keeps the changed sources' old provisional evidence, which
-nothing supersedes. A page the wallet holds under a source the map no longer
-names would block its account for good, so once a batch covers the page's
-range under the map's sources, the batch also completes the page in a commit of
-the page's own revision that carries nothing else.
+revision numbers is caught as `Withdrawn(Regression)`, `Withdrawn(Equivocation)`
+or `Pending`, never as a lineage that collides in the wallet. The wallet keeps
+the changed sources' old provisional evidence, which nothing supersedes and no
+later batch reports as retired revisions, even one an earlier batch listed and
+nobody acknowledged. A page the wallet holds under a source the
+map no longer names would block its account for good, so once a batch covers the
+page's range under the map's sources, the batch also completes the page in a
+commit of the page's own revision that carries nothing else.
 
 Until the retried pass binds the store again, a reset companion that still
 records exported revisions returns `Pending`. A revision an earlier batch

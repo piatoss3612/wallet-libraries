@@ -67,7 +67,9 @@ pub enum BatchState {
     /// A successor withdraws its predecessor's provisional evidence only when
     /// the wallet qualifies it, so `Ready` assumes the commits are applied
     /// through the trusted operation. The predecessors are the batch's
-    /// [`RecoveryBatch::retired_revisions`](crate::RecoveryBatch::retired_revisions).
+    /// [`RecoveryBatch::retired_revisions`](crate::RecoveryBatch::retired_revisions),
+    /// and such a batch is acknowledged only by
+    /// [`ReferenceRecovery::acknowledge_reconciled`](crate::ReferenceRecovery::acknowledge_reconciled).
     Ready,
     /// The publication or this companion's retrieval is behind what the
     /// companion recorded: a lagging replica (one serving a shard unsealed below
@@ -80,11 +82,13 @@ pub enum BatchState {
     /// refreshed mid-pass that does not continue the one the pass started
     /// from), and a map under another set that ends below the height the store
     /// synced to, are also `Pending`, with
-    /// [`Outcome::Behind`](crate::Outcome::Behind). The batch has no commits; a
-    /// later pass can be `Ready`.
+    /// [`Outcome::Behind`](crate::Outcome::Behind). The batch has no commits or
+    /// retired revisions and cannot be acknowledged; a later pass can be
+    /// `Ready`.
     Pending,
     /// The publication contradicts what this companion recorded. The batch has
-    /// no commits, and passes stay withdrawn until the publication changes.
+    /// no commits or retired revisions and cannot be acknowledged, and passes
+    /// stay withdrawn until the publication changes.
     ///
     /// Keep the companion meanwhile: hold and retry later, or stop recovering
     /// from this publication. A recreated companion has no record of what this
@@ -598,8 +602,10 @@ pub(crate) fn exported_any(conn: &Connection) -> Result<bool, RecoveryError> {
 /// The catalog stays: each source keeps its highest lineage, so a source the
 /// new set leaves unchanged still recognizes a restarted revision number. Rows
 /// of sources none of `published` names lose their export mark, because no
-/// commit can succeed them; the wallet keeps their evidence as it is, and a
-/// later batch completes its pages under them once it covers their ranges.
+/// commit can succeed them, so no batch reports them as retired revisions, even
+/// those a batch already listed and nobody acknowledged; the wallet keeps their
+/// evidence as it is, and a later batch completes its pages under them once it
+/// covers their ranges.
 pub(crate) fn reset(conn: &mut Connection, published: &[Published]) -> Result<(), RecoveryError> {
     let named: BTreeSet<&[u8]> = published
         .iter()

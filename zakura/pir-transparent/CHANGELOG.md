@@ -5,10 +5,22 @@
 ### Added
 
 - `SCHEMA` (`transparent-shard-v11`), the only shard schema the adapter reads.
-- `RecoveryBatch::retired_revisions()` exposes withdrawal notifications without
-  granting authority to withdraw wallet evidence. `acknowledge_applied` refuses
-  batches with retirements; `acknowledge_reconciled` explicitly confirms successful
-  trusted wallet reconciliation and application of the batch's commits.
+- `RecoveryBatch::retired_revisions()`, exactly the retired provisional
+  revisions a `Ready` batch resolves: each was exported by an earlier batch, is
+  no longer published, and has a successor for its source at a higher lineage
+  among the batch's commits. They are notifications, not authority to withdraw
+  wallet evidence, and stay recorded in the companion until acknowledged, or
+  until `RecoveryError::PublicationChanged` drops their source, after which no
+  successor can resolve them.
+- `ReferenceRecovery::acknowledge_reconciled`, the caller's confirmation that
+  it applied a `Ready` batch's commits through the wallet's trusted operation
+  (`qualify_and_apply_transparent_ledger_commit`), which resolves the batch's
+  retired revisions; the adapter cannot verify that wallet transaction.
+  `acknowledge_applied` refuses any batch with retirements. Both refuse a
+  `Pending` or `Withdrawn` batch and the receipt of an earlier pass. The
+  trusted operation requires `PrivateRequired`; without it, a batch with
+  retirements is never acknowledged, and each later pass that sees a new
+  revision of a retired source lists one more.
 - `Progress { covered_through, outcome }` and `Outcome { Complete, Behind,
   More, Overloaded, Stalled }`, the adapter's own report of a pass.
 - Re-exports of `ChainView`, `FilterSource`, `ShardTransport`, `ShardRequest`,
@@ -25,11 +37,12 @@
   for a shard map whose set identity no longer continues the one the
   companion's store is bound to. The pass first resets the companion in one
   transaction: every store table is emptied but the schema version, catalog
-  rows whose source the map no longer names lose their export mark, and the
-  catalog is kept, so each source keeps its highest lineage. Retry once with
-  the same companion. A map under another set ending below the store's anchor,
-  which the chain view still accepts, is instead a `Pending` batch with
-  `Outcome::Behind`, and the store is kept.
+  rows whose source the map no longer names lose their export mark, forgetting
+  any unacknowledged retirements among them, and the catalog is kept, so each
+  source keeps its highest lineage. Retry once with the same companion. A map
+  under another set ending below the store's anchor, which the chain view
+  still accepts, is instead a `Pending` batch with `Outcome::Behind`, and the
+  store is kept.
 - A completion-only commit for each page the wallet holds under a source the
   map no longer names, once the batch covers the page's range under the map's
   sources.
@@ -47,7 +60,8 @@
 - `RecoveryBatch::progress` replaces `report`. The companion classifies the
   exported revisions a map no longer publishes itself, and a batch lists only
   those its commits resolve; their export intents stay in the companion until
-  trusted reconciliation is acknowledged.
+  trusted reconciliation is acknowledged or a publication change drops their
+  source.
 - The wallet-pir crates move to `648264bb4801ae8faf7a61f4638ea049edb167cf`,
   whose client accepts maps and manifests that carry txid display fields.
 - `recover` refuses, before the service's init, a shard map whose network or
