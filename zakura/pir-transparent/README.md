@@ -51,21 +51,79 @@ Every pass has script, publication, query, byte and export bounds. Its
 | `Stalled` | An unknown chain block, unresolved spends or unbounded script discovery. |
 
 The companion store owns reference page continuation and revision-bound caches;
-the wallet store owns candidate evidence, qualification and activation.
-Replaying a pass after a crash is idempotent. Export intent is persisted before
-returning a batch, and revisions a later map no longer names stay recorded in
-the companion until trusted reconciliation is acknowledged. Inspect
-`batch.retired_revisions()` before applying commits. Resolve any notifications
-through independently trusted wallet qualification or rewind controls, apply
-returned commits with the existing wallet writer, then call
-`acknowledge_reconciled`. Retain failures and leave the batch unacknowledged when
-either step fails. For a batch without retirements, apply its commits and call
-`acknowledge_applied`; that method refuses any batch with retirements, including
-an empty replacement batch. The adapter never qualifies a revision, promotes an
-account or authorizes a spend.
-A server's revision counter cannot authorize withdrawal. Reader-schema and
-publication lineage changes fail closed and require a compatible companion
-store.
+the wallet store owns candidate evidence, qualification and activation. The
+adapter never qualifies a revision, promotes an account or authorizes a spend.
+
+Every commit's `RecoveryRevision` is derived from the publication, never
+counted, so a recreated companion reproduces the triples the wallet holds:
+
+- `source` hashes the companion binding with the set-identity fields that never
+  change while the publication continues (shard schema, network, genesis block,
+  profile, envelope version and start height), the shard's geometry, that
+  geometry's seal parameters, and the shard id. A set growing into a new
+  geometry tier changes no existing source.
+- `revision` hashes the shard's manifest digest and whether it is sealed.
+- `lineage` is the published revision number plus one.
+
+The companion catalogs each source's published revisions and records which
+ones a batch exported. Each pass classifies the map its sync finished with,
+without fetching another, and returns a `BatchState`. Commits are returned
+only when it is `Ready`:
+
+| `BatchState` | Meaning |
+| --- | --- |
+| `Ready` | The map agrees with the catalog, and every exported revision is still published or has a successor at a higher lineage in this batch. |
+| `Pending` | A lagging replica (an unsealed revision below one already seen, sealed or not), a map missing a shard, stored facts naming a revision the map no longer names, a shard ending on a block the chain view does not hold, or an exported tail whose successor is not retrieved yet. Nothing to apply; a later pass can be ready. |
+| `Withdrawn(cause)` | The publication contradicts the catalog. Nothing to apply. Keep the companion and retry later. |
+
+| `WithdrawnCause` | Meaning |
+| --- | --- |
+| `Regression` | A sealed shard is published below a revision already seen. |
+| `Equivocation` | One revision number is published with other content, seal state or endpoint. |
+| `ChangedSealed` | An exported sealed revision is no longer published, and the map does not merely name an older unsealed revision of its shard. |
+| `Retired` | An exported shard is published under another source, as after a geometry change. |
+
+`Ready` assumes the trusted operation. A successor withdraws its predecessor's
+provisional evidence from the wallet only when the wallet qualifies it in the
+same transaction (`qualify_and_apply_transparent_ledger_commit`).
+`batch.retired_revisions()` lists those predecessors: revisions an earlier
+batch exported that this batch's commits succeed at a higher lineage. They are
+notifications, not authority to withdraw wallet evidence. Apply every commit
+through the trusted operation, then call `acknowledge_reconciled`, which makes
+the companion forget them. For a batch without retirements, apply its commits
+and call `acknowledge_applied`; that method refuses any batch with retirements.
+Only the latest `Ready` batch can be acknowledged. Export intent is persisted
+before a batch is returned, so a crash before acknowledgment replays the same
+batch, notifications included, and a pass that would forget a possibly applied
+revision stays `Pending` until its successor is retrieved.
+
+A publication whose set identity no longer continues the companion's (another
+profile, start height, envelope or seal for a geometry in use), whether at the
+start of a pass or in a map refreshed mid-pass, fails with
+`RecoveryError::PublicationChanged`. Recreating the companion is then safe:
+the changed fields are part of every affected source, so the new companion's
+revisions for those sources cannot collide with the old ones, and every other
+source reproduces the triples the wallet holds. Any other divergence the
+reference client finds, such as a refreshed map that changes a shard the pass
+already read, is a `RecoveryError::Failure`: retry with the same companion,
+whose catalog classifies the publication it then finds.
+
+Never recreate a companion because a batch is `Withdrawn`. A publisher that
+re-cuts a set without changing its identity restarts revision numbers; the
+catalog reports that as `Regression` or `Pending`, but a recreated companion
+cannot detect it, and the wallet refuses its colliding revisions as an
+integrity failure.
+
+The messages of `RecoveryError::Invalid` and `RecoveryError::Failure` may quote
+the companion's transparent history or the caller's transport errors. Log the
+variant only.
+
+Companions are format `transparent-reference-companion-v2`. An earlier
+companion, whose lineage was a local counter, is refused with
+`companion format v1; recreate`. Each pass prunes catalog rows that are neither
+published nor exported, keeping each source's newest row; the store's filter
+and setup caches down to revisions the map names; and the store's commit log
+down to its last entry. Acknowledgment prunes the catalog again.
 
 This is recovery plumbing; sending, Vizor and public transaction-details fetching
 are outside its scope. The headless real-source harness and final qualification
