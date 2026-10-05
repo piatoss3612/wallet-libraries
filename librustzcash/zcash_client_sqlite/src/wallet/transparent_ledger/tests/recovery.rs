@@ -817,6 +817,70 @@ fn pending_pages_block_their_addresses_and_resume() {
 }
 
 #[test]
+fn a_pending_page_retains_its_revision_and_target_when_the_tip_advances() {
+    let (mut st, account) = shadow_wallet();
+    let ws = watch(&st, account);
+    let original = ws.target.unwrap();
+    let address = external(&ws);
+    let mut c = commit(&ws);
+    let opened_by = c.revision.clone();
+    let page = PageRequest {
+        page: b"older-target".to_vec(),
+        addresses: vec![address],
+        from: below_target(&ws, 2),
+        through: original.height,
+    };
+    c.opened_pages.push(page.clone());
+    apply(&mut st, c).unwrap();
+
+    // The watch set lists the page with the revision and target it was opened under.
+    scan_new_blocks(&mut st, 1);
+    let ws = watch(&st, account);
+    let tip = ws.target.unwrap().height;
+    assert!(tip > original.height);
+    let [pending] = &ws.pending_pages[..] else {
+        panic!("the page must stay pending")
+    };
+    assert_eq!(pending.target, original);
+    assert_eq!(pending.revision, opened_by);
+    assert_eq!(pending.request, page);
+
+    // Resuming it under that revision and anchor completes it.
+    let mut c = commit(&ws);
+    c.revision = pending.revision.clone();
+    c.anchor = pending.target;
+    c.completed_pages.push(pending.request.page.clone());
+    c.coverage.push(AddressRange {
+        address,
+        from: page.from,
+        through: page.through,
+    });
+    apply(&mut st, c).unwrap();
+    assert!(watch(&st, account).pending_pages.is_empty());
+
+    // The page covered its address only through its own target: with everything else
+    // covered, the new block is all that is missing.
+    let mut c = commit(&ws);
+    c.coverage = full_coverage(&ws);
+    for range in c.coverage.iter_mut().filter(|r| r.address == address) {
+        range.through = page.from - 1;
+    }
+    apply(&mut st, c).unwrap();
+    let r = recovery(&st, account);
+    assert_eq!(r.covered_through, Some(original.height));
+    assert_eq!(r.blockers, vec![CandidateBlocker::IncompleteCoverage]);
+    let mut c = commit(&ws);
+    c.coverage.push(AddressRange {
+        address,
+        from: original.height + 1,
+        through: tip,
+    });
+    apply(&mut st, c).unwrap();
+    assert_eq!(recovery(&st, account).covered_through, Some(tip));
+    assert_eq!(recovery(&st, account).blockers, vec![]);
+}
+
+#[test]
 fn unsupported_ranges_block_until_covered() {
     let (mut st, account) = shadow_wallet();
     let ws = watch(&st, account);
