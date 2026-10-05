@@ -268,104 +268,117 @@ fn script_of(address: &TransparentAddress) -> Vec<u8> {
     Script::from(address.script()).0.0
 }
 
-/// Recovers using only bounded public scheduling reads; no private coverage SQL or
-/// application-owned progress survives between passes. Delivery order still exercises
-/// replay, spends before receives, and pages completed by a later commit.
+/// Recovers `account` through its target from `chain` as the production adapter does, from
+/// public reads alone, and returns the number of passes.
+///
+/// Each pass reads the watch set, resumes the pages it lists, and covers every watched address
+/// from its required start through the target. Recovery ends at the first pass that finds no
+/// open page and the same addresses as the pass before. Only that address set is carried
+/// between passes; coverage is never read.
+///
+/// Delivery varies by address position: one commit, then a replay; spends first, then receives
+/// with coverage; or one commit. In the third position, an address the window added since the
+/// previous pass is instead delivered through a page opened with its receives and left for the
+/// next pass to resume. Only such an address gets a page, because a revision cannot reopen
+/// retrieval over a range it already covered.
 pub(super) fn recover(
     st: &mut State,
     account: AccountUuid,
     chain: &Chain,
     revision: &RecoveryRevision,
 ) -> usize {
-    use zcash_client_backend::data_api::transparent_ledger::TransparentRecoveryWork;
+    let mut previous: Option<BTreeMap<TransparentAddress, BlockHeight>> = None;
     for pass in 1..=64 {
         let ws = watch(st, account);
-        let batch = st
-            .wallet()
-            .db()
-            .transparent_recovery_work(account, std::num::NonZeroUsize::new(256).unwrap())
-            .unwrap();
-        if batch.items.is_empty() {
-            assert!(!batch.has_more);
+        let watched: BTreeMap<_, _> = ws
+            .addresses
+            .iter()
+            .map(|w| (w.address, w.required_from))
+            .collect();
+        if previous.as_ref() == Some(&watched) && ws.pending_pages.is_empty() {
             return pass;
         }
-        for (item_index, item) in batch.items.into_iter().enumerate() {
-            let (ranges, resumed) = match item {
-                TransparentRecoveryWork::CheckRange(range) => (vec![range], None),
-                TransparentRecoveryWork::ResumePage(page) => {
-                    assert_eq!(page.revision, *revision);
-                    (
-                        page.request
-                            .addresses
-                            .iter()
-                            .map(|address| AddressRange {
-                                address: *address,
-                                from: page.request.from,
-                                through: page.request.through,
-                            })
-                            .collect(),
-                        Some(page.request.page),
-                    )
+        let target = ws.target.unwrap();
+        let base = || {
+            let mut c = commit(&ws);
+            c.revision = revision.clone();
+            c
+        };
+
+        for page in &ws.pending_pages {
+            assert_eq!(page.revision, *revision);
+            let addresses: BTreeSet<_> = page.request.addresses.iter().copied().collect();
+            let (receives, spends) = source(chain, &addresses, page.request.through);
+            let mut c = base();
+            c.anchor = page.target;
+            c.receives = receives;
+            c.spends = spends;
+            c.coverage = addresses
+                .iter()
+                .map(|address| AddressRange {
+                    address: *address,
+                    from: page.request.from,
+                    through: page.request.through,
+                })
+                .collect();
+            c.completed_pages.push(page.request.page.clone());
+            apply(st, c).unwrap();
+        }
+
+        for (index, (address, required_from)) in watched.iter().enumerate() {
+            let range = AddressRange {
+                address: *address,
+                from: *required_from,
+                through: target.height,
+            };
+            let (receives, spends) = source(chain, &BTreeSet::from([*address]), target.height);
+            let fresh = previous
+                .as_ref()
+                .is_some_and(|previous| !previous.contains_key(address));
+            match index % 3 {
+                0 => {
+                    let mut c = base();
+                    c.receives = receives;
+                    c.spends = spends;
+                    c.coverage = vec![range];
+                    apply(st, c.clone()).unwrap();
+                    // A replay changes nothing.
+                    let before = recovery(st, account);
+                    apply(st, c).unwrap();
+                    assert_eq!(recovery(st, account), before);
                 }
-            };
-            let addresses: BTreeSet<_> = ranges.iter().map(|r| r.address).collect();
-            let (receives, spends) = source(chain, &addresses, ws.target.unwrap().height);
-            let base = || {
-                let mut c = commit(&ws);
-                c.revision = revision.clone();
-                c
-            };
-            if let Some(page) = resumed {
-                let mut c = base();
-                c.receives = receives;
-                c.spends = spends;
-                c.coverage = ranges;
-                c.completed_pages.push(page);
-                apply(st, c).unwrap();
-            } else {
-                match item_index % 3 {
-                    0 => {
-                        let mut c = base();
-                        c.receives = receives;
-                        c.spends = spends;
-                        c.coverage = ranges;
-                        apply(st, c.clone()).unwrap();
-                        let before = recovery(st, account);
-                        apply(st, c).unwrap();
-                        assert_eq!(recovery(st, account), before);
-                    }
-                    1 => {
-                        let mut c = base();
-                        c.spends = spends;
-                        apply(st, c).unwrap();
-                        let mut c = base();
-                        c.receives = receives;
-                        c.coverage = ranges;
-                        apply(st, c).unwrap();
-                    }
-                    _ => {
-                        let range = ranges[0];
-                        let page = PageRequest {
-                            page: format!("pass {pass} item {item_index}").into_bytes(),
-                            addresses: vec![range.address],
-                            from: range.from,
-                            through: range.through,
-                        };
-                        let mut c = base();
-                        c.receives = receives;
-                        c.opened_pages.push(page.clone());
-                        apply(st, c).unwrap();
-                        let mut c = base();
-                        c.spends = spends;
-                        c.coverage = ranges;
-                        c.completed_pages.push(page.page);
-                        apply(st, c).unwrap();
-                    }
+                1 => {
+                    let mut c = base();
+                    c.spends = spends;
+                    apply(st, c).unwrap();
+                    let mut c = base();
+                    c.receives = receives;
+                    c.coverage = vec![range];
+                    apply(st, c).unwrap();
+                }
+                _ if fresh => {
+                    let mut c = base();
+                    c.receives = receives;
+                    c.opened_pages.push(PageRequest {
+                        page: format!("pass {pass} address {index}").into_bytes(),
+                        addresses: vec![*address],
+                        from: range.from,
+                        through: range.through,
+                    });
+                    apply(st, c).unwrap();
+                }
+                _ => {
+                    let mut c = base();
+                    c.receives = receives;
+                    c.spends = spends;
+                    c.coverage = vec![range];
+                    apply(st, c).unwrap();
                 }
             }
         }
+        previous = Some(watched);
     }
-    panic!("fixture recovery did not converge within 64 bounded passes")
+    panic!("fixture recovery did not converge within 64 passes")
 }
 
 /// Every derived external and internal address of the test account within reach of the

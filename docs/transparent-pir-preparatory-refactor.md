@@ -900,13 +900,6 @@ Version-5 binaries, including the earlier #71 source rollback candidate, are not
 rollback readers for version-6 wallets. There is no new table or automatic release designation;
 a published version-6-aware rollback artifact still requires the release evidence above.
 
-`transparent_recovery_work(account, limit)` returns at most 256 work items, with pending
-pages first and missing supported-coverage intervals second. The batch includes the current
-recovery context and `has_more`; requery after committing it. Unsupported ranges are missing
-work, not completion evidence. Page intervals suppress duplicate range scheduling. The item
-bound does not bound a pending page's address list or total database-read cost. Applications
-continue to choose sources, verify their results and control network concurrency.
-
 Consumers can compose `get_wallet_summary` and `transparent_ledger_snapshot` inside
 `WalletDb::transactionally`; both reuse that database snapshot. Required-private summary
 amounts still withhold transparent funds; the authority snapshot supplies only eligible

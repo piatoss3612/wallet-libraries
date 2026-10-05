@@ -108,3 +108,43 @@ fn observed_higher_lineage_does_not_prevent_qualifying_an_older_observation() {
     apply(&mut st, c).unwrap();
     assert_eq!(count(&st, "tpir_qualified_revisions"), 1);
 }
+
+#[test]
+fn supported_coverage_combines_across_sources_and_stays_account_scoped() {
+    let (mut st, accounts) = shadow_wallet_with(1);
+    let ws = watch(&st, accounts[0]);
+    let middle = ws.addresses[0].required_from + 3;
+    let mut c = commit(&ws);
+    c.coverage = full_coverage(&ws)
+        .into_iter()
+        .map(|mut r| {
+            r.through = middle;
+            r
+        })
+        .collect();
+    apply(&mut st, c).unwrap();
+    assert!(
+        recovery(&st, accounts[0])
+            .blockers
+            .contains(&CandidateBlocker::IncompleteCoverage)
+    );
+    let mut c = commit(&ws);
+    c.revision.source = b"second-source".to_vec();
+    c.coverage = full_coverage(&ws)
+        .into_iter()
+        .map(|mut r| {
+            r.from = middle + 1;
+            r
+        })
+        .collect();
+    apply(&mut st, c).unwrap();
+    // Neither source covers the interval alone; together they do, for this account only.
+    let r = recovery(&st, accounts[0]);
+    assert_eq!(r.blockers, vec![]);
+    assert_eq!(r.covered_through, ws.target.map(|t| t.height));
+    assert!(
+        recovery(&st, accounts[1])
+            .blockers
+            .contains(&CandidateBlocker::IncompleteCoverage)
+    );
+}
