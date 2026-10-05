@@ -1,7 +1,9 @@
 # Transparent PIR ledger architecture
 
 Status: proposed design; production private authority is not enabled by the
-[preparatory refactor](transparent-pir-preparatory-refactor.md).
+[preparatory refactor](transparent-pir-preparatory-refactor.md). Private
+recovery over transparent PIR, behind a development flag, is planned in
+[private transparent recovery](transparent-pir-private-recovery.md).
 
 The [history testing and qualification plan](transparent-pir-history-qualification.md)
 defines the proposed 13-case fixture suite at the wallet-libraries and Vizor

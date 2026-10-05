@@ -1,10 +1,12 @@
 # Preparatory refactor for a transparent PIR ledger
 
-Status: Phase 0 is done. Phase 1's wallet-libraries half is merged (#60–#62);
-its Vizor half is pending. Phase 2's wallet-libraries half is merged (#64).
-Phases 3–6 are merged (#68–#71); consumer qualification remains pending. The Vizor halves
-of Phases 2–6 are in draft review or in progress. Production transparent
-authority stays public during preparation.
+Status: Phase 0 is done, and the wallet-libraries halves of Phases 1–6 are
+merged (#60–#62, #64, #68–#71). The Vizor halves of Phases 1–5 are in
+`roman/tpir` (chainapsis/vizor-wallet#783, open); its Phase 6 suite is
+unmerged, so consumer qualification remains pending. Production transparent
+authority stays public during preparation. Real PIR integration, behind a
+development flag, is planned in
+[private transparent recovery](transparent-pir-private-recovery.md).
 
 ## Objective and fixed boundaries
 
@@ -44,7 +46,7 @@ in the final qualification phase.
 | 1. Contract and migration (library merged) | Read contract, policy/provenance schema, configured handles. | Dependency upgrade and explicit handle configuration. | Schema upgrades; private transparent input use remains unavailable. |
 | 2. Privacy boundaries | Durable policy transitions and guarded follow-on work. | Shared policy, dispatch guards, native/preview coverage. | Required-private fixtures fail closed before any unsupported request. |
 | 3. Candidate recovery | Watched scripts, candidate events, coverage, resumable commits. | Disabled/fixture source and bounded coordinator. | Isolated shadow recovery; no production projection changes. |
-| 4. Safe activation (library in review) | Atomic projection, rewind, promotion, and all financial gates. | Balance/operation integration and activation fixtures. | Per-account private activation and spending exercised with fixtures. |
+| 4. Safe activation | Atomic projection, rewind, promotion, and all financial gates. | Balance/operation integration and activation fixtures. | Per-account private activation and spending exercised with fixtures. |
 | 5. History integration | Evidence-backed history reads and detail state. | Partial-history classification, FFI, and UI. | Mixed transactions and restored history represented accurately. |
 | 6. Qualification | Lifecycle/failure evidence and repair compatibility. | Cross-repository regression and request-capture results. | Preparatory refactor complete; real PIR integration still gated. |
 
@@ -827,8 +829,10 @@ Production release remains blocked until the release process records:
    exit-gate results below. The library fixtures alone do not qualify Vizor.
 3. Real-source verification and the privileged qualification operation. The
    current `qualify_transparent_revision` hook exists only under `test` or
-   `test-dependencies`; production cannot qualify a fresh source. Release
-   builds must not enable `test-dependencies` to bypass this gate. Quarantine
+   `test-dependencies`. Production qualifies a fresh source only through a
+   trusted commit, a development-flag deviation that verifies nothing (see the
+   [design notes](transparent-pir-ledger-design-notes.md#trusted-indexer-qualification-deviation)).
+   Release builds must not enable `test-dependencies` to bypass this gate. Quarantine
    clearing, requalification, and trust epochs remain owned by the source-
    verification stage; incomplete recovery never authorizes public fallback.
 
@@ -895,13 +899,6 @@ These revision writes require reader version 6 through the existing durable read
 Version-5 binaries, including the earlier #71 source rollback candidate, are not suitable
 rollback readers for version-6 wallets. There is no new table or automatic release designation;
 a published version-6-aware rollback artifact still requires the release evidence above.
-
-`transparent_recovery_work(account, limit)` returns at most 256 work items, with pending
-pages first and missing supported-coverage intervals second. The batch includes the current
-recovery context and `has_more`; requery after committing it. Unsupported ranges are missing
-work, not completion evidence. Page intervals suppress duplicate range scheduling. The item
-bound does not bound a pending page's address list or total database-read cost. Applications
-continue to choose sources, verify their results and control network concurrency.
 
 Consumers can compose `get_wallet_summary` and `transparent_ledger_snapshot` inside
 `WalletDb::transactionally`; both reuse that database snapshot. Required-private summary

@@ -8,8 +8,9 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, error::Error, fs, path::PathBuf, time::Duration};
 use transparent::address::TransparentAddress;
+use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use transparent_wallet::{ChainView, StaticChain};
-use zakura_pir_transparent::{RecoveryConfig, ReferenceRecovery};
+use zakura_pir_transparent::{BatchState, RecoveryConfig, ReferenceRecovery};
 use zcash_client_backend::data_api::{
     Account as _,
     chain::ChainState,
@@ -27,6 +28,9 @@ use zcash_client_sqlite::{
 use zcash_keys::address::Address;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::BlockHeight;
+
+/// Bound on each decoded HTTP response body.
+const RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
 
 fn block_hash(display: &str) -> Result<BlockHash, Box<dyn Error>> {
     let mut bytes = hex::decode(display)?;
@@ -69,8 +73,11 @@ fn locking_script(address: TransparentAddress) -> Vec<u8> {
 }
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 5 {
-        return Err("usage: recover-activity <independent-snapshot.json> <new-output-directory> <filter-origin> <shard-origin>".into());
+    if args.len() != 4 {
+        return Err(
+            "usage: recover-activity <independent-snapshot.json> <new-output-directory> <origin>"
+                .into(),
+        );
     }
     let input = fs::read(&args[1])?;
     if input.len() > 2 * 1024 * 1024 {
@@ -158,14 +165,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let db = state.wallet_mut().db_mut();
     db.apply_transparent_policy(PrivateShadow)?;
     db.set_transparent_ledger_mode(PrivateShadow);
+    let origin = &args[3];
     let config = RecoveryConfig {
         source: b"activity-v11-public-script-shadow-harness".to_vec(),
         account_binding: account.expose_uuid().as_bytes().to_vec(),
-        filter_origin: args[3].clone(),
-        shard_origin: args[4].clone(),
-        schema: "transparent-shard-v11".into(),
-        timeout: Duration::from_secs(30),
-        response_bytes: 64 * 1024 * 1024,
+        origin: origin.clone(),
         scripts: 512,
         shards: 128,
         events: 100_000,
@@ -174,6 +178,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let companion_path = directory.join("reference.sqlite");
     let mut reference = ReferenceRecovery::open(&companion_path, config.clone())?;
+    // The adapter takes the caller's transports; this harness uses the reference
+    // HTTP clients, one request at a time with bounded transient retries.
+    let options = HttpOptions {
+        timeout: Duration::from_secs(30),
+        ..HttpOptions::default()
+    };
+    let mut filters = HttpFilterSource::new(origin, &options)
+        .map_err(|error| error as Box<dyn Error>)?
+        .with_response_limit(RESPONSE_LIMIT)
+        .with_prefetch_concurrency(1)
+        .with_transient_retry_attempts(3);
+    let mut transport = HttpShardTransport::new(origin, &options)
+        .map_err(|error| error as Box<dyn Error>)?
+        .with_response_limit(RESPONSE_LIMIT)
+        .with_concurrency(1)
+        .with_transient_retry_attempts(3);
     let mut passes = vec![];
     let mut finished = false;
     for pass in 0..8 {
@@ -184,12 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         {
             return Err("wallet target differs from independent chain".into());
         }
-        let batch = reference.recover(&watch, &chain, None)?;
-        if !batch.reconciliation.is_empty() {
-            return Err(
-                "frozen fixture unexpectedly requires trusted revision reconciliation".into(),
-            );
-        }
+        let batch = reference.recover(&watch, &chain, &mut filters, &mut transport)?;
         let mut grew = false;
         let mut receives = 0;
         let mut spends = 0;
@@ -207,13 +222,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .apply_transparent_ledger_commit(commit.clone())?
                 .window_grew;
         }
-        reference.acknowledge_applied(&batch)?;
-        passes.push(json!({"pass":pass,"receives":receives,"spends":spends,"covered_through":batch.report.covered_through,
-            "completion":format!("{:?}",batch.report.completion),"window_grew":grew}));
+        // `Ready` assumes trusted application. This harness never qualifies, so
+        // a tail republished mid-run leaves its predecessor's provisional
+        // evidence in the harness wallet.
+        match batch.state {
+            BatchState::Ready => reference.acknowledge_applied(&batch)?,
+            BatchState::Pending => {}
+            BatchState::Withdrawn(cause) => {
+                return Err(format!("publication withdrawn: {cause:?}").into());
+            }
+        }
+        passes.push(json!({"pass":pass,"state":format!("{:?}",batch.state),"receives":receives,"spends":spends,
+            "covered_through":batch.progress.covered_through,"outcome":format!("{:?}",batch.progress.outcome),"window_grew":grew}));
         // Exercise durable companion reopen between passes.
         drop(reference);
         reference = ReferenceRecovery::open(&companion_path, config.clone())?;
-        if !grew && batch.report.covered_through >= u64::from(through) {
+        if batch.state == BatchState::Ready
+            && !grew
+            && batch.progress.covered_through >= u64::from(through)
+        {
             finished = true;
             break;
         }

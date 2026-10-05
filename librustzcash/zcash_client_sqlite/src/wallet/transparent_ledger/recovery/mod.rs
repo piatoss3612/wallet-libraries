@@ -76,11 +76,14 @@ mod promotion;
 mod revisions;
 #[cfg(feature = "transparent-inputs")]
 mod watch;
-#[cfg(feature = "transparent-inputs")]
-mod work;
 
+#[cfg(all(
+    feature = "transparent-inputs",
+    any(test, feature = "test-dependencies")
+))]
+pub(crate) use commit::qualify_revision;
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use commit::{apply_commit, qualify_revision};
+pub(crate) use commit::{CommitTrust, apply_commit};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use diagnostics::candidate_recovery;
 #[cfg(feature = "transparent-inputs")]
@@ -96,8 +99,6 @@ pub(crate) use ownership::forget_other_candidates;
 pub(crate) use promotion::promote;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use watch::watch_set;
-#[cfg(feature = "transparent-inputs")]
-pub(crate) use work::recovery_work;
 
 #[cfg(feature = "transparent-inputs")]
 use commit::{account_quarantined, atomically, lifecycle};

@@ -121,6 +121,25 @@ follows.
   - verifying coverage anchors against local blocks when reading, as defense
     in depth against a build that rewinds without clipping coverage.
 
+## Trusted-indexer qualification (deviation)
+
+Private recovery temporarily trusts the configured indexer for accuracy and
+completeness, including negative results. The architecture's
+[independent publication verifier](transparent-pir-ledger-architecture.md#trust-and-privacy-model)
+does not exist yet. Production activation still requires it and the owner's
+acceptance of the trusted-indexer model.
+
+`qualify_and_apply_transparent_ledger_commit` requires `PrivateRequired` on the
+handle and durably. It qualifies the exact revision, withdraws older provisional
+evidence of the same source across the wallet, and applies the commit in one
+transaction. Failure rolls back qualification and facts; an integrity failure
+also persists quarantine. Qualification is the caller's trust decision, not
+publication verification.
+
+The application must restrict qualification to its configured origin behind
+Vizor's development flag, `ZCASH_PRIVATE_TRANSPARENT_RECOVERY`. Quarantine cannot
+be cleared yet; `qualify_transparent_revision` remains a test/development hook.
+
 ## Recovery sources and revisions
 
 - **Opaque identifiers.** Sources, revisions, and pages are opaque byte strings,
@@ -176,14 +195,19 @@ follows.
   - Runs capture both epochs before I/O, so work started before a quarantine is
     never accepted after revalidation.
 - **Qualification.**
-  - Qualification is store-held and binds to exact verified revisions. Each
-    revision is qualified separately, and fixture sources are never qualified.
+  - Qualification is store-held and binds to exact revisions the caller trusts
+    (see
+    [Trusted-indexer qualification](#trusted-indexer-qualification-deviation)).
+    Each revision is qualified separately, and fixture sources are never
+    qualified.
   - Promotion requires every revision that contributed coverage to be qualified.
   - Active commits must also reject or isolate events from unqualified
     revisions.
-- **Privileged verification.** Qualifying a revision, clearing a quarantine, and
-  advancing the trust epoch need a privileged verification operation separate
-  from commits. It is added with real source verification, after this plan.
+- **Privileged verification.** Clearing a quarantine and advancing the trust
+  epoch still need a privileged verification operation separate from commits,
+  added with real source verification. Qualification no longer waits for it:
+  a trusted commit qualifies its own revision, as recorded under
+  [Trusted-indexer qualification](#trusted-indexer-qualification-deviation).
 
 ## Readiness and blockers
 

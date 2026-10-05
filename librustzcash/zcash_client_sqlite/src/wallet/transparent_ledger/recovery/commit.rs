@@ -104,11 +104,24 @@ fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<()
     Ok(())
 }
 
-/// Validates and applies `commit` to the candidate ledger, atomically.
+/// How [`apply_commit`] treats the commit's revision.
+#[cfg(feature = "transparent-inputs")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitTrust {
+    /// The revision is only registered. Qualifying it is a separate trust decision.
+    Observed,
+    /// The caller trusts the revision: the commit qualifies it, withdrawing older provisional
+    /// evidence of its source, in the commit's own transaction. Requires `PrivateRequired` on
+    /// the handle and durably.
+    Qualified,
+}
+
+/// Validates and applies `commit` to the account's ledger, atomically, qualifying its revision
+/// first when `trust` is [`CommitTrust::Qualified`].
 ///
-/// An integrity failure applies none of the commit's facts but quarantines, in the same
-/// transaction, the commit's source, its account, and every account holding evidence from the
-/// source, and removes those accounts' pending pages.
+/// An integrity failure applies none of the commit's facts and no qualification, but
+/// quarantines, in the same transaction, the commit's source, its account, and every account
+/// holding evidence from the source, and removes those accounts' pending pages.
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn apply_commit<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -116,6 +129,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
     gap_limits: &GapLimits,
     configured: Option<TransparentLedgerMode>,
     commit: TransparentLedgerCommit<AccountUuid>,
+    trust: CommitTrust,
 ) -> Result<CommitOutcome, SqliteClientError> {
     check_well_formed(&commit).map_err(|e| reject(CommitRejection::Invalid(e)))?;
     atomically(conn, |conn| {
@@ -124,6 +138,13 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
         let durable = durable_policy(conn)?.map(|policy| policy.mode);
         if handle == TransparentLedgerMode::Public
             || durable.is_none_or(|mode| mode == TransparentLedgerMode::Public)
+        {
+            return Err(SqliteClientError::TransparentRecoveryNotEnabled);
+        }
+        // Trusting a revision serves private authority only; shadow recovery observes.
+        if trust == CommitTrust::Qualified
+            && (handle != TransparentLedgerMode::PrivateRequired
+                || durable != Some(TransparentLedgerMode::PrivateRequired))
         {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
         }
@@ -176,9 +197,12 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
             }
         }
 
-        // The facts apply under a nested savepoint, so an integrity failure can discard them
-        // all while its quarantine commits.
+        // The qualification and facts apply under a nested savepoint, so an integrity failure
+        // can discard them all, including any withdrawn evidence, while its quarantine commits.
         match atomically(conn, |conn| {
+            if trust == CommitTrust::Qualified {
+                qualify_in(conn, &commit.revision)?;
+            }
             apply_facts(conn, params, gap_limits, &watch, &commit)
         }) {
             Err(SqliteClientError::TransparentLedgerCommitRejected(
@@ -402,13 +426,14 @@ fn quarantine(
     super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)
 }
 
-/// Authorizes a trusted revision transition: qualify the exact identity and atomically
-/// supersede older provisional evidence across the wallet. Ordinary commits only register it.
-///
-/// Qualification binds to the exact revision: a stored revision with the same identity and
-/// other lineage, sealing, or publication is an integrity failure, and a superseded provisional
-/// revision is stale.
-#[cfg(feature = "transparent-inputs")]
+/// Authorizes a trusted revision transition, outside any commit: qualifies the exact identity
+/// and atomically supersedes older provisional evidence across the wallet. This backs the test
+/// and development hook; production qualification goes through [`apply_commit`] with
+/// [`CommitTrust::Qualified`].
+#[cfg(all(
+    feature = "transparent-inputs",
+    any(test, feature = "test-dependencies")
+))]
 pub(crate) fn qualify_revision(
     conn: &rusqlite::Connection,
     revision: &RecoveryRevision,
@@ -423,12 +448,31 @@ pub(crate) fn qualify_revision(
     atomically(conn, |conn| {
         // Qualification is ledger state; only a build that interprets the wallet's may add it.
         durable_policy(conn)?;
-        let revision_id = super::revisions::register_revision(conn, revision)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO tpir_qualified_revisions (revision_id) VALUES (:revision_id)",
-            named_params![":revision_id": revision_id],
-        )?;
-        super::revisions::supersede_provisional(conn, revision)?;
-        super::super::require_reader_version(conn, super::super::REVISION_READER_VERSION)
+        qualify_in(conn, revision)
     })
+}
+
+/// Qualifies the exact `revision` in the caller's transaction, registering it first if it is
+/// new, exactly as a commit would. Ordinary commits only register a revision.
+///
+/// Qualification binds to the exact revision: a stored revision with the same identity and
+/// other lineage, sealing, or publication is an integrity failure, and a superseded provisional
+/// revision is stale. The first qualification withdraws older provisional evidence of the
+/// source across the wallet. Requalifying withdraws nothing: once a revision is qualified,
+/// registration refuses every older provisional revision of its source, so none can have
+/// gained evidence since.
+#[cfg(feature = "transparent-inputs")]
+fn qualify_in(
+    conn: &rusqlite::Connection,
+    revision: &RecoveryRevision,
+) -> Result<(), SqliteClientError> {
+    let revision_id = super::revisions::register_revision(conn, revision)?;
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO tpir_qualified_revisions (revision_id) VALUES (:revision_id)",
+        named_params![":revision_id": revision_id],
+    )?;
+    if inserted > 0 {
+        super::revisions::supersede_provisional(conn, revision)?;
+    }
+    super::super::require_reader_version(conn, super::super::REVISION_READER_VERSION)
 }

@@ -1,10 +1,9 @@
-//! Shared interval semantics for authority diagnostics and resumable scheduling.
+//! An account's recorded coverage, read for authority diagnostics.
 
 use super::*;
 
 /// Merges inclusive `(from, through)` ranges into disjoint, non-adjacent ranges.
-#[cfg(feature = "transparent-inputs")]
-pub(super) fn merge(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+fn merge(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
     ranges.sort_unstable();
     let mut merged: Vec<(u32, u32)> = vec![];
     for (from, through) in ranges {
@@ -49,76 +48,4 @@ pub(super) fn read(
         supported,
         unsupported,
     })
-}
-
-/// Complement of supported intervals inside an inclusive required interval. Uses u64 for
-/// the cursor so a covered u32::MAX endpoint does not wrap or manufacture another gap.
-pub(super) fn missing_ranges(from: u32, through: u32, covered: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
-    let mut cursor = u64::from(from);
-    let end = u64::from(through);
-    let mut missing = vec![];
-    for (start, stop) in merge(covered) {
-        let start = u64::from(start);
-        let stop = u64::from(stop);
-        if stop < cursor {
-            continue;
-        }
-        if start > end {
-            break;
-        }
-        if start > cursor {
-            missing.push((cursor as u32, (start - 1).min(end) as u32));
-        }
-        cursor = cursor.max(stop + 1);
-        if cursor > end {
-            break;
-        }
-    }
-    if cursor <= end {
-        missing.push((cursor as u32, through));
-    }
-    missing
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn missing_intervals_match_an_independent_point_oracle() {
-        for mask in 0u32..256 {
-            let covered: Vec<_> = (0..8)
-                .filter(|h| mask & (1 << h) != 0)
-                .map(|h| (h, h))
-                .collect();
-            for from in 0..9 {
-                for through in from..9 {
-                    let actual: BTreeSet<_> = missing_ranges(from, through, covered.clone())
-                        .into_iter()
-                        .flat_map(|(a, b)| a..=b)
-                        .collect();
-                    let expected: BTreeSet<_> = (from..=through)
-                        .filter(|h| *h >= 8 || mask & (1 << h) == 0)
-                        .collect();
-                    assert_eq!(actual, expected, "mask={mask}, range={from}..={through}");
-                }
-            }
-        }
-    }
-    #[test]
-    fn complements_merge_overlap_adjacency_and_handle_maximum_height() {
-        assert_eq!(
-            missing_ranges(0, 10, vec![(2, 4), (4, 6), (7, 8), (2, 3)]),
-            vec![(0, 1), (9, 10)]
-        );
-        assert_eq!(missing_ranges(5, 4, vec![]), vec![]);
-        assert_eq!(
-            missing_ranges(u32::MAX, u32::MAX, vec![]),
-            vec![(u32::MAX, u32::MAX)]
-        );
-        assert!(missing_ranges(u32::MAX, u32::MAX, vec![(u32::MAX, u32::MAX)]).is_empty());
-        assert_eq!(
-            missing_ranges(0, u32::MAX, vec![(1, u32::MAX - 1)]),
-            vec![(0, 0), (u32::MAX, u32::MAX)]
-        );
-    }
 }

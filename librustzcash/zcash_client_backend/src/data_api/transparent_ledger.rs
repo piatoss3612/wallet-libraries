@@ -292,20 +292,6 @@ pub trait TransparentLedgerRead: WalletRead {
         account: Self::AccountId,
     ) -> Result<TransparentWatchSet<Self::AccountId>, Self::Error>;
 
-    /// Returns at most `min(limit, 256)` recovery work items from one read snapshot.
-    ///
-    /// Pending pages precede missing supported-coverage intervals. Page intervals suppress
-    /// duplicate range work; unsupported evidence does not count as coverage. No local target
-    /// means no work. Requery after commits, rewinds or watch-set changes. The handle must be
-    /// configured and the account must exist and not be quarantined. This read grants neither
-    /// network dispatch nor financial authority. The bound limits items, not page address count.
-    #[cfg(feature = "transparent-inputs")]
-    fn transparent_recovery_work(
-        &self,
-        account: Self::AccountId,
-        limit: std::num::NonZeroUsize,
-    ) -> Result<TransparentRecoveryWorkBatch<Self::AccountId>, Self::Error>;
-
     /// Returns development diagnostics for `account`'s candidate ledger, from one read.
     ///
     /// Candidate amounts are unverified and never authorize a spend.
@@ -357,6 +343,26 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// wallet's outputs and spends in the same transaction.
     #[cfg(feature = "transparent-inputs")]
     fn apply_transparent_ledger_commit(
+        &mut self,
+        commit: TransparentLedgerCommit<Self::AccountId>,
+    ) -> Result<CommitOutcome, Self::Error>;
+
+    /// Atomically qualifies `commit.revision` as trusted and applies `commit`.
+    ///
+    /// Requires `PrivateRequired` both on the handle and durably. In one transaction it makes
+    /// every check of [`apply_transparent_ledger_commit`], qualifies the exact revision,
+    /// withdraws older provisional evidence of the same source across the wallet, and applies
+    /// the commit's facts. Any failure changes nothing, except that an integrity failure
+    /// quarantines exactly as an ordinary commit does, without qualifying. Replaying a commit
+    /// this method already applied changes nothing; resubmitting a commit applied only by
+    /// [`apply_transparent_ledger_commit`] qualifies its revision and withdraws older provisional
+    /// evidence as above.
+    ///
+    /// Qualification is the caller's trust decision: this does not verify the publication.
+    ///
+    /// [`apply_transparent_ledger_commit`]: Self::apply_transparent_ledger_commit
+    #[cfg(feature = "transparent-inputs")]
+    fn qualify_and_apply_transparent_ledger_commit(
         &mut self,
         commit: TransparentLedgerCommit<Self::AccountId>,
     ) -> Result<CommitOutcome, Self::Error>;

@@ -25,6 +25,7 @@ python3 scripts/dev.py verify
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |
+| `transparent-pir` | Transparent PIR adapter; `wallet` |
 
 The Python configuration table is authoritative. `-p` replaces the package
 selection; features still come from the selected configuration. Test-name

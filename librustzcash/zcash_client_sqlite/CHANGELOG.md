@@ -60,7 +60,7 @@ workspace.
   Promotion materializes only unowned receivers; shadow reads do not inspect private provenance,
   and per-account balance reads share one SQLite snapshot.
 - `WalletHandleModes`, `set_handle_modes`, and `with_handle_modes` configure every supported disclosure lane together without persisting policy.
-- Revision observations no longer supersede wallet-wide evidence. Only the trusted test/development qualification transition withdraws older provisional evidence. New revision writes require reader version 6; version-5 binaries cannot safely operate those wallets.
+- Revision observations no longer supersede wallet-wide evidence. Only a trusted qualification transition (a trusted commit, or the test/development hook) withdraws older provisional evidence. New revision writes require reader version 6; version-5 binaries cannot safely operate those wallets.
 - `get_wallet_summary` reuses existing transactions, allowing summary and transparent authority reads in one snapshot. Per-account transparent balances use an account-scoped query.
 
 - The seedless `transparent_ledger_schema` migration. It adds `tpir_meta`, the
@@ -138,7 +138,15 @@ workspace.
     receive also requires 5, including on a demoted candidate account, so a
     version 4 reader cannot mistake retained rows for current public funds.
   - `WalletDb::qualify_transparent_revision`, a test and development hook
-    behind `test-dependencies`. Production builds cannot qualify a revision.
+    behind `test-dependencies`. Production builds qualify a revision only
+    through a trusted commit.
+  - `qualify_and_apply_transparent_ledger_commit` requires `PrivateRequired` on
+    the handle and durably. In one transaction it makes every check of an
+    ordinary commit, qualifies the exact revision, withdraws older provisional
+    evidence of its source across the wallet, and applies the commit's facts.
+    An integrity failure quarantines as an ordinary commit does, without
+    qualifying; any other failure changes nothing. There is no schema or
+    reader-version change.
 - `SqliteClientError::TransparentPromotionBlocked`, behind `transparent-inputs`.
 - Projection origins for new transparent records. Public discovery records a
   legacy-public origin, and local construction, including creation evidence
