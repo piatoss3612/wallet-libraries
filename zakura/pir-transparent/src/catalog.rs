@@ -8,7 +8,7 @@
 //! one that contradicts what this companion recorded (`Withdrawn`); only a
 //! `Ready` pass returns commits.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, named_params, params,
@@ -25,10 +25,23 @@ use crate::recovery::{RecoveryError, block, block_hash, failure, require};
 /// The companion layout this build creates and reads.
 const FORMAT: &str = "transparent-reference-companion-v2";
 
-// Pruning names the reference store's cache and commit tables. Re-verify those
-// names, and that `last_commit` reads only the highest commit id, before
-// accepting another store schema.
+// Pruning names the reference store's cache and commit tables, and a reset names
+// every store table. Re-verify those names, that `wallet_meta` keeps the schema
+// version under `schema_version`, and that `last_commit` reads only the highest
+// commit id, before accepting another store schema.
 const _: () = assert!(transparent_wallet_store::SCHEMA_VERSION == 4);
+
+/// The reference store's tables at schema version 4, besides `wallet_meta`.
+const STORE_TABLES: [&str; 8] = [
+    "scripts",
+    "coverage",
+    "receives",
+    "spends",
+    "pending_work",
+    "setup_cache",
+    "filter_cache",
+    "commits",
+];
 
 const TABLES: &str = "CREATE TABLE pir_bridge_binding (key TEXT PRIMARY KEY, value BLOB NOT NULL);
     CREATE TABLE pir_bridge_catalog (
@@ -61,8 +74,14 @@ pub enum BatchState {
     /// a revision the companion saw, even a sealed one), a map missing a shard,
     /// stored facts naming a revision the map no longer names, a shard ending on
     /// a block the wallet's chain does not hold, or an exported tail whose
-    /// successor is not retrieved yet. The batch has no commits; a later pass can
-    /// be `Ready`.
+    /// successor is not retrieved yet, or a store a publication change reset
+    /// that has not bound the new set again. A publication that diverged from
+    /// what the sync read (a shard with pending pages withdrawn, or a map
+    /// refreshed mid-pass that does not continue the one the pass started
+    /// from), and a map under another set that ends below the height the store
+    /// synced to, are also `Pending`, with
+    /// [`Outcome::Behind`](crate::Outcome::Behind). The batch has no commits; a
+    /// later pass can be `Ready`.
     Pending,
     /// The publication contradicts what this companion recorded. The batch has
     /// no commits, and passes stay withdrawn until the publication changes.
@@ -70,8 +89,9 @@ pub enum BatchState {
     /// Keep the companion meanwhile: hold and retry later, or stop recovering
     /// from this publication. A recreated companion has no record of what this
     /// one exported, so it cannot see the contradiction and may export
-    /// revisions that collide with ones the wallet already holds. Recreate a
-    /// companion only after [`RecoveryError::PublicationChanged`].
+    /// revisions that collide with ones the wallet already holds. Not even
+    /// [`RecoveryError::PublicationChanged`] calls for a new companion: the
+    /// adapter resets the companion's store itself and keeps this catalog.
     Withdrawn(WithdrawnCause),
 }
 
@@ -212,9 +232,11 @@ impl Published {
 /// It hashes the set-identity fields [`SetIdentity::continues`] holds fixed,
 /// plus the shard's geometry, that geometry's seal parameters, shard id and
 /// start height. A set growing into a new geometry tier changes no existing
-/// source. Re-cutting another geometry can reuse an id for a different height
-/// range; its start height gives that range a new source even when its own
-/// geometry and seal parameters remain unchanged.
+/// source, and a set-identity change `continues` refuses changes every source
+/// it affects. Shard ids are one gapless sequence across geometries, so
+/// re-cutting another geometry can reuse an id for a different height range;
+/// its start height gives that range a new source even when its own geometry
+/// and seal parameters remain unchanged.
 pub(crate) fn source(
     binding: &[u8; 32],
     set: &SetIdentity,
@@ -378,6 +400,19 @@ impl<'c> Pass<'c> {
         Ok(true)
     }
 
+    /// Whether a batch before this pass may have handed `revision` to the
+    /// wallet. This pass's own exports are recorded only by [`Pass::export`].
+    pub(crate) fn was_exported(&self, revision: &RecoveryRevision) -> Result<bool, RecoveryError> {
+        self.tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pir_bridge_catalog
+                 WHERE source=?1 AND revision=?2 AND exported=1)",
+                params![revision.source, revision.revision],
+                |row| row.get(0),
+            )
+            .map_err(failure)
+    }
+
     /// Defers the batch: a stored fact names a shard the map does not publish,
     /// or a revision it no longer names, or a shard ends on a block the
     /// wallet's chain does not hold.
@@ -385,12 +420,20 @@ impl<'c> Pass<'c> {
         self.pending = true;
     }
 
-    /// Classifies every exported row the map no longer publishes unchanged.
+    /// Classifies every exported row the map no longer publishes unchanged, by
+    /// the first rule that matches:
+    ///
+    /// 1. its shard id is in the map under another source: `Retired`;
+    /// 2. its shard id is beyond the map's last shard (the map is behind):
+    ///    pending;
+    /// 3. it is sealed: `ChangedSealed`, unless the map publishes its shard
+    ///    unsealed below it (a replica behind the seal), which is pending;
+    /// 4. this batch commits its source at a higher lineage: replaced;
+    /// 5. otherwise: pending.
     ///
     /// `published` is every revision the map publishes, and `committed` maps
     /// each source with a commit in this batch to that commit's lineage. Returns
-    /// the rows a commit replaces, as the wallet identifies them: unsealed rows
-    /// whose source has a commit at a higher lineage.
+    /// the replaced rows, as the wallet identifies them.
     pub(crate) fn settle(
         &mut self,
         published: &[Published],
@@ -435,9 +478,10 @@ impl<'c> Pass<'c> {
         let mut replaced = vec![];
         for (row, shard_id, sealed, lineage) in rows {
             match published.get(&shard_id) {
-                // Beyond the map's last shard: the map is behind.
-                None => self.pending = true,
                 Some(entry) if entry.source != row.source => self.withdraw(WithdrawnCause::Retired),
+                // Shard ids are gapless from 0, so a missing one is beyond the
+                // map's last shard: the map is behind.
+                None => self.pending = true,
                 // The shard published unsealed below the sealed revision: a
                 // replica that has not caught up with the seal.
                 Some(entry) if sealed && !entry.sealed && entry.lineage < lineage => {
@@ -533,6 +577,59 @@ pub(crate) fn acknowledge(
         .map_err(failure)?;
     }
     prune_catalog(&tx)?;
+    tx.commit().map_err(failure)
+}
+
+/// Whether any batch may have handed a revision to the wallet.
+pub(crate) fn exported_any(conn: &Connection) -> Result<bool, RecoveryError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pir_bridge_catalog WHERE exported=1)",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(failure)
+}
+
+/// Restarts the companion's store for a publication whose set identity no
+/// longer continues the one the store is bound to, in one transaction.
+///
+/// Every store table is emptied, and `wallet_meta` keeps only the schema
+/// version, so the next sync binds the new set and retrieves from the floor.
+/// The catalog stays: each source keeps its highest lineage, so a source the
+/// new set leaves unchanged still recognizes a restarted revision number. Rows
+/// of sources none of `published` names lose their export mark, because no
+/// commit can succeed them; the wallet keeps their evidence as it is, and a
+/// later batch completes its pages under them once it covers their ranges.
+pub(crate) fn reset(conn: &mut Connection, published: &[Published]) -> Result<(), RecoveryError> {
+    let named: BTreeSet<&[u8]> = published
+        .iter()
+        .map(|entry| entry.revision.source.as_slice())
+        .collect();
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failure)?;
+    tx.execute("DELETE FROM wallet_meta WHERE key<>'schema_version'", [])
+        .map_err(failure)?;
+    for table in STORE_TABLES {
+        tx.execute(&format!("DELETE FROM {table}"), [])
+            .map_err(failure)?;
+    }
+    let exported = tx
+        .prepare("SELECT DISTINCT source FROM pir_bridge_catalog WHERE exported=1")
+        .map_err(failure)?
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(failure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(failure)?;
+    for source in exported {
+        if !named.contains(source.as_slice()) {
+            tx.execute(
+                "UPDATE pir_bridge_catalog SET exported=0 WHERE source=?1",
+                [&source],
+            )
+            .map_err(failure)?;
+        }
+    }
     tx.commit().map_err(failure)
 }
 

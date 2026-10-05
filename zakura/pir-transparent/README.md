@@ -75,7 +75,7 @@ only when it is `Ready`:
 | `BatchState` | Meaning |
 | --- | --- |
 | `Ready` | The map agrees with the catalog, and every exported revision is still published or has a successor at a higher lineage in this batch. |
-| `Pending` | A lagging replica (an unsealed revision below one already seen, sealed or not), a map missing a shard, stored facts naming a revision the map no longer names, a shard ending on a block the chain view does not hold, or an exported tail whose successor is not retrieved yet. Nothing to apply; a later pass can be ready. |
+| `Pending` | A lagging replica (an unsealed revision below one already seen, sealed or not), a map missing a shard, stored facts naming a revision the map no longer names, a shard ending on a block the chain view does not hold, an exported tail whose successor is not retrieved yet, or a publication that diverged from what the sync read (reported as `Behind`). Nothing to apply; a later pass can be ready. |
 | `Withdrawn(cause)` | The publication contradicts the catalog. Nothing to apply. Keep the companion and retry later. |
 
 | `WithdrawnCause` | Meaning |
@@ -99,22 +99,42 @@ before a batch is returned, so a crash before acknowledgment replays the same
 batch, notifications included, and a pass that would forget a possibly applied
 revision stays `Pending` until its successor is retrieved.
 
-A publication whose set identity no longer continues the companion's (another
-profile, start height, envelope or seal for a geometry in use), whether at the
-start of a pass or in a map refreshed mid-pass, fails with
-`RecoveryError::PublicationChanged`. Recreating the companion is then safe:
-the changed fields are part of every affected source, so the new companion's
-revisions for those sources cannot collide with the old ones, and every other
-source reproduces the triples the wallet holds. Any other divergence the
-reference client finds, such as a refreshed map that changes a shard the pass
-already read, is a `RecoveryError::Failure`: retry with the same companion,
-whose catalog classifies the publication it then finds.
+Before the sync, a pass checks that the store's set identity continues to the
+shard map's (the same profile, start height, envelope, and seal for every
+geometry in use). When it does not, the pass resets the companion in one
+transaction, emptying every store table but the schema version and clearing the
+export mark of catalog rows whose source the map no longer names, keeps the
+catalog rows, and fails with `RecoveryError::PublicationChanged`. Retry the pass
+once with the same companion. The changed fields are part of every affected
+source, so the retried pass exports those shards under new sources, while each
+unchanged source keeps its catalog history: a publisher that restarted its
+revision numbers is caught as `Withdrawn(Regression)`,
+`Withdrawn(Equivocation)` or `Pending`, never as a lineage that collides in the
+wallet. The wallet keeps the changed sources' old provisional evidence, which
+nothing supersedes. A page the wallet holds under a source the map no longer
+names would block its account for good, so once a batch covers the page's
+range under the map's sources, the batch also completes the page in a commit of
+the page's own revision that carries nothing else.
 
-Never recreate a companion because a batch is `Withdrawn`. A publisher that
-re-cuts a set without changing its identity restarts revision numbers; the
-catalog reports that as `Regression` or `Pending`, but a recreated companion
-cannot detect it, and the wallet refuses its colliding revisions as an
-integrity failure.
+Until the retried pass binds the store again, a reset companion that still
+records exported revisions returns `Pending`. A revision an earlier batch
+exported is held back while the store opens a page on it that the wallet does
+not hold, as when a reset store retrieves it again: the wallet may already
+cover that range, and refuses a page opened over its own coverage.
+
+A map under another set that ends below the store's anchor, while the chain
+view still accepts that anchor, is a replica that has not caught up, perhaps
+still serving the previous set; the pass keeps the store. That, and every other
+divergence the reference client finds, a lagging replica withdrawing a shard
+with pending pages or a map refreshed mid-pass that does not continue the
+first, makes the batch `Pending` with `Outcome::Behind`, keeping the companion
+and catalog; a later pass starts from the publication it then finds.
+
+Never recreate a companion, whether a batch is `Withdrawn` or after
+`PublicationChanged`. A publisher that re-cuts a set without changing its
+identity restarts revision numbers; the catalog reports that as `Regression`,
+`Equivocation` or `Pending`, but a recreated companion cannot detect it, and the
+wallet refuses its colliding revisions as an integrity failure.
 
 The messages of `RecoveryError::Invalid` and `RecoveryError::Failure` may quote
 the companion's transparent history or the caller's transport errors. Log the

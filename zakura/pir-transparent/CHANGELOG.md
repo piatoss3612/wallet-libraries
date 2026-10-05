@@ -21,11 +21,18 @@
   `WithdrawnCause { Regression, Equivocation, ChangedSealed, Retired }` and
   `RecoveryBatch::state`. Commits are returned, and a batch can be
   acknowledged, only when the state is `Ready`.
-- `RecoveryError::PublicationChanged`, for a publication whose set identity no
-  longer continues the companion's, including a map refreshed mid-pass.
-  Recreating the companion is then safe. Any other divergence the reference
-  client reports is a `RecoveryError::Failure`, retried with the same
-  companion.
+- `RecoveryError::PublicationChanged`, raised only by a check before the sync,
+  for a shard map whose set identity no longer continues the one the
+  companion's store is bound to. The pass first resets the companion in one
+  transaction: every store table is emptied but the schema version, catalog
+  rows whose source the map no longer names lose their export mark, and the
+  catalog is kept, so each source keeps its highest lineage. Retry once with
+  the same companion. A map under another set ending below the store's anchor,
+  which the chain view still accepts, is instead a `Pending` batch with
+  `Outcome::Behind`, and the store is kept.
+- A completion-only commit for each page the wallet holds under a source the
+  map no longer names, once the batch covers the page's range under the map's
+  sources.
 
 ### Changed
 
@@ -74,8 +81,15 @@
   missing a shard, stored facts naming a revision the map no longer names, a
   shard ending on a block the chain view does not hold, or an exported tail
   without a retrieved successor make the batch `Pending` instead of failing
-  the pass. A sealed regression, an equivocating revision, a changed sealed
-  revision or a retired shard make it `Withdrawn`.
+  the pass. So does every `MapDiverged` from the reference client's sync (a
+  shard with pending pages withdrawn, or a mid-pass refresh that does not
+  continue the first map), with `Outcome::Behind` and no claimed coverage, and
+  a pass on a reset store that stops before binding it while the catalog still
+  records exported revisions. A sealed regression, an equivocating revision, a
+  changed sealed revision or a retired shard make it `Withdrawn`.
+- A revision an earlier batch exported is left out of a batch while it opens a
+  page the watch set does not hold, since the wallet may already cover that
+  range, as after a store reset.
 - Each pass prunes the catalog to published, exported and per-source newest
   rows, the store's filter and setup caches to revisions the map names, and
   the store's commit log to its last entry.
