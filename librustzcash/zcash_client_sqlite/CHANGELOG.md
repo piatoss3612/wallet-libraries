@@ -53,6 +53,27 @@ workspace.
   deadline. An inconclusive status such as `FAILED` closes a key only by that
   limit. Keys close only while the wallet is scanned to the chain tip.
 - Typed receive-reservation policy errors replace message-prefix classification.
+- `maintain_swap_receiving` runs swap recovery maintenance at each sync start and
+  tip in one call, using the library's incoming gap limit.
+- Outgoing swap funding helpers: `record_swap_refund_quote` binds a quote's
+  deposit address to its reserved refund key, `swap_funding_memo` requires that
+  record, and `verify_swap_funding_proposal` checks the single-transaction shape
+  that refund recovery needs. A recorded quote expects nothing until its funding
+  is observed or mined, so abandoned quotes do not keep a key scanning.
+- `reap_swap_receive_reservations` closes settled paid reservations and reclaims
+  abandoned ones. The individual reclaim helpers are no longer public.
+- Swap address issuance takes the latest network tip instead of a scan start. It
+  requires scanning within `ISSUANCE_TIP_LAG` blocks of the tip, starts the key at
+  the first unscanned block, recovers funding memos before a refund reservation,
+  and keeps the incoming lookahead before an incoming one.
+- `close_finished_swap_keys` takes the tip the caller confirmed with the network,
+  recovers funding memos first, and settles no refund key while a funding memo
+  is missing.
+- `begin_swap_receive_quote` takes the requested deposit deadline. An unknown
+  quote outcome now holds its reservation only until that deadline is 48 hours
+  past. `start_swap_receive_quote` matches the deposit memo as well as the address.
+- `finish_swap_nullifier_recovery` no longer takes a lookahead, and
+  `maintain_swap_receive_lookahead` is no longer public.
 - `WalletDb::transaction_history_summaries` returns typed account-scoped transaction
   metadata and monetary effects without reading raw transaction payloads. It shares
   the corrected accounting definition of `v_transactions`, filters account inputs

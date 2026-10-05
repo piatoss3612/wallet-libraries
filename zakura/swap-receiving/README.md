@@ -32,6 +32,25 @@ receivers after reopen. These are `WalletDb` methods, also usable inside its
 transaction helpers so a reservation and an application's operation record can
 commit together. Do not expose an address until that transaction commits.
 
+A wallet drives the feature with these calls:
+
+- `maintain_swap_receiving` when each sync starts and again at the chain tip. It
+  retains spend history and, at the tip, recovers funding memos and keeps the
+  incoming lookahead.
+- `close_finished_swap_keys` once sync reaches a tip it confirmed with the network,
+  passing that tip.
+- `reserve_swap_receiving_key` for a refund address and
+  `prepare_swap_receive_reservation` for an incoming one, with the latest network
+  tip. Both require scanning within `ISSUANCE_TIP_LAG` blocks of it and choose the
+  key's first scanned block.
+- For an outgoing swap, `record_swap_refund_quote` when the quote arrives, then
+  `swap_funding_memo` for the funding transaction and
+  `verify_swap_funding_proposal` before signing.
+- For an incoming swap, `begin_swap_receive_quote` just before the request leaves
+  the device, `record_swap_receive_quote` or `reject_swap_receive_quote` for the
+  response, `start_swap_receive_quote` before showing deposit instructions, and
+  `reap_swap_receive_reservations` after reconciling due quotes.
+
 The registry stores full `u64` indices as fixed-width big-endian blobs for SQLite
 ordering. This is an internal storage encoding; the KDF and memo remain
 little-endian. The feature is disabled by default.
@@ -43,10 +62,10 @@ scanned at or above that height, and a batch whose key snapshot missed an active
 key requeues its range, so no block in a key's active range goes unchecked.
 Catching up after time offline scans active keys like any other blocks.
 
-For a newly issued address, use the next height after the accepted tip as
-`scan_from`. Keys found only through restore (`recover_swap_receiving_key`,
-`watch_swap_receive_key`) are not scanned until their receiver-directory sweep
-completes (see [Restore sweeps](#restore-sweeps)).
+A newly issued key starts at the first unscanned block. Keys found only through
+restore (`recover_swap_receiving_key`, `watch_swap_receive_key`) are not scanned
+until their receiver-directory sweep completes (see
+[Restore sweeps](#restore-sweeps)).
 
 The planned selector will prefer swap notes during ordinary sends when doing so
 adds neither inputs nor fees, respecting existing input constraints. Confirmed
@@ -68,9 +87,13 @@ on it has a conclusive terminal status (`FAILED` is not), mined receipts cover
 the expected amounts, and 24 hours have passed since the first terminal status.
 It also stops seven days after the latest quote deadline (or registration,
 without one), whatever the provider reports. Incoming keys this wallet issued
-stay active until paid and their reservation ends. Call it only after refreshing
-the chain tip and scanning to it. No provider response credits a note, and a
-closed key keeps its notes.
+stay active until paid and their reservation ends. Nothing closes unless the
+wallet is scanned to the tip the caller confirmed. No provider response credits
+a note, and a closed key keeps its notes.
+
+A recorded refund quote expects nothing until it is funded, so abandoned quotes
+do not hold a key open. A status for its deposit address, or its mined funding
+memo, makes the swap's outcome decide instead.
 
 ## Derivation
 

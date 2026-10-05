@@ -57,7 +57,7 @@ fn refund_key(st: &mut ScannedWallet) -> RegisteredKey {
     let from = next_height(st);
     st.wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Refund, from)
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, from)
         .unwrap()
 }
 
@@ -75,9 +75,10 @@ fn pay(st: &mut ScannedWallet, key: &RegisteredKey, value: u64) -> BlockHeight {
 /// Closes the test account's finished keys at `now` and returns how many closed.
 fn close(st: &mut ScannedWallet, now: i64) -> usize {
     let account = st.test_account().unwrap().id();
+    let tip = st.wallet().chain_height().unwrap().unwrap();
     st.wallet_mut()
         .db_mut()
-        .close_finished_swap_keys(account, now)
+        .close_finished_swap_keys(account, now, tip)
         .unwrap()
 }
 
@@ -345,7 +346,7 @@ fn keys_stay_open_while_a_rescan_is_queued() {
     let db = st.wallet_mut().db_mut();
     db.observe_swap_operation(account, key, "swap", Terminal(NoReceipt), terminal)
         .unwrap();
-    db.reserve_swap_receiving_key(account, Purpose::Refund, tip)
+    db.reserve_swap_receiving_key_from(account, Purpose::Refund, tip)
         .unwrap();
     assert!(
         st.wallet()
@@ -366,11 +367,11 @@ fn incoming_key_closes_only_once_paid_and_released() {
     let from = next_height(&st);
     let db = st.wallet_mut().db_mut();
     let reserved = db
-        .prepare_swap_receive_reservation(account, registered_at(), from)
+        .prepare_swap_receive_reservation_from(account, registered_at(), from)
         .unwrap()
         .key;
     let unpaid = db
-        .reserve_swap_receiving_key(account, Purpose::Receive, from)
+        .reserve_swap_receiving_key_from(account, Purpose::Receive, from)
         .unwrap();
     let terminal = registered_at() + HOUR;
     for key in [&reserved, &unpaid] {
@@ -398,15 +399,16 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
     let deadline = now + HOUR;
     let db = st.wallet_mut().db_mut();
     let reservation = db
-        .prepare_swap_receive_reservation(account, now, from)
+        .prepare_swap_receive_reservation_from(account, now, from)
         .unwrap();
     for request in ["edit", "accepted"] {
-        db.begin_swap_receive_quote(account, reservation.id, request, now)
+        db.begin_swap_receive_quote(account, reservation.id, request, deadline, now)
             .unwrap();
         db.record_swap_receive_quote(account, request, request, None, deadline)
             .unwrap();
     }
-    db.start_swap_receive_quote(account, "accepted").unwrap();
+    db.start_swap_receive_quote(account, "accepted", None)
+        .unwrap();
     pay(&mut st, &reservation.key, 70_000);
     let released = deadline + RECEIVE_RECLAIM_SECONDS;
     let payout = Some(Zatoshis::const_from_u64(70_000));
@@ -439,9 +441,9 @@ fn reissued_key_limit_ignores_an_earlier_reservations_deadline() {
     let from = next_height(&st);
     let db = st.wallet_mut().db_mut();
     let first = db
-        .prepare_swap_receive_reservation(account, start, from)
+        .prepare_swap_receive_reservation_from(account, start, from)
         .unwrap();
-    db.begin_swap_receive_quote(account, first.id, "first", start)
+    db.begin_swap_receive_quote(account, first.id, "first", first_deadline, start)
         .unwrap();
     db.record_swap_receive_quote(account, "first", "first", None, first_deadline)
         .unwrap();
@@ -458,14 +460,15 @@ fn reissued_key_limit_ignores_an_earlier_reservations_deadline() {
     // Reissued after the first quote's limit has passed.
     let reissued = first_deadline + LIMIT + 24 * HOUR;
     let second = db
-        .prepare_swap_receive_reservation(account, reissued, from)
+        .prepare_swap_receive_reservation_from(account, reissued, from)
         .unwrap();
     assert_eq!(second.key.key_id(), first.key.key_id());
-    db.begin_swap_receive_quote(account, second.id, "second", reissued)
+    db.begin_swap_receive_quote(account, second.id, "second", reissued + HOUR, reissued)
         .unwrap();
     db.record_swap_receive_quote(account, "second", "second", None, reissued + HOUR)
         .unwrap();
-    db.start_swap_receive_quote(account, "second").unwrap();
+    db.start_swap_receive_quote(account, "second", None)
+        .unwrap();
     pay(&mut st, &second.key, 1_000);
     let settled = reissued + 2 * HOUR;
     let success = ProviderStatus {
@@ -518,13 +521,13 @@ fn receive_quote_status_sets_the_expected_payout_and_deadline() {
     let deadline = now + HOUR;
     let db = st.wallet_mut().db_mut();
     let reservation = db
-        .prepare_swap_receive_reservation(account, now, from)
+        .prepare_swap_receive_reservation_from(account, now, from)
         .unwrap();
-    db.begin_swap_receive_quote(account, reservation.id, "request", now)
+    db.begin_swap_receive_quote(account, reservation.id, "request", deadline, now)
         .unwrap();
     assert_eq!(
         operation_row(&db.conn, "receive-quote:request"),
-        (now, None, 0, None, None)
+        (now, None, 0, None, Some(deadline))
     );
     db.record_swap_receive_quote(account, "request", "deposit", None, deadline)
         .unwrap();
@@ -539,5 +542,28 @@ fn receive_quote_status_sets_the_expected_payout_and_deadline() {
     assert_eq!(
         operation_row(&db.conn, "receive-quote:request"),
         (now + 60, Some(now + 60), 2, Some(70_000), Some(deadline))
+    );
+}
+
+#[test]
+fn keys_close_only_at_the_confirmed_tip() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(&mut st);
+    let terminal = registered_at() + HOUR;
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let db = st.wallet_mut().db_mut();
+    db.observe_swap_operation(account, key.key_id(), "swap", Terminal(NoReceipt), terminal)
+        .unwrap();
+    // The network reports a block the wallet has not stored or scanned yet.
+    assert_eq!(
+        db.close_finished_swap_keys(account, terminal + GRACE, tip + 1)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.close_finished_swap_keys(account, terminal + GRACE, tip)
+            .unwrap(),
+        1
     );
 }

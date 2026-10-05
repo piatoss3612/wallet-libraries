@@ -34,12 +34,12 @@ fn reservations_survive_reopen_and_keep_purposes_and_accounts_separate() {
     let refund = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Refund, start())
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, start())
         .unwrap();
     let incoming = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Receive, start())
+        .reserve_swap_receiving_key_from(account, Purpose::Receive, start())
         .unwrap();
     assert_eq!(refund.key_id(), KeyId::new(Purpose::Refund, 0));
     assert_eq!(incoming.key_id(), KeyId::new(Purpose::Receive, 0));
@@ -62,7 +62,7 @@ fn reservations_survive_reopen_and_keep_purposes_and_accounts_separate() {
     assert_eq!(keys[1].receiver(), incoming.receiver());
     assert_eq!(
         reopened
-            .reserve_swap_receiving_key(account, Purpose::Refund, start())
+            .reserve_swap_receiving_key_from(account, Purpose::Refund, start())
             .unwrap()
             .key_id()
             .index(),
@@ -75,7 +75,7 @@ fn reservations_survive_reopen_and_keep_purposes_and_accounts_separate() {
         .create_account("other", &seed, &birthday, None)
         .unwrap();
     let key = reopened
-        .reserve_swap_receiving_key(other, Purpose::Refund, start())
+        .reserve_swap_receiving_key_from(other, Purpose::Refund, start())
         .unwrap();
     assert_eq!(key.key_id().index(), 0);
     assert_ne!(key.receiver(), refund.receiver());
@@ -95,7 +95,7 @@ fn lookahead_does_not_skip_unissued_addresses_and_recovery_promotes_it() {
     }
     // An unswept lookahead index waits for its sweep rather than being skipped.
     assert!(matches!(
-        db.reserve_swap_receiving_key(account, Purpose::Receive, start()),
+        db.reserve_swap_receiving_key_from(account, Purpose::Receive, start()),
         Err(Error::ReservationPolicy(ReservationPolicy::Gap))
     ));
     let key_id = KeyId::new(Purpose::Receive, 18);
@@ -108,11 +108,11 @@ fn lookahead_does_not_skip_unissued_addresses_and_recovery_promotes_it() {
     assert_eq!(repeated.scan_from(), BlockHeight::from_u32(80));
     assert_eq!(db.get_swap_receiving_keys(account).unwrap().len(), 20);
     assert!(matches!(
-        db.reserve_swap_receiving_key(account, Purpose::Receive, start()),
+        db.reserve_swap_receiving_key_from(account, Purpose::Receive, start()),
         Err(Error::ReservationPolicy(ReservationPolicy::Gap))
     ));
     assert_eq!(
-        db.reserve_swap_receiving_key(account, Purpose::Refund, start())
+        db.reserve_swap_receiving_key_from(account, Purpose::Refund, start())
             .unwrap()
             .key_id()
             .index(),
@@ -130,14 +130,14 @@ fn recovered_indices_use_full_u64_order_and_never_wrap() {
             .unwrap();
     }
     assert_eq!(
-        db.reserve_swap_receiving_key(account, Purpose::Refund, start())
+        db.reserve_swap_receiving_key_from(account, Purpose::Refund, start())
             .unwrap()
             .key_id()
             .index(),
         u64::MAX
     );
     assert!(matches!(
-        db.reserve_swap_receiving_key(account, Purpose::Refund, start()),
+        db.reserve_swap_receiving_key_from(account, Purpose::Refund, start()),
         Err(Error::IndexExhausted)
     ));
     assert_eq!(db.get_swap_receiving_keys(account).unwrap().len(), 6);
@@ -153,7 +153,7 @@ fn operation_and_reservation_commit_or_roll_back_together() {
         .unwrap();
     let db = st.wallet_mut().db_mut();
     let result = db.transactionally_with_extension(|tx, ext| {
-        let key = tx.reserve_swap_receiving_key(account, Purpose::Refund, start())?;
+        let key = tx.reserve_swap_receiving_key_from(account, Purpose::Refund, start())?;
         ext.execute(
             "INSERT INTO ext_swap_operations VALUES (?1)",
             [&key.key_id().index().to_le_bytes()],
@@ -164,7 +164,7 @@ fn operation_and_reservation_commit_or_roll_back_together() {
     assert!(db.get_swap_receiving_keys(account).unwrap().is_empty());
     let key = db
         .transactionally_with_extension(|tx, ext| {
-            let key = tx.reserve_swap_receiving_key(account, Purpose::Refund, start())?;
+            let key = tx.reserve_swap_receiving_key_from(account, Purpose::Refund, start())?;
             ext.execute(
                 "INSERT INTO ext_swap_operations VALUES (?1)",
                 [&key.key_id().index().to_le_bytes()],
@@ -196,7 +196,7 @@ fn concurrent_connections_never_return_the_same_reservation() {
                 let mut db = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
                 barrier.wait();
                 for _ in 0..20 {
-                    match db.reserve_swap_receiving_key(account, Purpose::Refund, start()) {
+                    match db.reserve_swap_receiving_key_from(account, Purpose::Refund, start()) {
                         Ok(key) => return key.key_id().index(),
                         Err(Error::Wallet(SqliteClientError::DbError(
                             rusqlite::Error::SqliteFailure(e, _),
@@ -235,9 +235,11 @@ fn corrupted_receiver_is_not_replaced_or_silently_skipped() {
         Err(Error::Wallet(SqliteClientError::CorruptedData(_)))
     ));
     assert!(matches!(
-        st.wallet_mut()
-            .db_mut()
-            .reserve_swap_receiving_key(account, Purpose::Receive, start()),
+        st.wallet_mut().db_mut().reserve_swap_receiving_key_from(
+            account,
+            Purpose::Receive,
+            start()
+        ),
         Err(Error::Wallet(SqliteClientError::CorruptedData(_)))
     ));
     let allocated: bool = st
@@ -258,7 +260,7 @@ fn account_deletion_cascades_and_unknown_accounts_cannot_reserve() {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Refund, start())
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, start())
         .unwrap();
     st.wallet_mut().delete_account(account).unwrap();
     assert_eq!(
@@ -272,7 +274,7 @@ fn account_deletion_cascades_and_unknown_accounts_cannot_reserve() {
     assert!(matches!(
         st.wallet_mut()
             .db_mut()
-            .reserve_swap_receiving_key(account, Purpose::Refund, start()),
+            .reserve_swap_receiving_key_from(account, Purpose::Refund, start()),
         Err(Error::Wallet(SqliteClientError::AccountUnknown))
     ));
 }

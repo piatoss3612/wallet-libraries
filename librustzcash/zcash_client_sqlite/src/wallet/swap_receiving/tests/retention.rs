@@ -21,7 +21,7 @@ fn retention_completion_waits_for_candidates_and_extended_lookahead() {
     let db = st.wallet_mut().db_mut();
     db.retain_swap_spend_history(account).unwrap();
     assert!(
-        !db.finish_swap_nullifier_recovery(account, through, 1)
+        !db.finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     assert_eq!(
@@ -37,12 +37,12 @@ fn retention_completion_waits_for_candidates_and_extended_lookahead() {
     );
     // Import advances allocation. Finishing must create and wait for the new window.
     assert!(
-        !db.finish_swap_nullifier_recovery(account, through, 1)
+        !db.finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     finish_sweeps(db, account, through);
     assert!(
-        db.finish_swap_nullifier_recovery(account, through, 1)
+        db.finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     assert_eq!(
@@ -68,7 +68,7 @@ fn retention_completion_waits_for_candidates_and_extended_lookahead() {
     assert!(
         !st.wallet_mut()
             .db_mut()
-            .finish_swap_nullifier_recovery(account, wrong, 1)
+            .finish_swap_nullifier_recovery_with(account, wrong, 1)
             .unwrap()
     );
 }
@@ -91,11 +91,17 @@ fn undone_sweeps_and_queued_candidates_hold_spend_evidence() {
         hash: st.wallet().get_block_hash(height).unwrap().unwrap().0,
     };
     let db = st.wallet_mut().db_mut();
-    assert!(!db.finish_swap_nullifier_recovery(account, tip, 1).unwrap());
+    assert!(
+        !db.finish_swap_nullifier_recovery_with(account, tip, 1)
+            .unwrap()
+    );
     db.finish_sweep(account, KeyId::new(Purpose::Receive, 0), tip)
         .unwrap();
     // The candidate predates its key's own sweep start.
-    assert!(!db.finish_swap_nullifier_recovery(account, tip, 1).unwrap());
+    assert!(
+        !db.finish_swap_nullifier_recovery_with(account, tip, 1)
+            .unwrap()
+    );
     assert_eq!(
         crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
         Some(candidate.height)
@@ -108,16 +114,25 @@ fn undone_sweeps_and_queued_candidates_hold_spend_evidence() {
         Some((original, &path)),
     )
     .unwrap();
-    assert!(!db.finish_swap_nullifier_recovery(account, tip, 1).unwrap());
+    assert!(
+        !db.finish_swap_nullifier_recovery_with(account, tip, 1)
+            .unwrap()
+    );
     db.finish_sweep(account, KeyId::new(Purpose::Receive, 9), tip)
         .unwrap();
-    assert!(!db.finish_swap_nullifier_recovery(account, tip, 1).unwrap());
+    assert!(
+        !db.finish_swap_nullifier_recovery_with(account, tip, 1)
+            .unwrap()
+    );
     assert_eq!(
         crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
         Some(key.scan_from())
     );
     db.finish_sweep(account, key.key_id(), tip).unwrap();
-    assert!(db.finish_swap_nullifier_recovery(account, tip, 1).unwrap());
+    assert!(
+        db.finish_swap_nullifier_recovery_with(account, tip, 1)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -135,7 +150,7 @@ fn scanned_keys_never_hold_spend_evidence() {
     )
     .unwrap();
     assert!(
-        !db.finish_swap_nullifier_recovery(account, through, 1)
+        !db.finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     finish_sweeps(db, account, through);
@@ -143,7 +158,7 @@ fn scanned_keys_never_hold_spend_evidence() {
         .recover_swap_receiving_key(account, KeyId::new(Purpose::Refund, 0), through.height)
         .unwrap();
     assert!(
-        !db.finish_swap_nullifier_recovery(account, through, 1)
+        !db.finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     // A completed refund sweep scans its key from the next block.
@@ -157,7 +172,10 @@ fn scanned_keys_never_hold_spend_evidence() {
     let db = st.wallet_mut().db_mut();
     let scanning = db.get_swap_scanning_keys().unwrap();
     assert!(scanning.iter().any(|k| k.key_id() == refund.key_id()));
-    assert!(db.finish_swap_nullifier_recovery(account, tip, 1).unwrap());
+    assert!(
+        db.finish_swap_nullifier_recovery_with(account, tip, 1)
+            .unwrap()
+    );
     assert_eq!(
         crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
         Some(height + 1)
@@ -331,7 +349,7 @@ fn retention_waits_for_internal_memos_and_own_send_evidence() {
     )
     .unwrap();
     assert!(
-        !db.finish_swap_nullifier_recovery(account, through, 1)
+        !db.finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     finish_sweeps(db, account, through);
@@ -340,7 +358,7 @@ fn retention_waits_for_internal_memos_and_own_send_evidence() {
     assert!(
         !st.wallet_mut()
             .db_mut()
-            .finish_swap_nullifier_recovery(account, through, 1)
+            .finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     assert_eq!(
@@ -355,7 +373,7 @@ fn retention_waits_for_internal_memos_and_own_send_evidence() {
     assert!(
         !st.wallet_mut()
             .db_mut()
-            .finish_swap_nullifier_recovery(account, through, 1)
+            .finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     st.wallet()
@@ -365,7 +383,7 @@ fn retention_waits_for_internal_memos_and_own_send_evidence() {
     assert!(
         st.wallet_mut()
             .db_mut()
-            .finish_swap_nullifier_recovery(account, through, 1)
+            .finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
 }
@@ -385,12 +403,12 @@ fn retention_rewinds_and_resumes_for_new_blocks() {
     )
     .unwrap();
     assert!(
-        !db.finish_swap_nullifier_recovery(account, original, 1)
+        !db.finish_swap_nullifier_recovery_with(account, original, 1)
             .unwrap()
     );
     finish_sweeps(db, account, original);
     assert!(
-        db.finish_swap_nullifier_recovery(account, original, 1)
+        db.finish_swap_nullifier_recovery_with(account, original, 1)
             .unwrap()
     );
     let (height, _) = st.generate_empty_block();
@@ -403,7 +421,7 @@ fn retention_rewinds_and_resumes_for_new_blocks() {
     assert!(
         st.wallet_mut()
             .db_mut()
-            .finish_swap_nullifier_recovery(account, tip, 1)
+            .finish_swap_nullifier_recovery_with(account, tip, 1)
             .unwrap()
     );
     assert_eq!(
@@ -429,9 +447,15 @@ fn retention_rewinds_and_resumes_for_new_blocks() {
     );
     // The rewind removed the sweeps' completion, so they hold evidence until rerun.
     let db = st.wallet_mut().db_mut();
-    assert!(!db.finish_swap_nullifier_recovery(account, tip, 1).unwrap());
+    assert!(
+        !db.finish_swap_nullifier_recovery_with(account, tip, 1)
+            .unwrap()
+    );
     finish_sweeps(db, account, tip);
-    assert!(db.finish_swap_nullifier_recovery(account, tip, 1).unwrap());
+    assert!(
+        db.finish_swap_nullifier_recovery_with(account, tip, 1)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -449,12 +473,12 @@ fn completed_recovery_retains_the_next_large_batch_until_reconciled() {
     )
     .unwrap();
     assert!(
-        !db.finish_swap_nullifier_recovery(account, original, 1)
+        !db.finish_swap_nullifier_recovery_with(account, original, 1)
             .unwrap()
     );
     finish_sweeps(db, account, original);
     assert!(
-        db.finish_swap_nullifier_recovery(account, original, 1)
+        db.finish_swap_nullifier_recovery_with(account, original, 1)
             .unwrap()
     );
     for _ in 0..201 {
@@ -478,7 +502,7 @@ fn completed_recovery_retains_the_next_large_batch_until_reconciled() {
     assert!(
         st.wallet_mut()
             .db_mut()
-            .finish_swap_nullifier_recovery(account, through, 1)
+            .finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     assert_eq!(count(st.wallet().conn()), crate::PRUNING_DEPTH + 1);
@@ -505,7 +529,7 @@ fn completion_does_not_enable_discovery_for_an_unregistered_account() {
     assert!(
         !st.wallet_mut()
             .db_mut()
-            .finish_swap_nullifier_recovery(account, through, 50)
+            .finish_swap_nullifier_recovery_with(account, through, 50)
             .unwrap()
     );
     assert_eq!(
@@ -545,12 +569,12 @@ fn covered_history_releases_while_provider_outcome_is_pending() {
     )
     .unwrap();
     assert!(
-        !db.finish_swap_nullifier_recovery(account, through, 1)
+        !db.finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
     finish_sweeps(db, account, through);
     assert!(
-        db.finish_swap_nullifier_recovery(account, through, 1)
+        db.finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
     );
 }

@@ -19,7 +19,7 @@ fn swap_receiving_pir_authenticates_memos_after_reopen() {
         let key = st
             .wallet_mut()
             .db_mut()
-            .reserve_swap_receiving_key(account, purpose, BlockHeight::from_u32(100_000))
+            .reserve_swap_receiving_key_from(account, purpose, BlockHeight::from_u32(100_000))
             .unwrap();
         st.wallet_mut()
             .db_mut()

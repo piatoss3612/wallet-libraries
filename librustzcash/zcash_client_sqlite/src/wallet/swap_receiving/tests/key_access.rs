@@ -7,7 +7,7 @@ fn exact_key_access_ignores_unrelated_history_and_validates_the_requested_key() 
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     let wanted = db
-        .reserve_swap_receiving_key(account, Purpose::Refund, start())
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, start())
         .unwrap();
     let (account_ref, _) = account_key(db.conn.borrow(), &db.params, account).unwrap();
 
@@ -80,7 +80,7 @@ fn exact_key_access_keeps_accounts_and_reservations_separate() {
     let birthday = st.test_account().unwrap().birthday().clone();
     let db = st.wallet_mut().db_mut();
     let reservation = db
-        .prepare_swap_receive_reservation(account, 1_000_000, 100_000.into())
+        .prepare_swap_receive_reservation_from(account, 1_000_000, 100_000.into())
         .unwrap();
     let (other, _) = db.create_account("other", &seed, &birthday, None).unwrap();
     assert!(
@@ -95,7 +95,7 @@ fn exact_key_access_keeps_accounts_and_reservations_separate() {
     );
     assert!(db.swap_receive_reservation(other, reservation.id).is_err());
     let unrelated = db
-        .reserve_swap_receiving_key(account, Purpose::Refund, start())
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, start())
         .unwrap();
     db.conn
         .borrow()
@@ -123,7 +123,7 @@ fn transaction_keys_exclude_unscanned_history_and_preserve_self_payments() {
         .recover_swap_receiving_key(account, KeyId::new(Purpose::Refund, 70), start())
         .unwrap();
     let active = db
-        .reserve_swap_receiving_key(account, Purpose::Refund, start())
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, start())
         .unwrap();
     let txid = TxId::from_bytes([17; 32]);
     let keys = db

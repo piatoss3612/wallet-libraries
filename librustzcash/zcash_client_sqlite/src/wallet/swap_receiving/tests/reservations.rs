@@ -59,7 +59,7 @@ fn try_prepare(st: &mut State, now: i64) -> Result<ReceiveReservation, Error> {
     let from = anchor(st).height + 1;
     st.wallet_mut()
         .db_mut()
-        .prepare_swap_receive_reservation(account, now, from)
+        .prepare_swap_receive_reservation_from(account, now, from)
 }
 
 /// [`try_prepare`], expecting a reservation.
@@ -67,12 +67,13 @@ fn prepare(st: &mut State, now: i64) -> ReceiveReservation {
     try_prepare(st, now).unwrap()
 }
 
-/// Saves quote `request` on `r` at `NOW`, before contacting the provider.
+/// Saves quote `request` on `r` at `NOW` with a deadline of `NOW + 60`, before
+/// contacting the provider.
 fn begin(st: &mut State, r: &ReceiveReservation, request: &str) -> Result<(), Error> {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .begin_swap_receive_quote(account, r.id, request, NOW)
+        .begin_swap_receive_quote(account, r.id, request, NOW + 60, NOW)
 }
 
 /// Begins and accepts quote `request` with a deadline of `NOW + 60`, then optionally starts it.
@@ -83,7 +84,7 @@ fn quote(st: &mut State, r: &ReceiveReservation, request: &str, start: bool) {
     db.record_swap_receive_quote(account, request, request, None, NOW + 60)
         .unwrap();
     if start {
-        db.start_swap_receive_quote(account, request).unwrap();
+        db.start_swap_receive_quote(account, request, None).unwrap();
     }
 }
 
@@ -167,11 +168,12 @@ fn reclamation_waits_until_latest_quote_deadline_plus_cooldown() {
     let r = prepare(&mut st, NOW);
     quote(&mut st, &r, "first", false);
     let db = st.wallet_mut().db_mut();
-    db.begin_swap_receive_quote(account, r.id, "second", NOW + 30)
+    db.begin_swap_receive_quote(account, r.id, "second", NOW + 120, NOW + 30)
         .unwrap();
     db.record_swap_receive_quote(account, "second", "second", None, NOW + 120)
         .unwrap();
-    db.start_swap_receive_quote(account, "second").unwrap();
+    db.start_swap_receive_quote(account, "second", None)
+        .unwrap();
 
     let eligible_at = NOW + 120 + RECEIVE_RECLAIM_SECONDS;
     for request in ["first", "second"] {
@@ -281,7 +283,10 @@ fn restart_and_rejected_quote_reuse_the_same_draft() {
     let account = st.test_account().unwrap().id();
     let r = prepare(&mut st, NOW);
     begin(&mut st, &r, "too-low").unwrap();
-    assert_eq!(operation(&st, "too-low"), Some((NOW, None, 0, None, None)));
+    assert_eq!(
+        operation(&st, "too-low"),
+        Some((NOW, None, 0, None, Some(NOW + 60)))
+    );
     st.wallet_mut()
         .db_mut()
         .reject_swap_receive_quote(account, "too-low")
@@ -343,48 +348,32 @@ fn funded_deposits_without_zec_receipts_cannot_exceed_recovery_gap() {
 }
 
 #[test]
-fn unknown_outcomes_and_stale_or_out_of_order_observations_do_not_release() {
+fn unknown_outcomes_expire_but_stale_or_out_of_order_observations_do_not_release() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
     let r = prepare(&mut st, NOW);
     quote(&mut st, &r, "accepted", false);
-    begin(&mut st, &r, "lost-response").unwrap();
-    let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "accepted", "PENDING_DEPOSIT", false, now);
-    assert!(
-        st.wallet()
-            .db()
-            .swap_receive_reclaim_candidates(account, now)
-            .unwrap()
-            .is_empty()
-    );
+    // The lost response asked for a later deposit deadline than the accepted quote.
     st.wallet_mut()
         .db_mut()
-        .reject_swap_receive_quote(account, "lost-response")
+        .begin_swap_receive_quote(account, r.id, "lost-response", NOW + 120, NOW + 1)
         .unwrap();
-    assert_eq!(
+    let candidates = |st: &State, now| {
         st.wallet()
             .db()
             .swap_receive_reclaim_candidates(account, now)
-            .unwrap(),
-        vec![r.id]
-    );
-    assert!(
-        st.wallet()
-            .db()
-            .swap_receive_reclaim_candidates(account, now + 121)
             .unwrap()
-            .is_empty()
-    );
-    observe(&mut st, "accepted", "PROCESSING", true, now + 122);
-    observe(&mut st, "accepted", "PENDING_DEPOSIT", false, now + 121);
-    assert!(
-        st.wallet()
-            .db()
-            .swap_receive_reclaim_candidates(account, now + 122)
-            .unwrap()
-            .is_empty()
-    );
+    };
+    let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
+    observe(&mut st, "accepted", "PENDING_DEPOSIT", false, now);
+    assert!(candidates(&st, now).is_empty());
+    let expired = NOW + 120 + RECEIVE_RECLAIM_SECONDS;
+    observe(&mut st, "accepted", "PENDING_DEPOSIT", false, expired);
+    assert_eq!(candidates(&st, expired), vec![r.id]);
+    assert!(candidates(&st, expired + 121).is_empty());
+    observe(&mut st, "accepted", "PROCESSING", true, expired + 122);
+    observe(&mut st, "accepted", "PENDING_DEPOSIT", false, expired + 121);
+    assert!(candidates(&st, expired + 122).is_empty());
 }
 
 #[test]
@@ -486,11 +475,15 @@ fn paid_key_finishes_after_grace_once_its_reservation_closes() {
     let expired = NOW + 60 + RECEIVE_RECLAIM_SECONDS;
     observe(&mut st, "paid", "SUCCESS", true, expired);
     observe(&mut st, "edit", "PENDING_DEPOSIT", false, expired);
+    let tip = anchor(&st).height;
     let db = st.wallet_mut().db_mut();
     db.close_received_swap_reservations(account, expired)
         .unwrap();
     let settled = expired + CompletionPolicy::default().grace_secs;
-    assert_eq!(db.close_finished_swap_keys(account, settled).unwrap(), 1);
+    assert_eq!(
+        db.close_finished_swap_keys(account, settled, tip).unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -534,7 +527,7 @@ fn activation_rescan_finds_a_payment_in_already_scanned_blocks() {
     let r = st
         .wallet_mut()
         .db_mut()
-        .prepare_swap_receive_reservation(account, NOW, issued)
+        .prepare_swap_receive_reservation_from(account, NOW, issued)
         .unwrap();
     assert_eq!(r.key.key_id(), key);
     assert_eq!(
@@ -701,4 +694,133 @@ fn reorg_retains_used_marker_and_rechecks_draft_recovery_bound() {
             .unwrap()
             .contains(&first.id)
     );
+}
+
+#[test]
+fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let through = anchor(&st);
+    let db = st.wallet_mut().db_mut();
+    let behind = through.height + ISSUANCE_TIP_LAG + 1;
+    assert_eq!(
+        refusal(db.prepare_swap_receive_reservation(account, NOW, behind)),
+        Some(ReservationPolicy::Coverage)
+    );
+    assert_eq!(
+        refusal(db.reserve_swap_receiving_key(account, Purpose::Refund, behind)),
+        Some(ReservationPolicy::Coverage)
+    );
+    // A wallet cannot tell a fresh seed from a restore, so it sweeps the lookahead first.
+    let near = through.height + ISSUANCE_TIP_LAG;
+    assert_eq!(
+        refusal(db.prepare_swap_receive_reservation(account, NOW, near)),
+        Some(ReservationPolicy::Gap)
+    );
+    assert_eq!(
+        refusal(db.reserve_swap_receiving_key(account, Purpose::Receive, near)),
+        Some(ReservationPolicy::Gap)
+    );
+    let lookahead = db.get_swap_receiving_keys(account).unwrap();
+    assert_eq!(lookahead.len() as u64, RECEIVE_GAP_LIMIT);
+    for key in lookahead {
+        db.finish_sweep(account, key.key_id(), through).unwrap();
+    }
+    let r = db
+        .prepare_swap_receive_reservation(account, NOW, near)
+        .unwrap();
+    assert_eq!(r.key.key_id(), KeyId::new(Purpose::Receive, 0));
+    let refund = db
+        .reserve_swap_receiving_key(account, Purpose::Refund, through.height)
+        .unwrap()
+        .key_id();
+    assert_eq!(refund, KeyId::new(Purpose::Refund, 0));
+    for key in [r.key.key_id(), refund] {
+        assert_eq!(active_from(&st, key), Some(through.height + 1));
+    }
+}
+
+#[test]
+fn starting_a_quote_matches_its_deposit_memo() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let mut reservations = vec![];
+    for (request, memo) in [("first", "memo-1"), ("second", "memo-2")] {
+        let r = prepare(&mut st, NOW);
+        begin(&mut st, &r, request).unwrap();
+        let db = st.wallet_mut().db_mut();
+        // Both quotes share a deposit address and differ only by memo.
+        db.record_swap_receive_quote(account, request, "shared", Some(memo), NOW + 60)
+            .unwrap();
+        db.start_swap_receive_quote(account, "shared", Some("memo-1"))
+            .unwrap();
+        reservations.push(r.id);
+    }
+    // Starting the first quote again left the second reservation as the draft.
+    assert_eq!(prepare(&mut st, NOW).id, reservations[1]);
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        refusal(db.start_swap_receive_quote(account, "shared", None)),
+        Some(ReservationPolicy::Stale)
+    );
+    db.start_swap_receive_quote(account, "shared", Some("memo-2"))
+        .unwrap();
+    assert_eq!(prepare(&mut st, NOW).key.key_id().index(), 2);
+}
+
+#[test]
+fn begin_requires_a_future_deadline() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let r = prepare(&mut st, NOW);
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_swap_receive_quote(account, r.id, "expired", NOW, NOW)
+            .is_err()
+    );
+    assert_eq!(operation(&st, "expired"), None);
+}
+
+#[test]
+fn reaping_reclaims_abandoned_reservations_for_reuse() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let abandoned = prepare(&mut st, NOW);
+    quote(&mut st, &abandoned, "abandoned", true);
+    let paid = prepare(&mut st, NOW);
+    quote(&mut st, &paid, "paid", true);
+    pay(&mut st, paid.key.full_viewing_key());
+    let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
+    observe(&mut st, "abandoned", "PENDING_DEPOSIT", false, now);
+    observe(&mut st, "paid", "SUCCESS", true, now);
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(db.reap_swap_receive_reservations(account, now).unwrap(), 1);
+    // Both reservations are done: nothing is left to poll.
+    assert!(
+        db.swap_receive_quotes_due(account, now + 31)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(db.reap_swap_receive_reservations(account, now).unwrap(), 0);
+    assert_eq!(prepare(&mut st, now).key.key_id(), abandoned.key.key_id());
+}
+
+#[test]
+fn maintenance_registers_restore_discovery_only_at_the_tip() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let (h, _) = st.generate_empty_block();
+    st.wallet_mut().update_chain_tip(h).unwrap();
+    let db = st.wallet_mut().db_mut();
+    db.maintain_swap_receiving(account).unwrap();
+    assert!(db.get_swap_receiving_keys(account).unwrap().is_empty());
+    st.scan_cached_blocks(h, 1);
+    let db = st.wallet_mut().db_mut();
+    db.maintain_swap_receiving(account).unwrap();
+    let keys = db.get_swap_receiving_keys(account).unwrap();
+    assert_eq!(keys.len() as u64, RECEIVE_GAP_LIMIT);
+    assert!(keys.iter().all(|k| !k.advances_allocation()));
+    // Each waits for its restore sweep rather than being scanned.
+    assert!(db.swap_scanning_keys(account).unwrap().is_empty());
 }

@@ -8,6 +8,8 @@
 
 mod apply;
 pub use apply::PaymentApplication;
+mod funding;
+pub use funding::verify_swap_funding_proposal;
 mod lifecycle;
 mod payments;
 mod planner;
@@ -314,21 +316,40 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
-    /// Atomically reserves and registers the next index for this purpose.
+    /// Atomically reserves and registers the next index for this purpose. The key is
+    /// trial-decrypted from the first unscanned block until it closes.
     ///
-    /// The key is trial-decrypted from `scan_from`, inclusive, until it closes.
-    /// For a new address, use the next height after the accepted tip; blocks at
-    /// or above it that were already scanned are queued for rescanning.
-    /// Only a committed result may be exposed. On a concurrent-write error,
-    /// retry the whole operation. To also persist application operation state,
-    /// call this on the wallet handle inside `transactionally_with_extension`.
+    /// `tip` is the chain tip the caller last observed from the network. The wallet
+    /// must be scanned to within [`ISSUANCE_TIP_LAG`] blocks of it. A refund
+    /// reservation first recovers every funding memo, and an incoming one waits for
+    /// the restore lookahead's sweeps, so an index the seed already used is never
+    /// issued again. This commits a missing lookahead even when it must wait.
+    /// Only a committed result may be exposed. On a concurrent-write error, retry
+    /// the whole operation. To also persist application operation state, call this
+    /// on the wallet handle inside `transactionally_with_extension`.
     pub fn reserve_swap_receiving_key(
+        &mut self,
+        account: AccountUuid,
+        purpose: Purpose,
+        tip: BlockHeight,
+    ) -> Result<RegisteredKey, Error> {
+        if purpose == Purpose::Receive {
+            self.transactionally(|wdb| {
+                wdb.extend_receive_lookahead(account, reservations::RECEIVE_LOOKAHEAD)
+            })?;
+        }
+        self.transactionally(|wdb| wdb.reserve_swap_receiving_key(account, purpose, tip))
+    }
+
+    /// Reserves the next index scanned from `scan_from`, without readiness checks.
+    #[cfg(test)]
+    pub(crate) fn reserve_swap_receiving_key_from(
         &mut self,
         account: AccountUuid,
         purpose: Purpose,
         scan_from: BlockHeight,
     ) -> Result<RegisteredKey, Error> {
-        self.transactionally(|wdb| wdb.reserve_swap_receiving_key(account, purpose, scan_from))
+        self.transactionally(|wdb| wdb.reserve_swap_receiving_key_from(account, purpose, scan_from))
     }
 
     /// Registers a key backed by authenticated recovery evidence.
@@ -361,7 +382,32 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
 
 impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
     /// Reserves in the enclosing transaction. Expose the address only after commit.
+    /// See [`WalletDb::reserve_swap_receiving_key`] on a connection-backed handle.
+    /// A lookahead registered here commits only with the enclosing transaction;
+    /// [`WalletDb::maintain_swap_receiving`] commits it on its own.
     pub fn reserve_swap_receiving_key(
+        &mut self,
+        account: AccountUuid,
+        purpose: Purpose,
+        tip: BlockHeight,
+    ) -> Result<RegisteredKey, Error> {
+        let scan_from = issuance_start(self.conn.0, tip)?;
+        match purpose {
+            Purpose::Refund => {
+                if self.swap_refund_memos_pending(account)? {
+                    return Err(Error::ReservationPolicy(ReservationPolicy::Coverage));
+                }
+                self.recover_swap_refund_memos(account)?;
+            }
+            Purpose::Receive => {
+                self.extend_receive_lookahead(account, reservations::RECEIVE_LOOKAHEAD)?
+            }
+        }
+        self.reserve_swap_receiving_key_from(account, purpose, scan_from)
+    }
+
+    /// Reserves the next index scanned from `scan_from`, without readiness checks.
+    pub(crate) fn reserve_swap_receiving_key_from(
         &mut self,
         account: AccountUuid,
         purpose: Purpose,
@@ -484,6 +530,41 @@ fn account_key<P: Parameters>(
             )
         })?;
     Ok((account.id, fvk.clone()))
+}
+
+/// Where restore discovery starts for an account: its birthday or Ironwood
+/// activation, whichever is later.
+fn restore_start<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    account: super::AccountRef,
+) -> Result<BlockHeight, Error> {
+    let birthday: u32 = conn.query_row(
+        "SELECT birthday_height FROM accounts WHERE id = ?1",
+        [account.0],
+        |row| row.get(0),
+    )?;
+    let activation = params
+        .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+        .ok_or_else(|| corrupt("Ironwood inactive"))?;
+    Ok(BlockHeight::from(birthday).max(activation))
+}
+
+/// Blocks a wallet may trail the network tip and still issue a swap address.
+/// Further behind, restore discovery may not yet have reached an index the
+/// seed already used.
+pub const ISSUANCE_TIP_LAG: u32 = 10;
+
+/// The first block a key issued now must scan, once the fully scanned height is
+/// within [`ISSUANCE_TIP_LAG`] of both `tip` and the stored chain tip.
+pub(super) fn issuance_start(conn: &Connection, tip: BlockHeight) -> Result<BlockHeight, Error> {
+    let coverage = || Error::ReservationPolicy(ReservationPolicy::Coverage);
+    let scanned = crate::wallet::fully_scanned_height(conn)?.ok_or_else(coverage)?;
+    let tip = tip.max(crate::wallet::chain_tip_height(conn)?.unwrap_or(scanned));
+    if u32::from(tip).saturating_sub(u32::from(scanned)) > ISSUANCE_TIP_LAG {
+        return Err(coverage());
+    }
+    Ok(scanned + 1)
 }
 
 /// How a newly registered key's history is covered.

@@ -169,7 +169,7 @@ fn restored_keys_are_swept_instead_of_scanned() {
     // Recovery evidence for a key this wallet already scans needs no sweep.
     let db = st.wallet_mut().db_mut();
     let issued = db
-        .reserve_swap_receiving_key(account, Purpose::Refund, through.height)
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, through.height)
         .unwrap()
         .key_id();
     db.recover_swap_receiving_key(account, issued, through.height)
@@ -584,7 +584,7 @@ fn watched_key_finds_a_payout_after_its_sweep() {
     let reservation = st
         .wallet_mut()
         .db_mut()
-        .prepare_swap_receive_reservation(account, NOW, next)
+        .prepare_swap_receive_reservation_from(account, NOW, next)
         .unwrap();
     assert_ne!(reservation.key.key_id(), key);
 }
@@ -613,12 +613,12 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
     let grace = CompletionPolicy::default().grace_secs;
     let db = st.wallet_mut().db_mut();
     assert_eq!(
-        db.close_finished_swap_keys(account, registered + grace - 1)
+        db.close_finished_swap_keys(account, registered + grace - 1, anchor.height)
             .unwrap(),
         0
     );
     assert_eq!(
-        db.close_finished_swap_keys(account, registered + grace)
+        db.close_finished_swap_keys(account, registered + grace, anchor.height)
             .unwrap(),
         1
     );
@@ -627,7 +627,7 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
     let reservation = st
         .wallet_mut()
         .db_mut()
-        .prepare_swap_receive_reservation(account, NOW, through.height + 1)
+        .prepare_swap_receive_reservation_from(account, NOW, through.height + 1)
         .unwrap();
     assert_eq!(reservation.key.key_id(), key);
     assert_eq!(scanning(&st), [key]);
@@ -645,7 +645,7 @@ fn swept_key_cannot_be_issued_while_its_sweep_is_pending() {
         .unwrap()
         .key_id();
     assert!(matches!(
-        db.reserve_swap_receiving_key(account, Purpose::Receive, through.height + 1),
+        db.reserve_swap_receiving_key_from(account, Purpose::Receive, through.height + 1),
         Err(Error::ReservationPolicy(ReservationPolicy::Gap))
     ));
     assert!(scanning(&st).is_empty());
@@ -846,7 +846,7 @@ fn issuing_a_lookahead_key_does_not_extend_the_lookahead() {
             .unwrap();
     }
     let issued = db
-        .prepare_swap_receive_reservation(account, NOW, through.height + 1)
+        .prepare_swap_receive_reservation_from(account, NOW, through.height + 1)
         .unwrap();
     assert_eq!(issued.key.key_id().index(), 0);
     db.maintain_swap_receive_lookahead(account, 3, through.height)
@@ -855,7 +855,7 @@ fn issuing_a_lookahead_key_does_not_extend_the_lookahead() {
     let resumed = st
         .wallet_mut()
         .db_mut()
-        .prepare_swap_receive_reservation(account, NOW, through.height + 1)
+        .prepare_swap_receive_reservation_from(account, NOW, through.height + 1)
         .unwrap();
     assert_eq!(resumed.id, issued.id);
 }

@@ -8,8 +8,14 @@ use zakura_swap_receiving::RefundMemo;
 use zcash_keys::encoding::AddressCodec as _;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use super::{Discovery, Error, KeyId, Purpose, account_key, decode_index, register, unix_now};
+use super::{
+    Discovery, Error, KeyId, Purpose, account_key, decode_index, lifecycle::record_observation,
+    payments::key_ref, register, reservations::RECEIVE_LOOKAHEAD, restore_start,
+    retention::retain_spend_history, unix_now,
+};
 use crate::{AccountUuid, SqlTransaction, WalletDb};
+use zakura_swap_receiving::lifecycle::{Observation, OperationStatus};
+use zcash_protocol::consensus::NetworkUpgrade;
 
 /// A confirmed funding record recovered from an ordinary internal Ironwood note.
 /// The deposit address restores the application's provider-status lookup.
@@ -83,11 +89,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
             let mut result = Vec::new();
             for (index, operation) in rows {
                 let key = KeyId::new(Purpose::Refund, decode_index(index)?);
-                let key_ref = super::payments::key_ref(db.conn.0, account, key)?;
+                let id = key_ref(db.conn.0, account, key)?;
                 db.conn.0.execute(
                     "UPDATE ironwood_swap_refund_watches SET next_check_at=?3
                     WHERE receiving_key_id=?1 AND operation_id=?2",
-                    params![key_ref, operation, next],
+                    params![id, operation, next],
                 )?;
                 result.push((key, operation));
             }
@@ -95,14 +101,24 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         })
     }
 
-    /// Ensures `count` incoming keys beyond the highest reserved or paid index, queued
-    /// for a receiver-directory sweep.
+    /// Keeps `account`'s swap recovery current. Call under the wallet write lock when
+    /// each sync starts, before planning scan work, and again once it reaches the tip.
     ///
-    /// Call after scanning and after storing payments. The first window, and any
-    /// window above a paid key found by restore and never reserved, extends restore
-    /// recovery. Indices above a key this wallet issued were never handed out by it,
-    /// so they need no sweep. This is bounded-gap recovery, not a completeness proof.
-    pub fn maintain_swap_receive_lookahead(
+    /// Retains Ironwood spend evidence (see [`WalletDb::retain_swap_spend_history`]).
+    /// Once scanning reaches the chain tip at or above Ironwood activation, it also
+    /// registers refund keys from confirmed funding memos and keeps
+    /// [`RECEIVE_GAP_LIMIT`](super::RECEIVE_GAP_LIMIT) incoming lookahead keys above
+    /// the highest restored index, each queued for one receiver-directory sweep.
+    pub fn maintain_swap_receiving(&mut self, account: AccountUuid) -> Result<(), Error> {
+        self.transactionally(|db| {
+            retain_spend_history(db.conn.0, &db.params, account)?;
+            db.maintain_restore_discovery(account, RECEIVE_LOOKAHEAD)
+        })
+    }
+
+    /// See [`WalletDb::maintain_swap_receive_lookahead`] on a transaction-backed handle.
+    #[cfg(test)]
+    pub(crate) fn maintain_swap_receive_lookahead(
         &mut self,
         account: AccountUuid,
         count: u32,
@@ -173,7 +189,17 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 .optional()?
                 .flatten()
                 .unwrap_or(false);
-            if !scanned_locally {
+            if scanned_locally {
+                // The mined funding transaction proves a deposit, so the quote's record,
+                // which expects nothing, must wait for the swap's outcome. Observation
+                // time 0 changes only a record no provider status has updated.
+                let id = key_ref(self.conn.0, account, key_id)?;
+                let funded = Observation {
+                    status: OperationStatus::Active,
+                    deadline: None,
+                };
+                record_observation(self.conn.0, id, &deposit_address, funded, 0)?;
+            } else {
                 let key = register(
                     self.conn.0,
                     &self.params,
@@ -184,7 +210,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                     Discovery::Sweep,
                     now,
                 )?;
-                let id = super::payments::key_ref(self.conn.0, account, key.key_id())?;
+                let id = key_ref(self.conn.0, account, key.key_id())?;
                 // Restoring a seed has no local activity record. The provider
                 // identity schedules status polling for the restored refund.
                 self.conn.0.execute(
@@ -198,7 +224,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                     params![id, deposit_address],
                 )?;
             }
-            let id = super::payments::key_ref(self.conn.0, account, key_id)?;
+            let id = key_ref(self.conn.0, account, key_id)?;
             self.conn.0.execute(
                 "INSERT INTO ironwood_swap_refund_memo_progress
                 (note_id,receiving_key_id,funding_height) VALUES(?1,?2,?3)
@@ -216,8 +242,46 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         Ok(recovered)
     }
 
-    /// See [`WalletDb::maintain_swap_receive_lookahead`] on a connection-backed handle.
-    pub fn maintain_swap_receive_lookahead(
+    /// See [`WalletDb::maintain_swap_receiving`], keeping `lookahead` incoming keys.
+    /// Does nothing until scanning reaches a chain tip at or above Ironwood activation.
+    pub(crate) fn maintain_restore_discovery(
+        &mut self,
+        account: AccountUuid,
+        lookahead: u32,
+    ) -> Result<(), Error> {
+        let tip = wallet::chain_tip_height(self.conn.0)?;
+        let ready = match (tip, self.params.activation_height(NetworkUpgrade::Nu6_3)) {
+            (Some(tip), Some(activation)) => {
+                tip >= activation && wallet::fully_scanned_height(self.conn.0)? == Some(tip)
+            }
+            _ => false,
+        };
+        if !ready {
+            return Ok(());
+        }
+        self.recover_swap_refund_memos(account)?;
+        self.extend_receive_lookahead(account, lookahead)
+    }
+
+    /// Keeps `count` incoming lookahead keys, scanned from the account's restore start.
+    pub(crate) fn extend_receive_lookahead(
+        &mut self,
+        account: AccountUuid,
+        count: u32,
+    ) -> Result<(), Error> {
+        let (account_ref, _) = account_key(self.conn.0, &self.params, account)?;
+        let start = restore_start(self.conn.0, &self.params, account_ref)?;
+        self.maintain_swap_receive_lookahead(account, count, start)
+    }
+
+    /// Ensures `count` incoming keys beyond the highest reserved or paid index, queued
+    /// for a receiver-directory sweep.
+    ///
+    /// Call after scanning and after storing payments. The first window, and any
+    /// window above a paid key found by restore and never reserved, extends restore
+    /// recovery. Indices above a key this wallet issued were never handed out by it,
+    /// so they need no sweep. This is bounded-gap recovery, not a completeness proof.
+    pub(crate) fn maintain_swap_receive_lookahead(
         &mut self,
         account: AccountUuid,
         count: u32,

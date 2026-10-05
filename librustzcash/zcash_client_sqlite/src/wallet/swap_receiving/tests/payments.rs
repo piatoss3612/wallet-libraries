@@ -179,7 +179,7 @@ fn swap_payment_absence_requires_retained_contiguous_nullifiers() {
     let key = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Refund, start())
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, start())
         .unwrap();
     let (first, _) = st.generate_empty_block();
     let (last, _) = st.generate_empty_block();
@@ -306,7 +306,7 @@ fn swap_payment_spentness_includes_spends_already_linked_by_scanning() {
     let key = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Refund, activation)
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, activation)
         .unwrap();
     let fvk = IronwoodFvk(key.full_viewing_key().clone());
     let (height, _, nf) = st.generate_next_block(

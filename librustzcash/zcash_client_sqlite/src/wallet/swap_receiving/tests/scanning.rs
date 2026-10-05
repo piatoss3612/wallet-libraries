@@ -62,6 +62,9 @@ fn recipient(st: &State, key: KeyId) -> IronwoodFvk {
 /// Reports a finished swap on each of `keys` and closes them once the grace period has passed.
 fn close(st: &mut State, keys: &[KeyId]) {
     let account = st.test_account().unwrap().id();
+    let tip = crate::wallet::chain_tip_height(st.wallet().conn())
+        .unwrap()
+        .unwrap();
     let db = st.wallet_mut().db_mut();
     for key in keys {
         let finished = OperationStatus::Terminal(ReceiptExpectation::None);
@@ -70,7 +73,7 @@ fn close(st: &mut State, keys: &[KeyId]) {
     }
     let grace = CompletionPolicy::default().grace_secs;
     assert_eq!(
-        db.close_finished_swap_keys(account, grace).unwrap(),
+        db.close_finished_swap_keys(account, grace, tip).unwrap(),
         keys.len()
     );
 }
@@ -119,12 +122,12 @@ fn scan_reopen_and_spend(close_keys: bool) {
     let refund = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account.id(), Purpose::Refund, start)
+        .reserve_swap_receiving_key_from(account.id(), Purpose::Refund, start)
         .unwrap();
     let incoming = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account.id(), Purpose::Receive, start)
+        .reserve_swap_receiving_key_from(account.id(), Purpose::Receive, start)
         .unwrap();
 
     // Both purposes and the ordinary key coexist in one account's batch runner.
@@ -351,7 +354,7 @@ fn swap_receiving_reconstructs_only_with_the_registered_account() {
     let key = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Refund, start())
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, start())
         .unwrap();
     let id: i64 = st
         .wallet()
@@ -421,7 +424,7 @@ fn active_keys_scan_whole_batches_across_their_start() {
     let key = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Receive, first + 2)
+        .reserve_swap_receiving_key_from(account, Purpose::Receive, first + 2)
         .unwrap();
     st.generate_empty_block();
     let (paid, _, _) = st.generate_next_block(
@@ -457,7 +460,7 @@ fn activation_rescans_scanned_blocks_from_its_start_and_survives_reopen() {
 
     st.wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Refund, paid)
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, paid)
         .unwrap();
     assert_eq!(queued(&st), vec![paid..paid + 2]);
     assert_eq!(
@@ -489,7 +492,7 @@ fn reopening_a_closed_key_rescans_blocks_scanned_without_it() {
     let key = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Refund, first)
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, first)
         .unwrap();
     st.scan_cached_blocks(first, 1);
     close(&mut st, &[key.key_id()]);
@@ -520,7 +523,7 @@ fn reactivating_an_open_key_rescans_only_blocks_below_its_start() {
     let key = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key(account, Purpose::Receive, first + 2)
+        .reserve_swap_receiving_key_from(account, Purpose::Receive, first + 2)
         .unwrap()
         .key_id();
     assert_eq!(queued(&st), vec![first + 2..first + 4]);
@@ -579,7 +582,7 @@ fn key_activated_mid_batch_is_requeued_for_the_blocks_it_missed() {
         ran: Cell::new(false),
         register: || {
             let mut db = WalletDb::for_path(path, network, test_clock(), test_rng()).unwrap();
-            db.reserve_swap_receiving_key(account, Purpose::Receive, paid)
+            db.reserve_swap_receiving_key_from(account, Purpose::Receive, paid)
                 .unwrap();
         },
     };

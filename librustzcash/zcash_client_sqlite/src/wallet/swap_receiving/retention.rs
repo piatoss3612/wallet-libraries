@@ -1,5 +1,5 @@
 //! Temporary spend evidence for notes that a restore sweep finds after ordinary scanning.
-use super::{Error, account_key, corrupt};
+use super::{Error, account_key, corrupt, reservations::RECEIVE_LOOKAHEAD, restore_start};
 use crate::{AccountUuid, SqlTransaction, WalletDb, util::Clock, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::BorrowMut;
@@ -13,19 +13,29 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// [`WalletDb::finish_swap_nullifier_recovery`] releases it. Call before the
     /// first scan; evidence already pruned cannot be recovered without a rescan.
     pub fn retain_swap_spend_history(&mut self, account: AccountUuid) -> Result<(), Error> {
-        self.transactionally(|db| {
-            let (id, _) = account_key(db.conn.0, &db.params, account)?;
-            db.conn.0.execute(
-                "INSERT OR IGNORE INTO ironwood_swap_spend_retention(account_id, nullifier_retention_height)
-                 SELECT id, MAX(birthday_height, ?2) FROM accounts WHERE id = ?1",
-                params![
-                    id.0,
-                    db.params.activation_height(NetworkUpgrade::Nu6_3).map(u32::from).unwrap_or(0)
-                ],
-            )?;
-            Ok(())
-        })
+        self.transactionally(|db| retain_spend_history(db.conn.0, &db.params, account))
     }
+}
+
+/// See [`WalletDb::retain_swap_spend_history`].
+pub(super) fn retain_spend_history<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    account: AccountUuid,
+) -> Result<(), Error> {
+    let (id, _) = account_key(conn, params, account)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO ironwood_swap_spend_retention(account_id, nullifier_retention_height)
+         SELECT id, MAX(birthday_height, ?2) FROM accounts WHERE id = ?1",
+        params![
+            id.0,
+            params
+                .activation_height(NetworkUpgrade::Nu6_3)
+                .map(u32::from)
+                .unwrap_or(0)
+        ],
+    )?;
+    Ok(())
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
@@ -33,9 +43,18 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     /// restore sweep needs them. Missing memos, pending sweeps and queued candidates
     /// protect their evidence. Returns true when release reaches the tip.
     ///
-    /// `lookahead` is the wallet's nonzero incoming-address gap limit. Maintenance
-    /// runs inside the transaction so an edge payment cannot race with pruning.
+    /// Restore discovery (see [`WalletDb::maintain_swap_receiving`]) runs inside the
+    /// transaction first, so an edge payment cannot race with pruning.
     pub fn finish_swap_nullifier_recovery(
+        &mut self,
+        account: AccountUuid,
+        through: ChainAnchor,
+    ) -> Result<bool, Error> {
+        self.finish_swap_nullifier_recovery_with(account, through, RECEIVE_LOOKAHEAD)
+    }
+
+    /// [`WalletDb::finish_swap_nullifier_recovery`] keeping `lookahead` incoming keys.
+    pub(crate) fn finish_swap_nullifier_recovery_with(
         &mut self,
         account: AccountUuid,
         through: ChainAnchor,
@@ -57,15 +76,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
             {
                 return Ok(false);
             }
-            db.recover_swap_refund_memos(account)?;
-            let birthday: u32 = db.conn.0.query_row(
-                "SELECT birthday_height FROM accounts WHERE id=?1", [id.0], |r| r.get(0),
-            )?;
-            let start = BlockHeight::from(birthday).max(
-                db.params.activation_height(NetworkUpgrade::Nu6_3)
-                    .ok_or_else(|| corrupt("Ironwood inactive"))?,
-            );
-            db.maintain_swap_receive_lookahead(account, lookahead, start)?;
+            db.maintain_restore_discovery(account, lookahead)?;
             // A decrypted marker can precede its own-send evidence. Keep it eligible
             // until its inputs are known, just as we keep a missing memo eligible.
             let pending: bool = db.conn.0.query_row(
@@ -118,16 +129,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         through: BlockHeight,
     ) -> Result<(), Error> {
         let (id, _) = account_key(self.conn.0, &self.params, account)?;
-        let birthday: u32 = self.conn.0.query_row(
-            "SELECT birthday_height FROM accounts WHERE id=?1",
-            [id.0],
-            |r| r.get(0),
-        )?;
-        let start = BlockHeight::from(birthday).max(
-            self.params
-                .activation_height(NetworkUpgrade::Nu6_3)
-                .ok_or_else(|| corrupt("Ironwood inactive"))?,
-        );
+        let start = restore_start(self.conn.0, &self.params, id)?;
         let end = u32::from(through)
             .checked_add(1)
             .ok_or_else(|| corrupt("swap recovery height overflow"))?;

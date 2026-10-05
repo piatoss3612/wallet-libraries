@@ -1,12 +1,12 @@
 //! Provider observations and the rule that ends a key's trial decryption.
 use super::{Error, KeyId, account_key, corrupt, payments::key_ref};
-use crate::{AccountUuid, WalletDb, wallet};
+use crate::{AccountUuid, WalletDb, util::Clock, wallet};
 use rusqlite::{Connection, params};
 use std::borrow::BorrowMut;
 use zakura_swap_receiving::lifecycle::{
     CompletionPolicy, Observation, OperationStatus, ReceiptExpectation,
 };
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Persists a provider observation of `operation` on `key` immediately.
@@ -24,7 +24,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             record_observation(db.conn.0, id, operation, observation, now)
         })
     }
+}
 
+impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
     /// Stops trial decryption for `account`'s finished keys and returns how many closed.
     ///
     /// A key closes once every operation on it has a conclusive terminal status,
@@ -35,22 +37,30 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// reservation, and unpaid incoming keys this wallet issued, stay active, so an
     /// index can be reissued without a gap in its scanned history. An incoming key
     /// found by a restore sweep and never issued here has no known swap, so it
-    /// closes `grace_secs` after registration. Nothing closes until the wallet is
-    /// scanned to the chain tip, so a queued rescan never skips a key. The stored
-    /// tip can be stale after time offline, so call this only after refreshing the
-    /// tip and scanning to it. Provider status never credits a note; a closed key
-    /// keeps its notes.
+    /// closes `grace_secs` after registration. Provider status never credits a note;
+    /// a closed key keeps its notes.
+    ///
+    /// `tip` is the chain tip the caller has just confirmed with the network. The
+    /// stored tip can be stale after time offline, so nothing closes unless the
+    /// stored tip and the fully scanned height both equal `tip`, and a queued rescan
+    /// never skips a key. Confirmed funding memos are recovered first, and no refund
+    /// key settles while a funding memo is still missing, so a funded refund is not
+    /// mistaken for an abandoned quote.
     pub fn close_finished_swap_keys(
         &mut self,
         account: AccountUuid,
         now: i64,
+        tip: BlockHeight,
     ) -> Result<usize, Error> {
         self.transactionally(|db| {
             let (owner, _) = account_key(db.conn.0, &db.params, account)?;
-            let tip = wallet::chain_tip_height(db.conn.0)?;
-            if tip.is_none() || wallet::fully_scanned_height(db.conn.0)? != tip {
+            if wallet::chain_tip_height(db.conn.0)? != Some(tip)
+                || wallet::fully_scanned_height(db.conn.0)? != Some(tip)
+            {
                 return Ok(0);
             }
+            db.recover_swap_refund_memos(account)?;
+            let memos_pending = db.swap_refund_memos_pending(account)?;
             let policy = CompletionPolicy::default();
             let mut stmt = db.conn.0.prepare(
                 "SELECT k.id, k.registered_at, k.purpose = 1,
@@ -98,7 +108,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                             .unwrap_or(registered_at)
                             .saturating_add(policy.limit_secs)
                     };
-                    let settled = operations > 0
+                    // A refund key's missing funding memo could still reopen its quote.
+                    let settled = (incoming || !memos_pending)
+                        && operations > 0
                         && unresolved == 0
                         && received >= expected
                         && last_terminal.is_some_and(|t| now >= t.saturating_add(policy.grace_secs));
@@ -121,6 +133,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 /// See [`WalletDb::record_swap_observation`]. Shared with reservation and memo recovery.
+///
+/// An `observed_at` of 0 marks a record no provider status has updated yet. Its
+/// placeholder terminal time gives way to the first observed one.
 pub(super) fn record_observation(
     conn: &Connection,
     id: i64,
@@ -149,7 +164,9 @@ pub(super) fn record_observation(
          VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN ?3 END, ?5, ?6, ?7)
          ON CONFLICT (receiving_key_id, operation_id) DO UPDATE SET
             observed_at = excluded.observed_at,
-            terminal_at = CASE WHEN ?4 THEN COALESCE(terminal_at, excluded.terminal_at) END,
+            terminal_at = CASE WHEN ?4 THEN
+                CASE WHEN observed_at > 0 THEN COALESCE(terminal_at, excluded.terminal_at)
+                    ELSE excluded.terminal_at END END,
             expectation = excluded.expectation,
             expected_value = excluded.expected_value,
             deadline = COALESCE(excluded.deadline, deadline)
