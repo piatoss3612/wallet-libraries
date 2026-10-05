@@ -73,7 +73,7 @@ fn begin(st: &mut State, r: &ReceiveReservation, request: &str) -> Result<(), Er
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
-        .begin_swap_receive_quote(account, r.id, request, NOW + 60, NOW)
+        .begin_swap_receive_quote_as(account, r.id, request, NOW + 60, NOW)
 }
 
 /// Begins and accepts quote `request` with a deadline of `NOW + 60`, then optionally starts it.
@@ -81,10 +81,10 @@ fn quote(st: &mut State, r: &ReceiveReservation, request: &str, start: bool) {
     let account = st.test_account().unwrap().id();
     begin(st, r, request).unwrap();
     let db = st.wallet_mut().db_mut();
-    db.record_swap_receive_quote(account, request, request, None, NOW + 60)
+    db.finish_swap_receive_quote(account, request, &accepted(request, None, NOW + 60))
         .unwrap();
     if start {
-        db.start_swap_receive_quote(account, request, None).unwrap();
+        db.start_swap_receive_quote(account, request).unwrap();
     }
 }
 
@@ -168,12 +168,11 @@ fn reclamation_waits_until_latest_quote_deadline_plus_cooldown() {
     let r = prepare(&mut st, NOW);
     quote(&mut st, &r, "first", false);
     let db = st.wallet_mut().db_mut();
-    db.begin_swap_receive_quote(account, r.id, "second", NOW + 120, NOW + 30)
+    db.begin_swap_receive_quote_as(account, r.id, "second", NOW + 120, NOW + 30)
         .unwrap();
-    db.record_swap_receive_quote(account, "second", "second", None, NOW + 120)
+    db.finish_swap_receive_quote(account, "second", &accepted("second", None, NOW + 120))
         .unwrap();
-    db.start_swap_receive_quote(account, "second", None)
-        .unwrap();
+    db.start_swap_receive_quote(account, "second").unwrap();
 
     let eligible_at = NOW + 120 + RECEIVE_RECLAIM_SECONDS;
     for request in ["first", "second"] {
@@ -289,7 +288,7 @@ fn restart_and_rejected_quote_reuse_the_same_draft() {
     );
     st.wallet_mut()
         .db_mut()
-        .reject_swap_receive_quote(account, "too-low")
+        .finish_swap_receive_quote(account, "too-low", &QuoteOutcome::Rejected)
         .unwrap();
     assert_eq!(operation(&st, "too-low"), None);
     let reopened = WalletDb::for_path(
@@ -356,7 +355,7 @@ fn unknown_outcomes_expire_but_stale_or_out_of_order_observations_do_not_release
     // The lost response asked for a later deposit deadline than the accepted quote.
     st.wallet_mut()
         .db_mut()
-        .begin_swap_receive_quote(account, r.id, "lost-response", NOW + 120, NOW + 1)
+        .begin_swap_receive_quote_as(account, r.id, "lost-response", NOW + 120, NOW + 1)
         .unwrap();
     let candidates = |st: &State, now| {
         st.wallet()
@@ -741,31 +740,71 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
 }
 
 #[test]
-fn starting_a_quote_matches_its_deposit_memo() {
+fn starting_a_quote_returns_its_deposit_and_starts_only_its_reservation() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
-    let mut reservations = vec![];
-    for (request, memo) in [("first", "memo-1"), ("second", "memo-2")] {
-        let r = prepare(&mut st, NOW);
-        begin(&mut st, &r, request).unwrap();
-        let db = st.wallet_mut().db_mut();
-        // Both quotes share a deposit address and differ only by memo.
-        db.record_swap_receive_quote(account, request, "shared", Some(memo), NOW + 60)
-            .unwrap();
-        db.start_swap_receive_quote(account, "shared", Some("memo-1"))
-            .unwrap();
-        reservations.push(r.id);
-    }
-    // Starting the first quote again left the second reservation as the draft.
-    assert_eq!(prepare(&mut st, NOW).id, reservations[1]);
+    // Both quotes share a deposit address and differ only by memo.
+    let first = prepare(&mut st, NOW);
+    begin(&mut st, &first, "first").unwrap();
+    let db = st.wallet_mut().db_mut();
+    db.finish_swap_receive_quote(
+        account,
+        "first",
+        &accepted("shared", Some("memo-1"), NOW + 60),
+    )
+    .unwrap();
+    assert_eq!(
+        db.start_swap_receive_quote(account, "first").unwrap(),
+        ReceiveDeposit {
+            address: "shared".into(),
+            memo: Some("memo-1".into()),
+            deadline: NOW + 60,
+        }
+    );
+    let second = prepare(&mut st, NOW);
+    assert_ne!(second.id, first.id);
+    begin(&mut st, &second, "second").unwrap();
+    let db = st.wallet_mut().db_mut();
+    db.finish_swap_receive_quote(
+        account,
+        "second",
+        &accepted("shared", Some("memo-2"), NOW + 60),
+    )
+    .unwrap();
+    // Starting the first quote again leaves the second reservation as the draft.
+    db.start_swap_receive_quote(account, "first").unwrap();
+    assert_eq!(prepare(&mut st, NOW).id, second.id);
     let db = st.wallet_mut().db_mut();
     assert_eq!(
-        refusal(db.start_swap_receive_quote(account, "shared", None)),
+        refusal(db.start_swap_receive_quote(account, "unknown")),
         Some(ReservationPolicy::Stale)
     );
-    db.start_swap_receive_quote(account, "shared", Some("memo-2"))
-        .unwrap();
+    db.start_swap_receive_quote(account, "second").unwrap();
     assert_eq!(prepare(&mut st, NOW).key.key_id().index(), 2);
+}
+
+#[test]
+fn begin_returns_a_fresh_request_identity() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let r = prepare(&mut st, NOW);
+    let db = st.wallet_mut().db_mut();
+    let first = db
+        .begin_swap_receive_quote(account, r.id, NOW + 60, NOW)
+        .unwrap();
+    let second = db
+        .begin_swap_receive_quote(account, r.id, NOW + 60, NOW)
+        .unwrap();
+    assert_eq!(first.len(), 32);
+    assert_ne!(first, second);
+    db.finish_swap_receive_quote(account, &first, &accepted("deposit", None, NOW + 60))
+        .unwrap();
+    assert_eq!(
+        db.start_swap_receive_quote(account, &first)
+            .unwrap()
+            .address,
+        "deposit"
+    );
 }
 
 #[test]
@@ -776,7 +815,7 @@ fn begin_requires_a_future_deadline() {
     assert!(
         st.wallet_mut()
             .db_mut()
-            .begin_swap_receive_quote(account, r.id, "expired", NOW, NOW)
+            .begin_swap_receive_quote_as(account, r.id, "expired", NOW, NOW)
             .is_err()
     );
     assert_eq!(operation(&st, "expired"), None);

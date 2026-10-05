@@ -17,12 +17,14 @@ pub use planner::{DiscoveryBatch, DiscoveryWork};
 mod recovery;
 mod reservations;
 mod retention;
+mod sweep;
 pub use payments::{PendingPayment, SpendStatus};
 pub use recovery::RecoveredRefund;
 pub use reservations::{
-    RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, RECEIVE_UNFUNDED_LIMIT, ReceiveQuote,
-    ReceiveReservation,
+    QuoteOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, RECEIVE_UNFUNDED_LIMIT,
+    ReceiveDeposit, ReceiveQuote, ReceiveReservation,
 };
+pub use sweep::{DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral};
 
 use std::{
     borrow::{Borrow, BorrowMut},
@@ -58,6 +60,8 @@ pub enum ReservationPolicy {
     Stale,
     /// The wallet has not scanned this address through the chain tip.
     Coverage,
+    /// A swap refund record cannot be read by this version, and may hold a refund index.
+    Unreadable,
 }
 impl std::fmt::Display for ReservationPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,6 +70,7 @@ impl std::fmt::Display for ReservationPolicy {
             Self::Limit=>"Three incoming swaps are awaiting deposits. Resume an existing swap or wait for reconciliation.",
             Self::Stale=>"This receive reservation is no longer available. Request a new quote.",
             Self::Coverage=>"Finish syncing to the chain tip before requesting a quote.",
+            Self::Unreadable=>"A swap refund record could not be read. Update the app before swapping ZEC again.",
         })
     }
 }
@@ -81,6 +86,8 @@ pub enum Error {
     IndexExhausted,
     /// Address allocation is waiting for recovery or an existing reservation.
     ReservationPolicy(ReservationPolicy),
+    /// A restore sweep step must wait for more scanning or a newer publication.
+    SweepDeferred(SweepDeferral),
 }
 
 impl std::fmt::Display for Error {
@@ -90,6 +97,7 @@ impl std::fmt::Display for Error {
             Self::Derivation(e) => e.fmt(f),
             Self::IndexExhausted => f.write_str("swap receiving index space exhausted"),
             Self::ReservationPolicy(policy) => policy.fmt(f),
+            Self::SweepDeferred(reason) => reason.fmt(f),
         }
     }
 }
@@ -99,7 +107,7 @@ impl std::error::Error for Error {
         match self {
             Self::Wallet(e) => Some(e),
             Self::Derivation(e) => Some(e),
-            Self::IndexExhausted | Self::ReservationPolicy(_) => None,
+            Self::IndexExhausted | Self::ReservationPolicy(_) | Self::SweepDeferred(_) => None,
         }
     }
 }
@@ -394,10 +402,12 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         let scan_from = issuance_start(self.conn.0, tip)?;
         match purpose {
             Purpose::Refund => {
+                if self.recover_refund_memos(account)?.unreadable > 0 {
+                    return Err(Error::ReservationPolicy(ReservationPolicy::Unreadable));
+                }
                 if self.swap_refund_memos_pending(account)? {
                     return Err(Error::ReservationPolicy(ReservationPolicy::Coverage));
                 }
-                self.recover_swap_refund_memos(account)?;
             }
             Purpose::Receive => {
                 self.extend_receive_lookahead(account, reservations::RECEIVE_LOOKAHEAD)?

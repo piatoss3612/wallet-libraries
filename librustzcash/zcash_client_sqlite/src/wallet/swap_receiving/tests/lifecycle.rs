@@ -402,13 +402,12 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
         .prepare_swap_receive_reservation_from(account, now, from)
         .unwrap();
     for request in ["edit", "accepted"] {
-        db.begin_swap_receive_quote(account, reservation.id, request, deadline, now)
+        db.begin_swap_receive_quote_as(account, reservation.id, request, deadline, now)
             .unwrap();
-        db.record_swap_receive_quote(account, request, request, None, deadline)
+        db.finish_swap_receive_quote(account, request, &accepted(request, None, deadline))
             .unwrap();
     }
-    db.start_swap_receive_quote(account, "accepted", None)
-        .unwrap();
+    db.start_swap_receive_quote(account, "accepted").unwrap();
     pay(&mut st, &reservation.key, 70_000);
     let released = deadline + RECEIVE_RECLAIM_SECONDS;
     let payout = Some(Zatoshis::const_from_u64(70_000));
@@ -443,9 +442,9 @@ fn reissued_key_limit_ignores_an_earlier_reservations_deadline() {
     let first = db
         .prepare_swap_receive_reservation_from(account, start, from)
         .unwrap();
-    db.begin_swap_receive_quote(account, first.id, "first", first_deadline, start)
+    db.begin_swap_receive_quote_as(account, first.id, "first", first_deadline, start)
         .unwrap();
-    db.record_swap_receive_quote(account, "first", "first", None, first_deadline)
+    db.finish_swap_receive_quote(account, "first", &accepted("first", None, first_deadline))
         .unwrap();
     let pending = ProviderStatus {
         status: "PENDING_DEPOSIT",
@@ -463,12 +462,15 @@ fn reissued_key_limit_ignores_an_earlier_reservations_deadline() {
         .prepare_swap_receive_reservation_from(account, reissued, from)
         .unwrap();
     assert_eq!(second.key.key_id(), first.key.key_id());
-    db.begin_swap_receive_quote(account, second.id, "second", reissued + HOUR, reissued)
+    db.begin_swap_receive_quote_as(account, second.id, "second", reissued + HOUR, reissued)
         .unwrap();
-    db.record_swap_receive_quote(account, "second", "second", None, reissued + HOUR)
-        .unwrap();
-    db.start_swap_receive_quote(account, "second", None)
-        .unwrap();
+    db.finish_swap_receive_quote(
+        account,
+        "second",
+        &accepted("second", None, reissued + HOUR),
+    )
+    .unwrap();
+    db.start_swap_receive_quote(account, "second").unwrap();
     pay(&mut st, &second.key, 1_000);
     let settled = reissued + 2 * HOUR;
     let success = ProviderStatus {
@@ -523,13 +525,13 @@ fn receive_quote_status_sets_the_expected_payout_and_deadline() {
     let reservation = db
         .prepare_swap_receive_reservation_from(account, now, from)
         .unwrap();
-    db.begin_swap_receive_quote(account, reservation.id, "request", deadline, now)
+    db.begin_swap_receive_quote_as(account, reservation.id, "request", deadline, now)
         .unwrap();
     assert_eq!(
         operation_row(&db.conn, "receive-quote:request"),
         (now, None, 0, None, Some(deadline))
     );
-    db.record_swap_receive_quote(account, "request", "deposit", None, deadline)
+    db.finish_swap_receive_quote(account, "request", &accepted("deposit", None, deadline))
         .unwrap();
     let status = ProviderStatus {
         status: "SUCCESS",

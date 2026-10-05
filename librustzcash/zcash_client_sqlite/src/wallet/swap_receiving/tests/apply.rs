@@ -5,6 +5,7 @@ use orchard::{
     tree::{MerkleHashOrchard, MerklePath},
 };
 use prost::Message;
+use std::collections::BTreeMap;
 use zakura_swap_receiving::{lifecycle::ChainAnchor, recovery::EncryptedNote};
 use zcash_client_backend::{
     data_api::{
@@ -513,4 +514,156 @@ fn private_payment_uses_its_witness_anchor_and_rewind_invalidates_directory_prog
         .unwrap();
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].note().value().inner(), 100_000);
+}
+
+#[test]
+fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
+    let (mut st, key, candidate, through, path) = fixture();
+    let account = st.test_account().unwrap().id();
+    let key = key.key_id();
+    // Start from the directory's report alone, not a queued candidate.
+    st.wallet()
+        .conn()
+        .execute("DELETE FROM ironwood_swap_payment_recovery", [])
+        .unwrap();
+    let note = candidate.encrypted_note.to_bytes();
+    let payment = DirectoryPayment {
+        height: u32::from(candidate.height),
+        block_hash: candidate.block_hash.0,
+        txid: *candidate.txid.as_ref(),
+        tx_index: candidate.tx_index.into(),
+        action_index: candidate.action_index,
+        position: candidate.position.into(),
+        action_nullifier: note[..32].try_into().unwrap(),
+        cmx: note[32..64].try_into().unwrap(),
+        ephemeral_key: note[64..96].try_into().unwrap(),
+        ciphertext_prefix: note[96..148].try_into().unwrap(),
+    };
+    let suffix: [u8; 528] = note[148..].try_into().unwrap();
+    let db = st.wallet_mut().db_mut();
+    db.prepare_swap_discovery_batch(account, through, 0, std::num::NonZeroU32::new(8).unwrap())
+        .unwrap();
+
+    let deferred = |result: Result<_, Error>| match result {
+        Err(Error::SweepDeferred(reason)) => reason,
+        other => panic!("expected a deferral, got {:?}", other.map(|_| ())),
+    };
+    assert_eq!(
+        deferred(db.swap_publication_anchor(through.height + 1, through)),
+        SweepDeferral::UnknownAnchor
+    );
+    let far = ChainAnchor {
+        height: through.height + MAX_PUBLICATION_LAG + 1,
+        ..through
+    };
+    assert_eq!(
+        deferred(db.swap_publication_anchor(through.height, far)),
+        SweepDeferral::StalePublication
+    );
+    let anchor = db.swap_publication_anchor(through.height, through).unwrap();
+    assert_eq!(anchor, through);
+
+    assert_eq!(
+        db.swap_note_data_needed(account, key, std::slice::from_ref(&payment))
+            .unwrap(),
+        [0]
+    );
+    let note_data = BTreeMap::from([(payment.position, suffix)]);
+    assert!(
+        db.queue_swap_directory_lookup(
+            account,
+            key,
+            anchor,
+            std::slice::from_ref(&payment),
+            &BTreeMap::new()
+        )
+        .is_err()
+    );
+    db.queue_swap_directory_lookup(
+        account,
+        key,
+        anchor,
+        std::slice::from_ref(&payment),
+        &note_data,
+    )
+    .unwrap();
+    // Queued now, so a repeated report needs no note data, and a contradicting one fails.
+    assert!(
+        db.swap_note_data_needed(account, key, std::slice::from_ref(&payment))
+            .unwrap()
+            .is_empty()
+    );
+    let moved = DirectoryPayment {
+        position: 1,
+        ..payment.clone()
+    };
+    assert!(db.swap_note_data_needed(account, key, &[moved]).is_err());
+
+    assert_eq!(
+        db.apply_swap_sweep(account, key, through, anchor, |_, _| None)
+            .unwrap(),
+        PaymentApplication::AwaitingWitness
+    );
+    let siblings = path.auth_path().map(|hash| hash.to_bytes());
+    assert_eq!(
+        db.apply_swap_sweep(account, key, through, anchor, |position, cmx| {
+            (position == candidate.position && cmx == candidate.encrypted_note.commitment())
+                .then_some(siblings)
+        })
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    assert!(
+        st.wallet()
+            .db()
+            .get_unspent_ironwood_notes_at_historical_height(account, through.height)
+            .unwrap()
+            .iter()
+            .any(|n| n.swap_key_id() == Some(key))
+    );
+    let db = st.wallet_mut().db_mut();
+    assert!(!db.swap_history_pending(account, through.height).unwrap());
+    assert!(
+        db.swap_note_data_needed(account, key, std::slice::from_ref(&payment))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_publication_short_of_the_target_waits() {
+    let (mut st, key, _, through, _) = fixture();
+    let account = st.test_account().unwrap().id();
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE ironwood_swap_sweeps SET target_height = ?1",
+            [u32::from(through.height) + 1],
+        )
+        .unwrap();
+    // The attempt still counts, so a lagging publication backs off.
+    assert!(matches!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_swap_discovery_attempt(account, key.key_id(), through, 0),
+        Err(Error::SweepDeferred(SweepDeferral::TargetNotReached))
+    ));
+    let attempts: u32 = st
+        .wallet()
+        .conn()
+        .query_row("SELECT attempts FROM ironwood_swap_sweeps", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(attempts, 1);
+    assert!(matches!(
+        st.wallet_mut().db_mut().queue_swap_directory_lookup(
+            account,
+            key.key_id(),
+            through,
+            &[],
+            &BTreeMap::new()
+        ),
+        Err(Error::SweepDeferred(SweepDeferral::TargetNotReached))
+    ));
 }

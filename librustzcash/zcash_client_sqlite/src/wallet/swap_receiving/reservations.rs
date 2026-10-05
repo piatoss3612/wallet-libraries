@@ -4,6 +4,7 @@ use super::{
     issuance_start, payments::key_ref, register,
 };
 use crate::{AccountUuid, WalletDb, util::Clock, wallet};
+use rand_core::Rng;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::{Borrow, BorrowMut};
 use zakura_swap_receiving::lifecycle::{ProviderStatus, near_observation};
@@ -38,6 +39,27 @@ pub struct ReceiveQuote {
     pub operation_id: String,
     /// Provider memo required for memo-based deposits.
     pub deposit_memo: Option<String>,
+}
+
+/// Deposit instructions of an accepted incoming quote, as the provider issued them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiveDeposit {
+    /// Provider deposit address, which also identifies the provider operation.
+    pub address: String,
+    /// Memo the deposit must carry, on routes that tell deposits apart by memo.
+    pub memo: Option<String>,
+    /// Unix time after which the provider stops accepting the deposit.
+    pub deadline: i64,
+}
+
+/// How a request begun with [`WalletDb::begin_swap_receive_quote`] ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QuoteOutcome {
+    /// The provider accepted the request with these deposit instructions.
+    Accepted(ReceiveDeposit),
+    /// The provider definitively rejected the request. A timeout or a malformed
+    /// response is not a rejection: leave the outcome unknown instead.
+    Rejected,
 }
 
 pub(super) fn reservation_key(
@@ -136,13 +158,19 @@ fn reusable(conn: &Connection, id: i64, now: i64) -> Result<bool, Error> {
 }
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Refund allocation waits for account-internal funding memos, not unrelated outgoing metadata.
+    /// Whether an account-internal funding record is still unprocessed: its memo is
+    /// not retrieved yet, or [`WalletDb::recover_swap_refund_memos`] has not processed
+    /// it. Refund issuance and refund-key settling wait for these records, since one
+    /// may hold a refund index. Unrelated outgoing metadata does not block them.
     pub fn swap_refund_memos_pending(&self, account: AccountUuid) -> Result<bool, Error> {
         Ok(self.conn.borrow().query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
             JOIN transactions t ON t.id_tx=n.transaction_id JOIN accounts a ON a.id=n.account_id
             WHERE a.uuid=?1 AND n.recipient_key_scope=1 AND n.receiving_key_id IS NULL
-            AND t.mined_height IS NOT NULL AND n.memo IS NULL)",
+            AND t.mined_height IS NOT NULL
+            AND (n.memo IS NULL OR (substr(n.memo,1,5)=X'FF5A535750'
+                AND NOT EXISTS(SELECT 1 FROM ironwood_swap_refund_memo_progress p
+                    WHERE p.note_id=n.id AND p.funding_height=t.mined_height))))",
             [account.0],
             |r| r.get(0),
         )?)
@@ -259,13 +287,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         self.swap_receive_reservation(account, id)
     }
 
-    /// Saves an unknown quote outcome before a network request, so a lost response
-    /// cannot free the address while a deposit could still reach it. `deadline` is
-    /// the deposit deadline sent in the request. The outcome holds the reservation
-    /// until that deadline is [`RECEIVE_RECLAIM_SECONDS`] in the past. Call this just
-    /// before the request leaves the device, after any local validation. Requires
-    /// the address to be scanned empty through the chain tip, checked atomically.
-    pub fn begin_swap_receive_quote(
+    /// [`WalletDb::begin_swap_receive_quote`] with a chosen request identity.
+    pub(crate) fn begin_swap_receive_quote_as(
         &mut self,
         account: AccountUuid,
         reservation: i64,
@@ -294,70 +317,79 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         })
     }
 
-    /// Associates an accepted quote with its durable request. Deadlines are provider values.
-    pub fn record_swap_receive_quote(
+    /// Records how a request begun with [`WalletDb::begin_swap_receive_quote`] ended.
+    /// An accepted quote keeps its deposit instructions even if the requesting UI has
+    /// moved on, and its deadline replaces the requested one. A rejection releases the
+    /// request's hold on the address.
+    pub fn finish_swap_receive_quote(
         &mut self,
         account: AccountUuid,
         request: &str,
-        operation: &str,
-        memo: Option<&str>,
-        deadline: i64,
+        outcome: &QuoteOutcome,
     ) -> Result<(), Error> {
-        if operation.is_empty() {
-            return Err(corrupt("empty receive quote operation"));
+        if matches!(outcome, QuoteOutcome::Accepted(deposit) if deposit.address.is_empty()) {
+            return Err(corrupt("empty receive quote deposit address"));
         }
         self.transactionally(|db| {
             let id:i64=db.conn.0.query_row("SELECT reservation_id FROM ironwood_swap_receive_quotes WHERE request_id=?1",[request],|r|r.get(0))?;
             let key=reservation_key(db.conn.0,account,id)?;
-            let changed=db.conn.0.execute("UPDATE ironwood_swap_receive_quotes SET operation_id=?2,deposit_memo=?3,deadline=?4
-                WHERE request_id=?1 AND rejected=0 AND (operation_id IS NULL OR operation_id=?2)",params![request,operation,memo,deadline])?;
-            if changed!=1 {return Err(corrupt("receive quote identity changed"));}
-            // The accepted deadline replaces the requested one and bounds the key's
-            // scanning even if status responses omit it.
-            db.conn.0.execute("UPDATE ironwood_swap_operations SET deadline=?3
-                WHERE receiving_key_id=?1 AND operation_id=?2",params![key,format!("receive-quote:{request}"),deadline])?;
+            let operation=format!("receive-quote:{request}");
+            match outcome {
+                QuoteOutcome::Accepted(deposit) => {
+                    let changed=db.conn.0.execute("UPDATE ironwood_swap_receive_quotes SET operation_id=?2,deposit_memo=?3,deadline=?4
+                        WHERE request_id=?1 AND rejected=0 AND (operation_id IS NULL OR operation_id=?2)",
+                        params![request,deposit.address,deposit.memo,deposit.deadline])?;
+                    if changed!=1 {return Err(corrupt("receive quote identity changed"));}
+                    // The accepted deadline bounds the key's scanning even if status responses omit it.
+                    db.conn.0.execute("UPDATE ironwood_swap_operations SET deadline=?3
+                        WHERE receiving_key_id=?1 AND operation_id=?2",params![key,operation,deposit.deadline])?;
+                }
+                QuoteOutcome::Rejected => {
+                    db.conn.0.execute("UPDATE ironwood_swap_receive_quotes SET rejected=1 WHERE request_id=?1 AND operation_id IS NULL",[request])?;
+                    db.conn.0.execute("DELETE FROM ironwood_swap_operations WHERE receiving_key_id=?1 AND operation_id=?2
+                        AND EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes WHERE request_id=?3 AND rejected=1)",params![key,operation,request])?;
+                }
+            }
             Ok(())
         })
     }
 
-    /// Records a definitive provider rejection, never a timeout or malformed success response.
-    pub fn reject_swap_receive_quote(
-        &mut self,
-        account: AccountUuid,
-        request: &str,
-    ) -> Result<(), Error> {
-        self.transactionally(|db| {
-            let id:i64=db.conn.0.query_row("SELECT reservation_id FROM ironwood_swap_receive_quotes WHERE request_id=?1",[request],|r|r.get(0))?;
-            let key=reservation_key(db.conn.0,account,id)?;
-            db.conn.0.execute("UPDATE ironwood_swap_receive_quotes SET rejected=1 WHERE request_id=?1 AND operation_id IS NULL",[request])?;
-            db.conn.0.execute("DELETE FROM ironwood_swap_operations WHERE receiving_key_id=?1 AND operation_id=?2
-                AND EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes WHERE request_id=?3 AND rejected=1)",params![key,format!("receive-quote:{request}"),request])?;
-            Ok(())
-        })
-    }
-
-    /// Reserves the draft for an accepted quote before the UI exposes funding instructions.
-    /// The quote is identified by its deposit address and memo, since some routes share
-    /// one deposit address and tell deposits apart by memo.
+    /// Locks the draft of the accepted quote `request` before the UI exposes funding
+    /// instructions, and returns those instructions. Show these, not a copy held
+    /// elsewhere.
     pub fn start_swap_receive_quote(
         &mut self,
         account: AccountUuid,
-        operation: &str,
-        memo: Option<&str>,
-    ) -> Result<(), Error> {
+        request: &str,
+    ) -> Result<ReceiveDeposit, Error> {
         self.transactionally(|db| {
             let (a, _) = account_key(db.conn.0, &db.params, account)?;
-            let changed = db.conn.0.execute(
-                "UPDATE ironwood_swap_receive_reservations SET started=1 WHERE closed_at IS NULL
-                AND receiving_key_id IN (SELECT id FROM ironwood_receiving_keys WHERE account_id=?1)
-                AND id IN (SELECT reservation_id FROM ironwood_swap_receive_quotes
-                    WHERE operation_id=?2 AND deposit_memo IS ?3 AND rejected=0)",
-                params![a.0, operation, memo],
+            let quote: Option<(i64, String, Option<String>, i64)> = db
+                .conn
+                .0
+                .query_row(
+                    "SELECT r.id, q.operation_id, q.deposit_memo, q.deadline
+                     FROM ironwood_swap_receive_quotes q
+                     JOIN ironwood_swap_receive_reservations r ON r.id = q.reservation_id
+                     JOIN ironwood_receiving_keys k ON k.id = r.receiving_key_id
+                     WHERE q.request_id = ?1 AND k.account_id = ?2 AND q.rejected = 0
+                       AND q.operation_id IS NOT NULL AND q.deadline IS NOT NULL
+                       AND r.closed_at IS NULL",
+                    params![request, a.0],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let (reservation, address, memo, deadline) =
+                quote.ok_or(Error::ReservationPolicy(super::ReservationPolicy::Stale))?;
+            db.conn.0.execute(
+                "UPDATE ironwood_swap_receive_reservations SET started=1 WHERE id=?1",
+                [reservation],
             )?;
-            if changed == 0 {
-                return Err(Error::ReservationPolicy(super::ReservationPolicy::Stale));
-            }
-            Ok(())
+            Ok(ReceiveDeposit {
+                address,
+                memo,
+                deadline,
+            })
         })
     }
 
@@ -420,6 +452,29 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             }
         }
         Ok(reclaimed)
+    }
+}
+
+impl<C: BorrowMut<Connection>, P: Parameters, CL, R: Rng> WalletDb<C, P, CL, R> {
+    /// Saves an unknown quote outcome before a network request, so a lost response
+    /// cannot free the address while a deposit could still reach it. `deadline` is
+    /// the deposit deadline sent in the request. The outcome holds the reservation
+    /// until that deadline is [`RECEIVE_RECLAIM_SECONDS`] in the past. Call this just
+    /// before the request leaves the device, after any local validation. Requires
+    /// the address to be scanned empty through the chain tip, checked atomically.
+    /// Returns the request's identity, which later calls for this quote take.
+    pub fn begin_swap_receive_quote(
+        &mut self,
+        account: AccountUuid,
+        reservation: i64,
+        deadline: i64,
+        now: i64,
+    ) -> Result<String, Error> {
+        let mut id = [0; 16];
+        self.rng.fill_bytes(&mut id);
+        let request = hex::encode(id);
+        self.begin_swap_receive_quote_as(account, reservation, &request, deadline, now)?;
+        Ok(request)
     }
 }
 

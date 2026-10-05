@@ -304,6 +304,15 @@ fn maintained_lookahead_advances_only_after_reservation_or_payment() {
     assert_eq!(keys.last().unwrap().key_id().index(), 39);
 }
 
+/// An accepted quote outcome with these deposit instructions.
+fn accepted(address: &str, memo: Option<&str>, deadline: i64) -> QuoteOutcome {
+    QuoteOutcome::Accepted(ReceiveDeposit {
+        address: address.into(),
+        memo: memo.map(Into::into),
+        deadline,
+    })
+}
+
 mod apply;
 mod enhancement;
 mod key_access;

@@ -47,9 +47,10 @@ A wallet drives the feature with these calls:
   `swap_funding_memo` for the funding transaction and
   `verify_swap_funding_proposal` before signing.
 - For an incoming swap, `begin_swap_receive_quote` just before the request leaves
-  the device, `record_swap_receive_quote` or `reject_swap_receive_quote` for the
-  response, `start_swap_receive_quote` before showing deposit instructions, and
-  `reap_swap_receive_reservations` after reconciling due quotes.
+  the device, which returns the request's identity, `finish_swap_receive_quote`
+  with its outcome, `start_swap_receive_quote` for the deposit instructions to
+  show, and `reap_swap_receive_reservations` after reconciling due quotes.
+- For restore sweeps, the steps in [Restore sweeps](#restore-sweeps).
 
 The registry stores full `u64` indices as fixed-width big-endian blobs for SQLite
 ordering. This is an internal storage encoding; the KDF and memo remain
@@ -75,7 +76,8 @@ not trigger separate transactions or delete receiving keys.
 ## Completion policy
 
 Normalize a NEAR status response with `lifecycle::near_observation(purpose,
-&ProviderStatus)`. A refund key expects ZEC after `REFUNDED`, after `SUCCESS`
+&ProviderStatus)`, or read a raw `/v0/status` body with
+`lifecycle::near_status_observation`. A refund key expects ZEC after `REFUNDED`, after `SUCCESS`
 with a positive `refundedAmount`, and after an `EXACT_OUTPUT` `SUCCESS`, which
 can return unused input. An incoming key expects `amountOut` after `SUCCESS`.
 An incoming source-chain refund expects nothing on Zcash. Unknown statuses
@@ -122,8 +124,9 @@ transparent deposits, so recovery reads it from the funding transaction's single
 P2PKH or P2SH output. Ignoring the reserved bytes keeps prerelease records, which
 appended the address there, decoding to their index. Incoming indices are
 recovered through lookahead, not this memo. The decoder distinguishes unrelated
-memos from unsupported versions or purposes. Callers must retain unsupported
-records as incomplete recovery work.
+memos from unsupported versions or purposes. Recovery leaves a record it cannot
+read unprocessed, without failing, and refund issuance waits for it, since it may
+hold a refund index.
 
 ## Validation
 
@@ -218,14 +221,23 @@ scan; it cannot repair evidence pruned or skipped by earlier scans.
 Receiver-directory lookups happen only for keys recovered from the seed: refund
 keys named by funding memos and the incoming lookahead. Each such key gets one
 sweep up to a fixed target block. `prepare_swap_discovery_batch` selects due
-sweeps and reports all remaining uncached lookups for transport selection. Lease
-each record with `begin_swap_discovery_attempt` when its attempt starts; failures
-back off from one minute to twelve hours. Persist a complete lookup and
-authenticated ciphertexts atomically with `queue_swap_lookup`, then apply queued
-notes using independently accepted inclusion and spend evidence.
+sweeps and reports all remaining uncached lookups for transport selection. The
+app performs the directory and note-data lookups; the wallet steps around them
+are:
 
-`finish_swap_discovery_attempt` completes the sweep at an anchor that a recorded
-lookup reached. The key then scans from the next block: a refund key until its
+1. `swap_publication_anchor` binds a directory publication to the wallet's own
+   chain and refuses one more than `MAX_PUBLICATION_LAG` blocks behind it.
+2. `begin_swap_discovery_attempt` leases a record against that publication when
+   its attempt starts, refusing a publication short of the sweep's target before
+   any lookup. Attempts back off from one minute to twelve hours.
+3. Unless the record's lookup is already queued, `swap_note_data_needed` names the
+   positions of the directory's payments that need note data, and
+   `queue_swap_directory_lookup` queues the complete lookup with that data.
+4. `apply_swap_sweep` applies the queued notes with the publication's inclusion
+   paths and finishes the sweep at the anchor its lookup reached.
+
+A step that must wait for more scanning or a newer publication returns
+`Error::SweepDeferred`. After its sweep, a key scans from the next block: a refund key until its
 swap closes, and an incoming key never issued here for 24 hours after it was
 registered, catching a payout from a swap in flight at restore. Issuing a restored incoming key later starts at the
 tip without a rescan. Reorgs below a sweep reopen it. Until restore sweeps

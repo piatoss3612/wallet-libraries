@@ -14,7 +14,9 @@ ff.workspace = true
 hmac = { version = "0.12", default-features = false }
 orchard.workspace = true
 pasta_curves.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
+time = { workspace = true, features = ["parsing", "std"] }
 zcash_protocol.workspace = true
 zcash_note_encryption.workspace = true
 zeroize.workspace = true

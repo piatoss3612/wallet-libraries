@@ -215,7 +215,7 @@ fn bounded_batches_do_not_derive_ten_thousand_restored_keys() {
     assert!(batch.work.iter().all(|w| w.receiver == [0; 43]));
     // Only the started record is leased, so a stopped batch cannot starve its tail.
     let first = batch.work[0].key;
-    db.begin_swap_discovery_attempt(account, first, NOW)
+    db.begin_swap_discovery_attempt(account, first, through, NOW)
         .unwrap();
     let batch = db
         .prepare_swap_discovery_batch(account, through, NOW, limit)
@@ -319,7 +319,7 @@ fn attempts_back_off_from_one_minute_to_twelve_hours() {
     ] {
         st.wallet_mut()
             .db_mut()
-            .begin_swap_discovery_attempt(account, key, now)
+            .begin_swap_discovery_attempt(account, key, through, now)
             .unwrap();
         assert!(due(&mut st, through, now + delay - 1).is_empty());
         assert_eq!(due(&mut st, through, now + delay), [key]);
@@ -667,7 +667,8 @@ fn history_is_pending_until_sweeps_finish_and_candidates_apply() {
     let db = st.wallet_mut().db_mut();
     assert!(db.swap_history_pending(account, through.height).unwrap());
     // Retry backoff never makes an unfinished restore appear complete.
-    db.begin_swap_discovery_attempt(account, key, NOW).unwrap();
+    db.begin_swap_discovery_attempt(account, key, through, NOW)
+        .unwrap();
     assert!(db.swap_history_pending(account, through.height).unwrap());
     db.finish_sweep(account, key, through).unwrap();
     assert!(!db.swap_history_pending(account, through.height).unwrap());
@@ -748,7 +749,8 @@ fn rewound_sweep_does_not_wait_out_its_last_attempt_lease() {
         .key_id();
     let removed = advance(&mut st, 1);
     let db = st.wallet_mut().db_mut();
-    db.begin_swap_discovery_attempt(account, key, NOW).unwrap();
+    db.begin_swap_discovery_attempt(account, key, removed, NOW)
+        .unwrap();
     db.queue_swap_lookup(account, key, removed, &[]).unwrap();
     db.finish_swap_discovery_attempt(account, key, removed)
         .unwrap();

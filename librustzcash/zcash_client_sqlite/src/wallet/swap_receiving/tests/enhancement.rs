@@ -303,7 +303,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].index, 7);
-    assert_eq!(records[0].deposit_address, deposit.to_string());
+    assert_eq!(records[0].deposit_address, Some(deposit.to_string()));
     let keys = st.wallet().db().get_swap_receiving_keys(restored).unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].key_id(), KeyId::new(Purpose::Refund, 7));
@@ -519,7 +519,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     );
 
     // Changing the memo invalidates only that note's progress. Unsupported data
-    // fails without committing a new completion marker.
+    // stays unprocessed without failing recovery, and holds back refund issuance.
     let mut invalid = memo.encode();
     invalid[5] = 0xff;
     st.wallet()
@@ -529,12 +529,9 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             rusqlite::params![invalid.as_slice(), memo_bytes.as_slice()],
         )
         .unwrap();
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .recover_swap_refund_memos(restored)
-            .is_err()
-    );
+    let db = st.wallet_mut().db_mut();
+    assert!(db.recover_swap_refund_memos(restored).unwrap().is_empty());
+    assert!(db.swap_refund_memos_pending(restored).unwrap());
     st.wallet()
         .conn()
         .execute(
@@ -723,7 +720,7 @@ fn refund_status_checks_skip_closed_keys() {
 }
 
 #[test]
-fn refund_funding_memo_requires_one_transparent_deposit() {
+fn funding_without_one_transparent_output_restores_its_key_without_a_watch() {
     use zakura_swap_receiving::RefundMemo;
     let memo = MemoBytes::from_bytes(&RefundMemo::new(7).encode()).unwrap();
     let transparent = |byte| Address::Transparent(TransparentAddress::PublicKeyHash([byte; 20]));
@@ -746,15 +743,27 @@ fn refund_funding_memo_requires_one_transparent_deposit() {
         let network = *st.network();
         let payments = recipients.iter().map(|a| payment(a, &network)).collect();
         send_with_change_memo(&mut st, payments, &memo);
-        assert!(matches!(
-            st.wallet_mut().db_mut().recover_swap_refund_memos(account),
-            Err(Error::Wallet(SqliteClientError::CorruptedData(m)))
-                if m == "invalid swap funding deposit output"
-        ));
+        let db = st.wallet_mut().db_mut();
+        let records = db.recover_swap_refund_memos(account).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].index, 7);
+        assert_eq!(records[0].deposit_address, None);
+        assert!(
+            db.get_swap_receiving_key(account, KeyId::new(Purpose::Refund, 7))
+                .unwrap()
+                .is_some()
+        );
+        // Without a deposit address there is nothing to ask the provider about.
+        assert!(
+            db.take_swap_refund_status_checks(account, 0, std::num::NonZeroU32::new(8).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!db.swap_refund_memos_pending(account).unwrap());
     }
 
-    // The funding wallet recovers the exact address it paid once the raw
-    // transaction is available.
+    // A record whose raw transaction is not stored yet waits for it, without
+    // failing recovery, then recovers the exact address it paid.
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
@@ -776,11 +785,9 @@ fn refund_funding_memo_requires_one_transparent_deposit() {
             [txid.as_ref()],
         )
         .unwrap();
-    assert!(matches!(
-        st.wallet_mut().db_mut().recover_swap_refund_memos(account),
-        Err(Error::Wallet(SqliteClientError::CorruptedData(m)))
-            if m == "missing swap funding transaction"
-    ));
+    let db = st.wallet_mut().db_mut();
+    assert!(db.recover_swap_refund_memos(account).unwrap().is_empty());
+    assert!(db.swap_refund_memos_pending(account).unwrap());
     st.wallet()
         .conn()
         .execute(
@@ -797,7 +804,7 @@ fn refund_funding_memo_requires_one_transparent_deposit() {
     assert_eq!(records[0].index, 7);
     assert_eq!(
         records[0].deposit_address,
-        deposit.to_zcash_address(&network).to_string()
+        Some(deposit.to_zcash_address(&network).to_string())
     );
 }
 
@@ -927,16 +934,18 @@ fn refund_memo_over_pir_waits_for_raw_funding_transaction() {
         );
 
         decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
-        let recovered = st.wallet_mut().db_mut().recover_swap_refund_memos(restored);
+        let db = st.wallet_mut().db_mut();
+        let records = db.recover_swap_refund_memos(restored).unwrap();
         if version == 1 {
-            let records = recovered.unwrap();
             assert_eq!(records.len(), 1);
-            assert_eq!(records[0].deposit_address, deposit.to_string());
+            assert_eq!(records[0].deposit_address, Some(deposit.to_string()));
         } else {
+            // A newer record cannot be read here. It may hold a refund index, so
+            // refund issuance waits for an upgrade instead of failing sync.
+            assert!(records.is_empty());
             assert!(matches!(
-                recovered,
-                Err(Error::Wallet(SqliteClientError::CorruptedData(m)))
-                    if m == "unsupported swap memo version 2"
+                db.reserve_swap_receiving_key(restored, Purpose::Refund, mined),
+                Err(Error::ReservationPolicy(ReservationPolicy::Unreadable))
             ));
         }
     }

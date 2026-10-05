@@ -74,6 +74,20 @@ workspace.
   past. `start_swap_receive_quote` matches the deposit memo as well as the address.
 - `finish_swap_nullifier_recovery` no longer takes a lookahead, and
   `maintain_swap_receive_lookahead` is no longer public.
+- Funding-memo recovery no longer fails on a record it cannot read or whose raw
+  transaction is missing. Such records stay unprocessed, and refund issuance waits
+  for them, with `ReservationPolicy::Unreadable` for an unreadable one. A funding
+  transaction without exactly one transparent output restores its refund key
+  without a provider watch, so `RecoveredRefund::deposit_address` is optional.
+- The incoming quote lifecycle is `begin_swap_receive_quote`, which returns the
+  request identity, `finish_swap_receive_quote` with a `QuoteOutcome`, and
+  `start_swap_receive_quote`, which returns the `ReceiveDeposit` to show. These
+  replace `record_swap_receive_quote` and `reject_swap_receive_quote`.
+- Restore sweep steps: `swap_publication_anchor`, `swap_note_data_needed`,
+  `queue_swap_directory_lookup` and `apply_swap_sweep` take an app's directory
+  and note-data lookups as plain data. A step that must wait returns
+  `Error::SweepDeferred`. `begin_swap_discovery_attempt` takes the publication
+  anchor and defers a publication short of the sweep's target before any lookup.
 - `WalletDb::transaction_history_summaries` returns typed account-scoped transaction
   metadata and monetary effects without reading raw transaction payloads. It shares
   the corrected accounting definition of `v_transactions`, filters account inputs

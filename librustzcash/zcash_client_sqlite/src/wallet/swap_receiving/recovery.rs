@@ -23,10 +23,19 @@ use zcash_protocol::consensus::NetworkUpgrade;
 pub struct RecoveredRefund {
     /// Refund sequence index.
     pub index: u64,
-    /// Address of the funding transaction's only transparent output (P2PKH or P2SH).
-    pub deposit_address: String,
+    /// Address of the funding transaction's only transparent output (P2PKH or P2SH),
+    /// or `None` when the transaction did not have exactly one.
+    pub deposit_address: Option<String>,
     /// Earliest block to scan with the recovered refund key.
     pub funding_height: BlockHeight,
+}
+
+/// The outcome of one pass over an account's funding records.
+pub(super) struct MemoRecovery {
+    /// Records processed by this pass.
+    pub(super) recovered: Vec<RecoveredRefund>,
+    /// Records this version cannot read. They stay unprocessed.
+    pub(super) unreadable: usize,
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
@@ -36,14 +45,16 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     /// wallet was already scanning when the funding transaction was mined needs
     /// nothing more. Any other key is restored: it is queued for a receiver-directory
     /// sweep and a provider-status watch. Own-send evidence must include an input
-    /// belonging to the same account. Records whose inputs or memos are not yet
-    /// available remain eligible on subsequent calls.
-    /// Spent and zero-value marker notes are included. Unsupported records, and
-    /// funding transactions without a single transparent deposit output, return
-    /// an error and remain stored, rather than silently completing recovery.
-    /// Returns only records processed by this call. Completed records are skipped
-    /// across restarts unless their memo or funding height changes. Progress is
-    /// committed atomically with the key registration and provider watch.
+    /// belonging to the same account. Spent and zero-value marker notes are included.
+    ///
+    /// A record whose inputs, memo or raw transaction are not available yet, or that
+    /// this version cannot read, stays unprocessed without failing the call, and
+    /// refund issuance waits for it (see [`WalletDb::swap_refund_memos_pending`]). A
+    /// funding transaction without exactly one transparent output still restores its
+    /// refund key, but no provider watch. Returns only records processed by this
+    /// call. Completed records are skipped across restarts unless their memo or
+    /// funding height changes. Progress is committed atomically with the key
+    /// registration and provider watch.
     pub fn recover_swap_refund_memos(
         &mut self,
         account: AccountUuid,
@@ -134,6 +145,14 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         &mut self,
         account: AccountUuid,
     ) -> Result<Vec<RecoveredRefund>, Error> {
+        Ok(self.recover_refund_memos(account)?.recovered)
+    }
+
+    /// See [`WalletDb::recover_swap_refund_memos`]. Also counts unreadable records.
+    pub(super) fn recover_refund_memos(
+        &mut self,
+        account: AccountUuid,
+    ) -> Result<MemoRecovery, Error> {
         let (account_ref, _) = account_key(self.conn.0, &self.params, account)?;
         let records = {
             let mut stmt = self.conn.0.prepare_cached(
@@ -161,21 +180,28 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         };
         let now = unix_now(&self.clock);
         let mut recovered = Vec::new();
+        let mut unreadable = 0;
         for (bytes, height, note_id, raw) in records {
             // SQLite omits trailing zero padding when storing MemoBytes.
-            let bytes = zcash_protocol::memo::MemoBytes::from_bytes(&bytes)
-                .map_err(|_| super::corrupt("invalid stored swap memo length"))?;
-            let memo = RefundMemo::decode(bytes.as_array())
-                .map_err(|e| super::corrupt(&e.to_string()))?
-                .ok_or_else(|| super::corrupt("missing swap memo discriminator"))?;
-            let raw = raw.ok_or_else(|| super::corrupt("missing swap funding transaction"))?;
-            let (_, tx) = wallet::parse_tx(&self.params, &raw, Some(height.into()), None)?;
+            let memo = zcash_protocol::memo::MemoBytes::from_bytes(&bytes)
+                .ok()
+                .and_then(|bytes| RefundMemo::decode(bytes.as_array()).ok().flatten());
+            let Some(memo) = memo else {
+                unreadable += 1;
+                continue;
+            };
+            let Some(raw) = raw else { continue };
+            let Ok((_, tx)) = wallet::parse_tx(&self.params, &raw, Some(height.into()), None)
+            else {
+                unreadable += 1;
+                continue;
+            };
             let deposit_address = match tx.transparent_bundle().map(|b| &b.vout[..]) {
-                Some([output]) => output.recipient_address(),
+                Some([output]) => output
+                    .recipient_address()
+                    .map(|address| address.encode(&self.params)),
                 _ => None,
-            }
-            .ok_or_else(|| super::corrupt("invalid swap funding deposit output"))?
-            .encode(&self.params);
+            };
             let key_id = KeyId::new(Purpose::Refund, memo.index());
             let scanned_locally = self
                 .conn
@@ -193,12 +219,14 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 // The mined funding transaction proves a deposit, so the quote's record,
                 // which expects nothing, must wait for the swap's outcome. Observation
                 // time 0 changes only a record no provider status has updated.
-                let id = key_ref(self.conn.0, account, key_id)?;
-                let funded = Observation {
-                    status: OperationStatus::Active,
-                    deadline: None,
-                };
-                record_observation(self.conn.0, id, &deposit_address, funded, 0)?;
+                if let Some(deposit) = &deposit_address {
+                    let id = key_ref(self.conn.0, account, key_id)?;
+                    let funded = Observation {
+                        status: OperationStatus::Active,
+                        deadline: None,
+                    };
+                    record_observation(self.conn.0, id, deposit, funded, 0)?;
+                }
             } else {
                 let key = register(
                     self.conn.0,
@@ -210,19 +238,21 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                     Discovery::Sweep,
                     now,
                 )?;
-                let id = key_ref(self.conn.0, account, key.key_id())?;
                 // Restoring a seed has no local activity record. The provider
                 // identity schedules status polling for the restored refund.
-                self.conn.0.execute(
-                    "INSERT OR IGNORE INTO ironwood_swap_refund_watches (receiving_key_id, operation_id)
-                     VALUES (?1, ?2)",
-                    params![id, deposit_address],
-                )?;
-                self.conn.0.execute(
-                    "INSERT OR IGNORE INTO ironwood_swap_operations (receiving_key_id, operation_id)
-                     VALUES (?1, ?2)",
-                    params![id, deposit_address],
-                )?;
+                if let Some(deposit) = &deposit_address {
+                    let id = key_ref(self.conn.0, account, key.key_id())?;
+                    self.conn.0.execute(
+                        "INSERT OR IGNORE INTO ironwood_swap_refund_watches (receiving_key_id, operation_id)
+                         VALUES (?1, ?2)",
+                        params![id, deposit],
+                    )?;
+                    self.conn.0.execute(
+                        "INSERT OR IGNORE INTO ironwood_swap_operations (receiving_key_id, operation_id)
+                         VALUES (?1, ?2)",
+                        params![id, deposit],
+                    )?;
+                }
             }
             let id = key_ref(self.conn.0, account, key_id)?;
             self.conn.0.execute(
@@ -239,7 +269,10 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 funding_height: height.into(),
             });
         }
-        Ok(recovered)
+        Ok(MemoRecovery {
+            recovered,
+            unreadable,
+        })
     }
 
     /// See [`WalletDb::maintain_swap_receiving`], keeping `lookahead` incoming keys.

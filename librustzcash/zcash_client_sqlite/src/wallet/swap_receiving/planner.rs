@@ -4,7 +4,7 @@ use super::{
     Error, KeyId, PendingPayment, Purpose, account_key, activate, corrupt, payments::key_ref,
     stored_key_id,
 };
-use crate::{AccountUuid, WalletDb, wallet};
+use crate::{AccountUuid, SqlTransaction, WalletDb, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::{Borrow, BorrowMut};
 use zakura_swap_receiving::lifecycle::ChainAnchor;
@@ -195,20 +195,24 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         })
     }
 
-    /// Lease only work whose network attempt is starting. Failure or process exit
-    /// retains its target and backs off from one minute to twelve hours.
+    /// Leases `key`'s sweep for an attempt against a directory publication at
+    /// `publication`, just before its network lookups. Every attempt, including one
+    /// that fails or the process abandons, retains the target and backs off the next
+    /// from one minute to twelve hours. A publication short of the sweep's target
+    /// returns [`Error::SweepDeferred`], so no lookup is spent on it.
     pub fn begin_swap_discovery_attempt(
         &mut self,
         account: AccountUuid,
         key: KeyId,
+        publication: ChainAnchor,
         now: i64,
     ) -> Result<(), Error> {
-        self.transactionally(|db| {
+        let reached = self.transactionally(|db| {
             let id = key_ref(db.conn.0, account, key)?;
-            let attempt: u32 = db.conn.0.query_row(
-                "SELECT attempts FROM ironwood_swap_sweeps WHERE receiving_key_id = ?1",
+            let (attempt, target): (u32, Option<u32>) = db.conn.0.query_row(
+                "SELECT attempts, target_height FROM ironwood_swap_sweeps WHERE receiving_key_id = ?1",
                 [id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let delay = (60i64 << attempt.min(10)).min(43200);
             db.conn.0.execute(
@@ -216,8 +220,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                  WHERE receiving_key_id = ?1",
                 params![id, now.saturating_add(delay)],
             )?;
-            Ok(())
-        })
+            Ok::<_, Error>(target.is_none_or(|target| u32::from(publication.height) >= target))
+        })?;
+        if !reached {
+            return Err(Error::SweepDeferred(super::SweepDeferral::TargetNotReached));
+        }
+        Ok(())
     }
 
     /// Atomically persist an entire validated lookup and authenticated ciphertexts.
@@ -230,24 +238,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         anchor: ChainAnchor,
         payments: &[PendingPayment],
     ) -> Result<(), Error> {
-        self.transactionally(|db| {
-            let id = key_ref(db.conn.0, account, key)?;
-            if wallet::get_block_hash(db.conn.0, anchor.height)? != Some(BlockHash(anchor.hash)) {
-                return Err(corrupt("lookup anchor changed"));
-            }
-            for payment in payments {
-                if payment.height > anchor.height {
-                    return Err(corrupt("payment exceeds lookup coverage"));
-                }
-                db.queue_swap_payment(account, key, payment)?;
-            }
-            db.conn.0.execute(
-                "UPDATE ironwood_swap_sweeps SET lookup_height = ?2, lookup_hash = ?3
-                 WHERE receiving_key_id = ?1 AND (lookup_height IS NULL OR lookup_height <= ?2)",
-                params![id, u32::from(anchor.height), anchor.hash],
-            )?;
-            Ok(())
-        })
+        self.transactionally(|db| db.queue_swap_lookup(account, key, anchor, payments))
     }
 
     /// Completes a key's sweep at `anchor` once all its candidates are applied.
@@ -293,5 +284,33 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             }
             Ok(())
         })
+    }
+}
+
+impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
+    /// Transaction-scoped form of [`WalletDb::queue_swap_lookup`].
+    pub fn queue_swap_lookup(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        anchor: ChainAnchor,
+        payments: &[PendingPayment],
+    ) -> Result<(), Error> {
+        let id = key_ref(self.conn.0, account, key)?;
+        if wallet::get_block_hash(self.conn.0, anchor.height)? != Some(BlockHash(anchor.hash)) {
+            return Err(corrupt("lookup anchor changed"));
+        }
+        for payment in payments {
+            if payment.height > anchor.height {
+                return Err(corrupt("payment exceeds lookup coverage"));
+            }
+            self.queue_swap_payment(account, key, payment)?;
+        }
+        self.conn.0.execute(
+            "UPDATE ironwood_swap_sweeps SET lookup_height = ?2, lookup_hash = ?3
+             WHERE receiving_key_id = ?1 AND (lookup_height IS NULL OR lookup_height <= ?2)",
+            params![id, u32::from(anchor.height), anchor.hash],
+        )?;
+        Ok(())
     }
 }
