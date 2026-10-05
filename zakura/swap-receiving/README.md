@@ -34,20 +34,19 @@ commit together. Do not expose an address until that transaction commits.
 
 The registry stores full `u64` indices as fixed-width big-endian blobs for SQLite
 ordering. This is an internal storage encoding; the KDF and memo remain
-little-endian. Registration retains the earliest requested scan height, not
-proof that its history was scanned. The feature is disabled by default.
+little-endian. The feature is disabled by default.
 
-Compact scanning records the keys actually used in each batch, atomically with
-its notes and blocks. `get_swap_receiving_scan_ranges` returns their disjoint,
-end-exclusive coverage. Registration queues missing history through the known
-tip. Later scans and tip updates preserve those gaps until replay completes.
-Rewinds trim coverage even in builds without swap support. Refresh the chain tip
-before scanning after reopening, including after enabling the feature again.
+A key issued on this device is trial-decrypted from its `scan_from` height until
+it closes (`active_from` set, `closed_at` unset). Every compact scan batch
+includes all active keys. Activation queues a forced rescan of blocks already
+scanned at or above that height, and a batch whose key snapshot missed an active
+key requeues its range, so no block in a key's active range goes unchecked.
+Catching up after time offline scans active keys like any other blocks.
 
 For a newly issued address, use the next height after the accepted tip as
-`scan_from`. For recovery, use the earliest height at which that address could
-have received a payment. Requesting older history queues replay and can delay
-spending until that history is checked. Key retirement remains a separate step.
+`scan_from`. Keys found only through restore (`recover_swap_receiving_key`,
+`watch_swap_receive_key`) are not scanned until their receiver-directory sweep
+completes (see [Restore sweeps](#restore-sweeps)).
 
 The planned selector will prefer swap notes during ordinary sends when doing so
 adds neither inputs nor fees, respecting existing input constraints. Confirmed
@@ -56,14 +55,22 @@ not trigger separate transactions or delete receiving keys.
 
 ## Completion policy
 
-Normalize NEAR status with `near_status(purpose, status)`. An outgoing refund
-expects a Zcash receipt. An incoming source-chain refund does not. Unknown
-responses leave the previous observation unchanged.
+Normalize a NEAR status response with `lifecycle::near_observation(purpose,
+&ProviderStatus)`. A refund key expects ZEC after `REFUNDED`, after `SUCCESS`
+with a positive `refundedAmount`, and after an `EXACT_OUTPUT` `SUCCESS`, which
+can return unused input. An incoming key expects `amountOut` after `SUCCESS`.
+An incoming source-chain refund expects nothing on Zcash. Unknown statuses
+leave the previous observation unchanged.
 
-SQLite persists the observation immediately. A later independently refreshed
-chain view anchors ten further scanning blocks. A separate directory check is
-required twelve hours after terminal observation. Completed checks and expected
-receipt accounting govern closeout. No provider response credits a note.
+`record_swap_observation` persists each observation immediately.
+`close_finished_swap_keys` stops trial decryption for a key once every operation
+on it has a conclusive terminal status (`FAILED` is not), mined receipts cover
+the expected amounts, and 24 hours have passed since the first terminal status.
+It also stops seven days after the latest quote deadline (or registration,
+without one), whatever the provider reports. Incoming keys this wallet issued
+stay active until paid and their reservation ends. Call it only after refreshing
+the chain tip and scanning to it. No provider response credits a note, and a
+closed key keeps its notes.
 
 ## Derivation
 
@@ -126,16 +133,14 @@ cargo test -p zakura-client-sqlite --features experimental-swap-receiving --lock
 The SQLite integration tests also scan both purposes alongside ordinary keys,
 reopen the database, and construct a mixed-input transaction whose change returns
 to the ordinary internal key. They check replay, late payments, and invalid note
-metadata. Outside private recovery mode, registered keys remain in subsequent compact scans.
+metadata. Active keys remain in every subsequent compact scan until they close.
 Full-transaction retrieval authenticates swap memos before or after compact
 scanning, including self-payments also recoverable through the ordinary OVK.
 Enhance PIR resolves the registered key after restart and rejects altered
 ciphertext without clearing pending work. A build without swap support reports
 an error for that retrieval instead of trying the ordinary account key.
 
-Per-key historical coverage, retirement,
-automatic seed restore and gap extension, PCZT/firmware qualification, Vizor,
-and receiver PIR remain required before live use. Registered keys queue missing historical scans by default.
+PCZT/firmware qualification remains required before live use.
 
 ## Protocol baseline
 
@@ -179,36 +184,31 @@ A synthetic test spends a privately imported note into ordinary internal change.
 Transaction IDs and Action indices remain directory assertions, checked for
 conflicts with local data. The inclusion proof binds the commitment and position.
 
-`enable_private_swap_recovery` opts an account out of automatic key-history
-replay. Enable it before the first scan. This prototype retains the shared
-nullifier map without pruning while any account uses the policy, trading storage
-for locally verifiable spend history. Large scan batches also retain every block
-instead of skipping old entries at a contiguous scan frontier. Both decisions use
-the same store policy. Enabling it cannot repair evidence pruned or skipped by
-earlier scans. Those gaps require rescanning. `mark_swap_directory_checked` requires a local block anchor and no pending
-candidates. Rewinds remove checks above the retained height. This does not retire
-keys or claim that a provider's terminal status rules out future payments.
+`retain_swap_spend_history` keeps the shared nullifier map without pruning
+while any account uses it, trading storage for locally verifiable spend history
+of recovered notes. Large scan batches also retain every block instead of
+skipping old entries at a contiguous scan frontier. Call it before the first
+scan; it cannot repair evidence pruned or skipped by earlier scans.
 
-### Bounded private recovery policy
+### Restore sweeps
 
-`prepare_swap_discovery_batch` selects at most 64 metadata records in Vizor and
-reports all remaining uncached lookups for transport selection. Lease each record
-when its attempt starts. Persist a complete lookup and authenticated ciphertexts
-atomically with `queue_swap_lookup`, then apply queued notes using independently
-accepted inclusion and spend evidence. `finish_swap_discovery_attempt` records
-processed coverage and schedules closeout or another follow-up.
+Receiver-directory lookups happen only for keys recovered from the seed: refund
+keys named by funding memos and the incoming lookahead. Each such key gets one
+sweep up to a fixed target block. `prepare_swap_discovery_batch` selects due
+sweeps and reports all remaining uncached lookups for transport selection. Lease
+each record with `begin_swap_discovery_attempt` when its attempt starts; failures
+back off from one minute to twelve hours. Persist a complete lookup and
+authenticated ciphertexts atomically with `queue_swap_lookup`, then apply queued
+notes using independently accepted inclusion and spend evidence.
 
-Local operations scan without a count cap. Restored operations use directory
-work only. Two days without a supported status observation moves a local watch
-to directory follow-ups without marking it complete. Fresh active observations
-have no age limit. Follow-ups back off from one to twelve hours. Completed work
-makes no routine requests. Reorgs reopen affected coverage and candidates.
+`finish_swap_discovery_attempt` completes the sweep at an anchor that a recorded
+lookup reached. The key then scans from the next block: a refund key until its
+swap closes, and an incoming key never issued here for 24 hours after it was
+registered, catching a payout from a swap in flight at restore. Issuing a restored incoming key later starts at the
+tip without a rescan. Reorgs below a sweep reopen it. Until restore sweeps
+finish, new incoming reservations wait.
 
-Historical spend retention follows the earliest coverage gap or pending note,
-independently of provider completion. Missing spend evidence queues one coalesced
-replay of the public account recovery interval. A note before that interval
-stays explicitly blocked until the account's restore range is widened.
-
-Address issuance preferences do not disable recovery. Directory discovery can
-use encrypted PIR or the identical common row file. Full ciphertext retrieval
-and witness validation are unchanged, including when issuance is switched off.
+Historical spend retention follows the earliest unfinished sweep or pending note.
+Missing spend evidence queues one coalesced replay of the public account recovery
+interval. A note before that interval stays explicitly blocked until the
+account's restore range is widened.

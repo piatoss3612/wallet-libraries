@@ -13,12 +13,16 @@ workspace.
 ### Added
 - Direct swap receiving-key lookups by identity and receiver. Reservation lookup
   reconstructs only its key, and scanning reuses that validated derivation.
-- Bounded, durable swap recovery scheduling with metadata-only work selection,
-  atomic candidate queues, persisted backoff, and completed lookup reuse.
-  Restored operations use directory recovery without joining live scanning.
-- Typed provider observations anchor terminal grace to a later fresh chain view.
-  Expected payments remain unresolved until applied, and delayed closeout survives
-  restart. Covered spend history can be released independently of provider status.
+- Restore sweeps: one receiver-directory pass for each swap key recovered from
+  the seed, with metadata-only work selection, atomic candidate queues, persisted
+  backoff and a fixed target. After its sweep, a refund key is scanned from the
+  next block until it closes, and an unpaid incoming key for 24 hours. Covered
+  spend history can be released independently of provider status.
+- `record_swap_observation` and `close_finished_swap_keys`. Swap keys the wallet
+  issues are trial-decrypted until their swap closes: 24 hours after the final
+  provider status once the expected receipts are mined, or 7 days after the quote
+  deadline. An inconclusive status such as `FAILED` closes a key only by that
+  limit. Keys close only while the wallet is scanned to the chain tip.
 - Typed receive-reservation policy errors replace message-prefix classification.
 - The seedless `transparent_ledger_schema` migration. It adds `tpir_meta`, the
   durable transparent policy recorded as public, and the `tpir_output_origins`
@@ -50,15 +54,14 @@ workspace.
 
 ### Changed
 - Funding-memo recovery persists completion per note, so maintenance and restart
-  process only new or deferred records. Key registration queues only that key's
-  missing history rather than rechecking every registered key.
-- Restored swap keys use private discovery with fixed recovery targets. Temporary
-  Ironwood spend history is released after memo, lookahead and payment recovery
-  completes. Other pools keep ordinary pruning. Missing spend history queues
-  the account's public compact-block recovery interval after note inclusion is
-  verified, without substituting public address discovery for PIR. Funding memos
-  also restore provider-status polling and active refund watches. Restored refunds
-  check existing history before waiting for terminal status and its scan deadline.
+  process only new or deferred records. Activating a key rescans only blocks
+  already scanned without it.
+- Restored swap keys use a restore sweep instead of a historical rescan.
+  Temporary Ironwood spend history is released after memo, lookahead and payment
+  recovery completes. Other pools keep ordinary pruning. Missing spend history
+  queues the account's public compact-block recovery interval after note
+  inclusion is verified, without substituting public address discovery for PIR.
+  Funding memos also restore provider-status polling.
 - Funding-memo recovery reads the provider deposit address from the stored raw
   funding transaction's single P2PKH or P2SH output, since the memo now carries
   only the refund index. A missing raw transaction or any other output shape is
@@ -139,8 +142,9 @@ payload enhancement work.
   Orchard support; without it, every payload request is public work.
 
 ### Changed
-- Preserve all spend evidence during large scan batches when private swap recovery
-  is enabled, allowing old discovered notes to establish their spent state.
+- Preserve all spend evidence during large scan batches once
+  `retain_swap_spend_history` is called, allowing old discovered notes to
+  establish their spent state.
 - Enhance PIR storage and routing are now part of Orchard support; the separate
   `zakura-pir-enhance` feature has been removed.
 - `WalletRead::transaction_data_requests` no longer returns payload work and no
@@ -166,38 +170,26 @@ payload enhancement work.
   `compact_bound` flag instead of unused `ephemeral_key` and
   `compact_ciphertext` copies.
 - Add an opt-in experimental swap receiving-key registry with atomic per-purpose
-  reservations, recovered-index tracking, and persistent incoming lookahead keys.
-  Persist incoming quote attempts before provider requests and reuse the lowest
-  verified empty slot after 48 hours and successful provider reconciliation.
-  Limit unfunded reservations to three and issuance to a 30-slot recovery gap.
-  Persist canonical empty-address verification independently of recovery closeout.
-  Reuse it with continuous per-key scanning, or verify at most five missing recent
-  blocks before address exposure. Recheck ownership and coverage atomically at quote issuance.
-  Retain used markers and old quote associations across reclamation and restart.
-  Combine canonical directory checkpoints with actual per-key scan coverage so
-  completed private recovery does not repeat lookups when publications advance.
-  Private recovery persists per-operation scan deadlines and fixed PIR targets.
-  Only pending local operations and their ten-block terminal grace windows enable
-  compact trial decryption; retirement preserves note ownership and spendability.
-  Rewinds invalidate recovery anchors and trim scan coverage atomically.
-  The schema preserves these records across builds with the feature disabled.
-  Compact scanning retains the derived key on each note, promotes paid lookahead
-  indices, and reconstructs inputs with that key after reopening. Builds without
-  the feature exclude these notes from reconstruction. Full-transaction and
-  Enhance PIR retrieval authenticate memos using the note's registered key.
-  Unsupported builds preserve PIR work and report missing swap support.
-  Per-key scan coverage persists with blocks and queues missing history when keys
-  are recovered. Rewinds trim coverage even without the feature. Shared recovery helpers register authenticated funding memos
-  and extend incoming lookahead with historical replay. Privately retrieved
-  payments can be authenticated and persisted as pending candidates without
-  crediting balance. Local spentness checks require retained scan coverage and
-  consult both known wallet spends and unlinked nullifiers. Rewinds invalidate
-  affected candidates, and pruning trims nullifier coverage. Verified candidates
-  can be applied atomically with their memo, receiving key, inclusion path, and
-  any known spend. Incomplete chain, witness, or spend coverage stays pending.
-  An explicit private recovery policy suppresses historical key replay and retains
-  the shared nullifier map for delayed discovery. Directory checks persist by key
-  and accepted block. Rewinds invalidate affected checks.
+  reservations, recovered-index tracking, and incoming lookahead keys. Issued keys
+  are trial-decrypted in every compact scan batch until they close; activating a
+  key rescans already scanned blocks from its start, so no block in its active
+  range goes unchecked. Persist incoming quote attempts before provider requests
+  and reuse the lowest never-paid slot after 48 hours and successful provider
+  reconciliation, once scanning reaches the tip. Limit unfunded reservations to
+  three and issuance to a 30-slot recovery gap. Retain used markers and old quote
+  associations across reclamation and restart. The schema preserves these records
+  across builds with the feature disabled. Compact scanning retains the derived
+  key on each note and reconstructs inputs with that key after reopening. Builds
+  without the feature exclude these notes from reconstruction. Full-transaction
+  and Enhance PIR retrieval authenticate memos using the note's registered key.
+  Unsupported builds preserve PIR work and report missing swap support. Privately
+  retrieved payments can be authenticated and persisted as pending candidates
+  without crediting balance. Local spentness checks require retained scan coverage
+  and consult both known wallet spends and unlinked nullifiers. Rewinds invalidate
+  affected candidates and sweeps, and pruning trims nullifier coverage. Verified
+  candidates can be applied atomically with their memo, receiving key, inclusion
+  path, and any known spend. Incomplete chain, witness, or spend coverage stays
+  pending.
 
 ## [0.1.0-rc6] - 2026-09-24
 

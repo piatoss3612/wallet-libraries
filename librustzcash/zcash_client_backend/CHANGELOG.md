@@ -12,7 +12,7 @@ workspace.
 
 ### Added
 - `WalletRead::get_swap_transaction_keys` scopes full-transaction enhancement to
-  known outputs, queued payments, live watches and ordinarily recovered recipients.
+  known outputs, queued payments, active keys and ordinarily recovered recipients.
   The default remains conservative for stores without a specialized selector.
 - `SwapScanningKey::full_viewing_key` exposes the already derived viewing key so
   stores can validate registrations and reuse it for scanning.
@@ -72,9 +72,6 @@ enhancement and makes Enhance PIR part of Orchard support.
 ### Added
 - Add `LowLevelWalletRead::requires_full_nullifier_history` so stores supporting late
   note discovery can retain spend evidence throughout large scan batches.
-- Add `WalletRead::get_swap_scan_window` for experimental swap receiving. Compact
-  scanning splits batches at changes to the active key set without changing full
-  transaction enhancement or note spending. Custom stores retain existing defaults.
 
 - Add a typed `WalletRead::transaction_status_requests` view of
   `transaction_data_requests`. The method has a default for custom stores and does
@@ -120,8 +117,9 @@ enhancement and makes Enhance PIR part of Orchard support.
   change continues to use ordinary account keys. Full-transaction enhancement
   decrypts swap memos and retains their receiving-key identity. Enhance PIR
   authenticates these memos with a storage-resolved receiving key. Compact scanning
-  passes the keys actually used to `WalletWrite::put_blocks_with_swap_keys` so
-  storage backends can record their coverage atomically with the blocks.
+  includes every key from `WalletRead::get_swap_scanning_keys` in each batch and
+  passes that snapshot to `WalletWrite::put_blocks_with_swap_keys`, so storage
+  backends can rescan blocks that a key activated mid-batch missed.
 - `PendingIronwoodMemo` gains `receiving_ivk`. Storage backends use `None` for
   ordinary account keys and supply a validated key for registered receivers.
 
