@@ -36,6 +36,11 @@ PY
 cargo check --manifest-path "$repo_root/Cargo.toml" \
   --workspace --exclude "$facade" --all-targets --all-features --locked
 
+# No development lane builds the transparent PIR adapter without `wallet`: its
+# tests serve shards in process, so the `default` lane leaves it out.
+cargo check --manifest-path "$repo_root/Cargo.toml" \
+  -p zakura-pir-transparent --lib --locked
+
 cargo metadata --locked --manifest-path "$repo_root/Cargo.toml" \
   --format-version 1 --all-features \
   > "$CARGO_TARGET_DIR/zakura-graph-metadata.json"
