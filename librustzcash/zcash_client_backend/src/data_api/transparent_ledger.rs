@@ -367,8 +367,10 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// every check of [`apply_transparent_ledger_commit`], qualifies the exact revision,
     /// withdraws older provisional evidence of the same source across the wallet, and applies
     /// the commit's facts. Any failure changes nothing, except that an integrity failure
-    /// quarantines exactly as an ordinary commit does, without qualifying. Replaying an applied
-    /// commit changes nothing.
+    /// quarantines exactly as an ordinary commit does, without qualifying. Replaying a commit
+    /// this method already applied changes nothing; resubmitting a commit applied only by
+    /// [`apply_transparent_ledger_commit`] qualifies its revision and withdraws older provisional
+    /// evidence as above.
     ///
     /// Qualification is the caller's trust decision: this does not verify the publication.
     ///

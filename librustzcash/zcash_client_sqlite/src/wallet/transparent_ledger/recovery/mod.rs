@@ -79,8 +79,13 @@ mod watch;
 #[cfg(feature = "transparent-inputs")]
 mod work;
 
+#[cfg(all(
+    feature = "transparent-inputs",
+    any(test, feature = "test-dependencies")
+))]
+pub(crate) use commit::qualify_revision;
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use commit::{CommitTrust, apply_commit, qualify_revision};
+pub(crate) use commit::{CommitTrust, apply_commit};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use diagnostics::candidate_recovery;
 #[cfg(feature = "transparent-inputs")]

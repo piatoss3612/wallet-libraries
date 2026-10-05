@@ -430,7 +430,10 @@ fn quarantine(
 /// and atomically supersedes older provisional evidence across the wallet. This backs the test
 /// and development hook; production qualification goes through [`apply_commit`] with
 /// [`CommitTrust::Qualified`].
-#[cfg(feature = "transparent-inputs")]
+#[cfg(all(
+    feature = "transparent-inputs",
+    any(test, feature = "test-dependencies")
+))]
 pub(crate) fn qualify_revision(
     conn: &rusqlite::Connection,
     revision: &RecoveryRevision,

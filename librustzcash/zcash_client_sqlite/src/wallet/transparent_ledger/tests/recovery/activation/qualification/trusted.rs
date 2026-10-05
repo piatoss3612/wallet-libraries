@@ -70,6 +70,24 @@ fn output_id(st: &State, outpoint: &OutPoint) -> i64 {
         .unwrap()
 }
 
+/// The sources an integrity rejection quarantined.
+fn quarantined_sources(st: &State) -> Vec<Vec<u8>> {
+    conn(st)
+        .prepare("SELECT source FROM tpir_quarantined_sources")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// `dump` without the quarantine tables.
+fn unquarantined(dump: Vec<(String, Vec<String>)>) -> Vec<(String, Vec<String>)> {
+    dump.into_iter()
+        .filter(|(table, _)| !table.starts_with("tpir_quarantined_"))
+        .collect()
+}
+
 /// Trusted commits of `revision` covering every address `account` watches through the target,
 /// with `receives` in the first, repeated until the window stops growing.
 fn cover_trusted(
@@ -323,11 +341,6 @@ fn an_integrity_failure_in_a_trusted_commit_quarantines_without_qualifying() {
     let (mut st, account, received) = trusted_wallet();
     let (a, b) = (revision(1, false), revision(2, false));
     let evidence = rows_of(&st, &a);
-    let unquarantined = |dump: Vec<(String, Vec<String>)>| {
-        dump.into_iter()
-            .filter(|(table, _)| !table.starts_with("tpir_quarantined_"))
-            .collect::<Vec<_>>()
-    };
     let before = unquarantined(full_dump(conn(&st)));
 
     // B contradicts itself only after qualifying it has withdrawn A's evidence.
@@ -345,18 +358,43 @@ fn an_integrity_failure_in_a_trusted_commit_quarantines_without_qualifying() {
     );
 
     assert_eq!(quarantined_accounts(&st), vec![account]);
-    let sources: Vec<Vec<u8>> = conn(&st)
-        .prepare("SELECT source FROM tpir_quarantined_sources")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(sources, vec![b.source.clone()]);
+    assert_eq!(quarantined_sources(&st), vec![b.source.clone()]);
     assert!(!is_qualified(&st, &b));
     assert!(is_qualified(&st, &a));
     assert_eq!(rows_of(&st, &a), evidence);
     assert_eq!(unquarantined(full_dump(conn(&st))), before);
+}
+
+#[test]
+fn a_colliding_trusted_revision_quarantines_without_qualifying() {
+    let (mut st, account, received) = trusted_wallet();
+    let r1 = revision(1, false);
+    let evidence = rows_of(&st, &r1);
+    let before = unquarantined(full_dump(conn(&st)));
+
+    // A re-cut reusing R1's lineage under another identifier collides while being qualified,
+    // before any of its facts apply.
+    let recut = RecoveryRevision {
+        revision: b"recut".to_vec(),
+        ..r1.clone()
+    };
+    let c = trusted_commit(&st, account, &recut, &received);
+    assert_eq!(
+        rejection(trusted(&mut st, c)),
+        CommitRejection::Integrity(IntegrityFailure::RevisionMismatch)
+    );
+
+    assert_eq!(quarantined_accounts(&st), vec![account]);
+    assert_eq!(quarantined_sources(&st), vec![r1.source.clone()]);
+    assert!(!is_qualified(&st, &recut));
+    assert!(is_qualified(&st, &r1));
+    assert_eq!(rows_of(&st, &r1), evidence);
+    // The re-cut revision was not stored, and nothing but the quarantine changed.
+    assert_eq!(unquarantined(full_dump(conn(&st))), before);
+    assert_eq!(
+        snapshot(&st, account).authority,
+        TransparentAuthority::Unavailable
+    );
 }
 
 #[test]

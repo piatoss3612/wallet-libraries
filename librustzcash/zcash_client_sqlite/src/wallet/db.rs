@@ -988,7 +988,9 @@ CREATE TABLE tpir_active_accounts (
 )"#;
 /// Revisions qualified to support private authority. Promotion requires every revision that
 /// contributed an account's coverage or events to be qualified, and an active account accepts
-/// commits only from qualified revisions. Only a test/development hook writes this table.
+/// commits only from qualified revisions. Written only by trusted commits
+/// (`qualify_and_apply_transparent_ledger_commit`, `PrivateRequired` only) and by the
+/// test/development hook `qualify_transparent_revision`.
 pub(super) const TABLE_TPIR_QUALIFIED_REVISIONS: &str = r#"
 CREATE TABLE tpir_qualified_revisions (
     revision_id INTEGER PRIMARY KEY REFERENCES tpir_revisions(id)

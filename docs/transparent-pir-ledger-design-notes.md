@@ -195,8 +195,11 @@ be cleared yet; `qualify_transparent_revision` remains a test/development hook.
   - Runs capture both epochs before I/O, so work started before a quarantine is
     never accepted after revalidation.
 - **Qualification.**
-  - Qualification is store-held and binds to exact verified revisions. Each
-    revision is qualified separately, and fixture sources are never qualified.
+  - Qualification is store-held and binds to exact revisions the caller trusts
+    (see
+    [Trusted-indexer qualification](#trusted-indexer-qualification-deviation)).
+    Each revision is qualified separately, and fixture sources are never
+    qualified.
   - Promotion requires every revision that contributed coverage to be qualified.
   - Active commits must also reject or isolate events from unqualified
     revisions.

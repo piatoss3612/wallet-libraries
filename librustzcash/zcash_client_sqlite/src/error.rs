@@ -407,7 +407,7 @@ impl fmt::Display for SqliteClientError {
             ),
             SqliteClientError::TransparentRecoveryNotEnabled => write!(
                 f,
-                "Candidate transparent recovery requires a PrivateShadow or PrivateRequired policy"
+                "Transparent recovery is not enabled for this operation: candidate commits need PrivateShadow or PrivateRequired, and trusted commits and promotion need PrivateRequired, both durably and on the handle"
             ),
             #[cfg(feature = "transparent-inputs")]
             SqliteClientError::TransparentLedgerCommitRejected(rejection) => {
