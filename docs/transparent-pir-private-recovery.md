@@ -242,11 +242,36 @@ are classified last, by the first rule that matches:
 `Withdrawn(WithdrawnCause)`, where the cause is `Regression`, `Equivocation`,
 `ChangedSealed` or `Retired`. The state is the first withdrawal cause found,
 else `Pending` if anything is pending, else `Ready`. Commits are returned,
-marked exported and given an acknowledgment token only when `Ready`.
-Reconciliation is internal to the adapter; there is no public reconciliation
-list. `Ready` assumes the caller applies the commits through the trusted
-operation. `acknowledge_applied` requires a `Ready` batch and its token; it
-clears the export mark on resolved rows, records the commits and prunes.
+marked exported and given an acknowledgment token only when `Ready`; a
+`Pending` or `Withdrawn` batch exports nothing and cannot be acknowledged.
+
+A `Ready` batch also names the retirements it resolves.
+`RecoveryBatch::retired_revisions()` returns exactly the Resolved rows above:
+retired provisional revisions, each with a successor commit in the batch for
+the same source at a higher lineage. They are notifications, not authority; the
+adapter withdraws no wallet evidence. The caller resolves them by applying the
+batch's commits through the trusted operation, which qualifies each successor
+and supersedes the retired provisional evidence in the same wallet transaction.
+
+Both acknowledgments refuse a batch that is not `Ready` and a stale token, and
+otherwise clear the export mark on resolved rows and prune; a batch's commits
+were marked exported when it was returned. `acknowledge_applied` acknowledges
+only a batch with no retirements and refuses any batch with retirements; a
+`Ready` batch with retirements always carries their successor commits.
+`acknowledge_reconciled` acknowledges a batch with retirements. Calling it
+confirms that trusted reconciliation and every commit succeeded; the adapter
+cannot verify that separate wallet transaction. Either method acknowledges a
+`Ready` batch without retirements. Until acknowledgment the notifications stay
+durable, so after a failure or a crash the next pass reports them again, with
+any retirement found since. Only a publication change forgets them
+unacknowledged: those of sources the new map no longer names, which no
+successor can resolve; the wallet keeps their provisional evidence.
+
+The trusted operation requires `PrivateRequired` and is used only for the
+trusted origin. Without it a batch with retirements is never acknowledged, and
+until a `PrivateRequired` pass from the trusted origin reconciles them, each
+pass that sees a new revision of a retired source adds one retirement and one
+catalog row.
 
 ### Publication change
 
@@ -257,12 +282,13 @@ that the store's set identity `continues` to the map's,
 `RecoveryError::PublicationChanged`. When it fails, the adapter, in one
 transaction, empties the wallet-pir store tables except the schema version,
 clears the export mark of catalog rows whose source the map no longer names,
-and keeps the catalog rows, so each source's highest lineage survives. Vizor
-retries the pass once, keeping the companion. A map-wide change gives every
-shard a new source, and a seal change gives new sources to the re-sharded
-geometry's shards. Unchanged sources keep their catalog history, so a publisher
-that restarts their revision numbers is caught as `Withdrawn(Regression)` or
-`Pending`, as for a re-cut, not as an `Integrity` collision in the wallet.
+forgetting any unacknowledged retirements among them, and keeps the catalog
+rows, so each source's highest lineage survives. Vizor retries the pass once,
+keeping the companion. A map-wide change gives every shard a new source, and a
+seal change gives new sources to the re-sharded geometry's shards. Unchanged
+sources keep their catalog history, so a publisher that restarts their revision
+numbers is caught as `Withdrawn(Regression)` or `Pending`, as for a re-cut, not
+as an `Integrity` collision in the wallet.
 
 wallet-pir also raises `SyncError::MapDiverged` when stored pending pages name a
 shard the map no longer lists, and when a mid-pass map refresh is not a
@@ -299,11 +325,12 @@ A pass runs in `spawn_blocking` over a read-only wallet database and
 on `PublicationChanged`, keeping the companion. The async side always joins it,
 and acknowledgment also runs in `spawn_blocking`. Per-pass limits are 10,000
 scripts, 1,024 shards, 500,000 events, 256 queries, 96 MiB of private bytes and
-8 MiB per response. The source answers `Ready { commits, next, behind_by }`,
-`Pending { next }` or `Withdrawn(cause)`, or fails with `Unavailable`, `Failed`
-or `Cancelled`. `More` continues with another pass, `Overloaded` retries after
-30 s, and `Behind`, clamped or not, retries after 10 s while the run's
-publication wait is under 90 s.
+8 MiB per response. The source answers
+`Ready { commits, retired, next, behind_by }`, `Pending { next }` or
+`Withdrawn(cause)`, or fails with `Unavailable`, `Failed` or `Cancelled`;
+`retired` is the batch's `retired_revisions()`. `More` continues with another
+pass, `Overloaded` retries after 30 s, and `Behind`, clamped or not, retries
+after 10 s while the run's publication wait is under 90 s.
 
 A run raises the policy only under the fence and only from a confirmed
 preference. It visits the active account first and the rest from a rotating
@@ -313,12 +340,12 @@ are skipped without PIR traffic. For the rest:
 
 | Result | Coordinator action |
 | --- | --- |
-| `Ready` | Apply each commit under the wallet write lock, through the trusted operation when the source is trusted and the policy is `PrivateRequired`; acknowledge after every commit applies. |
+| `Ready` | Apply each commit under the wallet write lock, through the trusted operation when the source is trusted and the policy is `PrivateRequired`. Once every commit applies, call `acknowledge_applied` if `retired` is empty, or `acknowledge_reconciled` if every commit went through the trusted operation. Otherwise acknowledge nothing and hold the account for 1 h: only a trusted pass resolves the retirements, and each pass until then adds any newer revision of their sources to them. |
 | Stale rejection | Retry from a fresh watch set, up to 3 times, without acknowledgment. |
 | Integrity, quarantine, invalid or unqualified rejection | Skip the account. |
 | `NotEnabled` | Stop the run. |
-| `Pending` | Apply nothing. |
-| `Withdrawn(cause)` | Log the cause and hold the account for 1 h. |
+| `Pending` | Apply and acknowledge nothing. |
+| `Withdrawn(cause)` | Log the cause, acknowledge nothing and hold the account for 1 h. |
 | Third stalled run, or promotion blocked by `LegacyDiscrepancy` | Hold the account for 1 h. |
 
 The follow-up runs after the sync marks completion and emits its final event;
@@ -364,7 +391,7 @@ These hold under the development flag; PR 2 mirrors them in the design notes.
 | Quarantine | Nothing clears a quarantine. | Delete and re-import the account, which gives new sources, or turn the setting off. |
 | Pre-birthday outputs | Legacy public outputs mined below the birthday give a permanent `LegacyDiscrepancy`. | `Stopped(LegacyDiscrepancy)` with a 1 h hold; turn the setting off. |
 | Re-cut | A re-cut under an unchanged set identity restarts revision numbers. Sealed shards become `Withdrawn(Regression)`, the tail stays `Pending` until it passes the old maximum, and every account with evidence stops. After companion loss the catalog cannot detect the regression, so a colliding lineage yields `Integrity` and a quarantine. | Turn the setting off, or delete and re-import. See the publisher requirements. |
-| Set-identity change | The adapter resets the store automatically and keeps the catalog, but old provisional evidence of the changed sources is never superseded. A shard whose source did not change but whose revision number restarted is treated as a re-cut. | It is consistent data, and reorgs still rewind it. See the publisher requirements. |
+| Set-identity change | The adapter resets the store automatically and keeps the catalog, but old provisional evidence of the changed sources is never superseded, even where a batch listed it as retired and nobody acknowledged it. A shard whose source did not change but whose revision number restarted is treated as a re-cut. | It is consistent data, and reorgs still rewind it. See the publisher requirements. |
 | Geometry move | A shard id that moves to another geometry under one set identity makes every pass for an account with its evidence `Withdrawn(Retired)`. | As for a re-cut. See the publisher requirements. |
 | Origin change | A debug override creates new sources; the previous origin's provisional tail evidence is never withdrawn. | Debug builds only. |
 | Withdrawn | Every cause holds the account for 1 h, then it retries; holds are in memory, so a restart retries once. | A lagging replica is `Pending`, not `Withdrawn`. No new durable state. |
@@ -414,7 +441,7 @@ reviewed and merged in any order:
 | Ledger | #99 | `claude/tpir-pm-3-remove-work-query` | refactor(ledger): remove the unused recovery-work query |
 | Adapter | #100 | `claude/tpir-pm-4-injected-transport` | feat(pir-transparent): accept caller transports, narrow the API, repin wallet-pir |
 | Adapter | #101 | `claude/tpir-pm-5-wallet-chain` | feat(pir-transparent): wallet chain view, birthday floor, publication-lag clamp, mainnet check |
-| Adapter | — | `claude/tpir-pm-6-companion` | feat(pir-transparent): stable sources, published lineage, batch states, cache pruning |
+| Adapter | #102 | `claude/tpir-pm-6-companion` | feat(pir-transparent): stable sources, published lineage, batch states, cache pruning |
 | End to end | — | `claude/tpir-pm-7-e2e` | feat(pir-transparent): end-to-end private recovery against an in-process shard service |
 
 Within a stack, each PR targets the one before it. The end-to-end PR needs the
