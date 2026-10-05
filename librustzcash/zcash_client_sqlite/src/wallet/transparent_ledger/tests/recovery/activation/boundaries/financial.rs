@@ -82,3 +82,38 @@ fn per_account_balances_do_not_read_another_accounts_invalid_amounts() {
             .is_err()
     );
 }
+
+#[test]
+fn empty_interval_promotion_grants_no_funds_and_missing_coverage_revokes_authority() {
+    let (mut st, account) = shadow_wallet();
+    let target = watch(&st, account).target.unwrap();
+    conn(&st)
+        .execute(
+            "UPDATE accounts SET birthday_height = ?1 WHERE uuid = ?2",
+            rusqlite::params![u32::from(target.height + 1), account.0],
+        )
+        .unwrap();
+    set_policy(&mut st, PrivateRequired);
+    assert_eq!(count(&st, "tpir_qualified_revisions"), 0);
+    promote(&mut st, account).unwrap();
+    assert_eq!(
+        snapshot(&st, account).authority,
+        TransparentAuthority::Private
+    );
+    assert_eq!(
+        snapshot(&st, account).authorized.unwrap().regular.total(),
+        Zatoshis::ZERO
+    );
+    assert_eq!(recovery(&st, account).blockers, vec![]);
+    // The next block enters the required interval, and nothing covers it yet.
+    scan_new_blocks(&mut st, 1);
+    assert_eq!(
+        snapshot(&st, account).authority,
+        TransparentAuthority::Unavailable
+    );
+    assert!(
+        recovery(&st, account)
+            .blockers
+            .contains(&CandidateBlocker::IncompleteCoverage)
+    );
+}

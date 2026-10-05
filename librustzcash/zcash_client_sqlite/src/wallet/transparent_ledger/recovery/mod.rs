@@ -76,8 +76,6 @@ mod promotion;
 mod revisions;
 #[cfg(feature = "transparent-inputs")]
 mod watch;
-#[cfg(feature = "transparent-inputs")]
-mod work;
 
 #[cfg(all(
     feature = "transparent-inputs",
@@ -101,8 +99,6 @@ pub(crate) use ownership::forget_other_candidates;
 pub(crate) use promotion::promote;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use watch::watch_set;
-#[cfg(feature = "transparent-inputs")]
-pub(crate) use work::recovery_work;
 
 #[cfg(feature = "transparent-inputs")]
 use commit::{account_quarantined, atomically, lifecycle};

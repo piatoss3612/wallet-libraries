@@ -134,9 +134,15 @@ fn shared_activity_after_promotion_extends_discovery_across_reopen() {
     .unwrap()
     .with_transparent_ledger_mode(PrivateRequired);
     assert_eq!(reopened.transparent_watch_set(a).unwrap(), effective);
+    // Each discovered address is newly watched, so A has no coverage of it yet.
     for index in high + gap + 1..shared_index + gap + 1 {
-        assert!(work(&st, a, 256).items.iter().any(|item| matches!(item,
-            TransparentRecoveryWork::CheckRange(range) if range.address == address(index))));
+        assert!(!before.addresses.iter().any(|w| w.address == address(index)));
+        assert!(
+            effective
+                .addresses
+                .iter()
+                .any(|w| w.address == address(index))
+        );
     }
     let mut c = commit(&effective);
     c.coverage = full_coverage(&effective);
@@ -242,10 +248,9 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
         .with_transparent_ledger_mode(PrivateShadow);
         assert_eq!(reopened.transparent_watch_set(a).unwrap(), watch(&st, a));
         // B's activity extends A's effective window immediately, before A commits again.
-        // Reads schedule the new gaps and remain observational, including across reopen.
+        // Reads report the new gaps and remain observational, including across reopen.
         let effective = watch(&st, a);
         assert!(effective.addresses.len() > a_watch_before_shared_activity.addresses.len());
-        assert!(!work(&st, a, 256).items.is_empty());
         assert!(
             recovery(&st, a)
                 .blockers
@@ -271,17 +276,18 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
         // Promotion succeeds instead of refusing and rolling back on every retry. Writing the
         // window leaves the receiver with its owner; projecting A's receive at the window edge then
         // runs the wallet's gap-limit generation, which transfers the adjacent receiver under the
-        // existing rule. A is active, and recovery work asks it to cover the receiver before its
+        // existing rule. A is active, and its watch set asks it to cover the receiver before its
         // authority returns.
         promote(&mut st, a).unwrap();
         assert_ne!(owner(&st), importer);
         assert!(watch(&st, a).addresses.iter().any(|w| w.address == address));
         assert!(!watch(&st, b).addresses.iter().any(|w| w.address == address));
         assert_ne!(snapshot(&st, a).authority, TransparentAuthority::Private);
-        assert!(work(&st, a, 256).items.iter().any(|item| matches!(
-            item,
-            TransparentRecoveryWork::CheckRange(range) if range.address == address
-        )));
+        assert!(
+            recovery(&st, a)
+                .blockers
+                .contains(&CandidateBlocker::IncompleteCoverage)
+        );
         let mut c = commit(&watch(&st, a));
         c.coverage = full_coverage(&watch(&st, a));
         c.receives = vec![receive(
@@ -414,7 +420,11 @@ fn imported_ownership_filters_all_derivable_scopes() {
             snapshot(&st, accounts[0]).authority,
             TransparentAuthority::Unavailable
         );
-        assert!(!work(&st, accounts[0], 256).items.is_empty());
+        assert!(
+            recovery(&st, accounts[0])
+                .blockers
+                .contains(&CandidateBlocker::IncompleteCoverage)
+        );
     }
 }
 
