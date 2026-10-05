@@ -5,6 +5,9 @@
 //! so a rewind, promotion, account change, or later enhancement changes the result as soon as it
 //! changes those facts.
 
+#[cfg(test)]
+mod tests;
+
 use std::rc::Rc;
 
 use rusqlite::{OptionalExtension as _, named_params, types::Value};
@@ -311,7 +314,9 @@ fn has_unlinked_shielded_spend(
 }
 
 /// Whether a shielded output the account received or sent in the transaction lacks its memo.
-/// Compact scanning does not retrieve memos.
+/// Compact scanning does not retrieve memos. For an owned sent output, a recovered received
+/// memo satisfies the requirement only for the same account, transaction, pool, and output index.
+/// A known empty memo is recovered; SQL NULL is unknown. Other received memos remain independent.
 fn has_unretrieved_memo(
     conn: &rusqlite::Connection,
     account_id: i64,
@@ -323,9 +328,16 @@ fn has_unretrieved_memo(
              WHERE account_id = :account_id AND transaction_id = :transaction_id
              AND pool != 0 AND memo IS NULL
          ) OR EXISTS (
-             SELECT 1 FROM sent_notes
-             WHERE from_account_id = :account_id AND transaction_id = :transaction_id
-             AND output_pool != 0 AND memo IS NULL
+             SELECT 1 FROM sent_notes s
+             WHERE s.from_account_id = :account_id AND s.transaction_id = :transaction_id
+             AND s.output_pool != 0 AND s.memo IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM v_received_outputs ro
+                 WHERE ro.account_id = s.from_account_id
+                 AND ro.transaction_id = s.transaction_id
+                 AND ro.pool = s.output_pool AND ro.output_index = s.output_index
+                 AND ro.memo IS NOT NULL
+             )
          )",
         named_params![":account_id": account_id, ":transaction_id": transaction_id],
         |row| row.get(0),
