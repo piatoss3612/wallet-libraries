@@ -2430,18 +2430,8 @@ fn a_recovered_memo_completes_history_for_the_same_output_sent_without_one() {
         assert_eq!(ironwood.received, Zatoshis::from_u64(value).unwrap());
         assert_eq!(ironwood.spent, Zatoshis::ZERO);
         assert_eq!(ironwood.completeness, EffectCompleteness::Complete);
-        // Without transparent inputs the transparent effects never settle.
-        #[cfg(feature = "transparent-inputs")]
-        {
-            assert_eq!(entry.payment_details, DetailCompleteness::Complete);
-            assert_eq!(entry.fee, FeeState::NotApplicable);
-            assert_eq!(entry.classification, HistoryClassification::Reconstructed);
-        }
-        #[cfg(not(feature = "transparent-inputs"))]
-        {
-            assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
-            assert_eq!(entry.fee, FeeState::Unknown);
-            assert_eq!(entry.classification, HistoryClassification::Provisional);
-        }
+        assert_eq!(entry.payment_details, DetailCompleteness::Complete);
+        assert_eq!(entry.fee, FeeState::NotApplicable);
+        assert_eq!(entry.classification, HistoryClassification::Reconstructed);
     }
 }
