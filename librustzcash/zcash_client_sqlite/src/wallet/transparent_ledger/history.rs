@@ -311,7 +311,8 @@ fn has_unlinked_shielded_spend(
 }
 
 /// Whether a shielded output the account received or sent in the transaction lacks its memo.
-/// Compact scanning does not retrieve memos.
+/// Compact scanning does not retrieve memos. An output the account both sent and received has one
+/// memo; enhancement may store it only with the receipt, which then supplies it for the sent row.
 fn has_unretrieved_memo(
     conn: &rusqlite::Connection,
     account_id: i64,
@@ -323,9 +324,16 @@ fn has_unretrieved_memo(
              WHERE account_id = :account_id AND transaction_id = :transaction_id
              AND pool != 0 AND memo IS NULL
          ) OR EXISTS (
-             SELECT 1 FROM sent_notes
-             WHERE from_account_id = :account_id AND transaction_id = :transaction_id
-             AND output_pool != 0 AND memo IS NULL
+             SELECT 1 FROM sent_notes s
+             WHERE s.from_account_id = :account_id AND s.transaction_id = :transaction_id
+             AND s.output_pool != 0 AND s.memo IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM v_received_outputs ro
+                 WHERE ro.account_id = s.from_account_id
+                 AND ro.transaction_id = s.transaction_id
+                 AND ro.pool = s.output_pool AND ro.output_index = s.output_index
+                 AND ro.memo IS NOT NULL
+             )
          )",
         named_params![":account_id": account_id, ":transaction_id": transaction_id],
         |row| row.get(0),

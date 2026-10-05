@@ -706,6 +706,303 @@ fn full_data_completes_details_only_when_every_spent_unit_is_accounted_for() {
     assert_eq!(entry.classification, HistoryClassification::Provisional);
 }
 
+fn account_row(st: &State, account: AccountUuid) -> i64 {
+    conn(st)
+        .query_row(
+            "SELECT id FROM accounts WHERE uuid = ?1",
+            [account.expose_uuid()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn tx_row(st: &State, txid: TxId) -> i64 {
+    conn(st)
+        .query_row(
+            "SELECT id_tx FROM transactions WHERE txid = ?1",
+            [txid.as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+const NONEMPTY_MEMO: [u8; 512] = [7; 512];
+const EMPTY_MEMO: [u8; 1] = [0xf6];
+
+fn set_sapling_memo(st: &State, tx: i64, output_index: i64, memo: Option<&[u8]>) {
+    conn(st)
+        .execute(
+            "UPDATE sapling_received_notes SET memo = ?3
+             WHERE transaction_id = ?1 AND output_index = ?2",
+            rusqlite::params![tx, output_index, memo],
+        )
+        .unwrap();
+}
+
+/// Records output `(pool, output_index)` as sent by `from` to itself without its memo, as
+/// scanning does for an output the account both sent and received.
+fn record_sent_without_memo(
+    st: &State,
+    tx: i64,
+    from: i64,
+    pool: i64,
+    output_index: i64,
+    value: i64,
+) {
+    conn(st)
+        .execute(
+            "INSERT INTO sent_notes
+                 (transaction_id, output_pool, output_index, from_account_id, to_account_id,
+                  value, memo)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5, NULL)
+             ON CONFLICT (transaction_id, output_pool, output_index)
+             DO UPDATE SET memo = NULL",
+            rusqlite::params![tx, pool, output_index, from, value],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_sent_output_memo_is_known_only_from_the_same_owned_receipt() {
+    let (mut st, accounts) = shadow_wallet_with(1);
+    let (account, other) = (accounts[0], accounts[1]);
+    let (a, b) = (account_row(&st, account), account_row(&st, other));
+    let not_our_key = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
+    let dfvk = st
+        .test_account()
+        .unwrap()
+        .usk()
+        .sapling()
+        .to_diversifiable_full_viewing_key();
+    let receipt_at = |st: &State, height: BlockHeight| -> (TxId, i64, i64) {
+        conn(st)
+            .query_row(
+                "SELECT t.txid, t.id_tx, n.output_index FROM sapling_received_notes n
+                 JOIN transactions t ON t.id_tx = n.transaction_id
+                 WHERE t.mined_height = ?1",
+                [u32::from(height)],
+                |row| {
+                    Ok((
+                        row.get::<_, [u8; 32]>(0).map(TxId::from_bytes)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+
+    // A receipt behind an unscanned gap, and another receipt.
+    let (gap, _, _) =
+        st.generate_next_block(&not_our_key, AddressType::DefaultExternal, zat(10_000));
+    let (paid, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, zat(80_000));
+    let (other_paid, _, _) =
+        st.generate_next_block(&dfvk, AddressType::DefaultExternal, zat(30_000));
+    st.scan_cached_blocks(paid, 2);
+    let (txid, tx, _) = receipt_at(&st, paid);
+    let (_, other_tx, other_index) = receipt_at(&st, other_paid);
+    // Keep this receipt's index apart from the other receipt's.
+    let index = other_index + 1;
+    conn(&st)
+        .execute(
+            "UPDATE sapling_received_notes SET output_index = ?2 WHERE transaction_id = ?1",
+            rusqlite::params![tx, index],
+        )
+        .unwrap();
+
+    // Both records of the output lack the memo.
+    record_sent_without_memo(&st, tx, a, 2, index, 80_000);
+    assert_eq!(
+        history(&st, account, txid).payment_details,
+        DetailCompleteness::Incomplete
+    );
+
+    // A retrieved receipt memo does not settle the effects behind the gap.
+    set_sapling_memo(&st, tx, index, Some(&NONEMPTY_MEMO));
+    let entry = history(&st, account, txid);
+    assert_eq!(sapling(&entry).completeness, EffectCompleteness::Incomplete);
+    assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+
+    // Once settled, the receipt's memo is the sent row's memo; nothing else changes.
+    st.scan_cached_blocks(gap, 1);
+    let entry = history(&st, account, txid);
+    assert_eq!(
+        sapling(&entry),
+        PoolEffect {
+            pool: PoolType::SAPLING,
+            received: zat(80_000),
+            spent: Zatoshis::ZERO,
+            completeness: EffectCompleteness::Complete,
+        }
+    );
+    assert_eq!(entry.payment_details, DetailCompleteness::Complete);
+    assert_eq!(entry.fee, FeeState::NotApplicable);
+    assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+    assert_eq!(entry.classification, HistoryClassification::Reconstructed);
+    conn(&st)
+        .execute("DELETE FROM sent_notes WHERE transaction_id = ?1", [tx])
+        .unwrap();
+    assert_eq!(history(&st, account, txid), entry);
+    record_sent_without_memo(&st, tx, a, 2, index, 80_000);
+
+    // A known empty memo is a retrieved memo.
+    set_sapling_memo(&st, tx, index, Some(&EMPTY_MEMO));
+    assert_eq!(history(&st, account, txid), entry);
+
+    // Both copies lacking the memo.
+    set_sapling_memo(&st, tx, index, None);
+    assert_eq!(
+        history(&st, account, txid).payment_details,
+        DetailCompleteness::Incomplete
+    );
+    set_sapling_memo(&st, tx, index, Some(&NONEMPTY_MEMO));
+
+    // A memo-less sent row is resolved only by a receipt at its exact output.
+    set_sapling_memo(&st, other_tx, other_index, Some(&NONEMPTY_MEMO));
+    let resolved = |st: &State, pool: i64, output_index: i64| {
+        conn(st)
+            .execute(
+                "UPDATE sent_notes SET output_pool = ?2, output_index = ?3
+                 WHERE transaction_id = ?1",
+                rusqlite::params![tx, pool, output_index],
+            )
+            .unwrap();
+        history(st, account, txid).payment_details
+    };
+    // Another output index.
+    assert_eq!(resolved(&st, 2, index + 1), DetailCompleteness::Incomplete);
+    // Another pool.
+    #[cfg(feature = "orchard")]
+    assert_eq!(resolved(&st, 3, index), DetailCompleteness::Incomplete);
+    // Another transaction's receipt at that output index.
+    assert_eq!(
+        resolved(&st, 2, other_index),
+        DetailCompleteness::Incomplete
+    );
+    // Another account's receipt of that output.
+    conn(&st)
+        .execute(
+            "INSERT INTO sapling_received_notes
+                 (transaction_id, output_index, account_id, diversifier, value, rcm, is_change,
+                  memo, commitment_tree_position, recipient_key_scope)
+             SELECT transaction_id, ?2 + 1, ?3, diversifier, value, rcm, is_change,
+                    ?4, commitment_tree_position, recipient_key_scope
+             FROM sapling_received_notes WHERE transaction_id = ?1 AND output_index = ?2",
+            rusqlite::params![tx, index, b, &NONEMPTY_MEMO[..]],
+        )
+        .unwrap();
+    assert_eq!(resolved(&st, 2, index + 1), DetailCompleteness::Incomplete);
+    // The exact receipt.
+    assert_eq!(resolved(&st, 2, index), DetailCompleteness::Complete);
+
+    // Another receipt of the account still lacking its memo.
+    conn(&st)
+        .execute(
+            "INSERT INTO sapling_received_notes
+                 (transaction_id, output_index, account_id, diversifier, value, rcm, is_change,
+                  memo, commitment_tree_position, recipient_key_scope)
+             SELECT transaction_id, ?2 + 2, account_id, diversifier, value, rcm, is_change,
+                    NULL, commitment_tree_position, recipient_key_scope
+             FROM sapling_received_notes WHERE transaction_id = ?1 AND output_index = ?2",
+            rusqlite::params![tx, index],
+        )
+        .unwrap();
+    assert_eq!(
+        history(&st, account, txid).payment_details,
+        DetailCompleteness::Incomplete
+    );
+}
+
+#[test]
+fn an_accounted_payment_takes_its_change_memo_from_the_owned_receipt() {
+    let (mut st, accounts) = shadow_wallet_with(1);
+    let (account, other) = (accounts[0], accounts[1]);
+    let txid = discovered_payment(&mut st);
+    let tx = tx_row(&st, txid);
+    let (index, change): (i64, i64) = conn(&st)
+        .query_row(
+            "SELECT output_index, value FROM sapling_received_notes WHERE transaction_id = ?1",
+            [tx],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let fee: i64 = conn(&st)
+        .query_row(
+            "SELECT fee FROM transactions WHERE id_tx = ?1",
+            [tx],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(200_000, 50_000 + change + fee);
+
+    // Scanning recorded the change as sent without a memo, and its receipt without one too.
+    record_sent_without_memo(&st, tx, account_row(&st, account), 2, index, change);
+    set_sapling_memo(&st, tx, index, None);
+    let entry = history(&st, account, txid);
+    assert_eq!(sapling(&entry).completeness, EffectCompleteness::Complete);
+    assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+
+    // Enhancement retrieves the memo for the receipt only.
+    for memo in [&NONEMPTY_MEMO[..], &EMPTY_MEMO[..]] {
+        set_sapling_memo(&st, tx, index, Some(memo));
+        let entry = history(&st, account, txid);
+        assert_eq!(
+            sapling(&entry),
+            PoolEffect {
+                pool: PoolType::SAPLING,
+                received: Zatoshis::from_u64(change as u64).unwrap(),
+                spent: zat(200_000),
+                completeness: EffectCompleteness::Complete,
+            }
+        );
+        assert_eq!(entry.payment_details, DetailCompleteness::Complete);
+        assert_eq!(
+            entry.fee,
+            FeeState::Known(Zatoshis::from_u64(fee as u64).unwrap())
+        );
+        assert_eq!(
+            entry.aggregate_payment,
+            AggregatePayment::Partial(zat(50_000))
+        );
+        assert_eq!(entry.classification, HistoryClassification::Reconstructed);
+    }
+    let sent_memo: Option<Vec<u8>> = conn(&st)
+        .query_row(
+            "SELECT memo FROM sent_notes WHERE transaction_id = ?1 AND output_pool = 2",
+            [tx],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sent_memo, None);
+
+    // An unknown fee leaves the payment unaccounted for.
+    conn(&st)
+        .execute("UPDATE transactions SET fee = NULL WHERE id_tx = ?1", [tx])
+        .unwrap();
+    let entry = history(&st, account, txid);
+    assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_eq!(entry.classification, HistoryClassification::Provisional);
+    conn(&st)
+        .execute(
+            "UPDATE transactions SET fee = ?2 WHERE id_tx = ?1",
+            rusqlite::params![tx, fee],
+        )
+        .unwrap();
+
+    // Received by another account, the output is a payment the account sent elsewhere, which
+    // still balances; that account's memo is not the sender's.
+    conn(&st)
+        .execute(
+            "UPDATE sapling_received_notes SET account_id = ?2 WHERE transaction_id = ?1",
+            rusqlite::params![tx, account_row(&st, other)],
+        )
+        .unwrap();
+    let entry = history(&st, account, txid);
+    assert_eq!(entry.classification, HistoryClassification::Reconstructed);
+    assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+}
+
 #[test]
 fn unmined_shielded_spends_are_incomplete_until_the_scanned_chain_reaches_the_tip() {
     let (mut st, accounts) = shadow_wallet_with(0);
