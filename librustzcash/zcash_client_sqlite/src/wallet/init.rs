@@ -190,7 +190,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
             unreachable!("migrations do not request status work")
         }
         #[cfg(feature = "orchard")]
-        SqliteClientError::EnhancementModeNotConfigured | SqliteClientError::SwapReceivingNotEnabled => {
+        SqliteClientError::EnhancementModeNotConfigured
+        | SqliteClientError::SwapReceivingNotEnabled => {
             unreachable!("we don't enumerate enhancement requests in migrations")
         }
         SqliteClientError::TransparentLedgerModeNotConfigured
@@ -1071,6 +1072,11 @@ mod tests {
         }
         assert_eq!(expected_idx, expected_views.len());
 
+        let expected_triggers = [
+            db::TRIGGER_IRONWOOD_SWAP_REFUND_MEMO_CHANGED,
+            db::TRIGGER_REMEMBER_SWAP_RECEIVE_INSERT,
+            db::TRIGGER_REMEMBER_SWAP_RECEIVE_UPDATE,
+        ];
         let triggers: Vec<String> = st
             .wallet()
             .db()
@@ -1081,7 +1087,11 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert!(triggers.is_empty(), "unexpected triggers: {triggers:?}");
+        assert_eq!(
+            triggers.iter().map(|t| normalize(t)).collect::<Vec<_>>(),
+            expected_triggers.map(normalize),
+            "unexpected triggers"
+        );
     }
 
     #[test]

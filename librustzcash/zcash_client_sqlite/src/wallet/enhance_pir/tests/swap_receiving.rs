@@ -51,14 +51,15 @@ fn swap_receiving_pir_authenticates_memos_after_reopen() {
             )
             .unwrap();
         st.scan_cached_blocks(height, 1);
-        let mut reopened = WalletDb::for_path(
+        let reopened = WalletDb::for_path(
             st.wallet().data_file_path(),
             *st.network(),
             test_clock(),
             test_rng(),
         )
-        .unwrap();
-        reopened.set_enhancement_mode(EnhancementMode::PrivateIronwood);
+        .unwrap()
+        .with_enhancement_mode(EnhancementMode::PrivateIronwood)
+        .with_transparent_ledger_mode(TransparentLedgerMode::Public);
         *st.wallet_mut().db_mut() = reopened;
         let requests = st.wallet().db().query_requests().unwrap();
         assert_eq!(requests.len(), 1);

@@ -2104,6 +2104,32 @@ pub(super) const INDEX_ONE_OPEN_SWAP_RECEIVE_RESERVATION: &str =
 pub(super) const INDEX_SWAP_RECEIVE_QUOTE_OPERATION: &str =
     "CREATE INDEX swap_receive_quote_operation ON ironwood_swap_receive_quotes(operation_id)";
 
+#[cfg(test)]
+pub(super) const TRIGGER_IRONWOOD_SWAP_REFUND_MEMO_CHANGED: &str =
+    "CREATE TRIGGER ironwood_swap_refund_memo_changed
+            AFTER UPDATE OF memo, account_id, recipient_key_scope, receiving_key_id, transaction_id
+            ON ironwood_received_notes
+            WHEN OLD.memo IS NOT NEW.memo OR OLD.account_id IS NOT NEW.account_id
+              OR OLD.recipient_key_scope IS NOT NEW.recipient_key_scope
+              OR OLD.receiving_key_id IS NOT NEW.receiving_key_id
+              OR OLD.transaction_id IS NOT NEW.transaction_id
+            BEGIN
+                DELETE FROM ironwood_swap_refund_memo_progress WHERE note_id = NEW.id;
+            END";
+
+#[cfg(test)]
+pub(super) const TRIGGER_REMEMBER_SWAP_RECEIVE_INSERT: &str =
+    "CREATE TRIGGER remember_swap_receive_insert AFTER INSERT ON ironwood_received_notes
+                WHEN NEW.receiving_key_id IS NOT NULL BEGIN
+                INSERT OR IGNORE INTO ironwood_swap_receive_used VALUES (NEW.receiving_key_id);
+            END";
+
+#[cfg(test)]
+pub(super) const TRIGGER_REMEMBER_SWAP_RECEIVE_UPDATE: &str = "CREATE TRIGGER remember_swap_receive_update AFTER UPDATE OF receiving_key_id ON ironwood_received_notes
+                WHEN NEW.receiving_key_id IS NOT NULL BEGIN
+                INSERT OR IGNORE INTO ironwood_swap_receive_used VALUES (NEW.receiving_key_id);
+            END";
+
 /// Source-bound transaction facts. No fee is attributed to an account by this table.
 pub(super) const TABLE_TPIR_TRANSACTION_METADATA: &str = r#"
 CREATE TABLE tpir_transaction_metadata (
