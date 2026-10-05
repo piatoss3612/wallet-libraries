@@ -21,8 +21,23 @@ needs to map service refusals.
 accepted by the chain view; the watch set and retained scripts are within the
 script limit; the filter source does not use the parent-filter experiment,
 whose selective child requests leak coarse activity; the shard map is within
-the shard limit; and the service's init names `SCHEMA`. A refused check makes
-no further requests.
+the shard limit and names Zcash mainnet's network and genesis block; and the
+service's init names `SCHEMA`. A refused check makes no further requests. A
+watch set with no addresses needs nothing retrieved: once its target is
+accepted, the pass makes no request and completes at the target.
+
+`WalletChain` is the chain view for a wallet: it answers from the blocks the
+wallet scanned, only through the watch set's target, and never from a
+publication. A pass needs it only from the watch set's floor, the lowest
+required height (the account birthday). Shards ending below the floor are
+neither exported nor cataloged, and the reference client may roll its own
+coverage back to just below a shard that starts under the floor without a
+wallet hash; that is the only use it makes of blocks below the floor. When the
+publication ends below the target, the pass syncs to the map's end if that end
+is at or above the floor, the chain view accepts its terminal block, and the
+companion holds nothing above it; completing there still reports `Behind`.
+Otherwise it passes the target and reports `Behind` at once. Commits keep the
+watch set's context either way.
 
 Every pass has script, publication, query, byte and export bounds. Its
 `Progress` reports `covered_through` and an `Outcome`:
@@ -30,7 +45,7 @@ Every pass has script, publication, query, byte and export bounds. Its
 | `Outcome` | Meaning |
 | --- | --- |
 | `Complete` | Every watched script is covered through the target. |
-| `Behind` | The publication ends below the target. |
+| `Behind` | The publication ends below the target; `covered_through` may reach its end. |
 | `More` | A query, byte or pending-page budget stopped the pass; the next pass resumes. |
 | `Overloaded` | The service refused for capacity throughout its retry budget. |
 | `Stalled` | An unknown chain block, unresolved spends or unbounded script discovery. |

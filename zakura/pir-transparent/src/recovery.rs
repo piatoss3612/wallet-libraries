@@ -7,7 +7,7 @@ use std::{
 };
 use transparent::{address::TransparentAddress, bundle::OutPoint};
 use transparent_events::{FeeState, TransparentEvent};
-use transparent_filter::{ShardMap, ShardMapEntry};
+use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap, ShardMapEntry};
 use transparent_wallet::transport::{FilterSource, ShardTransport};
 use transparent_wallet::{
     Acceptance, Anchor, ChainView, Completion, IncompleteReason, ScriptEntry, ScriptOrigin,
@@ -57,8 +57,8 @@ pub struct RecoveryConfig {
 pub enum Outcome {
     /// Every watched script is covered from its required height through the target.
     Complete,
-    /// The publication ends below the target. A later pass can finish once it
-    /// catches up.
+    /// The publication ends below the target. The pass may still have covered
+    /// through the publication's end; a later pass can finish once it catches up.
     Behind,
     /// A query, byte or pending-page budget stopped the pass. The companion keeps
     /// the continuation, so the next pass resumes.
@@ -81,8 +81,12 @@ pub struct Progress {
 }
 
 /// Maps the reference client's report onto the adapter's narrower contract.
-fn progress(report: &SyncReport) -> Progress {
+///
+/// A `clamped` pass synced to the publication's end below the wallet's target,
+/// so even its completion is [`Outcome::Behind`].
+fn progress(report: &SyncReport, clamped: bool) -> Progress {
     let outcome = match &report.completion {
+        Completion::Complete if clamped => Outcome::Behind,
         Completion::Complete => Outcome::Complete,
         Completion::Incomplete { reason, .. } => match reason {
             IncompleteReason::QueryBudget
@@ -176,7 +180,7 @@ fn address_script(address: TransparentAddress) -> Vec<u8> {
 fn block(height: u64) -> Result<BlockHeight, RecoveryError> {
     Ok(BlockHeight::from(u32::try_from(height).map_err(failure)?))
 }
-fn block_hash(display: &str) -> Result<BlockHash, RecoveryError> {
+pub(crate) fn block_hash(display: &str) -> Result<BlockHash, RecoveryError> {
     let mut bytes = hex::decode(display).map_err(failure)?;
     require(bytes.len() == 32, "invalid publication block hash")?;
     bytes.reverse();
@@ -217,6 +221,108 @@ fn binding(parts: [&[u8]; 4]) -> Vec<u8> {
         hash.update(value);
     }
     hash.finalize().to_vec()
+}
+
+/// The lowest height a pass needs the wallet's chain for: the lowest required
+/// height in `watch`, capped at `target`, or 0 when nothing is watched.
+fn required_floor<A>(watch: &TransparentWatchSet<A>, target: u64) -> u64 {
+    watch
+        .addresses
+        .iter()
+        .map(|entry| u64::from(u32::from(entry.required_from)))
+        .min()
+        .map_or(0, |lowest| lowest.min(target))
+}
+
+/// The caller's chain, accepting every block below the watch set's floor. Passed
+/// to `sync_into` only.
+///
+/// A wallet holds no blocks below its birthday, while a publication may start far
+/// below it (the live map starts at genesis). Leniency there is sound because, at
+/// wallet-pir 648264bb, `sync_into` asks below the floor only for rollback
+/// anchors:
+///
+/// - It plans only shards meeting `[required_from, target]` (`sync.rs:870-895`),
+///   so every coverage endpoint it checks (`sync.rs:1208-1223`, `:2032-2048`,
+///   `sync_ahead.rs:255-258`) and every stored coverage end its reorg scan asks
+///   about (`sync.rs:609-662`) is at or above the floor. Required heights only
+///   move earlier, so no script the companion retains starts below the floor.
+/// - The block a rollback rewinds to may lie below it: the reorg fallback
+///   `map.start_height - 1` (`:648`), a replaced tail (`:734-741`) or a revision
+///   withdrawn mid-sync (`:1030-1035`), each just below a shard's start and each
+///   resolved by `accepted_at` (`:2370-2390`), which takes the hash from the map
+///   when the view has none. Only block 0 has no map entry, so [`Self::hash_at`]
+///   answers it with the map's genesis hash.
+///
+/// Nothing below the floor is exported or cataloged (see `normalize`), and the
+/// target and every shard anchor are checked against the caller's chain alone.
+/// Re-verify these call sites on every wallet-pir pin bump.
+struct BelowFloor<'a, C> {
+    chain: &'a C,
+    /// The floor: every block below it is accepted.
+    below: u64,
+    /// The map's genesis hash, already checked to be mainnet's.
+    genesis: &'a str,
+}
+
+impl<C: ChainView> ChainView for BelowFloor<'_, C> {
+    fn is_accepted(&self, height: u64, hash_display_hex: &str) -> Acceptance {
+        if height < self.below {
+            Acceptance::Accepted
+        } else {
+            self.chain.is_accepted(height, hash_display_hex)
+        }
+    }
+
+    fn tip(&self) -> Option<Anchor> {
+        self.chain.tip()
+    }
+
+    fn hash_at(&self, height: u64) -> Option<String> {
+        if height < self.below {
+            (height == 0).then(|| self.genesis.to_owned())
+        } else {
+            self.chain.hash_at(height)
+        }
+    }
+}
+
+/// The anchor a pass syncs to, and whether it was clamped below `target`.
+///
+/// When the publication ends at `t` below the wallet's target, a pass to the
+/// target can only report the publication behind. It syncs to the map's last end
+/// instead, and so covers everything published, only when all of these hold:
+/// `t` is at or above the `floor`; neither the companion's `stored` anchor nor a
+/// `retained` event lies above `t`, so the client neither refuses a regressed
+/// anchor nor a target below retained events (a lagging replica); and `chain`
+/// accepts the map's terminal block at `t`. Otherwise it passes the target
+/// unchanged.
+fn sync_target(
+    map: &ShardMap,
+    target: &Anchor,
+    floor: u64,
+    stored: Option<&Anchor>,
+    retained: u64,
+    chain: &impl ChainView,
+) -> (Anchor, bool) {
+    let Some(last) = map.shards.last() else {
+        return (target.clone(), false);
+    };
+    let t = last.end_height;
+    if t < target.height
+        && t >= floor
+        && stored.is_none_or(|anchor| t >= anchor.height)
+        && t >= retained
+        && chain.is_accepted(t, &last.terminal_block_hash) == Acceptance::Accepted
+    {
+        let clamped = Anchor {
+            height: t,
+            hash: last.terminal_block_hash.clone(),
+        };
+        (clamped, true)
+    } else {
+        (target.clone(), false)
+    }
 }
 
 impl ReferenceRecovery {
@@ -371,9 +477,20 @@ impl ReferenceRecovery {
     /// Before any filter or private retrieval, in order: the watch set's target
     /// must be accepted by `chain`; the watch set and the companion's retained
     /// scripts must be within the script limit; `filters` must not use the parent
-    /// filter experiment; the shard map must be within the shard limit; and the
-    /// service's init must name [`SCHEMA`]. A failed check returns
-    /// [`RecoveryError::Invalid`] without further requests.
+    /// filter experiment; the shard map must be within the shard limit and name
+    /// Zcash mainnet's network and genesis block; and the service's init must name
+    /// [`SCHEMA`]. A failed check returns [`RecoveryError::Invalid`] without
+    /// further requests. A watch set with no addresses needs nothing retrieved:
+    /// once its target is accepted, the pass sends no request and returns a batch
+    /// with no commits, [`Outcome::Complete`] at the target.
+    ///
+    /// `chain` answers for every block at or above the watch set's floor, its
+    /// lowest required height; below it the pass needs no wallet hashes and
+    /// exports nothing. When the publication ends below the target, the pass
+    /// syncs to the publication's end if `chain` accepts it and the companion
+    /// holds nothing above it; completing there reports [`Outcome::Behind`].
+    /// Otherwise the pass is [`Outcome::Behind`] at once. Commits keep the watch
+    /// set's context either way.
     pub fn recover<A, C, F, T>(
         &mut self,
         watch: &TransparentWatchSet<A>,
@@ -399,6 +516,16 @@ impl ReferenceRecovery {
             chain.is_accepted(target.height, &target.hash) == Acceptance::Accepted,
             "target is not independently accepted",
         )?;
+        if watch.addresses.is_empty() {
+            // Every watched script is covered, vacuously. A sync would need the
+            // wallet's hash for every shard from the map's start, since nothing
+            // raises the floor, and the reference client reports a sync with no
+            // scripts as unbounded discovery.
+            return self.empty(Progress {
+                covered_through: target.height,
+                outcome: Outcome::Complete,
+            });
+        }
         require(
             watch.addresses.len() <= self.config.scripts
                 && self.store.scripts().map_err(failure)?.len() <= self.config.scripts,
@@ -424,12 +551,34 @@ impl ReferenceRecovery {
             map.shards.len() <= self.config.shards,
             "publication shard limit exceeded",
         )?;
+        // The wallet's chain is mainnet's; another chain's map cannot cover it.
+        require(
+            map.network == NETWORK && map.genesis_hash == MAINNET_GENESIS_DISPLAY,
+            "publication is not for Zcash mainnet",
+        )?;
         let (raw_init, _) = transport.init().map_err(failure)?;
         let geometry = transparent_wallet::parse_init(&raw_init).map_err(failure)?;
         require(
             geometry.schema == SCHEMA,
             "service serves an unsupported shard schema",
         )?;
+        let floor = required_floor(watch, target.height);
+        let stored = self.store.anchor().map_err(failure)?;
+        let retained = self
+            .store
+            .events()
+            .map_err(failure)?
+            .iter()
+            .map(|held| u64::from(held.event.height()))
+            .max()
+            .unwrap_or(0);
+        let (sync_anchor, clamped) =
+            sync_target(&map, &target, floor, stored.as_ref(), retained, chain);
+        let below_floor = BelowFloor {
+            chain,
+            below: floor,
+            genesis: &map.genesis_hash,
+        };
         let mut scripts = StaticScripts(
             watch
                 .addresses
@@ -450,12 +599,12 @@ impl ReferenceRecovery {
             &map,
             map_bytes,
             &geometry,
-            chain,
+            &below_floor,
             &mut scripts,
             filters,
             transport,
             &limits,
-            &target,
+            &sync_anchor,
         )
         .map_err(failure)?;
         // A refresh may have replaced the first map. Export only provenance still
@@ -466,7 +615,7 @@ impl ReferenceRecovery {
             current_map.shards.len() <= self.config.shards,
             "publication shard limit exceeded",
         )?;
-        self.normalize(watch, current_map, progress(&report), chain)
+        self.normalize(watch, current_map, progress(&report, clamped), chain)
     }
 
     fn normalize<A: Copy>(
@@ -477,11 +626,11 @@ impl ReferenceRecovery {
         chain: &impl ChainView,
     ) -> Result<RecoveryBatch<A>, RecoveryError> {
         let context = watch.context().expect("validated before retrieval");
-        let identity = self
-            .store
-            .set_identity()
-            .map_err(failure)?
-            .ok_or_else(|| RecoveryError::Invalid("missing reference identity".into()))?;
+        let Some(identity) = self.store.set_identity().map_err(failure)? else {
+            // The client stopped before binding this companion to a publication
+            // (one behind the target, or an unknown target), so it holds no facts.
+            return self.empty(progress);
+        };
         map.check_shape().map_err(failure)?;
         require(
             identity.continues(&transparent_wallet::SetIdentity::of_schema(&map, SCHEMA)),
@@ -506,14 +655,16 @@ impl ReferenceRecovery {
         self.catalog
             .execute("UPDATE pir_bridge_revisions SET current=0", [])
             .map_err(failure)?;
+        let target = u64::from(u32::from(context.target.height));
+        let floor = required_floor(watch, target);
         let mut commits = BTreeMap::new();
         for entry in &map.shards {
-            if entry.start_height > u64::from(u32::from(context.target.height)) {
+            // Only shards meeting [floor, target]. One ending below the floor holds
+            // nothing the watch set requires, and the wallet holds no hash for it.
+            if entry.start_height > target || entry.end_height < floor {
                 continue;
             }
-            let height = entry
-                .end_height
-                .min(u64::from(u32::from(context.target.height)));
+            let height = entry.end_height.min(target);
             let hash = chain
                 .hash_at(height)
                 .ok_or_else(|| RecoveryError::Invalid("missing independent shard anchor".into()))?;
@@ -556,9 +707,8 @@ impl ReferenceRecovery {
             let Some(address) = addresses.get(&stored.script) else {
                 continue;
             };
-            if u64::from(stored.event.height()) < u64::from(u32::from(address.required_from))
-                || stored.event.height() > u32::from(context.target.height)
-            {
+            let height = u64::from(stored.event.height());
+            if height < u64::from(u32::from(address.required_from)) || height > target {
                 continue;
             }
             let commit = commits.get_mut(&stored.shard_id).ok_or_else(|| {
@@ -609,9 +759,7 @@ impl ReferenceRecovery {
                 let from = range
                     .start_height
                     .max(u64::from(u32::from(address.required_from)));
-                let through = range
-                    .end_height
-                    .min(u64::from(u32::from(context.target.height)));
+                let through = range.end_height.min(target);
                 if from <= through {
                     commit.coverage.push(AddressRange {
                         address: address.address,
@@ -644,9 +792,7 @@ impl ReferenceRecovery {
             let from = entry
                 .start_height
                 .max(u64::from(u32::from(address.required_from)));
-            let through = entry
-                .end_height
-                .min(u64::from(u32::from(context.target.height)));
+            let through = entry.end_height.min(target);
             if from <= through {
                 commits
                     .get_mut(&page.shard_id)
@@ -735,6 +881,19 @@ impl ReferenceRecovery {
             commits,
             progress,
             reconciliation,
+            token,
+        })
+    }
+
+    /// A batch exporting nothing, whose token the next acknowledgment must present.
+    fn empty<A>(&mut self, progress: Progress) -> Result<RecoveryBatch<A>, RecoveryError> {
+        let last_commit = self.store.last_commit().map_err(failure)?;
+        let token = Sha256::digest(last_commit.to_le_bytes()).into();
+        self.pending_export = Some(token);
+        Ok(RecoveryBatch {
+            commits: vec![],
+            progress,
+            reconciliation: vec![],
             token,
         })
     }
@@ -867,15 +1026,30 @@ mod tests {
         }
     }
 
-    /// A public filter source that counts every call and serves only the fixture map.
-    #[derive(Default)]
+    /// A public filter source that counts every call and serves only a shard map,
+    /// the fixture's by default.
     struct CountingFilters {
+        map: Vec<u8>,
         parents: bool,
         parent_checks: Cell<usize>,
         maps: usize,
         filters: usize,
     }
+    impl Default for CountingFilters {
+        fn default() -> Self {
+            Self::serving(MAP.to_vec())
+        }
+    }
     impl CountingFilters {
+        fn serving(map: Vec<u8>) -> Self {
+            Self {
+                map,
+                parents: false,
+                parent_checks: Cell::new(0),
+                maps: 0,
+                filters: 0,
+            }
+        }
         fn calls(&self) -> usize {
             self.parent_checks.get() + self.maps + self.filters
         }
@@ -887,7 +1061,7 @@ mod tests {
         }
         fn shard_map(&mut self) -> Result<(Vec<u8>, u64), BoxError> {
             self.maps += 1;
-            Ok((MAP.to_vec(), MAP.len() as u64))
+            Ok((self.map.clone(), self.map.len() as u64))
         }
         fn filter(&mut self, _shard_id: u64) -> Result<(Vec<u8>, u64), BoxError> {
             self.filters += 1;
@@ -1155,10 +1329,24 @@ mod tests {
             let mut report = report(completion);
             report.covered_through = 77;
             assert_eq!(
-                progress(&report),
+                progress(&report, false),
                 Progress {
                     covered_through: 77,
                     outcome,
+                }
+            );
+            // A pass clamped to the publication's end is behind even when it
+            // completes; an incomplete one keeps its reason.
+            let clamped = if outcome == Outcome::Complete {
+                Outcome::Behind
+            } else {
+                outcome
+            };
+            assert_eq!(
+                progress(&report, true),
+                Progress {
+                    covered_through: 77,
+                    outcome: clamped,
                 }
             );
         }
@@ -1675,6 +1863,442 @@ mod tests {
             page_id(0, "aa", &[1], 3),
         ] {
             assert_ne!(first, other);
+        }
+    }
+
+    /// A companion bound to the fixture map that retains `script` from `required_from`.
+    fn seeded(dir: &tempfile::TempDir, script: &[u8], required_from: u64) -> ReferenceRecovery {
+        let mut adapter =
+            ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        adapter.store.bind_set(&SetIdentity::of(&map())).unwrap();
+        adapter
+            .store
+            .add_scripts(&[ScriptEntry {
+                script: script.to_vec(),
+                origin: ScriptOrigin::Imported,
+                required_from,
+            }])
+            .unwrap();
+        adapter
+    }
+
+    /// What a pass reading `entry` under `digest` through `end` commits for `script`.
+    fn covered(
+        entry: &ShardMapEntry,
+        digest: &str,
+        (end, terminal): (u64, &str),
+        script: &[u8],
+        events: Vec<TransparentEvent>,
+    ) -> transparent_wallet::ShardCommit {
+        transparent_wallet::ShardCommit {
+            source_anchor: None,
+            shard_id: entry.shard_id,
+            revision_digest: digest.into(),
+            sealed: entry.sealed,
+            start_height: entry.start_height,
+            end_height: end,
+            terminal_block_hash: terminal.into(),
+            events: events
+                .into_iter()
+                .map(|event| StoredEvent {
+                    script: script.to_vec(),
+                    event,
+                    shard_id: entry.shard_id,
+                    revision_digest: digest.into(),
+                })
+                .collect(),
+            covered_scripts: vec![script.to_vec()],
+            pending_upsert: vec![],
+            pending_complete: vec![],
+        }
+    }
+
+    #[test]
+    fn below_floor_view_is_lenient_only_below_the_floor() {
+        let floor = 1_000;
+        let held = "11".repeat(32);
+        let other = "22".repeat(32);
+        let chain = StaticChain {
+            hashes: BTreeMap::from([(floor, held.clone())]),
+        };
+        let view = BelowFloor {
+            chain: &chain,
+            below: floor,
+            genesis: MAINNET_GENESIS_DISPLAY,
+        };
+        // Below the floor every block is accepted, and only block 0 has a hash.
+        for height in [0, 1, floor - 1] {
+            assert_eq!(view.is_accepted(height, &other), Acceptance::Accepted);
+        }
+        assert_eq!(view.hash_at(0).as_deref(), Some(MAINNET_GENESIS_DISPLAY));
+        assert_eq!(view.hash_at(1), None);
+        assert_eq!(view.hash_at(floor - 1), None);
+        // From the floor up, the caller's chain alone answers.
+        assert_eq!(view.is_accepted(floor, &held), Acceptance::Accepted);
+        assert_eq!(view.is_accepted(floor, &other), Acceptance::Rejected);
+        assert_eq!(view.is_accepted(floor + 1, &held), Acceptance::Unknown);
+        assert_eq!(view.hash_at(floor), Some(held));
+        assert_eq!(view.hash_at(floor + 1), None);
+        assert_eq!(view.tip(), chain.tip());
+        // A floor of 0, when nothing is watched, is never lenient.
+        let strict = BelowFloor {
+            chain: &chain,
+            below: 0,
+            genesis: MAINNET_GENESIS_DISPLAY,
+        };
+        assert_eq!(
+            strict.is_accepted(0, MAINNET_GENESIS_DISPLAY),
+            Acceptance::Unknown
+        );
+        assert_eq!(strict.hash_at(0), None);
+
+        // The floor is the lowest required height, capped at the target.
+        let mut watch = watch();
+        let lowest = u64::from(u32::from(watch.addresses[0].required_from));
+        watch.addresses.push(WatchedAddress {
+            address: TransparentAddress::PublicKeyHash([8; 20]),
+            required_from: block(lowest + 10).unwrap(),
+            ..watch.addresses[0]
+        });
+        assert_eq!(required_floor(&watch, u64::MAX), lowest);
+        assert_eq!(required_floor(&watch, lowest - 1), lowest - 1);
+        watch.addresses.clear();
+        assert_eq!(required_floor(&watch, u64::MAX), 0);
+    }
+
+    #[test]
+    fn shards_ending_below_the_required_start_are_neither_exported_nor_cataloged() {
+        let map = map();
+        let (low, high) = (&map.shards[0], &map.shards[1]);
+        let mut watch = watch();
+        let address = watch.addresses[0].address;
+        let script = address_script(address);
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = seeded(&dir, &script, map.start_height);
+        // The companion also holds coverage and a receive in the shard below the floor.
+        let receive = TransparentEvent::Receive(transparent_events::ReceiveEvent {
+            metadata: None,
+            height: low.start_height as u32,
+            txid: transparent_events::Txid([1; 32]),
+            transaction_index: 1,
+            output_index: 0,
+            value: 100,
+            coinbase: false,
+        });
+        for (entry, events) in [(low, vec![receive]), (high, vec![])] {
+            let end = (entry.end_height, entry.terminal_block_hash.as_str());
+            adapter
+                .store
+                .commit_shard(covered(entry, &entry.manifest_digest, end, &script, events))
+                .unwrap();
+        }
+        let cataloged = |adapter: &ReferenceRecovery| -> u64 {
+            adapter
+                .catalog
+                .query_row("SELECT COUNT(*) FROM pir_bridge_revisions", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+
+        // The wallet's chain starts at the floor, so it has no hash for the low shard.
+        watch.addresses[0].required_from = block(high.start_height).unwrap();
+        let chain = StaticChain {
+            hashes: BTreeMap::from([(high.end_height, high.terminal_block_hash.clone())]),
+        };
+        let batch = adapter
+            .normalize(&watch, map.clone(), MORE, &chain)
+            .unwrap();
+        assert_eq!(batch.commits.len(), 1);
+        let commit = &batch.commits[0];
+        assert_eq!(commit.anchor.height, block(high.end_height).unwrap());
+        assert!(commit.receives.is_empty());
+        assert_eq!(
+            commit.coverage,
+            vec![AddressRange {
+                address,
+                from: block(high.start_height).unwrap(),
+                through: block(high.end_height).unwrap(),
+            }]
+        );
+        assert_eq!(cataloged(&adapter), 1);
+
+        // With the floor at the map's start, the same companion exports and
+        // catalogs both shards, the receive included.
+        watch.addresses[0].required_from = block(map.start_height).unwrap();
+        let batch = adapter
+            .normalize(&watch, map.clone(), MORE, &StaticChain::from_map(&map))
+            .unwrap();
+        assert_eq!(batch.commits.len(), 2);
+        assert_eq!(batch.commits[0].receives.len(), 1);
+        assert_eq!(cataloged(&adapter), 2);
+    }
+
+    #[test]
+    fn a_pass_watching_nothing_sends_no_request() {
+        let map = map();
+        let last = map.shards.last().unwrap();
+        let mut watch = watch();
+        watch.addresses.clear();
+        let target = u64::from(u32::from(watch.target.unwrap().height));
+        // The wallet holds only its target, far above block 0, the floor of an
+        // empty watch set.
+        assert_eq!(required_floor(&watch, target), 0);
+        let chain = StaticChain {
+            hashes: BTreeMap::from([(last.end_height, last.terminal_block_hash.clone())]),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter =
+            ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        let mut filters = CountingFilters::default();
+        let mut shards = CountingShards::serving(SCHEMA);
+        let batch = adapter
+            .recover(&watch, &chain, &mut filters, &mut shards)
+            .unwrap();
+        assert_eq!(
+            batch.progress,
+            Progress {
+                covered_through: target,
+                outcome: Outcome::Complete,
+            }
+        );
+        assert!(batch.commits.is_empty());
+        assert_eq!((filters.calls(), shards.calls()), (0, 0));
+        assert!(adapter.store.set_identity().unwrap().is_none());
+        adapter.acknowledge_applied(&batch).unwrap();
+        // The target must still be accepted.
+        assert!(matches!(
+            adapter.recover(&watch, &StaticChain::default(), &mut filters, &mut shards),
+            Err(RecoveryError::Invalid(_))
+        ));
+        assert_eq!((filters.calls(), shards.calls()), (0, 0));
+    }
+
+    #[test]
+    fn sync_target_clamps_only_to_an_accepted_end_at_or_above_the_floor_and_anchor() {
+        let map = map();
+        let last = map.shards.last().unwrap();
+        let t = last.end_height;
+        let end = Anchor {
+            height: t,
+            hash: last.terminal_block_hash.clone(),
+        };
+        let accepted = StaticChain::from_map(&map);
+        let floor = map.start_height;
+        let target = Anchor {
+            height: t + 10,
+            hash: "99".repeat(32),
+        };
+        let unclamped = (target.clone(), false);
+
+        // Behind, with every condition met: sync to the map's accepted end.
+        assert_eq!(
+            sync_target(&map, &target, floor, None, 0, &accepted),
+            (end.clone(), true)
+        );
+        // A floor, companion anchor or retained event exactly at the end allows it.
+        assert_eq!(
+            sync_target(&map, &target, t, Some(&end), t, &accepted),
+            (end.clone(), true)
+        );
+        // Ahead or level: the publication reaches the target.
+        for reached in [t - 1, t] {
+            let target = Anchor {
+                height: reached,
+                hash: "99".repeat(32),
+            };
+            assert_eq!(
+                sync_target(&map, &target, floor, None, 0, &accepted),
+                (target, false)
+            );
+        }
+        // Below the floor: nothing the watch set requires is published yet.
+        assert_eq!(
+            sync_target(&map, &target, t + 1, None, 0, &accepted),
+            unclamped
+        );
+        // An unaccepted terminal: the wallet's chain does not know the end.
+        assert_eq!(
+            sync_target(&map, &target, floor, None, 0, &StaticChain::default()),
+            unclamped
+        );
+        // A map terminal on a stale branch: the wallet holds another block there.
+        let mut stale = accepted.clone();
+        stale.hashes.insert(t, "aa".repeat(32));
+        assert_eq!(
+            sync_target(&map, &target, floor, None, 0, &stale),
+            unclamped
+        );
+        // A lagging replica: the companion already settled above the end, or
+        // retains an event above it.
+        let above = Anchor {
+            height: t + 1,
+            hash: "bb".repeat(32),
+        };
+        assert_eq!(
+            sync_target(&map, &target, floor, Some(&above), 0, &accepted),
+            unclamped
+        );
+        assert_eq!(
+            sync_target(&map, &target, floor, None, t + 1, &accepted),
+            unclamped
+        );
+    }
+
+    #[test]
+    fn a_pass_behind_the_publication_syncs_to_its_accepted_end() {
+        let map = map();
+        let last = map.shards.last().unwrap();
+        let t = last.end_height;
+        let mut watch = watch();
+        let wallet_target = ChainPoint {
+            height: block(t + 10).unwrap(),
+            hash: BlockHash([9; 32]),
+        };
+        watch.target = Some(wallet_target);
+        let mut chain = StaticChain::from_map(&map);
+        chain.hashes.insert(t + 10, wallet_target.hash.to_string());
+        let address = watch.addresses[0].address;
+        let script = address_script(address);
+
+        // A wallet born above the publication's end has nothing to clamp to.
+        let dir = tempfile::tempdir().unwrap();
+        let mut young =
+            ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        let mut born = watch.clone();
+        born.addresses[0].required_from = block(t + 1).unwrap();
+        let mut filters = CountingFilters::default();
+        let mut shards = CountingShards::serving(SCHEMA);
+        let batch = young
+            .recover(&born, &chain, &mut filters, &mut shards)
+            .unwrap();
+        assert_eq!(batch.progress.outcome, Outcome::Behind);
+        assert!(batch.commits.is_empty());
+        assert_eq!(young.store.anchor().unwrap(), None);
+        assert_eq!((filters.filters, shards.calls()), (0, 1));
+
+        // A companion already covering the script through the end needs no retrieval.
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapter = seeded(&dir, &script, map.start_height);
+        for entry in &map.shards {
+            let end = (entry.end_height, entry.terminal_block_hash.as_str());
+            adapter
+                .store
+                .commit_shard(covered(entry, &entry.manifest_digest, end, &script, vec![]))
+                .unwrap();
+        }
+        let mut filters = CountingFilters::default();
+        let mut shards = CountingShards::serving(SCHEMA);
+        let batch = adapter
+            .recover(&watch, &chain, &mut filters, &mut shards)
+            .unwrap();
+        assert_eq!((filters.filters, shards.calls()), (0, 1));
+        // The client completed through the map's end, which is still behind the wallet.
+        assert_eq!(
+            batch.progress,
+            Progress {
+                covered_through: t,
+                outcome: Outcome::Behind,
+            }
+        );
+        assert_eq!(
+            adapter.store.anchor().unwrap(),
+            Some(Anchor {
+                height: t,
+                hash: last.terminal_block_hash.clone(),
+            })
+        );
+        // Commits keep the wallet's target, and each anchor stays at its shard's end.
+        assert_eq!(batch.commits.len(), map.shards.len());
+        for (commit, entry) in batch.commits.iter().zip(&map.shards) {
+            assert_eq!(commit.context.target, wallet_target);
+            assert_eq!(
+                commit.anchor,
+                ChainPoint {
+                    height: block(entry.end_height).unwrap(),
+                    hash: block_hash(&entry.terminal_block_hash).unwrap(),
+                }
+            );
+            assert_eq!(
+                commit.coverage,
+                vec![AddressRange {
+                    address,
+                    from: block(entry.start_height).unwrap(),
+                    through: block(entry.end_height).unwrap(),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn a_replaced_tail_rolls_back_below_the_floor_without_a_wallet_hash() {
+        let map = map();
+        let tail = map.shards.last().unwrap();
+        // The companion covered an older tail revision, ending at a block the wallet accepts.
+        let old_end = (tail.end_height - 38, "ef".repeat(32));
+        // The wallet holds no block below the tail's start, where the rollback lands.
+        let chain = StaticChain {
+            hashes: BTreeMap::from([
+                old_end.clone(),
+                (tail.end_height, tail.terminal_block_hash.clone()),
+            ]),
+        };
+        for (required_from, lenient) in [(tail.start_height, true), (map.start_height, false)] {
+            let mut watch = watch();
+            watch.addresses[0].required_from = block(required_from).unwrap();
+            let script = address_script(watch.addresses[0].address);
+            let dir = tempfile::tempdir().unwrap();
+            let mut adapter = seeded(&dir, &script, required_from);
+            let old = (old_end.0, old_end.1.as_str());
+            adapter
+                .store
+                .commit_shard(covered(tail, &"cd".repeat(32), old, &script, vec![]))
+                .unwrap();
+            let mut filters = CountingFilters::default();
+            let mut shards = CountingShards::serving(SCHEMA);
+            // Below the floor the rollback is accepted and the pass goes on to the
+            // tail's filter, which the counting source refuses. At or above it the
+            // wallet's missing hash stops the pass before any filter request.
+            let Err(RecoveryError::Failure(stopped)) =
+                adapter.recover(&watch, &chain, &mut filters, &mut shards)
+            else {
+                panic!("the pass must fail at the filter or at the rollback");
+            };
+            let cause = if lenient {
+                "transport:"
+            } else {
+                "no accepted rollback hash"
+            };
+            assert!(stopped.contains(cause), "{stopped}");
+            assert_eq!(adapter.store.provisional().unwrap().is_empty(), lenient);
+            assert_eq!(filters.filters, usize::from(lenient));
+        }
+    }
+
+    #[test]
+    fn a_map_for_another_network_or_genesis_is_refused_before_retrieval() {
+        let fixture: serde_json::Value = serde_json::from_slice(MAP).unwrap();
+        let mut testnet = fixture.clone();
+        testnet["network"] = "test".into();
+        let mut forked = fixture;
+        forked["genesis_hash"] = "11".repeat(32).into();
+        for served in [testnet, forked] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut adapter =
+                ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+            let mut filters = CountingFilters::serving(serde_json::to_vec(&served).unwrap());
+            let mut shards = CountingShards::serving(SCHEMA);
+            assert!(matches!(
+                adapter.recover(
+                    &watch(),
+                    &StaticChain::from_map(&map()),
+                    &mut filters,
+                    &mut shards
+                ),
+                Err(RecoveryError::Invalid(_))
+            ));
+            assert_eq!((filters.maps, filters.filters, shards.calls()), (1, 0, 0));
+            assert!(adapter.store.set_identity().unwrap().is_none());
         }
     }
 }
