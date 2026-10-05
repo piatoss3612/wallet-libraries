@@ -205,6 +205,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("wallet target differs from independent chain".into());
         }
         let batch = reference.recover(&watch, &chain, &mut filters, &mut transport)?;
+        if let BatchState::Withdrawn(cause) = batch.state {
+            return Err(format!("publication withdrawn: {cause:?}").into());
+        }
+        // Only the wallet's trusted operation resolves retired revisions, and only
+        // `acknowledge_reconciled` acknowledges a batch listing them. This harness
+        // never qualifies, so it stops before applying such a batch and leaves
+        // the notifications in the companion.
         if !batch.retired_revisions().is_empty() {
             return Err(
                 "frozen fixture unexpectedly requires trusted revision reconciliation".into(),
@@ -227,14 +234,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .apply_transparent_ledger_commit(commit.clone())?
                 .window_grew;
         }
-        // `Ready` assumes trusted application. This harness never qualifies, so
-        // it stopped above at a batch retiring a revision.
-        match batch.state {
-            BatchState::Ready => reference.acknowledge_applied(&batch)?,
-            BatchState::Pending => {}
-            BatchState::Withdrawn(cause) => {
-                return Err(format!("publication withdrawn: {cause:?}").into());
-            }
+        // A `Pending` batch has no commits and is not acknowledged. A `Ready` one
+        // without retirements is acknowledged once every commit applied.
+        if batch.state == BatchState::Ready {
+            reference.acknowledge_applied(&batch)?;
         }
         passes.push(json!({"pass":pass,"state":format!("{:?}",batch.state),"receives":receives,"spends":spends,
             "covered_through":batch.progress.covered_through,"outcome":format!("{:?}",batch.progress.outcome),"window_grew":grew}));
