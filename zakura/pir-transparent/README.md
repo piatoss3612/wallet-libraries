@@ -60,8 +60,10 @@ counted, so a recreated companion reproduces the triples the wallet holds:
 - `source` hashes the companion binding with the set-identity fields that never
   change while the publication continues (shard schema, network, genesis block,
   profile, envelope version and start height), the shard's geometry, that
-  geometry's seal parameters, and the shard id. A set growing into a new
-  geometry tier changes no existing source.
+  geometry's seal parameters, the shard id and the shard's start height. A set
+  growing into a new geometry tier changes no existing source. Re-cutting an
+  earlier geometry can move a later shard's start height while reusing its id;
+  that different height range gets a new source.
 - `revision` hashes the shard's manifest digest and whether it is sealed.
 - `lineage` is the published revision number plus one.
 
