@@ -31,7 +31,7 @@ mod ironwood_enhance;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
-mod ironwood_transparent_output_shape;
+pub(crate) mod ironwood_transparent_output_shape;
 mod ironwood_unsupported_memo_retry;
 mod ivk_item_cache;
 mod note_locking;
