@@ -22,6 +22,21 @@ workspace.
   swap note with its derived viewing key and sends change to the ordinary account key.
   `LowLevelWalletRead::ironwood_nullifier_retention_height` lets stores keep Ironwood
   spend evidence for notes found after scanning.
+- `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
+  output-presence assertion for display reconstruction; note decryption authenticates the memo,
+  not that assertion.
+- `transparent_ledger::HistoryClassification::NetReconstructed`: the account's effects and the
+  exact whole-transaction fee balance, but the wallet lacks the full transaction and cannot
+  exclude another party's self-balanced shielded participation, so the account's movement is
+  final while its payment and fee attribution are not.
+
+### Changed
+- `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
+  has-transparent records too, so storage can compare it before keeping such a record's
+  authenticated memo and agreeing fee without public authority. A `PrivateDetailsUnsupported`
+  result no longer skips later records of the same batch; `LwdRequired` still does.
+
+### Added
 - `tor::Client::connect_lightwalletd_channel` returns the Tor-routed `tonic` channel that
   `connect_to_lightwalletd` wraps, so callers can layer `tower` services over it.
 - `data_api::transparent_ledger`: the storage-neutral contract for transparent

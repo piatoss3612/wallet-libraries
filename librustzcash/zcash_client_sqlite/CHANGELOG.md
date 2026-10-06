@@ -10,6 +10,33 @@ workspace.
 
 ## [Unreleased]
 
+- Private recovery of mixed transparent/Ironwood transactions under `PrivateRequired` keeps
+  the details that do not depend on transparent data. A has-transparent Enhance PIR record (or
+  a compact scan with explicit non-Ironwood fields) still takes the sticky route-2
+  (`PrivateDetailsUnsupported`) marker, but the transaction keeps private memo work for its
+  received Ironwood notes. Each memo is authenticated by note decryption, and the whole-transaction
+  fee is filled only when it agrees with every known fee, expiry, and displayed expiry; a
+  disagreeing response is rejected without effect. Memo work is dispatched only while public
+  authority is absent and is dropped when a policy transition restores it (route 1).
+  The additive `ironwood_unsupported_memo_retry` migration requeues the unknown memos of
+  route-2 transactions in existing wallets, without resetting notes, spend links, or routes.
+- History reconstructs a mixed transaction without full data, as
+  `HistoryClassification::NetReconstructed`, only as a transparent-to-shielded self-transfer: every owned effect complete, qualified metadata counting exactly the account's
+  published transparent inputs, its exact whole-transaction fee agreeing with the stored one
+  when present, recovered evidence that no transparent outputs exist, only
+  transparent spends and shielded receipts, and the spent value equal to the receipts plus that
+  fee. Otherwise it stays provisional. A net reconstruction does not prove the debit was the
+  fee: another party's shielded spend paying an equal output at a padding action has the same
+  evidence. The stored fee of such a transaction is the whole
+  transaction's: `FeeState` stays `Unknown` and the aggregate payment is not inferred.
+
+- Mixed net-shielding reconstruction can use the qualified transparent PIR whole-transaction
+  fee when Enhance PIR omits it, without filling `transactions.fee` or attributing the fee.
+  The additive `ironwood_transparent_output_shape` migration retains the nullable output-presence
+  assertion and privately requeues its recovery for existing memo-complete route-2 wallets.
+  Unknown or conflicting shape, incomplete/unqualified effects, and failed accounting remain
+  provisional.
+
 - Transparent spend discovery retains work for unmined local spenders and resumes after they
   expire. Address and per-outpoint completion advance past expired-spender links, using expiry
   at the current tip; an address range advances only the outputs whose search frontier it covers.
@@ -312,6 +339,11 @@ Breaking storage release for independently routed transaction status and
 payload enhancement work.
 
 ### Fixed
+- History payment details recognize a recovered received memo for the exact same
+  owned sent output (account, transaction, pool, and output index), including an
+  empty memo. Private Ironwood recovery no longer leaves details incomplete solely
+  because the duplicate sent record's memo is unknown. Missing received or external
+  sent memos, unsettled effects, and incomplete accounting still prevent completeness.
 - Retire undecryptable Ironwood outgoing candidates once the wallet's value
   accounting proves no account it holds funded them: the wallet has a linked
   spend, no discovery work remains, every other output is recovered, the fee is
