@@ -6,10 +6,7 @@ use orchard::{
     tree::{Anchor, MerkleHashOrchard, MerklePath},
     value::NoteValue,
 };
-use zakura_swap_receiving::{
-    KeyId, Purpose,
-    recovery::{EncryptedNote, RecoveryError},
-};
+use zakura_swap_receiving::{KeyId, Purpose, recovery::EncryptedNote};
 use zcash_note_encryption::Domain;
 
 #[test]
@@ -41,16 +38,16 @@ fn authenticate_derived_key_and_bind_position() {
         assert_eq!(recovered.note(), &note);
         assert_eq!(recovered.memo(), &[4; 512]);
         assert_eq!(recovered.nullifier(), &note.nullifier(&key));
-        assert!(restored.decrypt(&account, KeyId::new(purpose, 8)).is_err());
+        assert!(restored.decrypt(&account, KeyId::new(purpose, 8)).is_none());
         let other = FullViewingKey::from(&SpendingKey::from_bytes([1; 32]).unwrap());
-        assert!(restored.decrypt(&other, id).is_err());
+        assert!(restored.decrypt(&other, id).is_none());
         for offset in [0, 32, 64, 96, 148, 675] {
             let mut bytes = *restored.to_bytes();
             bytes[offset] ^= 1;
             assert!(
                 EncryptedNote::from_bytes(bytes)
                     .decrypt(&account, id)
-                    .is_err()
+                    .is_none()
             );
         }
         let path = MerklePath::from_parts(
@@ -58,18 +55,9 @@ fn authenticate_derived_key_and_bind_position() {
             std::array::from_fn(|i| MerkleHashOrchard::empty_root((i as u8).into())),
         );
         let root = path.root(note.commitment().into());
-        recovered.verify_position(2, &path, root).unwrap();
-        assert_eq!(
-            recovered.verify_position(3, &path, root),
-            Err(RecoveryError::Witness)
-        );
-        assert_eq!(
-            recovered.verify_position((1u64 << 32) + 2, &path, root),
-            Err(RecoveryError::Witness)
-        );
-        assert_eq!(
-            recovered.verify_position(2, &path, Anchor::empty_tree()),
-            Err(RecoveryError::Witness)
-        );
+        assert!(recovered.verify_position(2, &path, root));
+        assert!(!recovered.verify_position(3, &path, root));
+        assert!(!recovered.verify_position((1u64 << 32) + 2, &path, root));
+        assert!(!recovered.verify_position(2, &path, Anchor::empty_tree()));
     }
 }

@@ -16,16 +16,8 @@ Applications supply:
   other writers.
 - the network's genesis hash (`MAINNET_GENESIS` on mainnet) and the clock.
 
-A run sweeps only while the wallet's fully scanned tip is its chain tip, and makes
-no request when nothing is due. The publication must commit to the genesis hash,
-cover history from Ironwood activation, and end at a block the wallet scanned no
-more than `MAX_PUBLICATION_LAG` blocks below its tip; otherwise no lookup is sent.
-A receiver is only ever sent inside a PIR query, and large jobs download the
-directory's row file instead. `EnhanceNotes` opens its session only when a lookup
-finds a payment. After each batch the incoming lookahead moves past paid indices
-and its new keys are swept too. A key that fails is backed off and reported while
-the others go on. Every wallet write is its own transaction, so dropping a run at
-any await leaves a consistent queue.
+See the `sweep` rustdoc for when a run sends requests, which publications it
+accepts, and how failures are retried.
 
 The receiver crates are pinned to a commit of wallet-pir's swap integration branch
 until they land on its `main`.

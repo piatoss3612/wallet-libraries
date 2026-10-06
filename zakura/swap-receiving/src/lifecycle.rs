@@ -3,26 +3,14 @@
 
 use zcash_protocol::value::Zatoshis;
 
-/// When a key's trial decryption may stop. Defaults are wallet conventions, not
-/// consensus parameters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CompletionPolicy {
-    /// Seconds an incoming key found only by a restore sweep keeps scanning, for a
-    /// payout from a swap in flight at restore.
-    pub restore_watch_secs: i64,
-    /// Seconds after the quote deadline, or after registration when no deadline
-    /// is known, after which scanning stops whatever the provider reports.
-    pub limit_secs: i64,
-}
+/// Seconds an incoming key found only by a restore sweep keeps scanning, for a
+/// payout from a swap in flight at restore. Like [`COMPLETION_LIMIT_SECS`], a
+/// wallet convention, not a consensus parameter.
+pub const RESTORE_WATCH_SECS: i64 = 24 * 60 * 60;
 
-impl Default for CompletionPolicy {
-    fn default() -> Self {
-        Self {
-            restore_watch_secs: 24 * 60 * 60,
-            limit_secs: 30 * 24 * 60 * 60,
-        }
-    }
-}
+/// Seconds after the quote deadline, or after registration when no deadline is
+/// known, after which a key stops scanning whatever the provider reports.
+pub const COMPLETION_LIMIT_SECS: i64 = 30 * 24 * 60 * 60;
 
 /// The route adapter's interpretation of the expected Zcash receipt.
 /// Incoming source-chain refunds must not be interpreted as Zcash refunds.
@@ -104,45 +92,6 @@ pub fn near_observation(
         status: outcome,
         deadline: status.deadline,
     })
-}
-
-/// Reads a NEAR 1Click `/v0/status` response body for a key of `purpose` with
-/// [`near_observation`]. Returns `None` for a malformed body or an unrecognized
-/// status. A deadline without a zone designator is taken as UTC, as 1Click reports.
-pub fn near_status_observation(purpose: crate::Purpose, body: &[u8]) -> Option<Observation> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let text = |pointer: &str| value.pointer(pointer).and_then(|v| v.as_str());
-    let amount = |pointer: &str| {
-        text(pointer)
-            .and_then(|v| v.parse::<u64>().ok())
-            .and_then(|v| Zatoshis::from_u64(v).ok())
-    };
-    near_observation(
-        purpose,
-        &ProviderStatus {
-            status: text("/status")?,
-            swap_type: text("/quoteResponse/quoteRequest/swapType"),
-            refunded_amount: amount("/swapDetails/refundedAmount"),
-            amount_out: amount("/swapDetails/amountOut"),
-            deadline: text("/quoteResponse/quoteRequest/deadline").and_then(unix_seconds),
-        },
-    )
-}
-
-/// Unix seconds of an RFC 3339 timestamp, or of one without a zone designator taken as UTC.
-fn unix_seconds(text: &str) -> Option<i64> {
-    use time::{
-        OffsetDateTime, PrimitiveDateTime,
-        format_description::well_known::{Iso8601, Rfc3339},
-    };
-    OffsetDateTime::parse(text, &Rfc3339)
-        .ok()
-        .or_else(|| {
-            PrimitiveDateTime::parse(text, &Iso8601::DEFAULT)
-                .ok()
-                .map(PrimitiveDateTime::assume_utc)
-        })
-        .map(OffsetDateTime::unix_timestamp)
 }
 
 #[cfg(test)]
@@ -238,35 +187,5 @@ mod tests {
                 deadline: Some(42),
             })
         );
-    }
-
-    #[test]
-    fn status_responses_yield_expectations_and_utc_deadlines() {
-        let body = br#"{"status":"SUCCESS","swapDetails":{"refundedAmount":"1500"},
-            "quoteResponse":{"quoteRequest":{"swapType":"EXACT_INPUT",
-            "deadline":"2026-09-01T12:00:00Z"}}}"#;
-        let refund = near_status_observation(Refund, body).unwrap();
-        assert_eq!(
-            refund.status,
-            OperationStatus::Terminal(ReceiptExpectation::Positive(Some(
-                Zatoshis::const_from_u64(1500)
-            )))
-        );
-        assert_eq!(refund.deadline, Some(1_788_264_000));
-        let zoneless = br#"{"status":"PENDING_DEPOSIT",
-            "quoteResponse":{"quoteRequest":{"deadline":"2026-09-01T12:00:00"}}}"#;
-        let pending = near_status_observation(Receive, zoneless).unwrap();
-        assert_eq!(pending.status, OperationStatus::Active);
-        assert_eq!(pending.deadline, Some(1_788_264_000));
-        let payout = br#"{"status":"SUCCESS","swapDetails":{"amountOut":"70000"}}"#;
-        assert_eq!(
-            near_status_observation(Receive, payout).unwrap().status,
-            OperationStatus::Terminal(ReceiptExpectation::Positive(Some(
-                Zatoshis::const_from_u64(70_000)
-            )))
-        );
-        for unusable in [&br#"{"status":"NEW_STATE"}"#[..], b"not json", b"{}"] {
-            assert_eq!(near_status_observation(Refund, unusable), None);
-        }
     }
 }

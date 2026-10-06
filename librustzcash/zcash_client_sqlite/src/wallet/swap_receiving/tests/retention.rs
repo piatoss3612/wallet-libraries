@@ -3,7 +3,7 @@ use super::*;
 use zakura_swap_receiving::lifecycle::OperationStatus;
 
 /// Completes the restore sweep of every key registered to `account` at `through`.
-fn finish_sweeps<CL, R>(
+fn finish_sweeps<CL: Clock, R>(
     db: &mut WalletDb<Connection, LocalNetwork, CL, R>,
     account: AccountUuid,
     through: ChainPoint,
@@ -26,14 +26,8 @@ fn swept() -> (State, RegisteredKey, ChainPoint) {
             .unwrap()
     );
     assert_eq!(
-        db.apply_pending_swap_payment(
-            account,
-            key.key_id(),
-            &candidate,
-            through,
-            Some((through, &path))
-        )
-        .unwrap(),
+        db.apply_pending_swap_payment(account, key.key_id(), &candidate, through, (through, &path))
+            .unwrap(),
         PaymentApplication::Applied
     );
     // Import advances allocation. Finishing must create and wait for the new window.
@@ -120,14 +114,8 @@ fn undone_sweeps_and_queued_candidates_hold_spend_evidence() {
         crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
         Some(candidate.height)
     );
-    db.apply_pending_swap_payment(
-        account,
-        key.key_id(),
-        &candidate,
-        tip,
-        Some((original, &path)),
-    )
-    .unwrap();
+    db.apply_pending_swap_payment(account, key.key_id(), &candidate, tip, (original, &path))
+        .unwrap();
     assert!(
         !db.finish_swap_nullifier_recovery_with(account, tip, 1)
             .unwrap()
@@ -140,7 +128,7 @@ fn undone_sweeps_and_queued_candidates_hold_spend_evidence() {
     );
     assert_eq!(
         crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
-        Some(key.scan_from())
+        Some(db.swap_key_state(account, key.key_id()).0)
     );
     db.finish_sweep(account, key.key_id(), tip).unwrap();
     assert!(
@@ -289,7 +277,7 @@ fn missing_spend_history_queues_replay_and_recovers_after_restart() {
                 key.key_id(),
                 &candidate,
                 through,
-                Some((through, &path))
+                (through, &path)
             )
             .unwrap(),
         PaymentApplication::AwaitingSpendHistory
@@ -324,7 +312,7 @@ fn missing_spend_history_queues_replay_and_recovers_after_restart() {
                 key.key_id(),
                 &candidate,
                 through,
-                Some((through, &path))
+                (through, &path)
             )
             .unwrap(),
         PaymentApplication::Applied
@@ -532,14 +520,8 @@ fn note_before_the_birthday_is_dropped_without_queuing_replay() {
         )
         .unwrap();
     assert_eq!(
-        db.apply_pending_swap_payment(
-            account,
-            key.key_id(),
-            &candidate,
-            through,
-            Some((through, &path))
-        )
-        .unwrap(),
+        db.apply_pending_swap_payment(account, key.key_id(), &candidate, through, (through, &path))
+            .unwrap(),
         PaymentApplication::BeforeBirthday
     );
     assert!(

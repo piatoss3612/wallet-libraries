@@ -71,7 +71,6 @@ fn swap_receiving_pir_authenticates_memos_after_reopen() {
             .unwrap()
             .unwrap();
         assert_eq!(pending.note.recipient(), key.receiver());
-        assert!(pending.receiving_ivk.is_some());
 
         let mut suffix = *record.enc_ciphertext_suffix();
         suffix[527] ^= 1;

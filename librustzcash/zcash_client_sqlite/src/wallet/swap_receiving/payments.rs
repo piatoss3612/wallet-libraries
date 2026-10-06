@@ -38,13 +38,9 @@ pub(crate) enum SpendStatus {
     Unknown,
     /// Every block retains its unlinked nullifiers, and no recorded wallet spend matches.
     Unspent,
-    /// A retained canonical transaction reveals the locally derived nullifier.
-    Spent {
-        /// Spending transaction ID.
-        txid: TxId,
-        /// Spending block height.
-        height: BlockHeight,
-    },
+    /// A retained canonical transaction, with this ID, reveals the locally derived
+    /// nullifier.
+    Spent(TxId),
 }
 
 /// The registry ID of `account`'s key `key`.
@@ -77,7 +73,7 @@ pub(super) fn authenticate<P: Parameters>(
     let note = candidate
         .encrypted_note
         .decrypt(&parent, key)
-        .map_err(|_| corrupt("swap note authentication failed"))?;
+        .ok_or_else(|| corrupt("swap note authentication failed"))?;
     let receiver: Vec<u8> = conn.query_row(
         "SELECT receiver FROM ironwood_receiving_keys WHERE id=?1",
         [id],
@@ -131,11 +127,11 @@ pub(super) fn spend_status(
         .query_row(
             // The scanner removes known wallet spends from the unlinked nullifier map.
             // Both stores must be checked before interpreting absence as unspent.
-            "SELECT t.txid, t.block_height FROM nullifier_map n
+            "SELECT t.txid FROM nullifier_map n
              JOIN tx_locator_map t USING (block_height, tx_index)
              WHERE n.spend_pool = ?1 AND n.nf = ?2 AND t.block_height BETWEEN ?3 AND ?4
              UNION ALL
-             SELECT t.txid, t.mined_height FROM ironwood_received_notes n
+             SELECT t.txid FROM ironwood_received_notes n
              JOIN ironwood_received_note_spends s ON s.ironwood_received_note_id = n.id
              JOIN transactions t ON t.id_tx = s.transaction_id
              JOIN blocks b ON b.height = t.block AND b.height = t.mined_height
@@ -147,12 +143,7 @@ pub(super) fn spend_status(
                 u32::from(candidate.height),
                 u32::from(through.height)
             ],
-            |r| {
-                Ok(SpendStatus::Spent {
-                    txid: TxId::from_bytes(r.get(0)?),
-                    height: BlockHeight::from(r.get::<_, u32>(1)?),
-                })
-            },
+            |r| Ok(SpendStatus::Spent(TxId::from_bytes(r.get(0)?))),
         )
         .optional()?;
     if let Some(spent) = spent {
@@ -185,32 +176,6 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
              FROM ironwood_swap_payment_recovery WHERE receiving_key_id = ?1 ORDER BY position",
         )?;
         Ok(stmt.query_map([id], payment)?.collect::<Result<_, _>>()?)
-    }
-}
-#[cfg(test)]
-impl<C: std::borrow::BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Authenticates `candidate` and checks its spend evidence with [`spend_status`].
-    pub(crate) fn swap_payment_spend_status(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        candidate: &PendingPayment,
-        through: ChainPoint,
-    ) -> Result<SpendStatus, Error> {
-        self.transactionally(|db| {
-            let (_, note) = authenticate(db.conn.0, &db.params, account, key, candidate)?;
-            spend_status(db.conn.0, candidate, note.nullifier(), through)
-        })
-    }
-
-    /// See [`WalletDb::queue_swap_payment`] on a transaction-backed handle.
-    pub(crate) fn queue_swap_payment(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        candidate: &PendingPayment,
-    ) -> Result<(), Error> {
-        self.transactionally(|db| db.queue_swap_payment(account, key, candidate))
     }
 }
 impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {

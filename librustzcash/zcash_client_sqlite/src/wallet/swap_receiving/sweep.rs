@@ -17,7 +17,12 @@ use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use super::{Error, KeyId, PaymentApplication, PendingPayment, corrupt, payments::key_ref};
+use super::{
+    Error, KeyId, PaymentApplication, PendingPayment, Purpose, activate, corrupt,
+    payments::key_ref,
+    planner::{anchor, canonical},
+    reservations::used,
+};
 use crate::{AccountUuid, WalletDb, wallet};
 
 /// A directory publication more than this many blocks behind the wallet's scanned
@@ -214,7 +219,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// hashes for a commitment tree position and note commitment, or `None` when the
     /// publication has none. `through` is the wallet's fully scanned tip. Returns
     /// [`PaymentApplication::Applied`] once the sweep is finished, or why a payment
-    /// must wait; payments applied before it stay applied.
+    /// must wait; payments applied before it stay applied. A lookup a reorg removed
+    /// defers the sweep to run again.
+    ///
+    /// The key then scans from the block after the lookup until it closes: a refund
+    /// key because the provider may still return funds, and an unpaid incoming key to
+    /// catch a payout from a swap in flight at restore.
     pub fn apply_swap_sweep(
         &mut self,
         account: AccountUuid,
@@ -234,18 +244,38 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 key,
                 &candidate,
                 through,
-                Some((publication, &path)),
+                (publication, &path),
             )?;
             match applied {
                 PaymentApplication::Applied | PaymentApplication::BeforeBirthday => {}
                 waiting => return Ok(waiting),
             }
         }
-        let coverage = self
-            .swap_lookup_coverage(account, key)?
-            .ok_or(Error::SweepDeferred(SweepDeferral::UnknownAnchor))?;
-        self.finish_swap_discovery_attempt(account, key, coverage)?;
-        Ok(PaymentApplication::Applied)
+        self.transactionally(|db| {
+            let conn = db.conn.0;
+            let id = key_ref(conn, account, key)?;
+            let (pending, lookup): (bool, Option<ChainPoint>) = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery
+                        WHERE receiving_key_id = ?1),
+                    lookup_height, lookup_hash
+                 FROM ironwood_swap_sweeps WHERE receiving_key_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, anchor(r.get(1)?, r.get(2)?))),
+            )?;
+            if pending {
+                return Err(corrupt("sweep has unapplied candidates"));
+            }
+            let lookup = canonical(conn, lookup)?
+                .ok_or(Error::SweepDeferred(SweepDeferral::UnknownAnchor))?;
+            conn.execute(
+                "UPDATE ironwood_swap_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
+                params![id, u32::from(lookup.height)],
+            )?;
+            if key.purpose() == Purpose::Refund || !used(conn, id)? {
+                activate(conn, id, lookup.height + 1)?;
+            }
+            Ok(PaymentApplication::Applied)
+        })
     }
 }
 

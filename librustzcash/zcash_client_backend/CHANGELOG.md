@@ -17,10 +17,9 @@ workspace.
   trial-decrypts every key from `WalletRead::get_swap_scanning_keys` in each batch and
   passes that snapshot to `WalletWrite::put_blocks_with_swap_keys`, so stores can
   rescan blocks that a key activated mid-batch missed. Full-transaction enhancement
-  uses `WalletRead::get_swap_transaction_keys`, and Enhance PIR authenticates swap
-  memos with `PendingIronwoodMemo::receiving_ivk`. Transaction construction spends a
-  swap note with its derived viewing key and sends change to the ordinary account key.
-  `LowLevelWalletRead::ironwood_nullifier_retention_height` lets stores keep Ironwood
+  uses `WalletRead::get_swap_transaction_keys`. Transaction construction spends a swap
+  note with its derived viewing key and sends change to the ordinary account key.
+- `LowLevelWalletRead::ironwood_nullifier_retention_height` lets stores keep Ironwood
   spend evidence for notes found after scanning.
 - `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
   output-presence assertion for display reconstruction; note decryption authenticates the memo,
@@ -31,6 +30,9 @@ workspace.
   final while its payment and fee attribution are not.
 
 ### Changed
+- `enhance_pir::storage::PendingIronwoodMemo` carries the incoming key that detected the
+  note, `ivk`, in place of `scope`. Storage resolves it, so a registered swap key
+  authenticates its own memos.
 - `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
   has-transparent records too, so storage can compare it before keeping such a record's
   authenticated memo and agreeing fee without public authority. A `PrivateDetailsUnsupported`

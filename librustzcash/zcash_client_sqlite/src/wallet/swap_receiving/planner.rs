@@ -1,11 +1,8 @@
 //! Restore sweeps: one receiver-directory pass for each key recovered from the seed.
 //! Preparing metadata does not derive viewing keys.
-use super::{
-    Error, KeyId, PendingPayment, Purpose, account_key, activate, corrupt, payments::key_ref,
-    reservations::used, stored_key_id,
-};
+use super::{Error, KeyId, PendingPayment, account_key, corrupt, payments::key_ref, stored_key_id};
 use crate::{AccountUuid, SqlTransaction, WalletDb, wallet};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use std::borrow::{Borrow, BorrowMut};
 use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_primitives::block::BlockHash;
@@ -30,7 +27,10 @@ pub struct DiscoveryBatch {
 }
 
 /// Returns `anchor` only while its block is still on the wallet's chain.
-fn canonical(conn: &Connection, anchor: Option<ChainPoint>) -> Result<Option<ChainPoint>, Error> {
+pub(super) fn canonical(
+    conn: &Connection,
+    anchor: Option<ChainPoint>,
+) -> Result<Option<ChainPoint>, Error> {
     Ok(match anchor {
         Some(a) if wallet::get_block_hash(conn, a.height)? == Some(a.hash) => Some(a),
         _ => None,
@@ -38,7 +38,7 @@ fn canonical(conn: &Connection, anchor: Option<ChainPoint>) -> Result<Option<Cha
 }
 
 /// Builds an anchor from a stored height and hash pair.
-fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<ChainPoint> {
+pub(super) fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<ChainPoint> {
     height.zip(hash).map(|(height, hash)| ChainPoint {
         height: BlockHeight::from(height),
         hash: BlockHash(hash),
@@ -46,26 +46,6 @@ fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<ChainPoint> {
 }
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Last atomically persisted lookup, independent of candidate application.
-    pub(crate) fn swap_lookup_coverage(
-        &self,
-        account: AccountUuid,
-        key: KeyId,
-    ) -> Result<Option<ChainPoint>, Error> {
-        let conn = self.conn.borrow();
-        let id = key_ref(conn, account, key)?;
-        let lookup = conn
-            .query_row(
-                "SELECT lookup_height, lookup_hash FROM ironwood_swap_sweeps
-                 WHERE receiving_key_id = ?1",
-                [id],
-                |r| Ok(anchor(r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .flatten();
-        canonical(conn, lookup)
-    }
-
     /// Whether `account` still has restore sweeps or queued candidates through `through`.
     /// Retry backoff never makes an unfinished restore appear complete.
     pub fn swap_history_pending(
@@ -175,60 +155,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                  WHERE receiving_key_id = ?1",
                 params![id, now.saturating_add(delay)],
             )?;
-            Ok(())
-        })
-    }
-
-    /// See [`WalletDb::queue_swap_lookup`] on a transaction-backed handle.
-    #[cfg(test)]
-    pub(crate) fn queue_swap_lookup(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        anchor: ChainPoint,
-        payments: &[PendingPayment],
-    ) -> Result<(), Error> {
-        self.transactionally(|db| db.queue_swap_lookup(account, key, anchor, payments))
-    }
-
-    /// Completes a key's sweep at `anchor` once all its candidates are applied.
-    ///
-    /// The key then scans from the next block until it closes: a refund key
-    /// because the provider may still return funds, and an unpaid incoming key to
-    /// catch a payout from a swap in flight at restore. Returns an error while
-    /// candidates remain queued, unless a canonical lookup reached `anchor`, or if
-    /// `anchor` is no longer canonical.
-    pub(crate) fn finish_swap_discovery_attempt(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        anchor: ChainPoint,
-    ) -> Result<(), Error> {
-        self.transactionally(|db| {
-            let id = key_ref(db.conn.0, account, key)?;
-            let (pending, lookup): (bool, Option<ChainPoint>) = db.conn.0.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery
-                        WHERE receiving_key_id = ?1),
-                    lookup_height, lookup_hash
-                 FROM ironwood_swap_sweeps WHERE receiving_key_id = ?1",
-                [id],
-                |r| Ok((r.get(0)?, self::anchor(r.get(1)?, r.get(2)?))),
-            )?;
-            if pending {
-                return Err(corrupt("sweep has unapplied candidates"));
-            }
-            // A reorg between the lookup and this call leaves the sweep to run again.
-            let covered = canonical(db.conn.0, lookup)?.is_some_and(|l| l.height >= anchor.height);
-            if !covered || canonical(db.conn.0, Some(anchor))?.is_none() {
-                return Err(Error::SweepDeferred(super::SweepDeferral::UnknownAnchor));
-            }
-            db.conn.0.execute(
-                "UPDATE ironwood_swap_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
-                params![id, u32::from(anchor.height)],
-            )?;
-            if key.purpose() == Purpose::Refund || !used(db.conn.0, id)? {
-                activate(db.conn.0, id, anchor.height + 1)?;
-            }
             Ok(())
         })
     }

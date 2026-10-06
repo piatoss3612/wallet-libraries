@@ -99,7 +99,7 @@ fn swap_payment_queue_authenticates_retries_and_survives_reopen_without_credit()
         .unwrap();
     assert_eq!(jobs.len(), 1);
     assert!(jobs[0] == candidate);
-    assert!(!reopening.get_swap_receiving_keys(account).unwrap()[0].advances_allocation());
+    assert!(!reopening.swap_key_state(account, key.key_id()).1);
     let credited: u64 = st
         .wallet()
         .conn()
@@ -222,10 +222,7 @@ fn swap_payment_absence_requires_retained_contiguous_nullifiers() {
             .db_mut()
             .swap_payment_spend_status(account, key.key_id(), &candidate, through)
             .unwrap(),
-        SpendStatus::Spent {
-            txid: spend_txid,
-            height: last
-        }
+        SpendStatus::Spent(spend_txid)
     );
     let mut wrong = through;
     wrong.hash.0[0] ^= 1;
@@ -322,7 +319,7 @@ fn swap_payment_spentness_includes_spends_already_linked_by_scanning() {
         .db_mut()
         .swap_payment_spend_status(account, key.key_id(), &candidate, through)
         .unwrap();
-    assert!(matches!(status, SpendStatus::Spent { height, .. } if height == spent_height));
+    assert!(matches!(status, SpendStatus::Spent(_)));
     st.wallet_mut().delete_account(account).unwrap();
     let coverage: u64 = st
         .wallet()

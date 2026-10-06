@@ -1,7 +1,7 @@
 //! Incoming allocation fills old holes without forgetting issued payment instructions.
 use super::{
-    Discovery, Error, KeyId, Purpose, RegisteredKey, account_key, corrupt, decode_index,
-    issuance_start, register,
+    Discovery, Error, KeyId, Purpose, RESTORED_INCOMING, RegisteredKey, account_key, corrupt,
+    decode_index, issuance_start, register,
 };
 use crate::{AccountUuid, WalletDb, util::Clock, wallet};
 use rand_core::Rng;
@@ -136,8 +136,8 @@ fn recovery_end(conn: &Connection, account: i64) -> Result<u64, Error> {
 }
 
 /// Closes reservation `id`, keeping its quote associations. Its quotes are no longer
-/// polled; the key's scanning ends separately under `close_finished_swap_keys`. Both
-/// callers admit only expired unfunded deposits as still open, which expect no receipt.
+/// polled; the key's scanning ends separately under `close_finished_swap_keys`.
+/// Reaping admits only expired unfunded deposits as still open, which expect no receipt.
 fn close_reservation(conn: &Connection, id: i64, now: i64) -> Result<(), Error> {
     conn.execute(
         "UPDATE ironwood_swap_receive_reservations SET closed_at = ?2 WHERE id = ?1",
@@ -229,31 +229,6 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             .collect::<Result<_, _>>()?)
     }
 
-    /// Unpaid reservations old enough to reclaim. This does not release them.
-    pub(crate) fn swap_receive_reclaim_candidates(
-        &self,
-        account: AccountUuid,
-        now: i64,
-    ) -> Result<Vec<i64>, Error> {
-        let conn = self.conn.borrow();
-        let mut stmt = conn.prepare(
-            "SELECT r.id FROM ironwood_swap_receive_reservations r
-             JOIN ironwood_receiving_keys k ON k.id = r.receiving_key_id
-             JOIN accounts a ON a.id = k.account_id
-             WHERE a.uuid = ?1 AND r.closed_at IS NULL ORDER BY k.key_index",
-        )?;
-        let ids = stmt
-            .query_map([account.0], |r| r.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids.into_iter()
-            .filter_map(|id| match reusable(conn, id, now) {
-                Ok(true) => Some(Ok(id)),
-                Ok(false) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .collect()
-    }
-
     /// Reloads a reservation under its owning account, including closed history.
     pub(crate) fn swap_receive_reservation(
         &self,
@@ -273,59 +248,6 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Stops polling completed paid reservations while preserving their permanent used marker.
-    /// Old unfunded quote edits can finish after the same grace and fresh status checks,
-    /// and unknown outcomes after the grace alone.
-    pub(crate) fn close_received_swap_reservations(
-        &mut self,
-        account: AccountUuid,
-        now: i64,
-    ) -> Result<(), Error> {
-        self.transactionally(|db| {
-            let (a, _) = account_key(db.conn.0, &db.params, account)?;
-            let ids = db
-                .conn
-                .0
-                .prepare(
-                    "SELECT r.id FROM ironwood_swap_receive_reservations r
-                     JOIN ironwood_receiving_keys k ON k.id = r.receiving_key_id
-                     WHERE k.account_id = ?1 AND k.used = 1 AND r.closed_at IS NULL
-                       AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q
-                         WHERE q.reservation_id = r.id AND q.rejected = 0 AND (
-                           (q.operation_id IS NULL AND (q.deadline IS NULL OR q.deadline > ?2 - ?3))
-                           OR (q.operation_id IS NOT NULL AND (
-                             q.status IS NULL OR q.checked_at IS NULL OR q.checked_at > ?2
-                             OR (q.status NOT IN ('SUCCESS', 'REFUNDED', 'FAILED')
-                               AND NOT (q.status = 'PENDING_DEPOSIT' AND q.funded = 0
-                                 AND q.deadline IS NOT NULL AND q.deadline <= ?2 - ?3
-                                 AND q.checked_at >= ?2 - ?4))))))",
-                )?
-                .query_map(
-                    params![a.0, now, RECEIVE_RECLAIM_SECONDS, STATUS_FRESH_SECONDS],
-                    |r| r.get::<_, i64>(0),
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            for id in ids {
-                close_reservation(db.conn.0, id, now)?;
-            }
-            Ok(())
-        })
-    }
-
-    /// Reserves like [`WalletDb::prepare_swap_receive_reservation`], scanning a new key
-    /// from `scan_from`, without the readiness checks or lookahead registration.
-    #[cfg(test)]
-    pub(crate) fn prepare_swap_receive_reservation_from(
-        &mut self,
-        account: AccountUuid,
-        now: i64,
-        scan_from: BlockHeight,
-    ) -> Result<ReceiveReservation, Error> {
-        let id =
-            self.transactionally(|db| prepare(db.conn.0, &db.params, account, now, scan_from))?;
-        self.swap_receive_reservation(account, id)
-    }
-
     /// [`WalletDb::begin_swap_receive_quote`] with a chosen request identity.
     pub(crate) fn begin_swap_receive_quote_as(
         &mut self,
@@ -510,42 +432,65 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         })
     }
 
-    /// Releases an unpaid reservation after successful provider reconciliation, once
-    /// local scanning has covered its address through the chain tip without a payment.
-    /// The key stays active, so a later reservation reuses it without a scanning gap.
-    pub(crate) fn reclaim_swap_receive_reservation(
-        &mut self,
-        account: AccountUuid,
-        id: i64,
-        now: i64,
-    ) -> Result<bool, Error> {
-        self.transactionally(|db| {
-            let key = reservation_key(db.conn.0, account, id)?;
-            if !reusable(db.conn.0, id, now)? || !scanned_empty(db.conn.0, key)? {
-                return Ok(false);
-            }
-            close_reservation(db.conn.0, id, now)?;
-            Ok(true)
-        })
-    }
-
     /// Ends settled paid reservations and reclaims abandoned unpaid ones whose
-    /// addresses local scanning shows are still empty. Returns how many were
-    /// reclaimed. Reconcile the quotes from [`WalletDb::swap_receive_quotes_due`]
-    /// with the provider first: reclamation needs fresh conclusive statuses.
+    /// addresses local scanning shows are still empty, in one transaction, and returns
+    /// the reclaimed reservations. A reclaimed key stays active, so a later
+    /// reservation reuses it without a scanning gap. Reconcile the quotes from
+    /// [`WalletDb::swap_receive_quotes_due`] with the provider first: reclamation needs
+    /// fresh conclusive statuses.
     pub fn reap_swap_receive_reservations(
         &mut self,
         account: AccountUuid,
         now: i64,
-    ) -> Result<u32, Error> {
-        self.close_received_swap_reservations(account, now)?;
-        let mut reclaimed = 0;
-        for id in self.swap_receive_reclaim_candidates(account, now)? {
-            if self.reclaim_swap_receive_reservation(account, id, now)? {
-                reclaimed += 1;
+    ) -> Result<Vec<i64>, Error> {
+        self.transactionally(|db| {
+            let conn = db.conn.0;
+            let (owner, _) = account_key(conn, &db.params, account)?;
+            // A paid reservation keeps its key's used marker. Its old unfunded quote
+            // edits finish after the cooldown and a fresh status, and unknown outcomes
+            // after the cooldown alone.
+            let paid = conn
+                .prepare(
+                    "SELECT r.id FROM ironwood_swap_receive_reservations r
+                     JOIN ironwood_receiving_keys k ON k.id = r.receiving_key_id
+                     WHERE k.account_id = ?1 AND k.used = 1 AND r.closed_at IS NULL
+                       AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q
+                         WHERE q.reservation_id = r.id AND q.rejected = 0 AND (
+                           (q.operation_id IS NULL AND (q.deadline IS NULL OR q.deadline > ?2 - ?3))
+                           OR (q.operation_id IS NOT NULL AND (
+                             q.status IS NULL OR q.checked_at IS NULL OR q.checked_at > ?2
+                             OR (q.status NOT IN ('SUCCESS', 'REFUNDED', 'FAILED')
+                               AND NOT (q.status = 'PENDING_DEPOSIT' AND q.funded = 0
+                                 AND q.deadline IS NOT NULL AND q.deadline <= ?2 - ?3
+                                 AND q.checked_at >= ?2 - ?4))))))",
+                )?
+                .query_map(
+                    params![owner.0, now, RECEIVE_RECLAIM_SECONDS, STATUS_FRESH_SECONDS],
+                    |r| r.get::<_, i64>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            for id in paid {
+                close_reservation(conn, id, now)?;
             }
-        }
-        Ok(reclaimed)
+            let open = conn
+                .prepare(
+                    "SELECT r.id, r.receiving_key_id FROM ironwood_swap_receive_reservations r
+                     JOIN ironwood_receiving_keys k ON k.id = r.receiving_key_id
+                     WHERE k.account_id = ?1 AND r.closed_at IS NULL ORDER BY k.key_index",
+                )?
+                .query_map([owner.0], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut reclaimed = Vec::new();
+            for (id, key) in open {
+                if reusable(conn, id, now)? && scanned_empty(conn, key)? {
+                    close_reservation(conn, id, now)?;
+                    reclaimed.push(id);
+                }
+            }
+            Ok(reclaimed)
+        })
     }
 }
 
@@ -599,7 +544,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
 }
 
 /// See [`WalletDb::prepare_swap_receive_reservation`]. Returns the reservation ID.
-fn prepare<P: Parameters>(
+pub(super) fn prepare<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
@@ -655,11 +600,10 @@ fn prepare<P: Parameters>(
     // unpaid indices may be the old device's open swaps, so issue from the top of the
     // recovery window instead. A later restore still reaches it.
     let watching: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
-            JOIN ironwood_swap_sweeps s ON s.receiving_key_id = k.id
-            WHERE k.account_id = ?1 AND k.purpose = 1 AND k.closed_at IS NULL
-              AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
-                  WHERE r.receiving_key_id = k.id))",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
+             WHERE k.account_id = ?1 AND k.closed_at IS NULL AND {RESTORED_INCOMING})"
+        ),
         [a.0],
         |r| r.get(0),
     )?;

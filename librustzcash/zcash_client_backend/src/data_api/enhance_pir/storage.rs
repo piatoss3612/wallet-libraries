@@ -28,28 +28,14 @@ pub struct PendingIronwoodMemo<AccountId> {
     pub account_id: AccountId,
     /// Compact-scanned note whose commitment must be reproduced.
     pub note: Note,
-    /// Key scope detected by compact trial decryption.
-    pub scope: Scope,
-    /// Storage-resolved incoming key for a registered receiving key. It must belong
-    /// to `account_id` and reconstruct `note`. Use `None` only for ordinary account
-    /// keys. A missing or unsupported registration must return a storage error.
-    pub receiving_ivk: Option<PreparedIncomingViewingKey>,
+    /// The incoming key that detected `note` in the compact scan: `account_id`'s key
+    /// for the detected scope, or a registered receiving key's. Storage resolves it
+    /// from the same snapshot as `note`.
+    pub ivk: PreparedIncomingViewingKey,
     /// Ephemeral key retained from the trusted compact scan.
     pub ephemeral_key: [u8; 32],
     /// First 52 ciphertext bytes retained from the same compact action.
     pub compact_ciphertext: [u8; 52],
-}
-
-impl<AccountId> PendingIronwoodMemo<AccountId> {
-    fn incoming_key(&self, account: &impl Account) -> Option<PreparedIncomingViewingKey> {
-        self.receiving_ivk.clone().or_else(|| match self.scope {
-            Scope::External => account.uivk().orchard().as_ref().map(|ivk| ivk.prepare()),
-            Scope::Internal => account
-                .ufvk()
-                .and_then(|key| key.orchard())
-                .map(|fvk| fvk.to_ivk(Scope::Internal).prepare()),
-        })
-    }
 }
 
 /// Compact action and candidate senders retained for outgoing recovery.
@@ -408,14 +394,8 @@ fn validate_record<DbT: EnhancePirStorage>(
     if let Some(binding) = metadata {
         let valid = match binding {
             PendingIronwoodMetadata::Incoming(pending) => {
-                let account = db.get_account(pending.account_id)?;
-                let ivk = account
-                    .as_ref()
-                    .and_then(|account| pending.incoming_key(account));
                 pending.note.version() == NoteVersion::V3
-                    && ivk
-                        .and_then(|ivk| decrypt_memo(&pending, &ivk, record))
-                        .is_some()
+                    && decrypt_memo(&pending, record).is_some()
             }
             // The server's position association is trusted for send-only metadata.
             // No local decryption can authenticate an unrecoverable output.
@@ -433,11 +413,7 @@ fn validate_record<DbT: EnhancePirStorage>(
         if pending.note.version() != NoteVersion::V3 {
             return Ok(Err(EnhancePirStoreResult::Rejected));
         }
-        let Some(account) = db.get_account(pending.account_id)? else {
-            return Ok(Err(EnhancePirStoreResult::Rejected));
-        };
-        let ivk = pending.incoming_key(&account);
-        let Some(memo) = ivk.and_then(|ivk| decrypt_memo(&pending, &ivk, record)) else {
+        let Some(memo) = decrypt_memo(&pending, record) else {
             return Ok(Err(EnhancePirStoreResult::Rejected));
         };
         Some(memo)
@@ -502,7 +478,6 @@ fn validate_record<DbT: EnhancePirStorage>(
 
 fn decrypt_memo<AccountId>(
     pending: &PendingIronwoodMemo<AccountId>,
-    ivk: &PreparedIncomingViewingKey,
     record: &EnhanceRecord,
 ) -> Option<MemoBytes> {
     let expected_note = &pending.note;
@@ -522,7 +497,7 @@ fn decrypt_memo<AccountId>(
     };
     let (note, _, memo) = zcash_note_encryption::try_note_decryption(
         &IronwoodDomain::for_compact_action(&compact),
-        ivk,
+        &pending.ivk,
         &output,
     )?;
     if note != *expected_note {
@@ -587,11 +562,7 @@ mod tests {
     #[allow(non_upper_case_globals)]
     const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 
-    fn encrypted_record() -> (
-        PendingIronwoodMemo<()>,
-        PreparedIncomingViewingKey,
-        EnhanceRecord,
-    ) {
+    fn encrypted_record() -> (PendingIronwoodMemo<()>, EnhanceRecord) {
         let usk =
             UnifiedSpendingKey::from_seed(&Network::TestNetwork, &[0; 32], zip32::AccountId::ZERO)
                 .expect("valid spending key");
@@ -634,21 +605,17 @@ mod tests {
             request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes([0; 32]), 0),
             account_id: (),
             note,
-            scope: Scope::External,
-            receiving_ivk: None,
+            ivk: fvk.to_ivk(Scope::External).prepare(),
             ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0,
             compact_ciphertext: encryptor.encrypt_note_plaintext()[..52].try_into().unwrap(),
         };
-        (pending, fvk.to_ivk(Scope::External).prepare(), record)
+        (pending, record)
     }
 
     #[test]
     fn accepts_authentic_ciphertext_and_rejects_tampering() {
-        let (mut note, ivk, record) = encrypted_record();
-        assert_eq!(
-            decrypt_memo(&note, &ivk, &record).unwrap().as_slice(),
-            &[7; 512]
-        );
+        let (mut note, record) = encrypted_record();
+        assert_eq!(decrypt_memo(&note, &record).unwrap().as_slice(), &[7; 512]);
 
         let mut ciphertext = *record.enc_ciphertext_suffix();
         ciphertext[527] ^= 1;
@@ -661,17 +628,17 @@ mod tests {
             metadata: crate::data_api::enhance_pir::EnhanceTransactionMetadata::new(0, Some(0))
                 .unwrap(),
         });
-        assert!(decrypt_memo(&note, &ivk, &tampered).is_none());
+        assert!(decrypt_memo(&note, &tampered).is_none());
 
         note.compact_ciphertext[0] ^= 1;
-        assert!(decrypt_memo(&note, &ivk, &record).is_none());
+        assert!(decrypt_memo(&note, &record).is_none());
         note.compact_ciphertext[0] ^= 1;
         note.ephemeral_key[0] ^= 1;
-        assert!(decrypt_memo(&note, &ivk, &record).is_none());
+        assert!(decrypt_memo(&note, &record).is_none());
         note.ephemeral_key[0] ^= 1;
 
-        let (_, _, another_note_record) = encrypted_record();
-        assert!(decrypt_memo(&note, &ivk, &another_note_record).is_none());
+        let (_, another_note_record) = encrypted_record();
+        assert!(decrypt_memo(&note, &another_note_record).is_none());
     }
 
     #[test]

@@ -22,8 +22,10 @@ durable registry of derived refund and incoming keys, their scanning, seed
 recovery through receiver-directory sweeps, and spending. It is disabled by
 default. The migration creates its tables in every build, so feature changes
 preserve existing reservations. Compact scanning and software spending retain each
-note's derived key; change uses ordinary account keys. The wallet calls and their
-contracts are described in the [shared contract](../../zakura/swap-receiving/README.md).
+note's derived key; change uses ordinary account keys. The `wallet::swap_receiving`
+rustdoc lists the calls a wallet makes, and the
+[`zakura-swap-receiving` README](../../zakura/swap-receiving/README.md) describes the
+key derivation and refund memo.
 
 A refund reservation can share a `transactionally_with_extension` transaction with
 application operation state. Expose the address only after commit, and reuse its

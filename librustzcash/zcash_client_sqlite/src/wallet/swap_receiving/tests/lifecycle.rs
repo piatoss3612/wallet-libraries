@@ -1,16 +1,13 @@
 use super::*;
 use zakura_swap_receiving::lifecycle::{
-    Observation,
+    COMPLETION_LIMIT_SECS as LIMIT, Observation,
     OperationStatus::{Active, Terminal},
     ProviderStatus,
     ReceiptExpectation::{None as NoReceipt, Positive, Unknown},
 };
 
 const HOUR: i64 = 60 * 60;
-/// `CompletionPolicy::default().grace_secs`.
-const GRACE: i64 = 24 * HOUR;
-/// `CompletionPolicy::default().limit_secs`.
-const LIMIT: i64 = 30 * 24 * HOUR;
+const DAY: i64 = 24 * HOUR;
 
 /// Unix time the fixed test clock stamps on registered keys as `registered_at`.
 fn registered_at() -> i64 {
@@ -182,7 +179,7 @@ fn inconclusive_status_keeps_key_open_until_the_limit() {
         .db_mut()
         .observe_swap_operation(account, key, "swap", Terminal(Unknown), failed)
         .unwrap();
-    assert_eq!(close(&mut st, failed + GRACE), 0);
+    assert_eq!(close(&mut st, failed + DAY), 0);
     assert_eq!(close(&mut st, registered_at() + LIMIT), 1);
 }
 
@@ -248,7 +245,7 @@ fn a_key_closes_once_its_last_operation_is_final() {
         .unwrap();
     db.observe_swap_operation(account, key, "pending", Active, first)
         .unwrap();
-    assert_eq!(close(&mut st, first + GRACE), 0);
+    assert_eq!(close(&mut st, first + DAY), 0);
     let last = first + 2 * HOUR;
     st.wallet_mut()
         .db_mut()
@@ -354,9 +351,9 @@ fn keys_stay_open_while_a_rescan_is_queued() {
             .iter()
             .any(|r| r.block_range().contains(&tip))
     );
-    assert_eq!(close(&mut st, terminal + GRACE), 0);
+    assert_eq!(close(&mut st, terminal + DAY), 0);
     st.scan_cached_blocks(tip, 1);
-    assert_eq!(close(&mut st, terminal + GRACE), 1);
+    assert_eq!(close(&mut st, terminal + DAY), 1);
 }
 
 #[test]
@@ -380,12 +377,12 @@ fn incoming_key_closes_only_once_paid_and_released() {
     }
     pay(&mut st, &reserved, 10_000);
     confirm(&mut st);
-    assert_eq!(close(&mut st, terminal + GRACE), 0);
+    assert_eq!(close(&mut st, terminal + DAY), 0);
     st.wallet_mut()
         .db_mut()
-        .close_received_swap_reservations(account, terminal + GRACE)
+        .reap_swap_receive_reservations(account, terminal + DAY)
         .unwrap();
-    assert_eq!(close(&mut st, terminal + GRACE), 1);
+    assert_eq!(close(&mut st, terminal + DAY), 1);
     assert_eq!(close(&mut st, registered_at() + LIMIT), 0);
     assert_eq!(scanning_keys(&st), [unpaid.key_id()]);
 }
@@ -426,9 +423,9 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
         db.observe_swap_receive_quote(account, request, &status, funded, released)
             .unwrap();
     }
-    db.close_received_swap_reservations(account, released)
+    db.reap_swap_receive_reservations(account, released)
         .unwrap();
-    assert_eq!(close(&mut st, released + GRACE), 1);
+    assert_eq!(close(&mut st, released + DAY), 1);
 }
 
 #[test]
@@ -453,12 +450,13 @@ fn reissued_key_limit_ignores_an_earlier_reservations_deadline() {
     };
     db.observe_swap_receive_quote(account, "first", &pending, false, reclaimed)
         .unwrap();
-    assert!(
-        db.reclaim_swap_receive_reservation(account, first.id, reclaimed)
-            .unwrap()
+    assert_eq!(
+        db.reap_swap_receive_reservations(account, reclaimed)
+            .unwrap(),
+        [first.id]
     );
     // Reissued after the first quote's limit has passed.
-    let reissued = first_deadline + LIMIT + 24 * HOUR;
+    let reissued = first_deadline + LIMIT + DAY;
     let second = db
         .prepare_swap_receive_reservation_from(account, reissued, from)
         .unwrap();
@@ -482,8 +480,7 @@ fn reissued_key_limit_ignores_an_earlier_reservations_deadline() {
     let db = st.wallet_mut().db_mut();
     db.observe_swap_receive_quote(account, "second", &success, true, settled)
         .unwrap();
-    db.close_received_swap_reservations(account, settled)
-        .unwrap();
+    db.reap_swap_receive_reservations(account, settled).unwrap();
     assert_eq!(close(&mut st, settled), 0);
     pay(&mut st, &second.key, 69_000);
     confirm(&mut st);
@@ -530,12 +527,12 @@ fn keys_close_only_at_the_confirmed_tip() {
         .unwrap();
     // The network reports a block the wallet has not stored or scanned yet.
     assert_eq!(
-        db.close_finished_swap_keys_at(account, terminal + GRACE, tip + 1)
+        db.close_finished_swap_keys_at(account, terminal + DAY, tip + 1)
             .unwrap(),
         0
     );
     assert_eq!(
-        db.close_finished_swap_keys_at(account, terminal + GRACE, tip)
+        db.close_finished_swap_keys_at(account, terminal + DAY, tip)
             .unwrap(),
         1
     );

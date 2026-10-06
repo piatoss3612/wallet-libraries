@@ -127,20 +127,21 @@ fn lookahead_does_not_skip_unissued_addresses_and_recovery_promotes_it() {
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     for index in 0..20 {
+        db.watch_swap_receive_key(account, index, start()).unwrap();
         assert!(
-            !db.watch_swap_receive_key(account, index, start())
-                .unwrap()
-                .advances_allocation()
+            !db.swap_key_state(account, KeyId::new(Purpose::Receive, index))
+                .1
         );
     }
     let key_id = KeyId::new(Purpose::Receive, 18);
-    let recovered = db
-        .recover_swap_receiving_key(account, key_id, 80.into())
+    db.recover_swap_receiving_key(account, key_id, 80.into())
         .unwrap();
-    assert!(recovered.advances_allocation());
-    let repeated = db.watch_swap_receive_key(account, 18, 120.into()).unwrap();
-    assert!(repeated.advances_allocation());
-    assert_eq!(repeated.scan_from(), BlockHeight::from_u32(80));
+    assert!(db.swap_key_state(account, key_id).1);
+    db.watch_swap_receive_key(account, 18, 120.into()).unwrap();
+    assert_eq!(
+        db.swap_key_state(account, key_id),
+        (BlockHeight::from_u32(80), true)
+    );
     assert_eq!(db.get_swap_receiving_keys(account).unwrap().len(), 20);
     // The unswept lookahead index 19 waits for its sweep rather than being skipped.
     assert!(matches!(
@@ -339,7 +340,7 @@ fn maintained_lookahead_extends_only_above_a_restored_key() {
         db.get_swap_receiving_keys(account)
             .unwrap()
             .iter()
-            .all(|k| !k.advances_allocation())
+            .all(|k| !db.swap_key_state(account, k.key_id()).1)
     );
     db.recover_swap_receiving_key(account, KeyId::new(Purpose::Receive, 19), start())
         .unwrap();
@@ -477,7 +478,207 @@ mod reservations;
 mod retention;
 mod scanning;
 
-impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
+impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
+    /// Every key registered to `account` by purpose and index, each re-derived and
+    /// checked against its stored receiver.
+    fn get_swap_receiving_keys(&self, account: AccountUuid) -> Result<Vec<RegisteredKey>, Error> {
+        let conn = self.conn.borrow();
+        let (account_ref, parent) = account_key(conn, &self.params, account)?;
+        let mut stmt = conn.prepare(
+            "SELECT purpose, key_index, receiver FROM ironwood_receiving_keys
+             WHERE account_id = ?1 ORDER BY purpose, key_index",
+        )?;
+        let mut rows = stmt.query([account_ref.0])?;
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next()? {
+            keys.push(registered_key(row, account, &parent)?);
+        }
+        Ok(keys)
+    }
+
+    /// The key registered to `account` as `key_id`, re-derived and checked.
+    fn get_swap_receiving_key(
+        &self,
+        account: AccountUuid,
+        key_id: KeyId,
+    ) -> Result<Option<RegisteredKey>, Error> {
+        self.swap_receiving_key_matching(
+            account,
+            "k.purpose=?2 AND k.key_index=?3",
+            rusqlite::params![
+                account.0,
+                purpose_code(key_id.purpose()),
+                key_id.index().to_be_bytes()
+            ],
+        )
+    }
+
+    /// `key`'s stored scan start and whether it advances allocation.
+    fn swap_key_state(&self, account: AccountUuid, key: KeyId) -> (BlockHeight, bool) {
+        self.conn
+            .borrow()
+            .query_row(
+                "SELECT k.scan_from, k.advances_allocation FROM ironwood_receiving_keys k
+                 JOIN accounts a ON a.id = k.account_id
+                 WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.key_index = ?3",
+                rusqlite::params![
+                    account.0,
+                    purpose_code(key.purpose()),
+                    key.index().to_be_bytes()
+                ],
+                |r| Ok((BlockHeight::from(r.get::<_, u32>(0)?), r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    /// `key`'s last queued lookup, if it is still on the wallet's chain.
+    fn swap_lookup_coverage(
+        &self,
+        account: AccountUuid,
+        key: KeyId,
+    ) -> Result<Option<ChainPoint>, Error> {
+        let conn = self.conn.borrow();
+        let id = super::payments::key_ref(conn, account, key)?;
+        let lookup = conn.query_row(
+            "SELECT lookup_height, lookup_hash FROM ironwood_swap_sweeps
+             WHERE receiving_key_id = ?1",
+            [id],
+            |r| Ok(super::planner::anchor(r.get(0)?, r.get(1)?)),
+        )?;
+        super::planner::canonical(conn, lookup)
+    }
+}
+
+impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
+    /// Reserves the next index, scanned at once from `scan_from`, without readiness
+    /// checks.
+    pub(crate) fn reserve_swap_receiving_key_from(
+        &mut self,
+        account: AccountUuid,
+        purpose: Purpose,
+        scan_from: BlockHeight,
+    ) -> Result<RegisteredKey, Error> {
+        self.transactionally(|wdb| {
+            wdb.reserve_swap_receiving_key_from(account, purpose, scan_from, Discovery::Scan)
+        })
+    }
+
+    /// Registers a key as recovered evidence would, from `scan_from`. A key this wallet
+    /// never scanned is queued for a receiver-directory sweep.
+    fn recover_swap_receiving_key(
+        &mut self,
+        account: AccountUuid,
+        key_id: KeyId,
+        scan_from: BlockHeight,
+    ) -> Result<RegisteredKey, Error> {
+        self.transactionally(|wdb| {
+            let now = unix_now(&wdb.clock);
+            let registered = register(
+                wdb.conn.0,
+                &wdb.params,
+                account,
+                key_id,
+                scan_from,
+                true,
+                Discovery::Sweep,
+                now,
+            )?;
+            Ok(registered.1)
+        })
+    }
+
+    /// See [`WalletDb::watch_swap_receive_key`] on a transaction-backed handle.
+    fn watch_swap_receive_key(
+        &mut self,
+        account: AccountUuid,
+        index: u64,
+        scan_from: BlockHeight,
+    ) -> Result<RegisteredKey, Error> {
+        self.transactionally(|wdb| wdb.watch_swap_receive_key(account, index, scan_from))
+    }
+
+    /// See [`WalletDb::maintain_swap_receive_lookahead`] on a transaction-backed handle.
+    fn maintain_swap_receive_lookahead(
+        &mut self,
+        account: AccountUuid,
+        count: u32,
+        scan_from: BlockHeight,
+    ) -> Result<(), Error> {
+        self.transactionally(|db| db.maintain_swap_receive_lookahead(account, count, scan_from))
+    }
+
+    /// Reserves like [`WalletDb::prepare_swap_receive_reservation`], scanning a new key
+    /// from `scan_from`, without the readiness checks or lookahead registration.
+    fn prepare_swap_receive_reservation_from(
+        &mut self,
+        account: AccountUuid,
+        now: i64,
+        scan_from: BlockHeight,
+    ) -> Result<ReceiveReservation, Error> {
+        let id = self.transactionally(|db| {
+            super::reservations::prepare(db.conn.0, &db.params, account, now, scan_from)
+        })?;
+        self.swap_receive_reservation(account, id)
+    }
+
+    /// See [`WalletDb::queue_swap_payment`] on a transaction-backed handle.
+    fn queue_swap_payment(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        candidate: &PendingPayment,
+    ) -> Result<(), Error> {
+        self.transactionally(|db| db.queue_swap_payment(account, key, candidate))
+    }
+
+    /// See [`WalletDb::queue_swap_lookup`] on a transaction-backed handle.
+    fn queue_swap_lookup(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        anchor: ChainPoint,
+        payments: &[PendingPayment],
+    ) -> Result<(), Error> {
+        self.transactionally(|db| db.queue_swap_lookup(account, key, anchor, payments))
+    }
+
+    /// Authenticates `candidate` and checks its spend evidence.
+    fn swap_payment_spend_status(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        candidate: &PendingPayment,
+        through: ChainPoint,
+    ) -> Result<SpendStatus, Error> {
+        self.transactionally(|db| {
+            let (_, note) =
+                super::payments::authenticate(db.conn.0, &db.params, account, key, candidate)?;
+            super::payments::spend_status(db.conn.0, candidate, note.nullifier(), through)
+        })
+    }
+
+    /// Retains `account`'s Ironwood spend evidence, as maintenance does.
+    fn retain_swap_spend_history(&mut self, account: AccountUuid) -> Result<(), Error> {
+        self.transactionally(|db| {
+            super::retention::retain_spend_history(db.conn.0, &db.params, account)
+        })
+    }
+
+    /// [`WalletDb::close_finished_swap_keys`] with `tip`'s block time set to `now`, as
+    /// when the caller's clock agrees with the chain.
+    fn close_finished_swap_keys_at(
+        &mut self,
+        account: AccountUuid,
+        now: i64,
+        tip: BlockHeight,
+    ) -> Result<usize, Error> {
+        self.conn.borrow_mut().execute(
+            "UPDATE blocks SET time = ?2 WHERE height = ?1",
+            rusqlite::params![u32::from(tip), now],
+        )?;
+        self.close_finished_swap_keys(account, now, tip)
+    }
+
     /// Records `status` for `operation` at Unix time `now`, without a quote deadline.
     fn observe_swap_operation(
         &mut self,
@@ -494,14 +695,17 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         self.record_swap_observation(account, key, operation, observation, now)
     }
 
-    /// Finishes `key`'s sweep at `anchor` after an empty lookup there.
+    /// Finishes `key`'s sweep after an empty lookup at `anchor`.
     fn finish_sweep(
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        anchor: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
+        anchor: ChainPoint,
     ) -> Result<(), Error> {
         self.queue_swap_lookup(account, key, anchor, &[])?;
-        self.finish_swap_discovery_attempt(account, key, anchor)
+        match self.apply_swap_sweep(account, key, anchor, anchor, |_, _| None)? {
+            PaymentApplication::Applied => Ok(()),
+            _ => Err(corrupt("sweep has unapplied candidates")),
+        }
     }
 }

@@ -8,14 +8,6 @@ use std::borrow::BorrowMut;
 use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
-impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// See [`retain_spend_history`].
-    #[cfg(test)]
-    pub(crate) fn retain_swap_spend_history(&mut self, account: AccountUuid) -> Result<(), Error> {
-        self.transactionally(|db| retain_spend_history(db.conn.0, &db.params, account))
-    }
-}
-
 /// Retains `account`'s Ironwood spend evidence from its birthday, or Ironwood
 /// activation if later, until [`WalletDb::finish_swap_nullifier_recovery`] releases it.
 pub(super) fn retain_spend_history<P: Parameters>(
@@ -60,9 +52,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         through: ChainPoint,
         lookahead: u32,
     ) -> Result<bool, Error> {
-        if lookahead == 0 {
-            return Err(corrupt("swap recovery requires a nonzero lookahead"));
-        }
         self.transactionally(|db| {
             let conn = db.conn.0;
             let (id, _) = account_key(conn, &db.params, account)?;

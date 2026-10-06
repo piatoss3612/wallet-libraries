@@ -8193,7 +8193,6 @@ version = "0.0.1-rc0"
 dependencies = [
  "axum",
  "futures-util",
- "prost",
  "receiver-directory",
  "receiver-pir",
  "receiver-pir-server",
@@ -8406,9 +8405,7 @@ dependencies = [
  "hex",
  "incrementalmerkletree",
  "rand 0.10.3",
- "serde_json",
  "shardtree",
- "time",
  "zakura-orchard",
  "zakura-pasta-curves",
  "zakura-protocol",

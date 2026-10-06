@@ -1,7 +1,7 @@
 use super::*;
 use rusqlite::params;
 use std::num::NonZeroU32;
-use zakura_swap_receiving::lifecycle::{CompletionPolicy, OperationStatus, ReceiptExpectation};
+use zakura_swap_receiving::lifecycle::{OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation};
 
 const NOW: i64 = 1_000;
 
@@ -274,84 +274,6 @@ fn incomplete_lookup_is_atomic_and_pending_ciphertext_survives_restart() {
 }
 
 #[test]
-fn finish_requires_applied_candidates_and_a_canonical_anchor() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = KeyId::new(Purpose::Receive, 8);
-    let from = tip(&st).height;
-    st.wallet_mut()
-        .db_mut()
-        .watch_swap_receive_key(account, 8, from)
-        .unwrap();
-    let candidate = pay_candidate(&mut st, key);
-    let through = tip(&st);
-    let db = st.wallet_mut().db_mut();
-    db.queue_swap_lookup(account, key, through, std::slice::from_ref(&candidate))
-        .unwrap();
-    assert!(
-        db.finish_swap_discovery_attempt(account, key, through)
-            .is_err()
-    );
-    assert_eq!(
-        db.apply_pending_swap_payment(
-            account,
-            key,
-            &candidate,
-            through,
-            Some((through, &first_leaf_path()))
-        )
-        .unwrap(),
-        PaymentApplication::Applied
-    );
-    let forked = ChainPoint {
-        hash: BlockHash([9; 32]),
-        ..through
-    };
-    let unscanned = ChainPoint {
-        height: through.height + 1,
-        ..through
-    };
-    // An anchor off the scanned chain defers the sweep rather than reporting corruption.
-    for anchor in [forked, unscanned] {
-        assert!(matches!(
-            db.finish_swap_discovery_attempt(account, key, anchor),
-            Err(Error::SweepDeferred(SweepDeferral::UnknownAnchor))
-        ));
-    }
-    assert_eq!(due(&mut st, through, NOW), [key]);
-    st.wallet_mut()
-        .db_mut()
-        .finish_swap_discovery_attempt(account, key, through)
-        .unwrap();
-    assert!(due(&mut st, through, NOW).is_empty());
-}
-
-#[test]
-fn finish_requires_a_lookup_through_its_anchor() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let looked_up = tip(&st);
-    let db = st.wallet_mut().db_mut();
-    let key = db
-        .watch_swap_receive_key(account, 0, looked_up.height)
-        .unwrap()
-        .key_id();
-    assert!(
-        db.finish_swap_discovery_attempt(account, key, looked_up)
-            .is_err()
-    );
-    db.queue_swap_lookup(account, key, looked_up, &[]).unwrap();
-    let later = advance(&mut st, 1);
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.finish_swap_discovery_attempt(account, key, later)
-            .is_err()
-    );
-    db.finish_swap_discovery_attempt(account, key, looked_up)
-        .unwrap();
-}
-
-#[test]
 fn finished_refund_sweep_scans_from_the_next_block_including_scanned_blocks() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
@@ -410,12 +332,12 @@ fn finished_incoming_sweep_watches_only_an_unpaid_key() {
             paid,
             &candidate,
             through,
-            Some((through, &first_leaf_path()))
+            (through, &first_leaf_path())
         )
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.finish_swap_discovery_attempt(account, paid, through)
+    db.apply_swap_sweep(account, paid, through, through, |_, _| None)
         .unwrap();
     db.finish_sweep(account, unpaid, through).unwrap();
     assert_eq!(scanning_keys(&st), [unpaid]);
@@ -478,15 +400,14 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
         )
         .unwrap();
     // No swap is known for a restored address, so it is only watched.
-    let watch = CompletionPolicy::default().restore_watch_secs;
     let db = st.wallet_mut().db_mut();
     assert_eq!(
-        db.close_finished_swap_keys_at(account, registered + watch - 1, anchor.height)
+        db.close_finished_swap_keys_at(account, registered + RESTORE_WATCH_SECS - 1, anchor.height)
             .unwrap(),
         0
     );
     assert_eq!(
-        db.close_finished_swap_keys_at(account, registered + watch, anchor.height)
+        db.close_finished_swap_keys_at(account, registered + RESTORE_WATCH_SECS, anchor.height)
             .unwrap(),
         1
     );
@@ -549,7 +470,7 @@ fn history_is_pending_until_sweeps_finish_and_candidates_apply() {
             key,
             &candidate,
             through,
-            Some((through, &first_leaf_path()))
+            (through, &first_leaf_path())
         )
         .unwrap(),
         PaymentApplication::Applied
@@ -592,14 +513,17 @@ fn rewind_reruns_only_sweeps_above_the_retained_chain() {
     let removed = advance(&mut st, 1);
     assert_eq!(due(&mut st, removed, NOW), [late]);
     let db = st.wallet_mut().db_mut();
-    db.queue_swap_lookup(account, late, removed, &[]).unwrap();
-    db.finish_swap_discovery_attempt(account, late, removed)
-        .unwrap();
+    db.finish_sweep(account, late, removed).unwrap();
     st.truncate_to_height(kept.height);
-    let db = st.wallet().db();
+    let db = st.wallet_mut().db_mut();
     assert_eq!(db.swap_lookup_coverage(account, early).unwrap(), Some(kept));
     assert_eq!(db.swap_lookup_coverage(account, late).unwrap(), None);
     assert!(db.swap_history_pending(account, kept.height).unwrap());
+    // The rewound sweep needs a new lookup before it can finish.
+    assert!(matches!(
+        db.apply_swap_sweep(account, late, kept, kept, |_, _| None),
+        Err(Error::SweepDeferred(SweepDeferral::UnknownAnchor))
+    ));
     assert_eq!(due(&mut st, kept, NOW), [late]);
 }
 
@@ -617,9 +541,7 @@ fn rewound_sweep_does_not_wait_out_its_last_attempt_lease() {
     let removed = advance(&mut st, 1);
     let db = st.wallet_mut().db_mut();
     db.begin_swap_discovery_attempt(account, key, NOW).unwrap();
-    db.queue_swap_lookup(account, key, removed, &[]).unwrap();
-    db.finish_swap_discovery_attempt(account, key, removed)
-        .unwrap();
+    db.finish_sweep(account, key, removed).unwrap();
     st.truncate_to_height(kept.height);
     assert_eq!(due(&mut st, kept, NOW), [key]);
 }
@@ -752,7 +674,7 @@ fn retained_spend_history_covers_early_spends_in_large_batches() {
             .unwrap();
         match (retained, spent) {
             (true, true) => {
-                assert!(matches!(status, SpendStatus::Spent { height, .. } if height == first))
+                assert!(matches!(status, SpendStatus::Spent(_)))
             }
             (true, false) => assert_eq!(status, SpendStatus::Unspent),
             // Without retention, ordinary pruning leaves no evidence of the spend.
@@ -795,12 +717,12 @@ fn recheck_sweeps_closed_keys_and_finds_a_later_refund() {
             key,
             &candidate,
             through,
-            Some((through, &first_leaf_path()))
+            (through, &first_leaf_path())
         )
         .unwrap(),
         PaymentApplication::Applied
     );
-    db.finish_swap_discovery_attempt(account, key, through)
+    db.apply_swap_sweep(account, key, through, through, |_, _| None)
         .unwrap();
     assert_eq!(unspent_keys(&st, through.height), [Some(key)]);
     // The finished sweep reopens the key until it closes again, so no key is left to

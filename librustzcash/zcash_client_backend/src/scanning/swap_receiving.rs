@@ -15,7 +15,7 @@ use super::{ScanningKeyOps, ScanningKeys};
 
 /// Identifies a trial-decryption key without conflating multiple keys of one account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ReceivingKeyTag<AccountId> {
+pub(crate) enum ReceivingKeyTag<AccountId> {
     /// An ordinary account key.
     Account(AccountId, Scope),
     /// An external key derived for one swap sequence index.
@@ -128,7 +128,7 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
 {
     /// Adds registered swap keys to Ironwood trial decryption, retaining ordinary keys in
     /// every pool. Reload this set when registrations change and schedule missing history.
-    pub fn with_swap_receiving_keys(
+    pub(crate) fn with_swap_receiving_keys(
         self,
         keys: impl IntoIterator<Item = SwapScanningKey<AccountId>>,
     ) -> ScanningKeys<AccountId, ReceivingKeyTag<AccountId>> {

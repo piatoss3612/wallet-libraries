@@ -8,7 +8,7 @@ use zakura_swap_receiving::RefundMemo;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
-    Discovery, Error, KeyId, Purpose, account_key, decode_index, register,
+    Discovery, Error, KeyId, Purpose, RESTORED_INCOMING, account_key, decode_index, register,
     reservations::RECEIVE_LOOKAHEAD, restore_start, retention::retain_spend_history, unix_now,
 };
 use crate::{AccountUuid, SqlTransaction, WalletDb};
@@ -55,17 +55,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
             db.maintain_restore_discovery(account, RECEIVE_LOOKAHEAD)
         })
     }
-
-    /// See [`WalletDb::maintain_swap_receive_lookahead`] on a transaction-backed handle.
-    #[cfg(test)]
-    pub(crate) fn maintain_swap_receive_lookahead(
-        &mut self,
-        account: AccountUuid,
-        count: u32,
-        scan_from: BlockHeight,
-    ) -> Result<(), Error> {
-        self.transactionally(|db| db.maintain_swap_receive_lookahead(account, count, scan_from))
-    }
 }
 
 impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
@@ -105,7 +94,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             // SQLite omits trailing zero padding when storing MemoBytes.
             let memo = zcash_protocol::memo::MemoBytes::from_bytes(&bytes)
                 .ok()
-                .and_then(|bytes| RefundMemo::decode(bytes.as_array()).ok().flatten());
+                .and_then(|bytes| RefundMemo::decode(bytes.as_array()));
             let Some(memo) = memo else {
                 unreadable += 1;
                 continue;
@@ -200,13 +189,11 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             .conn
             .0
             .query_row(
-                "SELECT k.key_index,
-                    EXISTS(SELECT 1 FROM ironwood_swap_sweeps s WHERE s.receiving_key_id = k.id)
-                    AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
-                        WHERE r.receiving_key_id = k.id)
-                 FROM ironwood_receiving_keys k
-                 WHERE k.account_id = ?1 AND k.purpose = 1 AND k.advances_allocation = 1
-                 ORDER BY k.key_index DESC LIMIT 1",
+                &format!(
+                    "SELECT k.key_index, ({RESTORED_INCOMING}) FROM ironwood_receiving_keys k
+                     WHERE k.account_id = ?1 AND k.purpose = 1 AND k.advances_allocation = 1
+                     ORDER BY k.key_index DESC LIMIT 1"
+                ),
                 [account_ref.0],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )

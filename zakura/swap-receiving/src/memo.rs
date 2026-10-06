@@ -1,25 +1,5 @@
 const MAGIC: &[u8; 5] = b"\xffZSWP";
 
-/// An invalid or unsupported refund recovery record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemoError {
-    /// Keep this record pending until its version can be interpreted.
-    UnsupportedVersion(u8),
-    /// Version one only stores refund indices in funding memos.
-    InvalidPurpose(u8),
-}
-
-impl core::fmt::Display for MemoError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::UnsupportedVersion(v) => write!(f, "unsupported swap memo version {v}"),
-            Self::InvalidPurpose(p) => write!(f, "invalid swap memo purpose {p}"),
-        }
-    }
-}
-
-impl std::error::Error for MemoError {}
-
 /// A v1 refund index carried by a swap funding transaction.
 ///
 /// The deposit address is not stored: recovery reads it from the funding
@@ -54,23 +34,18 @@ impl RefundMemo {
         bytes
     }
 
-    /// Decodes a record, returning `None` only for a memo without our discriminator.
+    /// Decodes a v1 record, or returns `None` for any other memo.
     ///
-    /// Unsupported versions are errors so callers cannot silently mark their
-    /// recovery work complete. Preserve those raw memos for a future decoder.
-    /// Bytes after the index are reserved and ignored, so prerelease records
-    /// that appended a deposit address still decode.
-    pub fn decode(bytes: &[u8; 512]) -> Result<Option<Self>, MemoError> {
-        if &bytes[..5] != MAGIC {
-            return Ok(None);
-        }
-        if bytes[5] != 1 {
-            return Err(MemoError::UnsupportedVersion(bytes[5]));
-        }
-        if bytes[6] != 0 {
-            return Err(MemoError::InvalidPurpose(bytes[6]));
+    /// A memo that starts with the `\xffZSWP` discriminator but has another version or
+    /// purpose is a record this release cannot read. Callers that select records by
+    /// that discriminator must keep such a memo pending rather than mark their
+    /// recovery work complete. Bytes after the index are reserved and ignored, so
+    /// prerelease records that appended a deposit address still decode.
+    pub fn decode(bytes: &[u8; 512]) -> Option<Self> {
+        if &bytes[..5] != MAGIC || bytes[5] != 1 || bytes[6] != 0 {
+            return None;
         }
         let index = u64::from_le_bytes(bytes[7..15].try_into().expect("eight-byte index"));
-        Ok(Some(Self { index }))
+        Some(Self { index })
     }
 }

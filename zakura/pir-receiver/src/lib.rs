@@ -116,13 +116,20 @@ impl<'a, T: EnhanceTransport> EnhanceNotes<'a, T> {
             session: None,
         }
     }
+}
 
-    /// The Enhance PIR session, opened against `wallet`'s scanned chain on first use.
-    /// The caller may run its own Enhance queries on it in the same run.
-    pub async fn session<C: Borrow<Connection>, P: Parameters, CL, R>(
+impl<T: EnhanceTransport, C: Borrow<Connection>, P: Parameters, CL, R>
+    NoteSource<WalletDb<C, P, CL, R>> for EnhanceNotes<'_, T>
+{
+    async fn note_data(
         &mut self,
         wallet: &WalletDb<C, P, CL, R>,
-    ) -> Result<&mut Client, Error> {
+        positions: Vec<u64>,
+    ) -> Result<BTreeMap<u64, [u8; 528]>, Error> {
+        let mut note_data = BTreeMap::new();
+        if positions.is_empty() {
+            return Ok(note_data);
+        }
         if self.session.is_none() {
             let pending = PendingClient::fetch(self.transport, self.origin).await?;
             let limits = ClientResourceLimits::with_cache(32768, 2);
@@ -141,28 +148,9 @@ impl<'a, T: EnhanceTransport> EnhanceNotes<'a, T> {
             };
             self.session = Some(pending.accept(&accepted)?);
         }
-        Ok(self.session.as_mut().expect("opened above"))
-    }
-}
-
-impl<T: EnhanceTransport, C: Borrow<Connection>, P: Parameters, CL, R>
-    NoteSource<WalletDb<C, P, CL, R>> for EnhanceNotes<'_, T>
-{
-    async fn note_data(
-        &mut self,
-        wallet: &WalletDb<C, P, CL, R>,
-        positions: Vec<u64>,
-    ) -> Result<BTreeMap<u64, [u8; 528]>, Error> {
-        let mut note_data = BTreeMap::new();
-        if positions.is_empty() {
-            return Ok(note_data);
-        }
-        let transport = self.transport;
+        let session = self.session.as_mut().expect("opened above");
         // Enhance groups these positions into shared row requests itself.
-        let stream = self
-            .session(wallet)
-            .await?
-            .query_batch(transport, positions)?;
+        let stream = session.query_batch(self.transport, positions)?;
         futures_util::pin_mut!(stream);
         while let Some(result) = stream.next().await {
             note_data.insert(result.position, *result.record?.enc_ciphertext_suffix());

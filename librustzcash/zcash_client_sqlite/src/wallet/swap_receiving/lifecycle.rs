@@ -1,10 +1,10 @@
 //! Provider observations and the rule that ends a key's trial decryption.
-use super::{Error, KeyId, account_key, corrupt, payments::key_ref};
+use super::{Error, KeyId, RESTORED_INCOMING, account_key, corrupt, payments::key_ref};
 use crate::{AccountUuid, WalletDb, util::Clock, wallet};
 use rusqlite::{Connection, params};
 use std::borrow::BorrowMut;
 use zakura_swap_receiving::lifecycle::{
-    CompletionPolicy, Observation, OperationStatus, ReceiptExpectation,
+    COMPLETION_LIMIT_SECS, Observation, OperationStatus, RESTORE_WATCH_SECS, ReceiptExpectation,
 };
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -33,15 +33,15 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     /// A key closes as soon as every operation on it has a conclusive terminal status
     /// and its receipts cover what the provider promised, each with the untrusted
     /// confirmations of the default [`ConfirmationsPolicy`], so a reorg cannot strand a
-    /// receipt on a closed key. A key also closes [`CompletionPolicy::limit_secs`] after
-    /// its latest quote deadline, or after registration without one, whatever the
-    /// provider reports. Keys with an open reservation, and unpaid incoming keys this
-    /// wallet issued, stay active, so an index can be reissued without a gap in its
-    /// scanned history. An incoming key found by a restore sweep and never issued here
-    /// has no known swap, so it closes [`CompletionPolicy::restore_watch_secs`] after
-    /// registration. A payment that arrives after its key closed is found by
-    /// [`WalletDb::recheck_swap_history`] or a seed restore. Provider status never
-    /// credits a note; a closed key keeps its notes.
+    /// receipt on a closed key. A key also closes [`COMPLETION_LIMIT_SECS`] after its
+    /// latest quote deadline, or after registration without one, whatever the provider
+    /// reports. Keys with an open reservation, and unpaid incoming keys this wallet
+    /// issued, stay active, so an index can be reissued without a gap in its scanned
+    /// history. An incoming key found by a restore sweep and never issued here has no
+    /// known swap, so it closes [`RESTORE_WATCH_SECS`] after registration. A payment
+    /// that arrives after its key closed is found by [`WalletDb::recheck_swap_history`]
+    /// or a seed restore. Provider status never credits a note; a closed key keeps its
+    /// notes.
     ///
     /// `tip` is the chain tip the caller has just confirmed with the network. The
     /// stored tip can be stale after time offline, so nothing closes unless the
@@ -73,15 +73,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
             let confirmed_below = u32::from(tip)
                 .saturating_add(1)
                 .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
-            let policy = CompletionPolicy::default();
-            let mut stmt = db.conn.0.prepare(
+            let mut stmt = db.conn.0.prepare(&format!(
                 "SELECT k.id, k.registered_at, k.purpose = 1,
                     EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
                         WHERE r.receiving_key_id = k.id AND r.closed_at IS NULL),
-                    EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
-                        WHERE r.receiving_key_id = k.id),
-                    k.used,
-                    EXISTS(SELECT 1 FROM ironwood_swap_sweeps s WHERE s.receiving_key_id = k.id),
+                    k.used, ({RESTORED_INCOMING}),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
@@ -97,31 +93,29 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         WHERE n.receiving_key_id = k.id AND t.mined_height <= ?2)
                  FROM ironwood_receiving_keys k
                  WHERE k.account_id = ?1 AND k.active_from IS NOT NULL AND k.closed_at IS NULL",
-            )?;
+            ))?;
             let finished = stmt
                 .query_map(params![owner.0, confirmed_below], |row| {
                     let id: i64 = row.get(0)?;
                     let registered_at: i64 = row.get(1)?;
                     let incoming: bool = row.get(2)?;
                     let open_reservation: bool = row.get(3)?;
-                    let ever_reserved: bool = row.get(4)?;
-                    let paid: bool = row.get(5)?;
-                    let swept: bool = row.get(6)?;
-                    let operations: u32 = row.get(7)?;
-                    let unresolved: u32 = row.get(8)?;
-                    let deadline: Option<i64> = row.get(9)?;
-                    let expected: i64 = row.get(10)?;
-                    let received: i64 = row.get(11)?;
-                    let restored = incoming && swept && !ever_reserved;
+                    let paid: bool = row.get(4)?;
+                    let restored: bool = row.get(5)?;
+                    let operations: u32 = row.get(6)?;
+                    let unresolved: u32 = row.get(7)?;
+                    let deadline: Option<i64> = row.get(8)?;
+                    let expected: i64 = row.get(9)?;
+                    let received: i64 = row.get(10)?;
                     if incoming && (open_reservation || !(paid || restored)) {
                         return Ok((id, false));
                     }
                     let limit = if restored {
-                        registered_at.saturating_add(policy.restore_watch_secs)
+                        registered_at.saturating_add(RESTORE_WATCH_SECS)
                     } else {
                         deadline
                             .unwrap_or(registered_at)
-                            .saturating_add(policy.limit_secs)
+                            .saturating_add(COMPLETION_LIMIT_SECS)
                     };
                     let settled = operations > 0 && unresolved == 0 && received >= expected;
                     Ok((id, settled || now >= limit))
@@ -139,24 +133,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
             }
             Ok(closed)
         })
-    }
-}
-
-#[cfg(test)]
-impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
-    /// [`WalletDb::close_finished_swap_keys`] with `tip`'s block time set to `now`, as
-    /// when the caller's clock agrees with the chain.
-    pub(crate) fn close_finished_swap_keys_at(
-        &mut self,
-        account: AccountUuid,
-        now: i64,
-        tip: BlockHeight,
-    ) -> Result<usize, Error> {
-        self.conn.borrow_mut().execute(
-            "UPDATE blocks SET time = ?2 WHERE height = ?1",
-            params![u32::from(tip), now],
-        )?;
-        self.close_finished_swap_keys(account, now, tip)
     }
 }
 

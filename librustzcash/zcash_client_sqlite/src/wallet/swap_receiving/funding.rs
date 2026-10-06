@@ -53,10 +53,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// stores a transaction funding `deposit`, from the first block above the scanned
     /// chain, and the swap's outcome then decides when it closes (see
     /// [`WalletDb::record_swap_observation`]). A quote never funded never starts the
-    /// key. Without a status, a started key closes [`CompletionPolicy::limit_secs`]
-    /// after `deadline`.
+    /// key. Without a status, a started key closes [`COMPLETION_LIMIT_SECS`] after
+    /// `deadline`.
     ///
-    /// [`CompletionPolicy::limit_secs`]: zakura_swap_receiving::lifecycle::CompletionPolicy::limit_secs
+    /// [`COMPLETION_LIMIT_SECS`]: zakura_swap_receiving::lifecycle::COMPLETION_LIMIT_SECS
     pub fn record_swap_refund_quote(
         &mut self,
         account: AccountUuid,
@@ -200,7 +200,7 @@ pub(crate) fn start_funded_refund_keys<P: Parameters>(
     for (account, memo) in memos {
         let Some(memo) = MemoBytes::from_bytes(&memo)
             .ok()
-            .and_then(|memo| RefundMemo::decode(memo.as_array()).ok().flatten())
+            .and_then(|memo| RefundMemo::decode(memo.as_array()))
         else {
             continue;
         };

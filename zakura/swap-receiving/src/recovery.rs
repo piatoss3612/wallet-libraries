@@ -1,6 +1,6 @@
 //! Authenticate privately retrieved notes before wallet accounting.
 //! Chain roots and spend-history coverage must come from the wallet independently.
-use crate::{DerivationError, KeyId};
+use crate::KeyId;
 use orchard::{
     keys::{FullViewingKey, Scope},
     note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier},
@@ -11,32 +11,6 @@ use zcash_note_encryption::{EphemeralKeyBytes, ShieldedOutput, try_note_decrypti
 
 /// Serialized encrypted context size, independent of the discovery transport.
 pub const ENCRYPTED_NOTE_BYTES: usize = 676;
-
-/// Authenticated recovery failure. No variant establishes an unused receiver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecoveryError {
-    /// Key derivation failed.
-    Derivation,
-    /// Invalid encoding, wrong key, wrong recipient, or failed ciphertext authentication.
-    Authentication,
-    /// The path or position does not reproduce the independently accepted root.
-    Witness,
-}
-impl std::fmt::Display for RecoveryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Derivation => "swap key derivation failed",
-            Self::Authentication => "swap note authentication failed",
-            Self::Witness => "swap note witness does not match accepted chain",
-        })
-    }
-}
-impl std::error::Error for RecoveryError {}
-impl From<DerivationError> for RecoveryError {
-    fn from(_: DerivationError) -> Self {
-        Self::Derivation
-    }
-}
 
 /// Compact Action context and the remaining ciphertext, without trusted chain metadata.
 #[derive(Clone, PartialEq, Eq)]
@@ -90,19 +64,16 @@ impl EncryptedNote {
     }
 
     /// Derives the expected key and authenticates the full note, including its memo.
+    /// Returns `None` if derivation, decoding or authentication fails, or the note is
+    /// not a v3 note to the key's address; that never shows the receiver is unused.
     /// This deliberately does not use the public zero OVK to establish ownership.
-    pub fn decrypt(
-        &self,
-        account: &FullViewingKey,
-        key_id: KeyId,
-    ) -> Result<RecoveredNote, RecoveryError> {
-        let key = key_id.derive(account)?;
-        let nf = Option::from(Nullifier::from_bytes(self.0[..32].try_into().unwrap()))
-            .ok_or(RecoveryError::Authentication)?;
-        let cmx = Option::from(ExtractedNoteCommitment::from_bytes(
+    pub fn decrypt(&self, account: &FullViewingKey, key_id: KeyId) -> Option<RecoveredNote> {
+        let key = key_id.derive(account).ok()?;
+        let nf =
+            Option::<Nullifier>::from(Nullifier::from_bytes(self.0[..32].try_into().unwrap()))?;
+        let cmx = Option::<ExtractedNoteCommitment>::from(ExtractedNoteCommitment::from_bytes(
             self.0[32..64].try_into().unwrap(),
-        ))
-        .ok_or(RecoveryError::Authentication)?;
+        ))?;
         let compact = CompactAction::from_parts(
             nf,
             cmx,
@@ -113,12 +84,11 @@ impl EncryptedNote {
             &IronwoodDomain::for_compact_action(&compact),
             &key.to_ivk(Scope::External).prepare(),
             self,
-        )
-        .ok_or(RecoveryError::Authentication)?;
+        )?;
         if note.version() != NoteVersion::V3 || recipient != key.address_at(0u32, Scope::External) {
-            return Err(RecoveryError::Authentication);
+            return None;
         }
-        Ok(RecoveredNote {
+        Some(RecoveredNote {
             nullifier: note.nullifier(&key),
             note,
             memo,
@@ -157,20 +127,13 @@ impl RecoveredNote {
     pub fn nullifier(&self) -> &Nullifier {
         &self.nullifier
     }
-    /// Binds a claimed position to the note commitment at a wallet-accepted root.
-    /// A root supplied by the same discovery service is not independent validation.
-    /// This does not bind transaction metadata or establish that the note is unspent.
-    pub fn verify_position(
-        &self,
-        position: u64,
-        path: &MerklePath,
-        accepted_root: Anchor,
-    ) -> Result<(), RecoveryError> {
-        if position != u64::from(path.position())
-            || path.root(self.note.commitment().into()) != accepted_root
-        {
-            return Err(RecoveryError::Witness);
-        }
-        Ok(())
+    /// Whether `path` places this note's commitment at `position` under a
+    /// wallet-accepted root. A root supplied by the same discovery service is not
+    /// independent validation. This does not bind transaction metadata or establish
+    /// that the note is unspent.
+    #[must_use]
+    pub fn verify_position(&self, position: u64, path: &MerklePath, accepted_root: Anchor) -> bool {
+        position == u64::from(path.position())
+            && path.root(self.note.commitment().into()) == accepted_root
     }
 }

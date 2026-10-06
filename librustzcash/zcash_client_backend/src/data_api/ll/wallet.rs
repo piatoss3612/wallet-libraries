@@ -351,15 +351,11 @@ where
         blocks.last().map(|block| block.height()),
     );
     #[cfg(feature = "orchard")]
-    let ironwood_tracking_floor = match (
-        nullifier_tracking_floor,
-        wallet_db
+    let ironwood_tracking_floor = {
+        let retention = wallet_db
             .ironwood_nullifier_retention_height()
-            .map_err(PutBlocksError::Storage)?,
-    ) {
-        (Some(ordinary), Some(recovery)) => Some(ordinary.min(recovery)),
-        (ordinary, None) => ordinary,
-        (None, _) => None,
+            .map_err(PutBlocksError::Storage)?;
+        nullifier_tracking_floor.map(|floor| retention.map_or(floor, |r| floor.min(r)))
     };
 
     let mut sapling_commitments = vec![];

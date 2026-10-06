@@ -1085,31 +1085,24 @@ fn pending_note<P: Parameters>(
             super::swap_receiving::note_key(conn, id, parent).map(|(_, fvk)| fvk)
         })
         .transpose()?;
+    let ivk = match scope {
+        Scope::External => account.uivk().orchard().clone(),
+        Scope::Internal => account
+            .ufvk()
+            .and_then(|ufvk| ufvk.orchard())
+            .map(|fvk| fvk.to_ivk(Scope::Internal)),
+    };
     #[cfg(feature = "experimental-swap-receiving")]
-    let receiving_ivk = receiving_key
-        .as_ref()
-        .map(|key| key.to_ivk(Scope::External));
-    #[cfg(not(feature = "experimental-swap-receiving"))]
-    let receiving_ivk: Option<orchard::keys::IncomingViewingKey> = None;
-    let recipient = receiving_ivk
-        .as_ref()
-        .map(|ivk| ivk.address(diversifier))
-        .or_else(|| match scope {
-            Scope::External => account
-                .uivk()
-                .orchard()
-                .as_ref()
-                .map(|ivk| ivk.address(diversifier)),
-            Scope::Internal => account
-                .ufvk()
-                .and_then(|ufvk| ufvk.orchard())
-                .map(|fvk| fvk.to_ivk(Scope::Internal).address(diversifier)),
-        })
-        .ok_or_else(|| {
-            SqliteClientError::CorruptedData(
-                "Account cannot reconstruct queued Ironwood note".to_owned(),
-            )
-        })?;
+    let ivk = match &receiving_key {
+        Some(key) => Some(key.to_ivk(Scope::External)),
+        None => ivk,
+    };
+    let ivk = ivk.ok_or_else(|| {
+        SqliteClientError::CorruptedData(
+            "Account cannot reconstruct queued Ironwood note".to_owned(),
+        )
+    })?;
+    let recipient = ivk.address(diversifier);
     #[cfg(feature = "experimental-swap-receiving")]
     if receiving_key.as_ref().is_some_and(|key| {
         scope != Scope::External || recipient != key.address_at(0u32, Scope::External)
@@ -1139,8 +1132,7 @@ fn pending_note<P: Parameters>(
         request_id: IronwoodEnhanceRequestId::new(TxId::from_bytes(txid), output_index),
         account_id,
         note,
-        scope,
-        receiving_ivk: receiving_ivk.map(|ivk| ivk.prepare()),
+        ivk: ivk.prepare(),
         ephemeral_key,
         compact_ciphertext,
     }))

@@ -92,7 +92,7 @@ fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
         .decrypt_output_with_key(positions[0], &account.to_ivk(Scope::Internal))
         .unwrap();
     assert_eq!(marker.value(), NoteValue::ZERO);
-    let record = RefundMemo::decode(&recovered_memo).unwrap().unwrap();
+    let record = RefundMemo::decode(&recovered_memo).unwrap();
     let refund = KeyId::new(Purpose::Refund, record.index())
         .derive(&account)
         .unwrap();

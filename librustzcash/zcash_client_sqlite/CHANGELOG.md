@@ -96,15 +96,15 @@ workspace.
   tip's block time. `recheck_swap_history` sweeps closed keys again on request.
 - Swap recovery: `maintain_swap_receiving`, called at each sync start and tip, recovers
   funding memos and keeps an incoming lookahead. Each recovered key is swept once
-  through a receiver directory with `prepare_swap_discovery_batch`,
-  `begin_swap_discovery_attempt`, `swap_publication_anchor`, `swap_note_data_needed`,
-  `queue_swap_directory_lookup` and `apply_swap_sweep`, which credit a note only after
-  verifying its inclusion and spend state locally. Scanning that later finds the same
-  note moves it to the transaction it is found in. `swap_history_pending` reports
-  unfinished sweeps, and `finish_swap_nullifier_recovery` releases the Ironwood spend
-  history they need.
-- Swap key reads: `get_swap_receiving_key`, `get_swap_receiving_key_for_receiver` and
-  `get_swap_receiving_keys`.
+  through a receiver directory. `zakura_pir_receiver::sweep` drives the steps
+  `prepare_swap_discovery_batch`, `begin_swap_discovery_attempt`,
+  `swap_publication_anchor`, `swap_note_data_needed`, `queue_swap_directory_lookup`
+  and `apply_swap_sweep`, which credit a note only after verifying its inclusion and
+  spend state locally, and then `finish_swap_nullifier_recovery`, which releases the
+  Ironwood spend history the sweeps needed. Scanning that later finds the same note
+  moves it to the transaction it is found in. `swap_history_pending` reports
+  unfinished sweeps.
+- `get_swap_receiving_key_for_receiver` reads the swap key registered for a receiver.
 - `WalletDb::transaction_history_summaries` returns typed account-scoped transaction
   metadata and monetary effects without reading raw transaction payloads. It shares
   the corrected accounting definition of `v_transactions`, filters account inputs

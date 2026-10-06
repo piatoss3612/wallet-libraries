@@ -21,7 +21,7 @@ fn recipient(st: &State, key: KeyId) -> IronwoodFvk {
     IronwoodFvk(key.derive(&parent).unwrap())
 }
 
-/// Reports a finished swap on each of `keys` and closes them once the grace period has passed.
+/// Reports a finished swap on each of `keys`, which closes them.
 fn close(st: &mut State, keys: &[KeyId]) {
     let account = st.test_account().unwrap().id();
     let tip = crate::wallet::chain_tip_height(st.wallet().conn())
@@ -390,7 +390,9 @@ fn swap_receiving_rejects_mismatched_note_metadata() {
         .is_err()
     );
     // Validation alone is not evidence committed to the wallet.
-    assert!(!st.wallet().db().get_swap_receiving_keys(account).unwrap()[0].advances_allocation());
+    let db = st.wallet().db();
+    let key = db.get_swap_receiving_keys(account).unwrap()[0].key_id();
+    assert!(!db.swap_key_state(account, key).1);
 }
 
 #[test]

@@ -34,7 +34,7 @@ fn swap_payment_applies_unscanned_key_note_atomically_and_reopens() {
                 key.key_id(),
                 &candidate,
                 through,
-                Some((through, &MerklePath::from_parts(0, bad_path)))
+                (through, &MerklePath::from_parts(0, bad_path))
             )
             .is_err()
     );
@@ -61,7 +61,7 @@ fn swap_payment_applies_unscanned_key_note_atomically_and_reopens() {
                 key.key_id(),
                 &candidate,
                 through,
-                Some((through, &path))
+                (through, &path)
             )
             .unwrap(),
         PaymentApplication::Applied
@@ -104,7 +104,13 @@ fn swap_payment_applies_unscanned_key_note_atomically_and_reopens() {
     assert_eq!(
         st.wallet_mut()
             .db_mut()
-            .apply_pending_swap_payment(account, key.key_id(), &candidate, through, None)
+            .apply_pending_swap_payment(
+                account,
+                key.key_id(),
+                &candidate,
+                through,
+                (through, &path)
+            )
             .unwrap(),
         PaymentApplication::Applied
     );
@@ -205,7 +211,7 @@ fn swap_payment_imports_an_already_spent_note_without_crediting_it() {
                         key.key_id(),
                         &candidate,
                         through,
-                        Some((through, &proof))
+                        (through, &proof)
                     )
                     .unwrap(),
                 PaymentApplication::AwaitingSpendHistory
@@ -229,7 +235,7 @@ fn swap_payment_imports_an_already_spent_note_without_crediting_it() {
                     key.key_id(),
                     &candidate,
                     through,
-                    Some((through, &proof))
+                    (through, &proof)
                 )
                 .unwrap(),
             PaymentApplication::Applied
@@ -276,7 +282,7 @@ fn privately_imported_note_spends_into_ordinary_internal_change() {
             key.key_id(),
             &candidate,
             through,
-            Some((through, &path)),
+            (through, &path),
         )
         .unwrap();
     for _ in 0..5 {
@@ -354,7 +360,7 @@ fn private_payment_uses_its_witness_anchor_and_survives_a_rewind() {
                 key.key_id(),
                 &candidate,
                 through,
-                Some((proof_anchor, &path))
+                (proof_anchor, &path)
             )
             .unwrap(),
         PaymentApplication::Applied
@@ -538,14 +544,8 @@ fn scanning_moves_a_mislabeled_import_to_its_transaction() {
     assert_eq!(key.key_id(), id);
     db.queue_swap_payment(account, id, &forged).unwrap();
     assert_eq!(
-        db.apply_pending_swap_payment(
-            account,
-            id,
-            &forged,
-            through,
-            Some((through, &first_leaf_path()))
-        )
-        .unwrap(),
+        db.apply_pending_swap_payment(account, id, &forged, through, (through, &first_leaf_path()))
+            .unwrap(),
         PaymentApplication::Applied
     );
     assert_eq!(note_txids(&st), vec![forged.txid]);
@@ -580,8 +580,14 @@ fn a_mislabeled_answer_for_a_scanned_note_is_dropped() {
     let db = st.wallet_mut().db_mut();
     db.queue_swap_payment(account, key, &forged).unwrap();
     assert_eq!(
-        db.apply_pending_swap_payment(account, key, &forged, through, None)
-            .unwrap(),
+        db.apply_pending_swap_payment(
+            account,
+            key,
+            &forged,
+            through,
+            (through, &first_leaf_path())
+        )
+        .unwrap(),
         PaymentApplication::Applied
     );
     assert!(db.pending_swap_payments(account, key).unwrap().is_empty());

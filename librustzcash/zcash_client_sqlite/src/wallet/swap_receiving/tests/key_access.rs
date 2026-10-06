@@ -38,8 +38,6 @@ fn exact_key_access_ignores_unrelated_history_and_validates_the_requested_key() 
             found.full_viewing_key().to_bytes(),
             wanted.full_viewing_key().to_bytes()
         );
-        assert_eq!(found.scan_from(), wanted.scan_from());
-        assert!(found.advances_allocation());
     }
     assert!(
         db.get_swap_receiving_key(account, KeyId::new(Purpose::Receive, 0))
@@ -172,14 +170,8 @@ fn unscanned_transaction_keys_follow_pending_and_imported_output_identity() {
         .unwrap()
         .is_empty()
     );
-    db.apply_pending_swap_payment(
-        account,
-        key.key_id(),
-        &candidate,
-        through,
-        Some((through, &path)),
-    )
-    .unwrap();
+    db.apply_pending_swap_payment(account, key.key_id(), &candidate, through, (through, &path))
+        .unwrap();
     assert!(
         db.pending_swap_payments(account, key.key_id())
             .unwrap()

@@ -36,17 +36,17 @@ pub enum PaymentApplication {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Applies a queued payment using a supplied path or a locally available one.
-    /// Transaction identity remains directory-provided until scanning finds the note.
-    /// Inclusion authenticates the note and position, not its transaction ID.
-    /// Conflicts with local data fail.
+    /// Applies a queued payment with `witness`, its inclusion path at an anchor on the
+    /// wallet's chain. Transaction identity remains directory-provided until scanning
+    /// finds the note. Inclusion authenticates the note and position, not its
+    /// transaction ID. Conflicts with local data fail.
     pub(crate) fn apply_pending_swap_payment(
         &mut self,
         account: AccountUuid,
         key: KeyId,
         candidate: &PendingPayment,
         through: ChainPoint,
-        witness: Option<(ChainPoint, &MerklePath)>,
+        witness: (ChainPoint, &MerklePath),
     ) -> Result<PaymentApplication, Error> {
         self.transactionally(|db| {
             db.apply_pending_swap_payment(account, key, candidate, through, witness)
@@ -61,7 +61,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         key: KeyId,
         candidate: &PendingPayment,
         through: ChainPoint,
-        witness: Option<(ChainPoint, &MerklePath)>,
+        (anchor, path): (ChainPoint, &MerklePath),
     ) -> Result<PaymentApplication, Error> {
         let conn = self.conn.0;
         if !self
@@ -130,19 +130,17 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         {
             return Err(corrupt("swap note position is outside its block"));
         }
-        if let Some((anchor, _)) = witness
-            && (anchor.height > through.height
-                || through.height - anchor.height > crate::PRUNING_DEPTH
-                || wallet::get_block_hash(conn, anchor.height)? != Some(anchor.hash))
+        if anchor.height > through.height
+            || through.height - anchor.height > crate::PRUNING_DEPTH
+            || wallet::get_block_hash(conn, anchor.height)? != Some(anchor.hash)
         {
             return Ok(PaymentApplication::AwaitingWitness);
         }
-        let path_height = witness.map(|(a, _)| a.height).unwrap_or(through.height);
         let oldest = u32::from(through.height).saturating_sub(crate::PRUNING_DEPTH);
         let checkpoint: Option<u32> = conn.query_row(
             "SELECT MAX(checkpoint_id) FROM ironwood_tree_checkpoints
              WHERE checkpoint_id BETWEEN ?1 AND ?2",
-            params![oldest, u32::from(path_height)],
+            params![oldest, u32::from(anchor.height)],
             |r| r.get(0),
         )?;
         let Some(checkpoint) = checkpoint.map(BlockHeight::from) else {
@@ -155,26 +153,9 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         else {
             return Ok(PaymentApplication::AwaitingWitness);
         };
-        let local_path;
-        let path = match witness {
-            Some((_, path)) => path,
-            None => {
-                local_path = match tree.witness_at_checkpoint_id(
-                    Position::from(u64::from(candidate.position)),
-                    &checkpoint,
-                ) {
-                    Ok(Some(path)) => MerklePath::from(path),
-                    Ok(None) | Err(shardtree::error::ShardTreeError::Query(_)) => {
-                        return Ok(PaymentApplication::AwaitingWitness);
-                    }
-                    Err(e) => return Err(SqliteClientError::from(e).into()),
-                };
-                &local_path
-            }
-        };
-        recovered
-            .verify_position(u64::from(candidate.position), path, root.into())
-            .map_err(|_| corrupt("swap note witness does not match accepted chain"))?;
+        if !recovered.verify_position(u64::from(candidate.position), path, root.into()) {
+            return Err(corrupt("swap note witness does not match accepted chain"));
+        }
         let spent = spend_status(conn, candidate, recovered.nullifier(), through)?;
         if spent == SpendStatus::Unknown {
             // Authenticate inclusion before a directory answer can trigger a replay.
@@ -210,13 +191,13 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             .witness_at_checkpoint_id(Position::from(u64::from(candidate.position)), &checkpoint)
             .map_err(SqliteClientError::from)?
             .ok_or_else(|| corrupt("stored swap witness missing"))?;
-        recovered
-            .verify_position(
-                u64::from(candidate.position),
-                &stored_path.into(),
-                root.into(),
-            )
-            .map_err(|_| corrupt("stored swap witness changed"))?;
+        if !recovered.verify_position(
+            u64::from(candidate.position),
+            &stored_path.into(),
+            root.into(),
+        ) {
+            return Err(corrupt("stored swap witness changed"));
+        }
 
         let conflict: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM transactions WHERE txid = ?1 AND mined_height IS NOT NULL
@@ -254,7 +235,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             vec![],
         );
         let tx_ref = wallet::put_tx_meta(conn, &tx, candidate.height)?;
-        let spent_in = if let SpendStatus::Spent { txid, .. } = spent {
+        let spent_in = if let SpendStatus::Spent(txid) = spent {
             let existing: Option<i64> = conn
                 .query_row(
                     "SELECT id_tx FROM transactions WHERE txid = ?1",
