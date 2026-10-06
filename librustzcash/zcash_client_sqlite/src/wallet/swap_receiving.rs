@@ -70,8 +70,8 @@ impl std::fmt::Display for ReservationPolicy {
                  Wait for a payment or abandoned-address reconciliation."
             }
             Self::Limit => {
-                "Three incoming swaps are awaiting deposits. \
-                 Resume an existing swap or wait for reconciliation."
+                "Too many incoming swaps are awaiting deposits. \
+                 Resume one, or wait for an unused one to expire."
             }
             Self::Stale => "This receive reservation is no longer available. Request a new quote.",
             Self::Coverage => "Finish syncing to the chain tip before requesting a quote.",

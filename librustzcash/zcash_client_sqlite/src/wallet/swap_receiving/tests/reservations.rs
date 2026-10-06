@@ -267,18 +267,31 @@ fn restart_and_rejected_quote_reuse_the_same_draft() {
 }
 
 #[test]
-fn only_three_distinct_unfunded_reservations_are_allowed() {
+fn unfunded_reservations_are_capped_until_a_deposit_or_payment_is_seen() {
     let mut st = fixture();
+    let mut reservations = Vec::new();
     for i in 0..RECEIVE_UNFUNDED_LIMIT {
         let r = prepare(&mut st, NOW);
         quote(&mut st, &r, &format!("quote-{i}"), true);
+        reservations.push(r);
     }
+    let limit = u64::from(RECEIVE_UNFUNDED_LIMIT);
     assert_eq!(
         refusal(try_prepare(&mut st, NOW)),
         Some(ReservationPolicy::Limit)
     );
+    // The provider seeing a deposit frees a slot.
     observe(&mut st, "quote-0", "PROCESSING", true, NOW + 1);
-    assert_eq!(prepare(&mut st, NOW + 1).key.key_id().index(), 3);
+    let next = prepare(&mut st, NOW + 1);
+    assert_eq!(next.key.key_id().index(), limit);
+    quote(&mut st, &next, "quote-next", true);
+    assert_eq!(
+        refusal(try_prepare(&mut st, NOW + 1)),
+        Some(ReservationPolicy::Limit)
+    );
+    // So does the payment arriving, without any provider status.
+    pay(&mut st, reservations[1].key.full_viewing_key());
+    assert_eq!(prepare(&mut st, NOW + 2).key.key_id().index(), limit + 1);
 }
 
 #[test]
