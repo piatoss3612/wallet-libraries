@@ -279,7 +279,7 @@ pub trait TransparentLedgerRead: WalletRead {
         &self,
         account: Self::AccountId,
         txids: &[TxId],
-    ) -> Result<Vec<TransactionHistoryDetails>, Self::Error>;
+    ) -> Result<Vec<TransactionHistoryDetails<Self::AccountId>>, Self::Error>;
 
     /// Returns the addresses candidate recovery must cover for `account`, the context a run
     /// captures, and the pages earlier runs left open, from one read.

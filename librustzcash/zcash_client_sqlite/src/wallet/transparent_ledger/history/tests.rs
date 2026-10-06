@@ -170,7 +170,7 @@ mod ironwood {
             }
         }
 
-        fn history(&self) -> TransactionHistoryDetails {
+        fn history(&self) -> TransactionHistoryDetails<AccountUuid> {
             let mut entries = self
                 .st
                 .wallet()

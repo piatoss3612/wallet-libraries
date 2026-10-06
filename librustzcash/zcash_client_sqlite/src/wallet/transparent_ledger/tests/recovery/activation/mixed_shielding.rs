@@ -202,7 +202,7 @@ fn reported_metadata() -> TransactionMetadata {
     }
 }
 
-fn history(st: &State, account: AccountUuid, txid: TxId) -> TransactionHistoryDetails {
+fn history(st: &State, account: AccountUuid, txid: TxId) -> TransactionHistoryDetails<AccountUuid> {
     let mut entries = st
         .wallet()
         .db()
@@ -212,7 +212,7 @@ fn history(st: &State, account: AccountUuid, txid: TxId) -> TransactionHistoryDe
     entries.remove(0)
 }
 
-fn effect(entry: &TransactionHistoryDetails, pool: PoolType) -> PoolEffect {
+fn effect(entry: &TransactionHistoryDetails<AccountUuid>, pool: PoolType) -> PoolEffect {
     *entry.effects.iter().find(|e| e.pool == pool).unwrap()
 }
 
@@ -932,6 +932,8 @@ fn foreign_self_balanced_shielded_participation_is_indistinguishable() {
         TransactionHistoryDetails {
             txid: TxId::from_bytes([0; 32]),
             mined_height: None,
+            // Account UUIDs are local identities, just like transaction placement.
+            known_wallet_funders: vec![AccountUuid::from_uuid(uuid::Uuid::nil())],
             ..entry
         }
     });

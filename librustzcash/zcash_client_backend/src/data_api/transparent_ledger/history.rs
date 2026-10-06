@@ -5,6 +5,7 @@
 //! or spend row does not mean the effect is absent, a missing fee is not zero, and a partial net
 //! amount is not the transaction's final delta.
 
+use transparent::{address::TransparentAddress, bundle::OutPoint};
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{PoolType, consensus::BlockHeight, value::Zatoshis};
 
@@ -101,14 +102,52 @@ pub enum HistoryClassification {
     Provisional,
 }
 
+/// A transparent receiver's role in the wallet's existing activity presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransparentOutputScope {
+    /// An ordinary externally derived receiver.
+    External,
+    /// An internally derived change receiver.
+    Internal,
+    /// An ephemeral funding receiver.
+    Ephemeral,
+    /// An independently imported receiver whose ownership is known.
+    Foreign,
+}
+
+/// A currently supported wallet-owned output, separate from financial sender attribution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedTransparentOutput<AccountId> {
+    /// Transaction and transparent output index.
+    pub outpoint: OutPoint,
+    /// Output value, never reduced by a fee.
+    pub value: Zatoshis,
+    /// The recovered transparent receiver.
+    pub address: TransparentAddress,
+    /// Its current wallet owner.
+    pub recipient_account: AccountId,
+    /// Unknown is not an external scope.
+    pub scope: Option<TransparentOutputScope>,
+    /// The single known wallet funder, only when its owned effects and the receiver's
+    /// transparent effects are settled. This is the public wallet's display convention,
+    /// not proof of sole transaction funding, per-output funding, or fee payment.
+    pub inferred_funding_account: Option<AccountId>,
+}
+
 /// One account's history view of one transaction, from one database read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransactionHistoryDetails {
+pub struct TransactionHistoryDetails<AccountId> {
     /// Display-only Enhance service assertion that the transaction contains transparent
     /// outputs. `None` means no assertion has been recovered. This transaction-wide fact
     /// can classify activity independently of payment-detail completeness; it does not
     /// establish recipients, output ownership, or account payment/fee attribution.
     pub has_transparent_outputs: Option<bool>,
+    /// Current owned outputs of the transaction, including those owned by other wallet accounts.
+    /// Display-only reconciliation never creates sent notes or completes payment evidence.
+    pub owned_transparent_outputs: Vec<OwnedTransparentOutput<AccountId>>,
+    /// Distinct accounts with currently supported spends. No order implies funding priority,
+    /// and this list cannot exclude outside participants.
+    pub known_wallet_funders: Vec<AccountId>,
     /// Whole-transaction facts, separate from the account-related fee.
     pub transaction_metadata: Option<TransactionMetadataEvidence>,
     /// Aggregate outgoing amount with explicit completeness.

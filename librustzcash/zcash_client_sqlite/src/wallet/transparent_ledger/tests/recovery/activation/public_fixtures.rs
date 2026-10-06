@@ -118,7 +118,7 @@ pub(super) fn history(
     st: &State,
     account: AccountUuid,
     tx: &Transaction,
-) -> TransactionHistoryDetails {
+) -> TransactionHistoryDetails<AccountUuid> {
     let mut entries = st
         .wallet()
         .db()

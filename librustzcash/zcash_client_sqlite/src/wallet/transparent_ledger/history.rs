@@ -8,6 +8,9 @@
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "transparent-inputs")]
+mod owned_transparent;
+
 use std::rc::Rc;
 
 use rusqlite::{OptionalExtension as _, named_params, types::Value};
@@ -544,7 +547,35 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
     configured: Option<TransparentLedgerMode>,
     account: AccountUuid,
     txids: &[TxId],
-) -> Result<Vec<TransactionHistoryDetails>, SqliteClientError> {
+) -> Result<Vec<TransactionHistoryDetails<AccountUuid>>, SqliteClientError> {
+    let entries = read_account_history(
+        conn,
+        params,
+        #[cfg(feature = "transparent-inputs")]
+        gap_limits,
+        configured,
+        account,
+        txids,
+    )?;
+    #[cfg(feature = "transparent-inputs")]
+    let mut entries = entries;
+    #[cfg(feature = "transparent-inputs")]
+    for entry in &mut entries {
+        owned_transparent::reconcile(conn, params, gap_limits, configured, entry)?;
+    }
+    Ok(entries)
+}
+
+/// Core evidence read, without display reconciliation. The reconciler uses this same
+/// completeness calculation for other wallet accounts without recursively reconciling them.
+fn read_account_history<P: consensus::Parameters>(
+    conn: &rusqlite::Connection,
+    #[cfg_attr(not(feature = "transparent-inputs"), allow(unused_variables))] params: &P,
+    #[cfg(feature = "transparent-inputs")] gap_limits: &GapLimits,
+    configured: Option<TransparentLedgerMode>,
+    account: AccountUuid,
+    txids: &[TxId],
+) -> Result<Vec<TransactionHistoryDetails<AccountUuid>>, SqliteClientError> {
     let mode = resolve_mode(conn, configured)?;
     // Scanning detects an account's shielded spends only through the nullifiers its full viewing
     // key derives; an account imported from an incoming viewing key never learns them.
@@ -787,6 +818,8 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
 
         entries.push(TransactionHistoryDetails {
             has_transparent_outputs: tx.has_transparent_outputs,
+            owned_transparent_outputs: vec![],
+            known_wallet_funders: vec![],
             transaction_metadata,
             aggregate_payment,
             account_movement: AccountMovement {

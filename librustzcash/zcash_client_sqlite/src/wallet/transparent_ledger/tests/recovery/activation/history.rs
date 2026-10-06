@@ -9,7 +9,7 @@ use zcash_protocol::PoolType;
 
 use super::*;
 
-fn history(st: &State, account: AccountUuid, txid: TxId) -> TransactionHistoryDetails {
+fn history(st: &State, account: AccountUuid, txid: TxId) -> TransactionHistoryDetails<AccountUuid> {
     let mut entries = st
         .wallet()
         .db()
@@ -19,15 +19,15 @@ fn history(st: &State, account: AccountUuid, txid: TxId) -> TransactionHistoryDe
     entries.remove(0)
 }
 
-fn effect(entry: &TransactionHistoryDetails, pool: PoolType) -> PoolEffect {
+fn effect(entry: &TransactionHistoryDetails<AccountUuid>, pool: PoolType) -> PoolEffect {
     *entry.effects.iter().find(|e| e.pool == pool).unwrap()
 }
 
-fn transparent(entry: &TransactionHistoryDetails) -> PoolEffect {
+fn transparent(entry: &TransactionHistoryDetails<AccountUuid>) -> PoolEffect {
     effect(entry, PoolType::Transparent)
 }
 
-fn sapling(entry: &TransactionHistoryDetails) -> PoolEffect {
+fn sapling(entry: &TransactionHistoryDetails<AccountUuid>) -> PoolEffect {
     effect(entry, PoolType::SAPLING)
 }
 
