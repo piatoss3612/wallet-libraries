@@ -1590,14 +1590,21 @@ fn response_application_retries_after_another_connection_rolls_back() {
 }
 
 fn authentic_incoming_record(st: &State, request: EnhancePirRequest) -> EnhanceRecord {
+    incoming_record_with_memo(st, request, [7; 512])
+}
+
+fn incoming_record_with_memo(
+    st: &State,
+    request: EnhancePirRequest,
+    memo: [u8; 512],
+) -> EnhanceRecord {
     let pending = st
         .wallet()
         .db()
         .pending_memo(request.position())
         .unwrap()
         .unwrap();
-    let encryptor =
-        orchard::note_encryption::IronwoodNoteEncryption::new(None, pending.note, [7; 512]);
+    let encryptor = orchard::note_encryption::IronwoodNoteEncryption::new(None, pending.note, memo);
     EnhanceRecord::from_parts(EnhanceRecordParts {
         enc_ciphertext_suffix: encryptor.encrypt_note_plaintext()[52..].try_into().unwrap(),
         cv_net: [0; 32],
@@ -2562,5 +2569,90 @@ fn a_mixed_batch_stores_every_authenticated_memo_only_without_public_authority()
             assert_eq!(route_of(&st, tx_ref), Some(LWD_REQUIRED));
         }
         assert!(st.wallet().db().query_requests().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn a_recovered_memo_completes_history_for_the_same_output_sent_without_one() {
+    use zcash_client_backend::data_api::transparent_ledger::{
+        DetailCompleteness, EffectCompleteness, FeeState, HistoryClassification,
+        TransparentLedgerRead,
+    };
+    let mut empty = [0; 512];
+    empty[0] = 0xf6;
+    for memo in [empty, [7; 512]] {
+        let (mut st, tx_ref, request) = fixture();
+        st.wallet_mut()
+            .db_mut()
+            .set_transparent_ledger_mode(TransparentLedgerMode::Public);
+        let account = st.test_account().unwrap().id();
+        let txid = request.request_id().txid();
+        let (from, index, value): (i64, i64, u64) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT account_id, action_index, value FROM ironwood_received_notes
+                 WHERE transaction_id = ?",
+                [tx_ref.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        // The account's own output, also recorded as sent without its memo.
+        st.wallet()
+            .conn()
+            .execute(
+                "INSERT INTO sent_notes
+                     (transaction_id, output_pool, output_index, from_account_id, to_account_id,
+                      value, memo)
+                 VALUES (?1, 4, ?2, ?3, ?3, ?4, NULL)",
+                rusqlite::params![tx_ref.0, index, from, value],
+            )
+            .unwrap();
+        let history = |st: &State| {
+            let mut entries = st
+                .wallet()
+                .db()
+                .transaction_history_details(account, &[txid])
+                .unwrap();
+            assert_eq!(entries.len(), 1);
+            entries.remove(0)
+        };
+        assert_eq!(history(&st).payment_details, DetailCompleteness::Incomplete);
+
+        let record = incoming_record_with_memo(&st, request, memo);
+        assert_eq!(
+            apply_record(st.wallet_mut().db_mut(), request, &record).unwrap(),
+            EnhancePirStoreResult::Stored
+        );
+        let (received, sent): (Option<Vec<u8>>, Option<Vec<u8>>) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT r.memo, s.memo FROM ironwood_received_notes r
+                 JOIN sent_notes s ON s.transaction_id = r.transaction_id
+                     AND s.output_pool = 4 AND s.output_index = r.action_index
+                 WHERE r.transaction_id = ?",
+                [tx_ref.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            received,
+            memo_repr(Some(&MemoBytes::from_bytes(&memo).unwrap())).map(<[u8]>::to_vec)
+        );
+        assert_eq!(sent, None);
+
+        let entry = history(&st);
+        let ironwood = *entry
+            .effects
+            .iter()
+            .find(|e| e.pool == PoolType::Shielded(ShieldedPool::Ironwood))
+            .unwrap();
+        assert_eq!(ironwood.received, Zatoshis::from_u64(value).unwrap());
+        assert_eq!(ironwood.spent, Zatoshis::ZERO);
+        assert_eq!(ironwood.completeness, EffectCompleteness::Complete);
+        assert_eq!(entry.payment_details, DetailCompleteness::Complete);
+        assert_eq!(entry.fee, FeeState::NotApplicable);
+        assert_eq!(entry.classification, HistoryClassification::Reconstructed);
     }
 }
