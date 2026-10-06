@@ -129,8 +129,8 @@ History reports two facts for Activity without changing attribution:
 The value is inferred: it assumes the account paid the whole fee, which a foreign input or
 foreign shielded spend could have shared; a fee supplied only by Enhance is trusted service
 metadata that note decryption does not authenticate; and the value may include outputs to the
-account's own transparent addresses or shielded outputs to others whose outgoing viewing key
-was discarded (`an_unrecoverable_shielded_payment_is_part_of_the_inferred_value`). `aggregate_payment`, `payment_details`, the
-account's fee, and the `Provisional` classification are unchanged, and no recipient is claimed.
-The public restore of the same transaction records the 250,000 output as the account's send;
-`activity_outgoing.rs` compares the two.
+account's own transparent addresses or shielded outputs to others whose outgoing viewing key was
+discarded (`an_unrecoverable_shielded_payment_is_part_of_the_inferred_value`).
+`aggregate_payment`, `payment_details`, the account's fee, and the `Provisional` classification
+are unchanged, and no recipient is claimed. The public restore of the same transaction records
+the 250,000 output as the account's send; `activity_outgoing.rs` compares the two.

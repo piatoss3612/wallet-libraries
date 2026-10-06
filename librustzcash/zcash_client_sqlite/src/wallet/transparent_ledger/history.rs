@@ -555,7 +555,11 @@ fn inferred_outgoing(
     fee: Zatoshis,
     metadata: Option<&TransactionMetadataEvidence>,
 ) -> Result<Option<Zatoshis>, SqliteClientError> {
-    if metadata.is_some_and(|e| e.metadata.transparent_input_count != 0) {
+    // Without transparent support, the account's transparent effect is not even reported, so a
+    // transparent spend of its own cannot be excluded.
+    if cfg!(not(feature = "transparent-inputs"))
+        || metadata.is_some_and(|e| e.metadata.transparent_input_count != 0)
+    {
         return Ok(None);
     }
     let mut spent = Zatoshis::ZERO;
