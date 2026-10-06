@@ -397,6 +397,9 @@ fn assert_reconstructed_shielding(case: &Shielding, shape: &Shape) {
     assert_eq!(entry.fee, FeeState::Unknown);
     // No exact payment is fabricated: no outgoing record exists, only the balance.
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+    // Nothing left the account's shielded pools, so no outgoing Activity is inferred.
+    assert_eq!(entry.whole_fee, Some(zat(FEE)));
+    assert_eq!(entry.inferred_outgoing, None);
     // The full transaction remains unavailable under PrivateRequired.
     assert_eq!(
         entry.pending_private_details,

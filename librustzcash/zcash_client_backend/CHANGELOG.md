@@ -11,6 +11,15 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `transparent_ledger::TransactionHistoryDetails::whole_fee`: the exact whole-transaction fee
+  from the stored fee (including one supplied by a validated Enhance PIR record) or qualified
+  transparent metadata, independent of the account's fee attribution in `fee`. Unknown when
+  neither establishes it or they disagree.
+- `transparent_ledger::TransactionHistoryDetails::inferred_outgoing`: an Activity-only outgoing
+  value for a mixed transaction known without its full data whose Enhance record asserts
+  transparent outputs: the account's spent shielded value less its shielded receipts and the
+  whole fee. It is not a payment, names no recipient, and leaves the aggregate payment, payment
+  details, fee attribution, and classification unchanged.
 - `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
   output-presence assertion for display reconstruction; note decryption authenticates the memo,
   not that assertion.

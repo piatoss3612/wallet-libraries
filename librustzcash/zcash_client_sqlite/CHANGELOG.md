@@ -10,6 +10,16 @@ workspace.
 
 ## [Unreleased]
 
+- History reports the whole-transaction fee separately from the account's fee, and infers the
+  outgoing Activity value of a freshly restored shielded send with transparent outputs that
+  private recovery cannot attribute: the account's spent shielded value less its shielded
+  receipts and the whole fee (for the reported mainnet shape, 107,485,000 spent and 107,220,000
+  returned with a 15,000 fee: 250,000 outgoing). The inference needs a mined transaction without
+  full data whose Enhance record asserts transparent outputs, complete shielded effects, a known
+  and uncontradicted fee, no transparent spend or ledger-recorded transparent input, no other
+  funding wallet account, and no recorded send to anyone else. The payment, its details, the
+  account's fee, and the classification are unchanged. No schema change.
+
 - Private recovery of mixed transparent/Ironwood transactions under `PrivateRequired` keeps
   the details that do not depend on transparent data. A has-transparent Enhance PIR record (or
   a compact scan with explicit non-Ironwood fields) still takes the sticky route-2

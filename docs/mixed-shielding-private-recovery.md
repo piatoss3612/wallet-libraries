@@ -102,3 +102,32 @@ This is a wallet-library history workaround, not a publisher repair or a claim o
 mixed-transaction reconstruction. A consumer that supports `NetReconstructed` can display the
 owned transparent-to-Ironwood net transfer (for example 400,000 zatoshis received), but native
 Vizor behavior must be tested after repinning the library.
+
+## Outgoing Activity of a shielded send with transparent outputs
+
+The reverse shape spends the account's Ironwood notes and pays a transparent address: for the
+reported mainnet transaction, 107,485,000 zatoshis spent, 107,220,000 returned as Ironwood change,
+a 15,000 fee, and 250,000 to a transparent output. A fresh `PrivateRequired` restore holds the
+spend and the change (compact scanning) and the Enhance PIR records with the fee and the
+`has_transparent_outputs` assertion. Outgoing recovery never runs for a mixed record, and
+transparent recovery links no sent output, so nothing records where the 250,000 went. When the
+transparent output is the account's own, transparent recovery adds a 250,000 receipt and the net
+movement is the fee alone.
+
+History reports two facts for Activity without changing attribution:
+
+- `whole_fee`: the stored fee (here, the Enhance record's) or the exact qualified metadata fee,
+  unknown when they disagree. `fee` remains the account's share (`Unknown` here).
+- `inferred_outgoing`: owned shielded spent − owned shielded returned − whole fee, 250,000 here.
+  It requires a mined transaction without full data whose Enhance record asserts transparent
+  outputs, complete shielded effects, a known and uncontradicted fee, no transparent spend by the
+  account and no ledger-recorded transparent input in the transaction, no qualified metadata
+  counting a transparent input, no other funding wallet account, a positive result, and no
+  recorded output the account sent to anyone else (which Activity would show itself).
+
+The value is inferred: it assumes the account paid the whole fee, which a foreign input or
+foreign shielded spend could have shared, and it may include outputs to the account's own
+transparent addresses or shielded outputs to others. `aggregate_payment`, `payment_details`, the
+account's fee, and the `Provisional` classification are unchanged, and no recipient is claimed.
+The public restore of the same transaction records the 250,000 output as the account's send;
+`activity_outgoing.rs` compares the two.
