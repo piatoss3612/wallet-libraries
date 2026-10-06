@@ -262,9 +262,12 @@ are:
 A step that must wait for more scanning or a newer publication returns
 `Error::SweepDeferred`. After its sweep, a key scans from the next block: a refund key until its
 swap closes, and an incoming key never issued here for 24 hours after it was
-registered, catching a payout from a swap in flight at restore. Issuing a closed
-key again starts scanning at the tip and queues another sweep for the time it
-was closed; that sweep does not hold up other reservations. Reorgs below a sweep
+registered, catching a payout from a swap in flight at restore. During that
+watch, incoming issuance takes the highest free index in the recovery window
+rather than the lowest, since the lowest unpaid indices may be the old device's
+open swaps. Issuing a closed key again starts scanning at the tip and queues
+another sweep for the time it was closed; that sweep does not hold up other
+reservations. Reorgs below a sweep
 reopen it. Until restore sweeps finish, new incoming reservations wait.
 
 Historical spend retention follows the earliest unfinished sweep, pending note, or

@@ -587,7 +587,11 @@ fn undone_incoming_sweep_blocks_new_reservations() {
         .db_mut()
         .finish_sweep(account, swept, through)
         .unwrap();
-    assert_eq!(prepare(&mut st, NOW).key.key_id(), swept);
+    // Issuance resumes, from the top of the window while the swept key is watched.
+    assert_eq!(
+        prepare(&mut st, NOW).key.key_id().index(),
+        RECEIVE_GAP_LIMIT - 1
+    );
 }
 
 #[test]
@@ -633,6 +637,32 @@ fn reissue_sweeps_of_closed_keys_do_not_block_issuance() {
 }
 
 #[test]
+fn issuance_during_the_restore_watch_starts_at_the_top_of_the_window() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let swept_at = tip(&st);
+    let db = st.wallet_mut().db_mut();
+    db.maintain_swap_receive_lookahead(account, RECEIVE_GAP_LIMIT as u32, swept_at.height)
+        .unwrap();
+    for index in 0..RECEIVE_GAP_LIMIT {
+        db.finish_sweep(account, KeyId::new(Purpose::Receive, index), swept_at)
+            .unwrap();
+    }
+    // The old device's open swaps, if any, hold the lowest unpaid indices.
+    let first = prepare(&mut st, NOW);
+    assert_eq!(first.key.key_id().index(), RECEIVE_GAP_LIMIT - 1);
+    quote(&mut st, &first, "first", true);
+    // Once the watch ends, issuance fills from the lowest free index again.
+    let grace = zakura_swap_receiving::lifecycle::CompletionPolicy::default().grace_secs;
+    let closes = unix_now(&test_clock()) + grace;
+    st.wallet_mut()
+        .db_mut()
+        .close_finished_swap_keys_at(account, closes, swept_at.height)
+        .unwrap();
+    assert_eq!(prepare(&mut st, NOW).key.key_id().index(), 0);
+}
+
+#[test]
 fn payout_during_restore_watch_excludes_the_index() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
@@ -649,7 +679,11 @@ fn payout_during_restore_watch_excludes_the_index() {
     // A swap issued before a restore pays out after the sweep, during the watch.
     pay(&mut st, swept.full_viewing_key());
     assert!(holds_note(&st, swept.key_id()));
-    assert_eq!(prepare(&mut st, NOW).key.key_id().index(), 1);
+    // The payout moves the window up by one; during the watch, issuance takes its top.
+    assert_eq!(
+        prepare(&mut st, NOW).key.key_id().index(),
+        RECEIVE_GAP_LIMIT
+    );
 }
 
 #[test]
@@ -717,7 +751,11 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
     let r = db
         .prepare_swap_receive_reservation(account, NOW, near)
         .unwrap();
-    assert_eq!(r.key.key_id(), KeyId::new(Purpose::Receive, 0));
+    // The swept lookahead is still watched, so issuance takes the top of the window.
+    assert_eq!(
+        r.key.key_id(),
+        KeyId::new(Purpose::Receive, RECEIVE_GAP_LIMIT - 1)
+    );
     let refund = db
         .reserve_swap_refund_key(account, through.height)
         .unwrap()

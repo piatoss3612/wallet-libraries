@@ -712,18 +712,20 @@ fn issuing_a_lookahead_key_does_not_extend_the_lookahead() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let through = tip(&st);
+    let window = RECEIVE_GAP_LIMIT;
     let db = st.wallet_mut().db_mut();
-    db.maintain_swap_receive_lookahead(account, 3, through.height)
+    db.maintain_swap_receive_lookahead(account, window as u32, through.height)
         .unwrap();
-    for i in 0..3 {
+    for i in 0..window {
         db.finish_sweep(account, KeyId::new(Purpose::Receive, i), through)
             .unwrap();
     }
     let issued = db
         .prepare_swap_receive_reservation_from(account, NOW, through.height + 1)
         .unwrap();
-    assert_eq!(issued.key.key_id().index(), 0);
-    db.maintain_swap_receive_lookahead(account, 3, through.height)
+    // During the restore watch, issuance takes the top of the window.
+    assert_eq!(issued.key.key_id().index(), window - 1);
+    db.maintain_swap_receive_lookahead(account, window as u32, through.height)
         .unwrap();
     assert!(due(&mut st, through, NOW).is_empty());
     let resumed = st

@@ -55,7 +55,8 @@ workspace.
   `finish_swap_receive_quote`, `start_swap_receive_quote`, `swap_receive_quotes_due`,
   `observe_swap_receive_quote`, `has_swap_receive_quote` and
   `reap_swap_receive_reservations`, holding at most `RECEIVE_UNFUNDED_LIMIT` unfunded
-  addresses within a `RECEIVE_GAP_LIMIT` recovery gap.
+  addresses within a `RECEIVE_GAP_LIMIT` recovery gap. During the watch after a restore,
+  incoming issuance starts from the top of that gap.
 - Swap funding: `record_swap_refund_quote`, `swap_funding_memo` and
   `verify_swap_funding_proposal`. The refund index travels in a memo on the funding
   transaction's internal Ironwood change, whose only transparent output is the deposit.

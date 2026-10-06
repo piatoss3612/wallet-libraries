@@ -591,7 +591,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R: Rng> WalletDb<C, P, CL, R> 
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
-    /// Atomically resumes the single draft or locks the lowest never-paid free index.
+    /// Atomically resumes the single draft or locks the lowest never-paid free index,
+    /// or the highest one in the recovery window while restored keys are still watched.
     /// Does not expose the address.
     ///
     /// `tip` is the chain tip last observed from the network, within
@@ -674,7 +675,24 @@ fn prepare<P: Parameters>(
     if unfunded >= RECEIVE_UNFUNDED_LIMIT {
         return Err(Error::ReservationPolicy(super::ReservationPolicy::Limit));
     }
-    for index in 0..end {
+    // While restored keys are watched for payouts in flight at restore, the lowest
+    // unpaid indices may be the old device's open swaps, so issue from the top of the
+    // recovery window instead. A later restore still reaches it.
+    let watching: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
+            JOIN ironwood_swap_sweeps s ON s.receiving_key_id = k.id
+            WHERE k.account_id = ?1 AND k.purpose = 1 AND k.closed_at IS NULL
+              AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
+                  WHERE r.receiving_key_id = k.id))",
+        [a.0],
+        |r| r.get(0),
+    )?;
+    let indices: Box<dyn Iterator<Item = u64>> = if watching {
+        Box::new((0..end).rev())
+    } else {
+        Box::new(0..end)
+    };
+    for index in indices {
         let blocked: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
                 WHERE k.account_id = ?1 AND k.purpose = 1 AND k.key_index = ?2 AND (
