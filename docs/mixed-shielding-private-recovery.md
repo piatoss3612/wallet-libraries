@@ -120,14 +120,17 @@ History reports two facts for Activity without changing attribution:
   unknown when they disagree. `fee` remains the account's share (`Unknown` here).
 - `inferred_outgoing`: owned shielded spent − owned shielded returned − whole fee, 250,000 here.
   It requires a mined transaction without full data whose Enhance record asserts transparent
-  outputs, complete shielded effects, a known and uncontradicted fee, no transparent spend by the
-  account and no ledger-recorded transparent input in the transaction, no qualified metadata
+  outputs, complete shielded effects, a complete transparent effect (private coverage reaches
+  the transaction) with no transparent spend by the account, a known and uncontradicted fee, no
+  ledger-recorded transparent input in the transaction, no qualified metadata
   counting a transparent input, no other funding wallet account, a positive result, and no
   recorded output the account sent to anyone else (which Activity would show itself).
 
 The value is inferred: it assumes the account paid the whole fee, which a foreign input or
-foreign shielded spend could have shared, and it may include outputs to the account's own
-transparent addresses or shielded outputs to others. `aggregate_payment`, `payment_details`, the
+foreign shielded spend could have shared; a fee supplied only by Enhance is trusted service
+metadata that note decryption does not authenticate; and the value may include outputs to the
+account's own transparent addresses or shielded outputs to others whose outgoing viewing key
+was discarded (`an_unrecoverable_shielded_payment_is_part_of_the_inferred_value`). `aggregate_payment`, `payment_details`, the
 account's fee, and the `Provisional` classification are unchanged, and no recipient is claimed.
 The public restore of the same transaction records the 250,000 output as the account's send;
 `activity_outgoing.rs` compares the two.

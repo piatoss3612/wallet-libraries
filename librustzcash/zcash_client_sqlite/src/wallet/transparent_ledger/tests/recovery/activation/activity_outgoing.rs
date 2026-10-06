@@ -85,7 +85,13 @@ enum Destination {
     /// An Ironwood address no wallet account holds, with the sender's outgoing viewing key
     /// discarded: no transparent output, and no outgoing recovery.
     ExternalShieldedWithoutOvk,
+    /// Both a transparent address and, for `SHIELDED_PAYMENT` more, an Ironwood address that no
+    /// wallet account holds, with the sender's outgoing viewing key discarded.
+    ExternalTransparentAndShieldedWithoutOvk,
 }
+
+/// The shielded payment of [`Destination::ExternalTransparentAndShieldedWithoutOvk`].
+const SHIELDED_PAYMENT: u64 = 100_000;
 
 fn own_transparent(st: &State) -> TransparentAddress {
     let account = st.test_account().unwrap().id();
@@ -95,19 +101,24 @@ fn own_transparent(st: &State) -> TransparentAddress {
 /// Builds the reported transaction in a sender wallet that holds the same note.
 fn sent_transaction(destination: Destination) -> Transaction {
     let mut st = funded(|st| set_policy(st, Public));
-    let to = match destination {
-        Destination::OwnTransparent => Address::from(own_transparent(&st)),
-        Destination::ExternalTransparent => {
-            Address::from(TransparentAddress::PublicKeyHash([7; 20]))
-        }
-        Destination::ExternalShieldedWithoutOvk => {
-            OrchardPoolTester::sk_default_address(&OrchardPoolTester::sk(&[0xf5; 32]))
-        }
+    let external_transparent = Address::from(TransparentAddress::PublicKeyHash([7; 20]));
+    let external_shielded =
+        OrchardPoolTester::sk_default_address(&OrchardPoolTester::sk(&[0xf5; 32]));
+    let payments = match destination {
+        Destination::OwnTransparent => vec![(Address::from(own_transparent(&st)), SENT)],
+        Destination::ExternalTransparent => vec![(external_transparent, SENT)],
+        Destination::ExternalShieldedWithoutOvk => vec![(external_shielded, SENT)],
+        Destination::ExternalTransparentAndShieldedWithoutOvk => vec![
+            (external_transparent, SENT),
+            (external_shielded, SHIELDED_PAYMENT),
+        ],
     };
-    let request = TransactionRequest::new(vec![Payment::without_memo(
-        to.to_zcash_address(st.network()),
-        zat(SENT),
-    )])
+    let request = TransactionRequest::new(
+        payments
+            .into_iter()
+            .map(|(to, value)| Payment::without_memo(to.to_zcash_address(st.network()), zat(value)))
+            .collect(),
+    )
     .unwrap();
     let account = st.test_account().cloned().unwrap();
     let proposal = st
@@ -120,8 +131,9 @@ fn sent_transaction(destination: Destination) -> Transaction {
         )
         .unwrap();
     let ovk_policy = match destination {
-        Destination::ExternalShieldedWithoutOvk => OvkPolicy::Discard,
-        _ => OvkPolicy::Sender,
+        Destination::ExternalShieldedWithoutOvk
+        | Destination::ExternalTransparentAndShieldedWithoutOvk => OvkPolicy::Discard,
+        Destination::OwnTransparent | Destination::ExternalTransparent => OvkPolicy::Sender,
     };
     let txid = *st
         .create_proposed_transactions::<Infallible, _, Infallible, _>(
@@ -526,10 +538,10 @@ fn absent_or_unknown_transparent_shape_infers_nothing() {
     assert_only_activity_inferred(&entry);
 }
 
-/// A shielded payment whose outgoing viewing key was discarded has no transparent output and is
-/// not recoverable privately: it stays a provisional debit, without an inferred amount.
+/// An Ironwood-only payment whose outgoing viewing key was discarded is not recoverable
+/// privately: it stays a provisional debit, without an inferred amount.
 #[test]
-fn unrecoverable_shielded_payment_infers_nothing() {
+fn ironwood_only_unrecoverable_payment_infers_nothing() {
     let case = privately_recovered(
         Destination::ExternalShieldedWithoutOvk,
         None,
@@ -561,8 +573,8 @@ fn a_recorded_send_suppresses_the_inference() {
         .execute(
             "INSERT INTO sent_notes (transaction_id, output_pool, output_index, from_account_id,
                  to_address, value)
-             SELECT ?1, 0, 0, id, 't1fixture', ?2 FROM accounts",
-            rusqlite::params![case.tx_ref, SENT],
+             SELECT ?1, 0, 0, id, 't1fixture', ?2 FROM accounts WHERE uuid = ?3",
+            rusqlite::params![case.tx_ref, SENT, case.account.expose_uuid()],
         )
         .unwrap();
     let entry = case.history();
@@ -578,4 +590,47 @@ fn reorg_withdraws_the_inference() {
     let entry = case.history();
     assert_eq!(entry.mined_height, None);
     assert_eq!(entry.inferred_outgoing, None);
+}
+
+/// A mixed transaction that also paid someone else's Ironwood address with its outgoing viewing
+/// key discarded: no recovery reveals that payment, so the inferred outgoing value includes it.
+/// This is the documented limit of the inference; it remains provisional and incomplete.
+#[test]
+fn an_unrecoverable_shielded_payment_is_part_of_the_inferred_value() {
+    let entry = privately_recovered(
+        Destination::ExternalTransparentAndShieldedWithoutOvk,
+        None,
+        true,
+        Some(FEE),
+    )
+    .history();
+    assert_eq!(entry.whole_fee, Some(zat(FEE)));
+    assert_eq!(entry.inferred_outgoing, Some(zat(SENT + SHIELDED_PAYMENT)));
+    assert_only_activity_inferred(&entry);
+}
+
+/// Private transparent coverage that stops below the transaction leaves the account's
+/// transparent effect incomplete: an unrecovered transparent spend of its own could be part of
+/// the transaction, so nothing is inferred until coverage reaches it.
+#[test]
+fn incomplete_transparent_coverage_infers_nothing() {
+    let tx = sent_transaction(Destination::ExternalTransparent);
+    let mut case = restore(tx, |st| {
+        set_policy(st, PrivateShadow);
+        recover_transparent(st, vec![]);
+    });
+    enhance(&mut case, true, Some(FEE));
+    let entry = case.history();
+    assert_eq!(
+        effect(&entry, PoolType::Transparent).completeness,
+        EffectCompleteness::Incomplete
+    );
+    assert_eq!(entry.whole_fee, Some(zat(FEE)));
+    assert_eq!(entry.inferred_outgoing, None);
+    assert_only_activity_inferred(&entry);
+
+    // Once coverage reaches the transaction, the inference follows.
+    let account = case.account;
+    cover(&mut case.st, account, &revision(1, true), vec![]);
+    assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
 }

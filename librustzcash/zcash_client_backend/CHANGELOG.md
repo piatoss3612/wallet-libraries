@@ -12,9 +12,10 @@ workspace.
 
 ### Added
 - `transparent_ledger::TransactionHistoryDetails::whole_fee`: the exact whole-transaction fee
-  from the stored fee (including one supplied by a validated Enhance PIR record) or qualified
-  transparent metadata, independent of the account's fee attribution in `fee`. Unknown when
-  neither establishes it or they disagree.
+  from the stored fee (including trusted service metadata from an applied Enhance PIR record) or
+  qualified transparent metadata, independent of the account's fee attribution in `fee`.
+  Unknown when neither establishes it or they disagree. Struct literals must set the two new
+  fields.
 - `transparent_ledger::TransactionHistoryDetails::inferred_outgoing`: an Activity-only outgoing
   value for a mixed transaction known without its full data whose Enhance record asserts
   transparent outputs: the account's spent shielded value less its shielded receipts and the

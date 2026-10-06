@@ -513,7 +513,8 @@ fn has_other_outgoing_evidence(
     )?)
 }
 
-/// Whether any account's ledger records a transparent spend in `txid`.
+/// Whether any account's ledger records a transparent spend in `txid`, including events of an
+/// inactive account: any of them is evidence of a transparent input.
 #[cfg(feature = "transparent-inputs")]
 fn has_ledger_spend(conn: &rusqlite::Connection, txid: &TxId) -> Result<bool, SqliteClientError> {
     Ok(conn.query_row(
@@ -531,16 +532,20 @@ fn has_ledger_spend(conn: &rusqlite::Connection, txid: &TxId) -> Result<bool, Sq
 /// The inference assumes the account paid the whole fee. Each condition removes evidence that
 /// another funder shared it, or that the account's funds moved in a way the balance misreads:
 /// - every shielded effect is complete, so no owned spend or receipt is missing;
-/// - the account spent no transparent funds, no account's ledger records a transparent spend in
-///   the transaction, and qualified metadata, when present, counts no transparent input;
+/// - the account's transparent effect is complete (private coverage reaches the transaction, so
+///   an unrecovered transparent spend of the account is excluded) and spends nothing, no
+///   account's ledger records a transparent spend in the transaction, and qualified metadata,
+///   when present, counts no transparent input;
 /// - no other wallet account spent funds in it, and the account recorded no sent output, which
 ///   other Activity would show;
 /// - the account's net shielded debit exceeds the fee.
 ///
 /// What remains unknown is reported as such elsewhere: an unrecovered transparent input of
-/// another party, or a foreign shielded spend, could have paid part of the fee, and the outgoing
-/// value may include outputs to the account's own transparent addresses or to shielded
-/// recipients. The result is therefore an Activity amount, never a payment or a fee attribution.
+/// another party, or a foreign shielded spend, could have paid part of the fee; the fee itself
+/// is trusted service metadata when only Enhance supplies it; and the outgoing value may include
+/// outputs to the account's own transparent addresses or shielded outputs to others, which no
+/// outgoing recovery reveals for a mixed transaction. The result is therefore an Activity
+/// amount, never a payment or a fee attribution.
 fn inferred_outgoing(
     conn: &rusqlite::Connection,
     account_id: i64,
@@ -557,7 +562,12 @@ fn inferred_outgoing(
     let mut received = Zatoshis::ZERO;
     for effect in effects {
         match effect.pool {
-            PoolType::Transparent if effect.spent != Zatoshis::ZERO => return Ok(None),
+            PoolType::Transparent
+                if effect.completeness != EffectCompleteness::Complete
+                    || effect.spent != Zatoshis::ZERO =>
+            {
+                return Ok(None);
+            }
             PoolType::Transparent => {}
             PoolType::Shielded(_) if effect.completeness != EffectCompleteness::Complete => {
                 return Ok(None);
