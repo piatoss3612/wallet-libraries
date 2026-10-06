@@ -519,7 +519,7 @@ fn repeated_missing_history_does_not_restart_the_public_replay() {
 }
 
 #[test]
-fn note_before_public_restore_bound_is_blocked_without_queuing_replay() {
+fn note_before_the_birthday_is_dropped_without_queuing_replay() {
     let (mut st, key, candidate, through, path) = fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
@@ -540,13 +540,12 @@ fn note_before_public_restore_bound_is_blocked_without_queuing_replay() {
             Some((through, &path))
         )
         .unwrap(),
-        PaymentApplication::OutsideRecoveryRange
+        PaymentApplication::BeforeBirthday
     );
-    assert_eq!(
+    assert!(
         db.pending_swap_payments(account, key.key_id())
             .unwrap()
-            .len(),
-        1
+            .is_empty()
     );
     assert_eq!(
         db.conn

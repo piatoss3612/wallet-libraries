@@ -254,8 +254,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 through,
                 Some((publication, &path)),
             )?;
-            if applied != PaymentApplication::Applied {
-                return Ok(applied);
+            match applied {
+                PaymentApplication::Applied | PaymentApplication::BeforeBirthday => {}
+                waiting => return Ok(waiting),
             }
         }
         let coverage = self

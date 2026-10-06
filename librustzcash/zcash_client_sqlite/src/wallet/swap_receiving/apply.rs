@@ -26,9 +26,10 @@ pub enum PaymentApplication {
     AwaitingWitness,
     /// Locally retained history cannot establish absence of a spend.
     AwaitingSpendHistory,
-    /// The authenticated note predates the public account restore range. Widen that
-    /// range before retrying.
-    OutsideRecoveryRange,
+    /// The authenticated note predates the account's birthday, so the wallet does not
+    /// track it, as with any note before the birthday. Its key is marked used and
+    /// advancing, so the index is never issued again and the lookahead moves past it.
+    BeforeBirthday,
     /// Note, memo, witness, key identity, and any known spend were committed together,
     /// or the wallet already stored the note under another transaction.
     Applied,
@@ -99,7 +100,20 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             |r| r.get(0),
         )?;
         if u32::from(candidate.height) < birthday {
-            return Ok(PaymentApplication::OutsideRecoveryRange);
+            conn.execute(
+                "UPDATE ironwood_receiving_keys SET advances_allocation = 1 WHERE id = ?1",
+                [key_ref],
+            )?;
+            conn.execute(
+                "INSERT OR IGNORE INTO ironwood_swap_receive_used (receiving_key_id) VALUES (?1)",
+                [key_ref],
+            )?;
+            conn.execute(
+                "DELETE FROM ironwood_swap_payment_recovery
+                 WHERE receiving_key_id = ?1 AND txid = ?2 AND action_index = ?3",
+                params![key_ref, candidate.txid.as_ref(), candidate.action_index],
+            )?;
+            return Ok(PaymentApplication::BeforeBirthday);
         }
 
         if wallet::fully_scanned_height(conn)? != Some(through.height)

@@ -626,3 +626,44 @@ fn a_mislabeled_answer_for_a_scanned_note_is_dropped() {
     assert_eq!(note_txids(&st), vec![candidate.txid]);
     assert!(!has_transaction(&st, forged.txid));
 }
+
+/// A payment from before the account's birthday is not tracked, as no note before it
+/// is, but its index is marked used and its sweep finishes, so a restore with a late
+/// birthday does not hold up incoming issuance.
+#[test]
+fn a_payment_before_the_birthday_marks_its_index_used_and_finishes_the_sweep() {
+    let (mut st, key, candidate, through, path) = fixture();
+    let account = st.test_account().unwrap().id();
+    let id = key.key_id();
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE accounts SET birthday_height = ?1",
+            [u32::from(candidate.height) + 1],
+        )
+        .unwrap();
+    let siblings = path.auth_path().map(|hash| hash.to_bytes());
+    let db = st.wallet_mut().db_mut();
+    db.queue_swap_lookup(account, id, through, std::slice::from_ref(&candidate))
+        .unwrap();
+    assert_eq!(
+        db.apply_swap_sweep(account, id, through, through, |_, _| Some(siblings))
+            .unwrap(),
+        PaymentApplication::Applied
+    );
+    assert!(!db.swap_history_pending(account, through.height).unwrap());
+    assert!(db.pending_swap_payments(account, id).unwrap().is_empty());
+    assert!(unspent_keys(&st, through.height).is_empty());
+    let (used, advances): (bool, bool) = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_swap_receive_used u
+                    WHERE u.receiving_key_id = k.id), k.advances_allocation
+             FROM ironwood_receiving_keys k WHERE k.purpose = 1 AND k.key_index = ?1",
+            [id.index().to_be_bytes()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(used && advances);
+}
