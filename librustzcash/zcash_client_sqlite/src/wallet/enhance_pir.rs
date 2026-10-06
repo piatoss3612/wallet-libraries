@@ -16,7 +16,7 @@ use zcash_client_backend::data_api::{
         storage::{
             EnhancePirStorage, IronwoodOutgoingResult, PendingIronwoodMemo,
             PendingIronwoodMetadata, PendingIronwoodOutgoing, StoredIronwoodMetadata,
-            ValidatedIronwoodEnhancement,
+            TransparentShape, ValidatedIronwoodEnhancement,
         },
     },
 };
@@ -56,8 +56,8 @@ macro_rules! active_private_tx {
 
 /// Like [`active_private_tx`], but also keeps transactions whose transparent details are
 /// unsupported (route 2) while public authority is absent (`:public_authority` false). Only
-/// received memos are retrieved for them: note decryption authenticates a memo without the
-/// transparent details. Extend the WHERE with `AND`.
+/// received memos and note-bound metadata are retrieved for them: note decryption authenticates
+/// both without the transparent details. Extend the WHERE with `AND`.
 macro_rules! active_memo_tx {
     () => {
         concat!(
@@ -88,8 +88,8 @@ mod metadata;
 // PrivateProtected survives completion and rewinds; only an explicit LWD decision or
 // transaction deletion with retrieval-intent cleanup ends protection. Route 2
 // (PrivateDetailsUnsupported) is sticky under PrivateRequired; once public authority is
-// current again it is ordinary public LWD work. Until then it keeps private memo work for
-// its received Ironwood notes, and nothing else: see [`queue_unsupported_memos`].
+// current again it is ordinary public LWD work. Until then it keeps private memo and note-bound
+// metadata work for its received Ironwood notes, and nothing else: see [`queue_unsupported_work`].
 // No row retains ordinary enhancement semantics for unclassified and legacy transactions. Its
 // history expiry is display-only and never controls spendability.
 const PRIVATE_PROTECTED: i64 = private_protected!();
@@ -313,7 +313,7 @@ fn require_lwd(
 
 /// Marks a mixed or otherwise publicly unrecoverable transaction under PrivateRequired.
 /// Clears retryable PIR jobs without deleting financial facts or inserting a public request,
-/// then requeues the memos of its received Ironwood notes, which remain privately recoverable.
+/// then requeues the work for its received Ironwood notes that remains privately recoverable.
 fn require_private_details_unsupported(
     conn: &Connection,
     tx_ref: crate::TxRef,
@@ -324,19 +324,24 @@ fn require_private_details_unsupported(
         named_params![":tx": tx_ref.0, ":route": PRIVATE_DETAILS_UNSUPPORTED],
     )?;
     clear_work(conn, tx_ref)?;
-    queue_unsupported_memos(conn, Some(tx_ref))
+    queue_unsupported_work(conn, Some(tx_ref))
 }
 
-/// Queues the unknown memos of the received Ironwood notes of route-2 transactions (all of them,
-/// or only `tx_ref`) for private retrieval.
+/// Queues the privately recoverable work of route-2 transactions (all of them, or only
+/// `tx_ref`): the unknown memos of their received Ironwood notes, and, while the whole-transaction
+/// fee or a current transparent shape is unknown, metadata work bound to their first received
+/// version-3 note.
 ///
-/// Decrypting the scanned note authenticates its memo whether or not the transaction has
-/// transparent data, so a memo is recoverable even though the transaction's transparent details
-/// are not. Retrieval queries a commitment tree position, never the transaction ID, and is
-/// dispatched only while public authority is absent; with public authority, route 2 is ordinary
-/// LWD work instead. Recovering a memo never changes the route: the transaction stays marked as
-/// having unsupported details. A position another note already claims is left to it.
-pub(crate) fn queue_unsupported_memos(
+/// Decrypting the scanned note authenticates its memo, and binds a record to the transaction,
+/// whether or not the transaction has transparent data, so both are recoverable even though the
+/// transaction's transparent details are not. Metadata work stays queued after the memo is known,
+/// so a response without a fee leaves the fee retryable. A shape recorded at a placement the
+/// transaction no longer has is unknown, so re-mining requeues it. Retrieval queries a commitment
+/// tree position, never the transaction ID, and is dispatched only while public authority is
+/// absent; with public authority, route 2 is ordinary LWD work instead. Recovering details never
+/// changes the route: the transaction stays marked as having unsupported details. A memo position
+/// another note already claims is left to it.
+pub(crate) fn queue_unsupported_work(
     conn: &Connection,
     tx_ref: Option<crate::TxRef>,
 ) -> Result<(), SqliteClientError> {
@@ -356,7 +361,90 @@ pub(crate) fn queue_unsupported_memos(
             ":tx": tx_ref.map(|tx_ref| tx_ref.0),
         ],
     )?;
+    conn.execute(
+        "INSERT INTO ironwood_enhance_metadata_queue (
+             transaction_id, commitment_tree_position, output_index, compact_bound
+         )
+         SELECT t.id_tx, rn.commitment_tree_position, rn.action_index, 0
+         FROM transactions t
+         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+         JOIN ironwood_received_notes rn ON rn.transaction_id = t.id_tx
+         WHERE r.route = :route AND t.raw IS NULL AND t.mined_height IS NOT NULL
+           AND (:tx IS NULL OR t.id_tx = :tx)
+           AND (t.fee IS NULL OR r.transparent_flags IS NULL
+                OR r.transparent_flags_height IS NOT t.mined_height)
+           AND rn.note_version = 3 AND rn.commitment_tree_position IS NOT NULL
+           AND rn.action_index = (
+               SELECT MIN(n.action_index) FROM ironwood_received_notes n
+               WHERE n.transaction_id = t.id_tx AND n.note_version = 3
+                 AND n.commitment_tree_position IS NOT NULL)
+         ON CONFLICT(transaction_id) DO UPDATE SET
+             commitment_tree_position = excluded.commitment_tree_position,
+             output_index = excluded.output_index,
+             compact_bound = 0",
+        named_params![
+            ":route": PRIVATE_DETAILS_UNSUPPORTED,
+            ":tx": tx_ref.map(|tx_ref| tx_ref.0),
+        ],
+    )?;
     Ok(())
+}
+
+/// The transparent shape recorded for `tx_ref` at its current placement, or `None` if none is.
+fn current_shape(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+) -> Result<Option<TransparentShape>, SqliteClientError> {
+    let flags: Option<u8> = conn
+        .query_row(
+            "SELECT CASE WHEN r.transparent_flags_height IS t.mined_height
+                         THEN r.transparent_flags END
+             FROM transactions t
+             JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+             WHERE t.id_tx = :tx",
+            named_params![":tx": tx_ref.0],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(flags.map(shape_from_flags))
+}
+
+/// Shape flags use the record's wire bits: transparent inputs `1`, transparent outputs `2`.
+fn shape_from_flags(flags: u8) -> TransparentShape {
+    TransparentShape {
+        has_transparent_inputs: flags & 1 != 0,
+        has_transparent_outputs: flags & 2 != 0,
+    }
+}
+
+fn shape_flags(shape: TransparentShape) -> u8 {
+    u8::from(shape.has_transparent_inputs) | (u8::from(shape.has_transparent_outputs) << 1)
+}
+
+/// Records `shape` for `tx_ref` at its current placement, if the current shape is still
+/// `expected`. Returns whether it was recorded.
+fn record_shape(
+    conn: &Connection,
+    tx_ref: crate::TxRef,
+    expected: Option<TransparentShape>,
+    shape: TransparentShape,
+) -> Result<bool, SqliteClientError> {
+    Ok(conn.execute(
+        "UPDATE ironwood_enhance_routing
+         SET transparent_flags = :flags,
+             transparent_flags_height = (SELECT mined_height FROM transactions WHERE id_tx = :tx)
+         WHERE transaction_id = :tx
+           AND (SELECT mined_height FROM transactions WHERE id_tx = :tx) IS NOT NULL
+           AND (CASE WHEN transparent_flags_height
+                          IS (SELECT mined_height FROM transactions WHERE id_tx = :tx)
+                     THEN transparent_flags END) IS :expected",
+        named_params![
+            ":tx": tx_ref.0,
+            ":flags": shape_flags(shape),
+            ":expected": expected.map(shape_flags),
+        ],
+    )? == 1)
 }
 
 /// Routes a transaction that needs ordinary transparent enhancement: public LWD when
@@ -498,8 +586,9 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
              SELECT q.commitment_tree_position, t.txid, q.output_index
              FROM ironwood_enhance_metadata_queue q
              JOIN transactions t ON t.id_tx = q.transaction_id
-             {ACTIVE_PRIVATE_TX}
+             {ACTIVE_MEMO_TX}
                AND q.commitment_tree_position IS NOT NULL
+               AND (r.route = {PRIVATE_PROTECTED} OR q.compact_bound = 0)
          )
          {rows}
          ORDER BY kind, ordinal, tx_index, identity, output_index"
@@ -619,26 +708,16 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
         &self,
         txid: TxId,
     ) -> Result<Option<StoredIronwoodMetadata>, Self::Error> {
-        self.tx
-            .query_row(
-                "SELECT fee, expiry_height FROM transactions WHERE txid = ?",
-                [txid.as_ref()],
-                |r| {
-                    Ok(StoredIronwoodMetadata {
-                        fee_zatoshis: r.get(0)?,
-                        expiry_height: r.get(1)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(Into::into)
+        stored_metadata(self.tx, txid)
     }
 
     fn pending_ironwood_metadata(
         &self,
         position: Position,
     ) -> Result<Option<PendingIronwoodMetadata<AccountUuid>>, Self::Error> {
-        metadata::pending(self.tx, self.params, position)
+        let public_authority =
+            transparent_ledger::retains_public_authority(self.tx, self.configured)?;
+        metadata::pending(self.tx, self.params, position, public_authority)
     }
 
     fn get_account(&self, id: AccountUuid) -> Result<Option<Self::Account>, Self::Error> {
@@ -673,6 +752,31 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
             enhancement,
         )
     }
+}
+
+/// The transaction's fee, authoritative expiry, and transparent shape at its current placement.
+pub(crate) fn stored_metadata(
+    conn: &Connection,
+    txid: TxId,
+) -> Result<Option<StoredIronwoodMetadata>, SqliteClientError> {
+    conn.query_row(
+        "SELECT t.fee, t.expiry_height,
+                CASE WHEN r.transparent_flags_height IS t.mined_height
+                     THEN r.transparent_flags END
+         FROM transactions t
+         LEFT JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+         WHERE t.txid = ?",
+        [txid.as_ref()],
+        |r| {
+            Ok(StoredIronwoodMetadata {
+                fee_zatoshis: r.get(0)?,
+                expiry_height: r.get(1)?,
+                transparent_shape: r.get::<_, Option<u8>>(2)?.map(shape_from_flags),
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub(crate) fn apply_records<P: Parameters>(
@@ -957,8 +1061,8 @@ pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
     pending_note(conn, params, position, false, public_authority)
 }
 
-/// Memo work (`metadata_only` false) includes route-2 transactions while `public_authority` is
-/// false; metadata work exists only for protected transactions.
+/// Memo and note-bound metadata work include route-2 transactions while `public_authority` is
+/// false.
 fn pending_note<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -998,9 +1102,6 @@ fn pending_note<P: Parameters>(
              ",
                 active_memo_tx!(),
                 "
-               AND (NOT :metadata OR r.route = ",
-                private_protected!(),
-                ")
                AND q.commitment_tree_position = :position
                AND (:metadata OR rn.memo IS NULL)
                AND rn.commitment_tree_position = q.commitment_tree_position"
@@ -1113,12 +1214,13 @@ pub(crate) fn apply<P: Parameters>(
 ) -> Result<EnhancePirStoreResult, SqliteClientError> {
     let zcash_client_backend::data_api::enhance_pir::storage::IronwoodEnhancementData {
         request,
-        has_transparent,
+        shape,
         metadata,
         expected_metadata,
         incoming,
         outgoing,
     } = enhancement.into_parts();
+    let has_transparent = shape.has_transparent();
     let id = request.request_id();
     let public_authority = transparent_ledger::retains_public_authority(tx, configured)?;
     let target: Option<(crate::TxRef, i64)> = tx
@@ -1174,7 +1276,15 @@ pub(crate) fn apply<P: Parameters>(
             return Ok(EnhancePirStoreResult::AlreadyResolved);
         }
     }
-    // Crucially, no routing mutation happens before the identity rechecks.
+    // Crucially, no routing mutation happens before the identity rechecks. A shape that
+    // contradicts the captured one, or a captured shape that is no longer current, rejects the
+    // response before any write on every route.
+    if expected_metadata.is_some_and(|expected| {
+        !expected.shape_agrees_with(shape)
+    }) || current_shape(tx, tx_ref)? != expected_metadata.and_then(|e| e.transparent_shape)
+    {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
     if has_transparent || route == PRIVATE_DETAILS_UNSUPPORTED {
         transparent_ledger::ensure_policy_generation(tx, expected_generation)?;
         if public_authority {
@@ -1186,6 +1296,7 @@ pub(crate) fn apply<P: Parameters>(
             tx,
             tx_ref,
             route,
+            shape,
             metadata,
             expected_metadata,
             memo_id.zip(incoming),
@@ -1239,6 +1350,11 @@ pub(crate) fn apply<P: Parameters>(
     {
         return Err(SqliteClientError::CorruptedData(
             "Ironwood enhancement routing changed during response application".into(),
+        ));
+    }
+    if !record_shape(tx, tx_ref, expected.transparent_shape, shape)? {
+        return Err(SqliteClientError::CorruptedData(
+            "Ironwood transparent shape changed during response application".into(),
         ));
     }
     tx.execute(
@@ -1306,26 +1422,30 @@ pub(crate) fn apply<P: Parameters>(
 
 /// Applies a response for a transaction whose transparent details are unsupported without public
 /// authority: one with transparent data (by the response's flags, or an earlier decision), or with
-/// a non-Ironwood bundle (by the compact scan). Called after the identity rechecks of [`apply`],
-/// inside its SQL transaction, with `route` the transaction's current route.
+/// a non-Ironwood bundle (by the compact scan). Called after the identity and shape rechecks of
+/// [`apply`], inside its SQL transaction, with `route` the transaction's current route.
 ///
 /// Keeps only details that do not depend on the transparent data:
 /// - the memo of the authenticated received note at this action, if requested;
+/// - the response's transparent shape, flag by flag, at the transaction's current placement;
 /// - the whole-transaction fee, filled only when unknown. The fee is trusted service metadata,
 ///   as for Ironwood-only transactions. Like those, the response must agree with every known
 ///   fee, expiry, and displayed expiry, and the captured snapshot must still be current;
-///   otherwise nothing changes and the response is `Rejected`. A response without a fee keeps
-///   only the memo.
+///   otherwise nothing changes and the response is `Rejected`.
 ///
-/// Outgoing and discovery work cannot be completed privately for such a transaction, and its
-/// metadata work is answered by this response. A protected transaction therefore takes the
-/// sticky route-2 marker here, keeping memo work for its other received notes, and every later
-/// response for it lands in this function again. The marker stays when every memo is known:
-/// its transparent details remain unsupported, and history keeps reporting them as pending.
+/// A response without a fee keeps the memo and shape and leaves the metadata work queued, so the
+/// fee stays retryable. Once the fee and a current shape are known, the metadata work is done.
+///
+/// Outgoing and discovery work cannot be completed privately for such a transaction. A protected
+/// transaction therefore takes the sticky route-2 marker here, keeping memo and metadata work for
+/// its received notes, and every later response for it lands in this function again. The marker
+/// stays when every detail it can recover is known: its transparent details remain unsupported,
+/// and history keeps reporting them as pending.
 fn store_unsupported_details(
     tx: &Transaction<'_>,
     tx_ref: crate::TxRef,
     route: i64,
+    shape: TransparentShape,
     metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata,
     expected_metadata: Option<StoredIronwoodMetadata>,
     memo: Option<(i64, zcash_protocol::memo::MemoBytes)>,
@@ -1375,6 +1495,7 @@ fn store_unsupported_details(
             ":route": route,
         ],
     )? != 1
+        || !record_shape(tx, tx_ref, expected.transparent_shape, shape)?
     {
         return Err(SqliteClientError::CorruptedData(
             "Ironwood enhancement routing changed during response application".into(),
@@ -1390,8 +1511,17 @@ fn store_unsupported_details(
             named_params![":id": note_id],
         )?;
     }
+    // The shape was just recorded at the current placement; the fee may still be unknown.
+    tx.execute(
+        "DELETE FROM ironwood_enhance_metadata_queue
+         WHERE transaction_id = :tx
+           AND EXISTS (SELECT 1 FROM transactions WHERE id_tx = :tx AND fee IS NOT NULL)",
+        named_params![":tx": tx_ref.0],
+    )?;
     if route == PRIVATE_PROTECTED {
         require_private_details_unsupported(tx, tx_ref)?;
+    } else {
+        queue_unsupported_work(tx, Some(tx_ref))?;
     }
     Ok(EnhancePirStoreResult::PrivateDetailsUnsupported)
 }

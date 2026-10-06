@@ -657,7 +657,9 @@ CREATE TABLE "ironwood_enhance_routing" (
     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id_tx) ON DELETE CASCADE,
     route INTEGER NOT NULL CHECK (route IN (0, 1, 2)),
     history_expiry_height INTEGER
-        CHECK (history_expiry_height >= 0 AND history_expiry_height < 500000000)
+        CHECK (history_expiry_height >= 0 AND history_expiry_height < 500000000), transparent_flags INTEGER CHECK (transparent_flags IN (0, 1, 2, 3)), transparent_flags_height INTEGER
+                     CHECK (transparent_flags_height >= 0
+                            AND (transparent_flags IS NULL) = (transparent_flags_height IS NULL))
 )"#;
 
 /// Stores the transparent outputs received by the wallet.

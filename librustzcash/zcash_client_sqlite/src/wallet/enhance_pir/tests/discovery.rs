@@ -2578,6 +2578,11 @@ fn pir_expiry_does_not_pin_notes_across_reorg_or_reopen_completed_work() {
             StoredIronwoodMetadata {
                 fee_zatoshis: Some(0),
                 expiry_height: None,
+                // The Ironwood-only shape is recorded too; the expiry never is.
+                transparent_shape: Some(TransparentShape {
+                    has_transparent_inputs: false,
+                    has_transparent_outputs: false,
+                }),
             }
         );
         assert_eq!(

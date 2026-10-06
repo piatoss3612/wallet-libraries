@@ -112,9 +112,9 @@ pub(crate) fn apply_transparent_policy(
                    )",
                     [],
                 )?;
-                // Their received memos remain privately recoverable.
+                // Their received memos, fees and shapes remain privately recoverable.
                 #[cfg(feature = "orchard")]
-                crate::wallet::enhance_pir::queue_unsupported_memos(conn, None)?;
+                crate::wallet::enhance_pir::queue_unsupported_work(conn, None)?;
             } else if mode.retains_public_authority() {
                 // Sticky route 2 was assigned while public enhancement was forbidden. With
                 // public authority restored, unresolved mixed rows become ordinary LWD work
@@ -130,13 +130,21 @@ pub(crate) fn apply_transparent_policy(
                    )",
                     [],
                 )?;
-                // LWD retrieval of the full transaction supersedes their private memo work.
+                // LWD retrieval of the full transaction supersedes their private memo and
+                // metadata work.
                 conn.execute(
                     "DELETE FROM ironwood_memo_retrieval_queue
                  WHERE received_note_id IN (
                      SELECT rn.id FROM ironwood_received_notes rn
                      JOIN ironwood_enhance_routing r ON r.transaction_id = rn.transaction_id
                      WHERE r.route = 1
+                 )",
+                    [],
+                )?;
+                conn.execute(
+                    "DELETE FROM ironwood_enhance_metadata_queue
+                 WHERE transaction_id IN (
+                     SELECT transaction_id FROM ironwood_enhance_routing WHERE route = 1
                  )",
                     [],
                 )?;

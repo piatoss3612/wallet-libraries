@@ -67,13 +67,15 @@ pub(super) fn bind(
     Ok(())
 }
 
+/// Note-bound metadata work includes route-2 transactions while `public_authority` is false;
+/// compact-bound (send-only) work exists only for protected transactions.
 pub(super) fn pending<P: Parameters>(
     conn: &Connection,
     params: &P,
     position: Position,
+    public_authority: bool,
 ) -> Result<Option<PendingIronwoodMetadata<AccountUuid>>, SqliteClientError> {
-    // Metadata work belongs to protected transactions only, whatever the authority.
-    if let Some(note) = super::pending_note(conn, params, position, true, true)? {
+    if let Some(note) = super::pending_note(conn, params, position, true, public_authority)? {
         return Ok(Some(PendingIronwoodMetadata::Incoming(note)));
     }
     conn.query_row(

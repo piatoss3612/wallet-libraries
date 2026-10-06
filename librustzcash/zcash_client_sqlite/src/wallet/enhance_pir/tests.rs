@@ -160,18 +160,8 @@ fn validated(
 }
 
 fn stored_metadata(st: &State, request: EnhancePirRequest) -> StoredIronwoodMetadata {
-    st.wallet()
-        .conn()
-        .query_row(
-            "SELECT fee, expiry_height FROM transactions WHERE txid = ?",
-            [request.request_id().txid().as_ref()],
-            |r| {
-                Ok(StoredIronwoodMetadata {
-                    fee_zatoshis: r.get(0)?,
-                    expiry_height: r.get(1)?,
-                })
-            },
-        )
+    super::stored_metadata(st.wallet().conn(), request.request_id().txid())
+        .unwrap()
         .unwrap()
 }
 
@@ -1415,6 +1405,7 @@ fn metadata_compare_and_apply_requires_a_compatible_snapshot() {
         Some(StoredIronwoodMetadata {
             fee_zatoshis: Some(1),
             expiry_height: None,
+            transparent_shape: None,
         }),
     ] {
         let (mut st, _, request) = fixture();

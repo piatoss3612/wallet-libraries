@@ -98,14 +98,14 @@ impl EnhancePirStorage for TransactionContext {
     ) -> Result<EnhancePirStoreResult, Self::Error> {
         let zcash_client_backend::data_api::enhance_pir::storage::IronwoodEnhancementData {
             request,
-            has_transparent,
+            shape,
             expected_metadata,
             ..
         } = enhancement.into_parts();
         if request != self.request {
             return Ok(EnhancePirStoreResult::AlreadyResolved);
         }
-        assert!(has_transparent);
+        assert!(shape.has_transparent());
         assert_eq!(expected_metadata, Some(Default::default()));
         self.committed = true;
         Ok(EnhancePirStoreResult::LwdRequired)
@@ -180,7 +180,7 @@ fn canonical_fixture_agrees_with_standard_transaction_fee_and_expiry() {
 
 use zcash_client_backend::data_api::enhance_pir::{
     EnhanceTransactionMetadata,
-    storage::{PendingIronwoodMetadata, StoredIronwoodMetadata},
+    storage::{PendingIronwoodMetadata, StoredIronwoodMetadata, TransparentShape},
 };
 
 /// A transaction-scoped custom store: action effects are staged until commit succeeds.
@@ -268,7 +268,7 @@ impl EnhancePirStorage for MetadataStore {
             self.known = Some(concurrent);
         }
         let mut next_metadata = self.known;
-        if !data.has_transparent {
+        if !data.has_transparent() {
             let Some(expected) = data.expected_metadata else {
                 return Ok(EnhancePirStoreResult::Rejected);
             };
@@ -287,7 +287,7 @@ impl EnhancePirStorage for MetadataStore {
         }
         self.known = next_metadata;
         self.applied.push(data.request);
-        if data.has_transparent {
+        if data.has_transparent() {
             self.lwd_required = true;
             self.pending.clear();
             Ok(EnhancePirStoreResult::LwdRequired)
@@ -326,6 +326,7 @@ fn custom_store_rejects_known_transaction_metadata_disagreement_before_commit() 
             let mut store = MetadataStore::new(StoredIronwoodMetadata {
                 fee_zatoshis: None,
                 expiry_height: Some(values[0].1),
+                transparent_shape: None,
             });
             let requests = store.pending.clone();
             let first = metadata_record(requests[0], Some(values[0].0), values[0].1, false);
@@ -359,14 +360,17 @@ fn custom_store_fills_unknown_fields_and_accepts_matching_actions_including_zero
             StoredIronwoodMetadata {
                 fee_zatoshis: Some(fee),
                 expiry_height: None,
+                transparent_shape: None,
             },
             StoredIronwoodMetadata {
                 fee_zatoshis: None,
                 expiry_height: Some(expiry),
+                transparent_shape: None,
             },
             StoredIronwoodMetadata {
                 fee_zatoshis: Some(fee),
                 expiry_height: Some(expiry),
+                transparent_shape: None,
             },
         ];
         for known in known_cases {
@@ -383,6 +387,7 @@ fn custom_store_fills_unknown_fields_and_accepts_matching_actions_including_zero
                 Some(StoredIronwoodMetadata {
                     fee_zatoshis: Some(fee),
                     expiry_height: known.expiry_height,
+                    transparent_shape: None,
                 })
             );
             assert!(store.pending.is_empty());
@@ -397,10 +402,12 @@ fn custom_store_does_not_treat_known_zero_as_unknown() {
         StoredIronwoodMetadata {
             fee_zatoshis: Some(0),
             expiry_height: None,
+            transparent_shape: None,
         },
         StoredIronwoodMetadata {
             fee_zatoshis: None,
             expiry_height: Some(0),
+            transparent_shape: None,
         },
     ] {
         let mut store = MetadataStore::new(known);
@@ -422,10 +429,12 @@ fn custom_store_compare_and_apply_rejects_changed_snapshot_even_when_values_agre
         StoredIronwoodMetadata {
             fee_zatoshis: Some(20_000),
             expiry_height: Some(101),
+            transparent_shape: None,
         },
         StoredIronwoodMetadata {
             fee_zatoshis: Some(10_000),
             expiry_height: Some(100),
+            transparent_shape: None,
         },
     ] {
         let mut store = MetadataStore::new(StoredIronwoodMetadata::default());
@@ -471,6 +480,7 @@ fn custom_store_transparent_routing_does_not_store_conflicting_metadata() {
     let known = StoredIronwoodMetadata {
         fee_zatoshis: Some(0),
         expiry_height: Some(0),
+        transparent_shape: None,
     };
     let mut store = MetadataStore::new(known);
     let request = store.pending[0];
@@ -481,6 +491,58 @@ fn custom_store_transparent_routing_does_not_store_conflicting_metadata() {
     );
     assert_eq!(store.known, Some(known));
     assert!(store.lwd_required);
+}
+
+/// A record whose shape contradicts the known shape is rejected before the backend commits,
+/// whether it would route publicly, privately, or as an Ironwood-only response.
+#[test]
+fn custom_store_rejects_a_contradicting_shape_before_commit() {
+    let shape = |has_transparent_inputs, has_transparent_outputs| TransparentShape {
+        has_transparent_inputs,
+        has_transparent_outputs,
+    };
+    for (known, proposed) in [
+        (shape(true, false), shape(true, true)),
+        (shape(true, false), shape(false, false)),
+        (shape(false, false), shape(true, false)),
+        (shape(true, true), shape(false, true)),
+    ] {
+        let known = StoredIronwoodMetadata {
+            transparent_shape: Some(known),
+            ..Default::default()
+        };
+        let mut store = MetadataStore::new(known);
+        let request = store.pending[0];
+        let record = EnhanceRecord::from_parts(EnhanceRecordParts {
+            enc_ciphertext_suffix: [2; 528],
+            cv_net: [0; 32],
+            out_ciphertext: [0; 80],
+            has_transparent_inputs: proposed.has_transparent_inputs,
+            has_transparent_outputs: proposed.has_transparent_outputs,
+            metadata: EnhanceTransactionMetadata::new(100, Some(10_000)).unwrap(),
+        });
+        assert_eq!(
+            validate_and_apply_record(&mut store, request, &record),
+            Ok(EnhancePirStoreResult::Rejected)
+        );
+        assert_eq!(store.commit_calls, 0);
+        assert_eq!(store.known, Some(known));
+        assert_eq!(store.pending.len(), 2);
+        assert!(store.applied.is_empty());
+        assert!(!store.lwd_required);
+    }
+    // An agreeing shape is not a contradiction.
+    let known = StoredIronwoodMetadata {
+        transparent_shape: Some(shape(false, false)),
+        ..Default::default()
+    };
+    let mut store = MetadataStore::new(known);
+    let request = store.pending[0];
+    let record = metadata_record(request, Some(10_000), 100, false);
+    assert_eq!(
+        validate_and_apply_record(&mut store, request, &record),
+        Ok(EnhancePirStoreResult::Stored)
+    );
 }
 
 #[test]

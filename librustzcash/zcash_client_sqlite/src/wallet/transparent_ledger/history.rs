@@ -177,6 +177,10 @@ struct TransactionFacts {
     /// compact scan) and the full transaction is not stored: its fee, if known, comes from
     /// private metadata and also covers inputs and outputs that are not the account's.
     mixed_without_full_data: bool,
+    /// The transparent shape flags an Enhance PIR record asserted for the transaction where it is
+    /// mined now (transparent inputs `1`, transparent outputs `2`). `None` is unknown: no record
+    /// was stored, or the transaction was re-mined elsewhere since.
+    enhance_transparent_flags: Option<u8>,
 }
 
 fn transaction_facts(
@@ -191,7 +195,10 @@ fn transaction_facts(
                 raw IS NULL AND EXISTS (
                     SELECT 1 FROM ironwood_enhance_routing r
                     WHERE r.transaction_id = id_tx AND r.route IN (1, 2)
-                )
+                ),
+                (SELECT CASE WHEN r.transparent_flags_height IS mined_height
+                             THEN r.transparent_flags END
+                 FROM ironwood_enhance_routing r WHERE r.transaction_id = id_tx)
          FROM transactions WHERE txid = :txid",
         named_params![":txid": txid.as_ref()],
         |row| {
@@ -203,12 +210,13 @@ fn transaction_facts(
                 row.get::<_, bool>(4)?,
                 row.get::<_, bool>(5)?,
                 row.get::<_, bool>(6)?,
+                row.get::<_, Option<u8>>(7)?,
             ))
         },
     )
     .optional()?
     .map(
-        |(id, mined_height, has_full_data, fee, constructed, created_locally, mixed)| {
+        |(id, mined_height, has_full_data, fee, constructed, created_locally, mixed, flags)| {
             Ok(TransactionFacts {
                 id,
                 mined_height: mined_height.map(BlockHeight::from_u32),
@@ -217,6 +225,7 @@ fn transaction_facts(
                 constructed,
                 created_locally,
                 mixed_without_full_data: mixed,
+                enhance_transparent_flags: flags,
             })
         },
     )
@@ -465,9 +474,39 @@ fn has_unresolved_spend(
     )?)
 }
 
+/// Whether another of the wallet's accounts is known to have funded the transaction: it spent a
+/// recorded output, the transparent ledger published one of its spends, or it sent an output.
+fn funded_by_another_account(
+    conn: &rusqlite::Connection,
+    account_id: i64,
+    transaction_id: i64,
+    txid: &TxId,
+) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM v_received_output_spends ros
+             JOIN v_received_outputs ro
+                  ON ro.pool = ros.pool AND ro.id_within_pool_table = ros.received_output_id
+             WHERE ros.transaction_id = :transaction_id AND ro.account_id != :account_id
+         ) OR EXISTS (
+             SELECT 1 FROM tpir_spend_events s
+             WHERE s.spending_txid = :txid AND s.account_id != :account_id
+         ) OR EXISTS (
+             SELECT 1 FROM sent_notes s
+             WHERE s.transaction_id = :transaction_id AND s.from_account_id != :account_id
+         )",
+        named_params![
+            ":account_id": account_id,
+            ":transaction_id": transaction_id,
+            ":txid": txid.as_ref(),
+        ],
+        |row| row.get(0),
+    )?)
+}
+
 /// Whether the account's side of a mixed transaction, known without its full data, is a
-/// transparent-to-shielded self-transfer whose spent value the whole-transaction fee and the
-/// account's shielded receipts account for. The caller has already checked that balance.
+/// transparent-to-Ironwood self-transfer whose spent value the whole-transaction fee and the
+/// account's Ironwood receipts account for. The caller has already checked that balance.
 ///
 /// Each condition closes one way the account's funds could have reached someone else:
 /// - every owned effect is complete (not merely settled), so the balance is not partial;
@@ -476,8 +515,12 @@ fn has_unresolved_spend(
 ///   side;
 /// - that metadata's exact whole-transaction fee equals the stored one, which Enhance PIR
 ///   recovered from an independent service, so the balance does not rest on one source;
-/// - the account spent only transparent funds and received only shielded outputs, with no
-///   recorded outputs to others.
+/// - the Enhance PIR record for the account's receipt explicitly reports transparent inputs and
+///   no transparent outputs at the transaction's current placement, so no transparent output
+///   paid anyone; a missing, stale, or positive output flag is not that evidence;
+/// - the account spent only transparent funds and received only Ironwood outputs, with no
+///   recorded outputs to others, and no other account of the wallet is known to have funded
+///   the transaction.
 ///
 /// What no available evidence can exclude is another party's self-balanced shielded
 /// participation: a real foreign shielded spend paying an equal foreign shielded output in an
@@ -496,6 +539,7 @@ fn is_private_shielding(
     metadata: Option<&TransactionMetadataEvidence>,
     owned_inputs: u32,
     sent_elsewhere: u64,
+    funded_by_another_account: bool,
 ) -> bool {
     let Some(metadata) = metadata.map(|e| e.metadata) else {
         return false;
@@ -504,21 +548,26 @@ fn is_private_shielding(
         WholeTransactionFee::Exact(fee) => tx.fee == Some(fee),
         WholeTransactionFee::Unknown | WholeTransactionFee::NotApplicable => false,
     };
-    let shape = effects.iter().all(|e| {
+    // Transparent inputs, and explicitly no transparent outputs.
+    let enhance_shape = tx.enhance_transparent_flags == Some(1);
+    let effects_shape = effects.iter().all(|e| {
         e.completeness == EffectCompleteness::Complete
             && match e.pool {
                 PoolType::Transparent => e.received == Zatoshis::ZERO && e.spent > Zatoshis::ZERO,
-                PoolType::Shielded(_) => e.spent == Zatoshis::ZERO,
+                PoolType::Shielded(ShieldedPool::Ironwood) => {
+                    e.spent == Zatoshis::ZERO && e.received > Zatoshis::ZERO
+                }
+                PoolType::Shielded(_) => e.spent == Zatoshis::ZERO && e.received == Zatoshis::ZERO,
             }
-    }) && effects
-        .iter()
-        .any(|e| matches!(e.pool, PoolType::Shielded(_)) && e.received > Zatoshis::ZERO);
+    }) && effects.iter().any(|e| e.pool == PoolType::IRONWOOD);
     metadata.has_shielded_components
         && owned_inputs > 0
         && owned_inputs == metadata.transparent_input_count
         && fees_agree
-        && shape
+        && enhance_shape
+        && effects_shape
         && sent_elsewhere == 0
+        && !funded_by_another_account
 }
 
 /// Returns `account`'s history view of each of `txids` that it has a recorded output or spend
@@ -692,6 +741,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
                 transaction_metadata.as_ref(),
                 owned_inputs,
                 sent_elsewhere(conn, account_id, tx.id)?,
+                funded_by_another_account(conn, account_id, tx.id, txid)?,
             );
         let payments_accounted = payments_accounted && !tx.mixed_without_full_data;
         let payment_details = if tx.constructed

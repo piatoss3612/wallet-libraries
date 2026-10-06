@@ -77,6 +77,32 @@ pub enum IronwoodOutgoingResult<AccountId> {
     NotRecoverable,
 }
 
+/// The transparent shape a record asserts for its whole transaction.
+///
+/// Trusted service metadata, not authenticated by note decryption. The two flags are carried
+/// separately: transparent inputs alone (a shielding) and transparent outputs (a payment or
+/// change leaving the shielded pools) support different history conclusions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransparentShape {
+    pub has_transparent_inputs: bool,
+    pub has_transparent_outputs: bool,
+}
+
+impl TransparentShape {
+    /// The shape `record` asserts.
+    pub fn of(record: &EnhanceRecord) -> Self {
+        Self {
+            has_transparent_inputs: record.has_transparent_inputs(),
+            has_transparent_outputs: record.has_transparent_outputs(),
+        }
+    }
+
+    /// Whether the transaction has any transparent data.
+    pub fn has_transparent(self) -> bool {
+        self.has_transparent_inputs || self.has_transparent_outputs
+    }
+}
+
 /// Transaction-wide metadata already known to storage.
 ///
 /// Each field is independently optional; `Some(0)` is known, not missing.
@@ -91,9 +117,19 @@ pub struct StoredIronwoodMetadata {
     /// a proposed expiry in this authoritative field; storage may retain a separate
     /// display-only assertion for history.
     pub expiry_height: Option<u32>,
+    /// The shape an earlier validated record asserted while the transaction was mined where it
+    /// is now. `None` is unknown, never the absence of transparent data: no record was stored,
+    /// or it was stored at a placement the transaction no longer has.
+    pub transparent_shape: Option<TransparentShape>,
 }
 
 impl StoredIronwoodMetadata {
+    /// Whether a record's shape agrees with the known shape, if any. Shapes are trusted service
+    /// metadata about one transaction, so two that differ contradict each other.
+    pub fn shape_agrees_with(self, proposed: TransparentShape) -> bool {
+        self.transparent_shape.is_none_or(|known| known == proposed)
+    }
+
     /// Whether a private response supplies a fee and agrees with every known field.
     pub fn agrees_with(self, proposed: EnhanceTransactionMetadata) -> bool {
         proposed.fee_zatoshis().is_some()
@@ -115,6 +151,7 @@ impl StoredIronwoodMetadata {
         Self {
             fee_zatoshis: self.fee_zatoshis.or(proposed.fee_zatoshis()),
             expiry_height: self.expiry_height,
+            transparent_shape: self.transparent_shape,
         }
     }
 }
@@ -129,7 +166,7 @@ impl StoredIronwoodMetadata {
 /// transparent flags say.
 pub struct ValidatedIronwoodEnhancement<AccountId> {
     request: EnhancePirRequest,
-    has_transparent: bool,
+    shape: TransparentShape,
     metadata: EnhanceTransactionMetadata,
     expected_metadata: Option<StoredIronwoodMetadata>,
     incoming: Option<MemoBytes>,
@@ -139,15 +176,24 @@ pub struct ValidatedIronwoodEnhancement<AccountId> {
 /// Fields of a validated response; commit them together after identity rechecks.
 pub struct IronwoodEnhancementData<AccountId> {
     pub request: EnhancePirRequest,
-    pub has_transparent: bool,
+    /// The response's transparent shape, with each flag kept separately.
+    pub shape: TransparentShape,
     pub metadata: EnhanceTransactionMetadata,
     /// Snapshot to compare atomically before filling unknown metadata fields.
     /// Validation always captures it; `None` only reaches storage from test constructors.
-    /// A transparent response has not been compared with it: storage compares it only
-    /// when it stores the response's details privately.
+    /// Validation has compared its shape with the response's. A transparent response's fee
+    /// and expiry have not been compared with it: storage compares them only when it stores
+    /// the response's details privately.
     pub expected_metadata: Option<StoredIronwoodMetadata>,
     pub incoming: Option<MemoBytes>,
     pub outgoing: IronwoodOutgoingResult<AccountId>,
+}
+
+impl<AccountId> IronwoodEnhancementData<AccountId> {
+    /// Whether the response reports any transparent data.
+    pub fn has_transparent(&self) -> bool {
+        self.shape.has_transparent()
+    }
 }
 
 impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
@@ -155,7 +201,7 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
     pub fn into_parts(self) -> IronwoodEnhancementData<AccountId> {
         IronwoodEnhancementData {
             request: self.request,
-            has_transparent: self.has_transparent,
+            shape: self.shape,
             metadata: self.metadata,
             expected_metadata: self.expected_metadata,
             incoming: self.incoming,
@@ -163,7 +209,8 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
         }
     }
 
-    /// Bypasses validation for storage tests only.
+    /// Bypasses validation for storage tests only. `has_transparent` reports transparent inputs
+    /// only.
     #[cfg(any(test, feature = "test-dependencies"))]
     pub fn for_testing(
         request: EnhancePirRequest,
@@ -174,7 +221,10 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
     ) -> Self {
         Self {
             request,
-            has_transparent,
+            shape: TransparentShape {
+                has_transparent_inputs: has_transparent,
+                has_transparent_outputs: false,
+            },
             metadata: EnhanceTransactionMetadata::new(0, Some(0)).expect("test metadata"),
             expected_metadata,
             incoming,
@@ -234,11 +284,16 @@ pub trait EnhancePirStorage {
     /// The comparison, fills, and all action/queue writes must share a transaction; a write
     /// error must roll back every effect. Do not perform a separate metadata commit.
     ///
+    /// The response's shape must agree with the captured shape, if known; a contradiction
+    /// returns `Rejected` before any write, whatever the route. Storage records an agreeing
+    /// shape, flag by flag, with the placement it was validated at, and treats a shape recorded
+    /// at another placement as unknown.
+    ///
     /// For an action-bound transparent response, retain the LWD routing behavior when public
     /// authority is current, without comparing or storing its fee/expiry. Without public
     /// authority, storage may keep the details that do not depend on the transparent data
-    /// (the authenticated memo, and a fee agreeing with `expected_metadata`) while marking
-    /// the transparent details unsupported; it must apply the same comparisons as above.
+    /// (the authenticated memo, its shape, and a fee agreeing with `expected_metadata`) while
+    /// marking the transparent details unsupported; it must apply the same comparisons as above.
     fn compare_and_apply_ironwood_enhancement(
         &mut self,
         enhancement: ValidatedIronwoodEnhancement<Self::AccountId>,
@@ -470,16 +525,20 @@ fn validate_record<DbT: EnhancePirStorage>(
     let Some(known) = db.ironwood_transaction_metadata(request.request_id().txid())? else {
         return Ok(Err(EnhancePirStoreResult::AlreadyResolved));
     };
-    // A transparent response may still route to public LWD, which ignores its metadata;
-    // storage compares it only if it keeps the response's details privately.
-    if !record.has_transparent() && !known.agrees_with(record.metadata()) {
+    // A shape contradicting an earlier record's is rejected on every route. A transparent
+    // response may still route to public LWD, which ignores its fee and expiry; storage
+    // compares those only if it keeps the response's details privately.
+    let shape = TransparentShape::of(record);
+    if !known.shape_agrees_with(shape)
+        || (!record.has_transparent() && !known.agrees_with(record.metadata()))
+    {
         return Ok(Err(EnhancePirStoreResult::Rejected));
     }
     let expected_metadata = Some(known);
 
     Ok(Ok(ValidatedIronwoodEnhancement {
         request,
-        has_transparent: record.has_transparent(),
+        shape,
         metadata: record.metadata(),
         expected_metadata,
         incoming: memo,
