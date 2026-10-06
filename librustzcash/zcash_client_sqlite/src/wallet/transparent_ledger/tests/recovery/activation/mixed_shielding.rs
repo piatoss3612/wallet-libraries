@@ -221,17 +221,34 @@ fn private_queries(st: &State) -> Vec<EnhancePirRequest> {
 /// The service's record for the account's received action: the authentic ciphertext of the
 /// scanned note, the service's transparent shape flags, and its transaction metadata.
 fn record(st: &State, request: EnhancePirRequest, fee: Option<u64>) -> EnhanceRecord {
+    record_with_outputs(st, request, fee, false)
+}
+
+fn record_with_outputs(
+    st: &State,
+    request: EnhancePirRequest,
+    fee: Option<u64>,
+    outputs: bool,
+) -> EnhanceRecord {
     let pending =
         crate::wallet::enhance_pir::pending(st.wallet().conn(), st.network(), request.position())
             .unwrap()
-            .expect("the received note awaits its memo");
+            .or_else(|| {
+                crate::wallet::enhance_pir::pending_metadata_note(
+                    st.wallet().conn(),
+                    st.network(),
+                    request.position(),
+                )
+                .unwrap()
+            })
+            .expect("the received note binds the memo or metadata query");
     let encryptor = IronwoodNoteEncryption::new(None, pending.note, MEMO);
     EnhanceRecord::from_parts(EnhanceRecordParts {
         enc_ciphertext_suffix: encryptor.encrypt_note_plaintext()[52..].try_into().unwrap(),
         cv_net: [0; 32],
         out_ciphertext: [0; 80],
         has_transparent_inputs: true,
-        has_transparent_outputs: false,
+        has_transparent_outputs: outputs,
         metadata: EnhanceTransactionMetadata::new(0, fee).unwrap(),
     })
 }
@@ -339,13 +356,17 @@ fn financial_rows(st: &State, tx_ref: i64) -> (i64, i64, i64, i64) {
 }
 
 /// The supported shape: every transparent input is the account's, the whole-transaction fee is
-/// exact and agrees across both private sources, and the account's spent value is exactly its
+/// exact (and agrees with any canonical fee), and the account's spent value is exactly its
 /// shielded receipt plus that fee.
 fn assert_reconstructed_shielding(case: &Shielding, shape: &Shape) {
     assert_owned_effects(case, shape);
     let entry = history(&case.st, case.account, case.txid);
     // The received memo is recovered, so the payment details are complete.
-    assert_eq!(entry.payment_details, DetailCompleteness::Complete);
+    assert_eq!(
+        entry.payment_details,
+        DetailCompleteness::Complete,
+        "{entry:?}"
+    );
     // The account's net movement is final; whether its debit was the fee is not proven.
     assert_eq!(
         entry.classification,
@@ -489,24 +510,129 @@ fn a_fee_sized_debit_without_sole_funding_evidence_stays_ambiguous() {
     }
 }
 
-/// A record without a fee still yields its authenticated memo, and no more.
+/// Qualified transparent metadata supplies the whole fee when the mixed enhancement cannot.
 #[test]
-fn memo_only_recovery_does_not_complete_the_payment() {
-    let shape = &CASES[1];
-    let mut case = shielding(shape, Some(reported_metadata()));
-    assert_eq!(
-        recover_memo(&mut case, None),
-        vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
-    );
+fn qualified_fee_reconstructs_without_an_enhancement_fee() {
+    for shape in &CASES {
+        let mut case = shielding(shape, Some(reported_metadata()));
+        assert_eq!(
+            recover_memo(&mut case, None),
+            vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
+        );
+        assert_eq!(
+            stored(&case.st, case.tx_ref),
+            (Some(2), None, Some(MEMO.to_vec()), false)
+        );
+        assert_eq!(queued(&case.st, case.tx_ref), 0);
+        assert_reconstructed_shielding(&case, shape);
+    }
+}
+
+/// A service shape flag is required separately from the wallet's absence of owned outputs.
+#[test]
+fn transparent_outputs_or_unknown_shape_prevent_net_reconstruction() {
+    for outputs in [Some(true), None] {
+        let mut case = shielding(&CASES[0], Some(reported_metadata()));
+        let request = private_queries(&case.st)[0];
+        let record = record_with_outputs(&case.st, request, None, true);
+        apply_records(&mut case.st, &[(request, record)]);
+        if outputs.is_none() {
+            // Models a recovered memo from an older build, without its discarded shape evidence.
+            conn(&case.st).execute("UPDATE ironwood_enhance_routing SET has_transparent_outputs = NULL WHERE transaction_id = ?", [case.tx_ref]).unwrap();
+        }
+        let entry = history(&case.st, case.account, case.txid);
+        assert_eq!(entry.classification, HistoryClassification::Provisional);
+        assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+        assert_eq!(entry.fee, FeeState::Unknown);
+    }
+}
+
+/// Conflicting shape assertions cannot overwrite a recovered absence flag or finish work.
+#[test]
+fn conflicting_transparent_output_shape_is_rejected_atomically() {
+    let mut case = shielding(&CASES[0], Some(reported_metadata()));
+    recover_memo(&mut case, None);
+    let (position, index): (u64, u32) = conn(&case.st).query_row(
+        "SELECT commitment_tree_position, action_index FROM ironwood_received_notes WHERE transaction_id = ?",
+        [case.tx_ref], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    conn(&case.st).execute(
+        "INSERT INTO ironwood_enhance_metadata_queue (transaction_id, commitment_tree_position, output_index) VALUES (?1, ?2, ?3)",
+        rusqlite::params![case.tx_ref, position, index],
+    ).unwrap();
+    let request = private_queries(&case.st)[0];
+    let response = record_with_outputs(&case.st, request, Some(FEE), true);
+    assert!(matches!(
+        case.st
+            .wallet_mut()
+            .db_mut()
+            .apply_ironwood_enhance_records(&[(request, response)])
+            .unwrap(),
+        EnhancePirBatchResult::Rejected { .. }
+    ));
+    assert_eq!(queued(&case.st, case.tx_ref), 1);
     assert_eq!(
         stored(&case.st, case.tx_ref),
         (Some(2), None, Some(MEMO.to_vec()), false)
     );
-    assert_eq!(queued(&case.st, case.tx_ref), 0);
-    let entry = history(&case.st, case.account, case.txid);
-    assert_eq!(entry.classification, HistoryClassification::Provisional);
-    assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
-    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_reconstructed_shielding(&case, &CASES[0]);
+}
+
+/// Memo recovery must not substitute a missing fee, an input count, or a balanced account flow.
+#[test]
+fn qualified_fee_workaround_rejects_incomplete_or_ambiguous_evidence() {
+    for (metadata, shielded) in [
+        (None, 400_000),
+        (
+            Some(TransactionMetadata {
+                fee: WholeTransactionFee::Unknown,
+                ..reported_metadata()
+            }),
+            400_000,
+        ),
+        (
+            Some(TransactionMetadata {
+                fee: WholeTransactionFee::Exact(zat(15_000)),
+                ..reported_metadata()
+            }),
+            400_000,
+        ),
+        (
+            Some(TransactionMetadata {
+                transparent_input_count: 3,
+                ..reported_metadata()
+            }),
+            400_000,
+        ),
+        (Some(reported_metadata()), 390_000),
+    ] {
+        let shape = Shape {
+            shielded,
+            ..CASES[1]
+        };
+        let mut case = shielding(&shape, metadata);
+        recover_memo(&mut case, None);
+        let entry = history(&case.st, case.account, case.txid);
+        assert_eq!(entry.classification, HistoryClassification::Provisional);
+        assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+        assert_eq!(entry.fee, FeeState::Unknown);
+        assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+        assert_eq!(stored(&case.st, case.tx_ref).1, None);
+    }
+    // The qualified fee cannot override a contradictory canonical fee either.
+    let mut case = shielding(&CASES[1], Some(reported_metadata()));
+    conn(&case.st)
+        .execute(
+            "UPDATE transactions SET fee = 15000 WHERE id_tx = ?",
+            [case.tx_ref],
+        )
+        .unwrap();
+    recover_memo(&mut case, None);
+    assert_eq!(
+        history(&case.st, case.account, case.txid).classification,
+        HistoryClassification::Provisional
+    );
+    assert_eq!(stored(&case.st, case.tx_ref).1, Some(15_000));
 }
 
 /// A response that contradicts stored facts, or no longer matches pending work, changes nothing.
@@ -600,6 +726,9 @@ fn an_existing_route_two_database_resumes_private_memo_recovery_after_upgrade() 
             tx = case.tx_ref
         ))
         .unwrap();
+    conn(&case.st)
+        .execute_batch("ALTER TABLE ironwood_enhance_routing DROP COLUMN has_transparent_outputs")
+        .unwrap();
     for leaf in CURRENT_LEAF_MIGRATIONS {
         conn(&case.st)
             .execute(
@@ -663,7 +792,7 @@ fn interrupted_recovery_retries_without_duplicates() {
 fn coverage_loss_and_reorg_reevaluate_the_classification() {
     let shape = &CASES[0];
     let mut case = shielding(shape, Some(reported_metadata()));
-    recover_memo(&mut case, Some(FEE));
+    recover_memo(&mut case, None);
     assert_reconstructed_shielding(&case, shape);
 
     // A quarantined source no longer covers the account or qualifies its metadata.
@@ -689,12 +818,7 @@ fn coverage_loss_and_reorg_reevaluate_the_classification() {
     let (route, fee, memo, raw) = stored(&case.st, case.tx_ref);
     assert_eq!(
         (route, fee, memo, raw),
-        (
-            Some(2),
-            Some(i64::try_from(FEE).unwrap()),
-            Some(MEMO.to_vec()),
-            false
-        )
+        (Some(2), None, Some(MEMO.to_vec()), false)
     );
 }
 
@@ -722,7 +846,7 @@ fn foreign_self_balanced_shielded_participation_is_indistinguishable() {
             .unwrap();
         assert_eq!(outgoing, 0);
         assert_eq!(
-            recover_memo(&mut case, Some(FEE)),
+            recover_memo(&mut case, None),
             vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
         );
         let entry = history(&case.st, case.account, case.txid);
@@ -739,4 +863,98 @@ fn foreign_self_balanced_shielded_participation_is_indistinguishable() {
         }
     });
     assert_eq!(details[0], details[1]);
+}
+
+/// Existing memo-complete route-2 wallets recover discarded shape evidence without a reset or
+/// a public payload request, and reopen with the canonical fee still NULL.
+#[test]
+fn existing_memo_complete_wallet_recovers_shape_and_survives_reopen() {
+    use crate::wallet::init::{WalletMigrator, migrations::CURRENT_LEAF_MIGRATIONS};
+    use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerRead;
+    let mut case = shielding(&CASES[1], Some(reported_metadata()));
+    recover_memo(&mut case, None);
+    let rows = financial_rows(&case.st, case.tx_ref);
+    conn(&case.st)
+        .execute_batch("ALTER TABLE ironwood_enhance_routing DROP COLUMN has_transparent_outputs")
+        .unwrap();
+    for leaf in CURRENT_LEAF_MIGRATIONS {
+        conn(&case.st)
+            .execute(
+                "DELETE FROM schemer_migrations WHERE id = ?",
+                [leaf.as_bytes().to_vec()],
+            )
+            .unwrap();
+    }
+    assert_eq!(queued(&case.st, case.tx_ref), 0);
+    WalletMigrator::new()
+        .init_or_migrate(case.st.wallet_mut().db_mut())
+        .unwrap();
+    assert_eq!(queued(&case.st, case.tx_ref), 1);
+    assert_eq!(
+        history(&case.st, case.account, case.txid).classification,
+        HistoryClassification::Provisional
+    );
+    assert_eq!(
+        recover_memo(&mut case, None),
+        vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
+    );
+    assert_eq!(queued(&case.st, case.tx_ref), 0);
+    assert_eq!(financial_rows(&case.st, case.tx_ref), rows);
+    assert_eq!(
+        stored(&case.st, case.tx_ref),
+        (Some(2), None, Some(MEMO.to_vec()), false)
+    );
+    assert_reconstructed_shielding(&case, &CASES[1]);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reopened.sqlite");
+    conn(&case.st)
+        .execute("VACUUM INTO ?", [path.to_str().unwrap()])
+        .unwrap();
+    let reopened = crate::WalletDb::for_path(
+        path,
+        *case.st.network(),
+        crate::testing::db::test_clock(),
+        crate::testing::db::test_rng(),
+    )
+    .unwrap()
+    .with_transparent_ledger_mode(PrivateRequired);
+    let entry = reopened
+        .transaction_history_details(case.account, &[case.txid])
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        entry.classification,
+        HistoryClassification::NetReconstructed
+    );
+    assert_eq!(entry.fee, FeeState::Unknown);
+}
+
+/// A pending shape response cannot survive restoration of public authority. Returning to
+/// PrivateRequired requeues the same private note binding without allowing public fallback.
+#[test]
+fn shape_only_recovery_obeys_public_authority_transitions() {
+    let mut case = shielding(&CASES[1], Some(reported_metadata()));
+    recover_memo(&mut case, None);
+    conn(&case.st).execute("UPDATE ironwood_enhance_routing SET has_transparent_outputs = NULL WHERE transaction_id = ?", [case.tx_ref]).unwrap();
+    crate::wallet::enhance_pir::queue_unsupported_memos(
+        conn(&case.st),
+        Some(crate::TxRef(case.tx_ref)),
+    )
+    .unwrap();
+    let request = private_queries(&case.st)[0];
+    let response = record(&case.st, request, None);
+    set_policy(&mut case.st, Public);
+    assert_eq!(
+        apply_records(&mut case.st, &[(request, response.clone())]),
+        vec![EnhancePirStoreResult::AlreadyResolved]
+    );
+    assert_eq!(queued(&case.st, case.tx_ref), 0);
+    set_policy(&mut case.st, PrivateRequired);
+    promote(&mut case.st, case.account).unwrap();
+    assert_eq!(private_queries(&case.st), vec![request]);
+    assert_eq!(
+        apply_records(&mut case.st, &[(request, response)]),
+        vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
+    );
+    assert_reconstructed_shielding(&case, &CASES[1]);
 }

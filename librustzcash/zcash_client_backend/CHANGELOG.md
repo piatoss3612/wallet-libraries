@@ -11,6 +11,9 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `IronwoodEnhancementData::has_transparent_outputs` preserves the service's separate
+  output-presence assertion for display reconstruction; note decryption authenticates the memo,
+  not that assertion.
 - `transparent_ledger::HistoryClassification::NetReconstructed`: the account's effects and the
   exact whole-transaction fee balance, but the wallet lacks the full transaction and cannot
   exclude another party's self-balanced shielded participation, so the account's movement is

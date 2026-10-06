@@ -56,8 +56,8 @@ macro_rules! active_private_tx {
 
 /// Like [`active_private_tx`], but also keeps transactions whose transparent details are
 /// unsupported (route 2) while public authority is absent (`:public_authority` false). Only
-/// received memos are retrieved for them: note decryption authenticates a memo without the
-/// transparent details. Extend the WHERE with `AND`.
+/// received memos and received-note-bound shape metadata are retrieved for them. Note
+/// decryption authenticates a memo without authenticating the service's shape assertion. Extend the WHERE with `AND`.
 macro_rules! active_memo_tx {
     () => {
         concat!(
@@ -89,7 +89,8 @@ mod metadata;
 // transaction deletion with retrieval-intent cleanup ends protection. Route 2
 // (PrivateDetailsUnsupported) is sticky under PrivateRequired; once public authority is
 // current again it is ordinary public LWD work. Until then it keeps private memo work for
-// its received Ironwood notes, and nothing else: see [`queue_unsupported_memos`].
+// its received Ironwood notes, including shape retrieval once their memos are known.
+// See [`queue_unsupported_memos`].
 // No row retains ordinary enhancement semantics for unclassified and legacy transactions. Its
 // history expiry is display-only and never controls spendability.
 const PRIVATE_PROTECTED: i64 = private_protected!();
@@ -340,22 +341,7 @@ pub(crate) fn queue_unsupported_memos(
     conn: &Connection,
     tx_ref: Option<crate::TxRef>,
 ) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "INSERT INTO ironwood_memo_retrieval_queue (received_note_id, commitment_tree_position)
-         SELECT rn.id, rn.commitment_tree_position
-         FROM ironwood_received_notes rn
-         JOIN transactions t ON t.id_tx = rn.transaction_id
-         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
-         WHERE r.route = :route AND t.raw IS NULL AND t.mined_height IS NOT NULL
-           AND (:tx IS NULL OR t.id_tx = :tx)
-           AND rn.memo IS NULL AND rn.note_version = 3
-           AND rn.commitment_tree_position IS NOT NULL
-         ON CONFLICT DO NOTHING",
-        named_params![
-            ":route": PRIVATE_DETAILS_UNSUPPORTED,
-            ":tx": tx_ref.map(|tx_ref| tx_ref.0),
-        ],
-    )?;
+    super::ironwood_hooks::queue_ironwood_output_shape(conn, tx_ref)?;
     Ok(())
 }
 
@@ -498,7 +484,7 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
              SELECT q.commitment_tree_position, t.txid, q.output_index
              FROM ironwood_enhance_metadata_queue q
              JOIN transactions t ON t.id_tx = q.transaction_id
-             {ACTIVE_PRIVATE_TX}
+             {ACTIVE_MEMO_TX}
                AND q.commitment_tree_position IS NOT NULL
          )
          {rows}
@@ -957,8 +943,19 @@ pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
     pending_note(conn, params, position, false, public_authority)
 }
 
+/// Test helper for the received-note binding of metadata-only private work.
+#[cfg(test)]
+pub(crate) fn pending_metadata_note<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    position: Position,
+) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, SqliteClientError> {
+    let public_authority = transparent_ledger::retains_public_authority(conn, None)?;
+    pending_note(conn, params, position, true, public_authority)
+}
+
 /// Memo work (`metadata_only` false) includes route-2 transactions while `public_authority` is
-/// false; metadata work exists only for protected transactions.
+/// false; received-note-bound metadata uses the same authority guard.
 fn pending_note<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -998,9 +995,6 @@ fn pending_note<P: Parameters>(
              ",
                 active_memo_tx!(),
                 "
-               AND (NOT :metadata OR r.route = ",
-                private_protected!(),
-                ")
                AND q.commitment_tree_position = :position
                AND (:metadata OR rn.memo IS NULL)
                AND rn.commitment_tree_position = q.commitment_tree_position"
@@ -1114,6 +1108,7 @@ pub(crate) fn apply<P: Parameters>(
     let zcash_client_backend::data_api::enhance_pir::storage::IronwoodEnhancementData {
         request,
         has_transparent,
+        has_transparent_outputs,
         metadata,
         expected_metadata,
         incoming,
@@ -1186,6 +1181,7 @@ pub(crate) fn apply<P: Parameters>(
             tx,
             tx_ref,
             route,
+            has_transparent_outputs,
             metadata,
             expected_metadata,
             memo_id.zip(incoming),
@@ -1326,6 +1322,7 @@ fn store_unsupported_details(
     tx: &Transaction<'_>,
     tx_ref: crate::TxRef,
     route: i64,
+    has_transparent_outputs: bool,
     metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata,
     expected_metadata: Option<StoredIronwoodMetadata>,
     memo: Option<(i64, zcash_protocol::memo::MemoBytes)>,
@@ -1350,6 +1347,14 @@ fn store_unsupported_details(
     if displayed_expiry.is_some_and(|expiry| expiry != metadata.expiry_height()) {
         return Ok(EnhancePirStoreResult::Rejected);
     }
+    let known_outputs: Option<bool> = tx.query_row(
+        "SELECT has_transparent_outputs FROM ironwood_enhance_routing WHERE transaction_id = :tx",
+        named_params![":tx": tx_ref.0],
+        |row| row.get(0),
+    )?;
+    if known_outputs.is_some_and(|known| known != has_transparent_outputs) {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
     // One compare-and-fill, as for Ironwood-only responses. A NULL fee leaves the known fee.
     if tx.execute(
         "UPDATE transactions SET fee = COALESCE(fee, :fee)
@@ -1366,11 +1371,13 @@ fn store_unsupported_details(
     }
     if tx.execute(
         "UPDATE ironwood_enhance_routing
-         SET history_expiry_height = COALESCE(history_expiry_height, :expiry)
+         SET history_expiry_height = COALESCE(history_expiry_height, :expiry),
+             has_transparent_outputs = COALESCE(has_transparent_outputs, :outputs)
          WHERE transaction_id = :tx AND route = :route
            AND (history_expiry_height IS NULL OR history_expiry_height = :expiry)",
         named_params![
             ":expiry": metadata.expiry_height(),
+            ":outputs": has_transparent_outputs,
             ":tx": tx_ref.0,
             ":route": route,
         ],
@@ -1390,6 +1397,10 @@ fn store_unsupported_details(
             named_params![":id": note_id],
         )?;
     }
+    tx.execute(
+        "DELETE FROM ironwood_enhance_metadata_queue WHERE transaction_id = ?",
+        [tx_ref.0],
+    )?;
     if route == PRIVATE_PROTECTED {
         require_private_details_unsupported(tx, tx_ref)?;
     }

@@ -130,7 +130,12 @@ pub(crate) fn apply_transparent_policy(
                    )",
                     [],
                 )?;
-                // LWD retrieval of the full transaction supersedes their private memo work.
+                // LWD retrieval supersedes received memo and shape-only private work.
+                conn.execute(
+                    "DELETE FROM ironwood_enhance_metadata_queue WHERE transaction_id IN (
+                         SELECT transaction_id FROM ironwood_enhance_routing WHERE route = 1)",
+                    [],
+                )?;
                 conn.execute(
                     "DELETE FROM ironwood_memo_retrieval_queue
                  WHERE received_note_id IN (

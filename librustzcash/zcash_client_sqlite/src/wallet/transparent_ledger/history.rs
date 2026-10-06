@@ -177,6 +177,8 @@ struct TransactionFacts {
     /// compact scan) and the full transaction is not stored: its fee, if known, comes from
     /// private metadata and also covers inputs and outputs that are not the account's.
     mixed_without_full_data: bool,
+    /// Display-only service assertion; NULL means it has not been recovered.
+    has_transparent_outputs: Option<bool>,
 }
 
 fn transaction_facts(
@@ -191,7 +193,9 @@ fn transaction_facts(
                 raw IS NULL AND EXISTS (
                     SELECT 1 FROM ironwood_enhance_routing r
                     WHERE r.transaction_id = id_tx AND r.route IN (1, 2)
-                )
+                ),
+                (SELECT has_transparent_outputs FROM ironwood_enhance_routing r
+                 WHERE r.transaction_id = id_tx)
          FROM transactions WHERE txid = :txid",
         named_params![":txid": txid.as_ref()],
         |row| {
@@ -203,12 +207,13 @@ fn transaction_facts(
                 row.get::<_, bool>(4)?,
                 row.get::<_, bool>(5)?,
                 row.get::<_, bool>(6)?,
+                row.get::<_, Option<bool>>(7)?,
             ))
         },
     )
     .optional()?
     .map(
-        |(id, mined_height, has_full_data, fee, constructed, created_locally, mixed)| {
+        |(id, mined_height, has_full_data, fee, constructed, created_locally, mixed, outputs)| {
             Ok(TransactionFacts {
                 id,
                 mined_height: mined_height.map(BlockHeight::from_u32),
@@ -217,6 +222,7 @@ fn transaction_facts(
                 constructed,
                 created_locally,
                 mixed_without_full_data: mixed,
+                has_transparent_outputs: outputs,
             })
         },
     )
@@ -467,15 +473,16 @@ fn has_unresolved_spend(
 
 /// Whether the account's side of a mixed transaction, known without its full data, is a
 /// transparent-to-shielded self-transfer whose spent value the whole-transaction fee and the
-/// account's shielded receipts account for. The caller has already checked that balance.
+/// account's shielded receipts account for.
 ///
 /// Each condition closes one way the account's funds could have reached someone else:
 /// - every owned effect is complete (not merely settled), so the balance is not partial;
 /// - qualified transparent metadata counts as many inputs as the account's published spends,
 ///   so every transparent input is the account's and no other party funded the transparent
 ///   side;
-/// - that metadata's exact whole-transaction fee equals the stored one, which Enhance PIR
-///   recovered from an independent service, so the balance does not rest on one source;
+/// - that metadata's fee is exact, balances the owned effects, and agrees with the canonical
+///   fee if one exists; the service's separately retained output flag says no transparent
+///   outputs exist (unknown is not absence);
 /// - the account spent only transparent funds and received only shielded outputs, with no
 ///   recorded outputs to others.
 ///
@@ -500,10 +507,15 @@ fn is_private_shielding(
     let Some(metadata) = metadata.map(|e| e.metadata) else {
         return false;
     };
-    let fees_agree = match metadata.fee {
-        WholeTransactionFee::Exact(fee) => tx.fee == Some(fee),
-        WholeTransactionFee::Unknown | WholeTransactionFee::NotApplicable => false,
+    let WholeTransactionFee::Exact(fee) = metadata.fee else {
+        return false;
     };
+    // TPIR fee evidence is qualified on every read; do not copy it into transactions.fee.
+    // If an independent canonical fee exists, it must agree.
+    let fees_agree = tx.fee.is_none_or(|known| known == fee);
+    let spent: u64 = effects.iter().map(|e| e.spent.into_u64()).sum();
+    let received: u64 = effects.iter().map(|e| e.received.into_u64()).sum();
+    let balanced = Some(spent) == received.checked_add(fee.into_u64());
     let shape = effects.iter().all(|e| {
         e.completeness == EffectCompleteness::Complete
             && match e.pool {
@@ -517,6 +529,8 @@ fn is_private_shielding(
         && owned_inputs > 0
         && owned_inputs == metadata.transparent_input_count
         && fees_agree
+        && balanced
+        && tx.has_transparent_outputs == Some(false)
         && shape
         && sent_elsewhere == 0
 }
@@ -684,8 +698,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         // the account's funds paid someone else the same amount. It stands only for the one shape
         // the recovered evidence pins down, and then only as a net movement; see
         // `is_private_shielding`.
-        let net_shielding = payments_accounted
-            && tx.mixed_without_full_data
+        let net_shielding = tx.mixed_without_full_data
             && is_private_shielding(
                 &tx,
                 &effects,

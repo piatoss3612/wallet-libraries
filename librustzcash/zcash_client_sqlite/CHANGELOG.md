@@ -22,12 +22,20 @@ workspace.
   route-2 transactions in existing wallets, without resetting notes, spend links, or routes.
 - History reconstructs a mixed transaction without full data, as
   `HistoryClassification::NetReconstructed`, only as a transparent-to-shielded self-transfer: every owned effect complete, qualified metadata counting exactly the account's
-  published transparent inputs, its exact whole-transaction fee equal to the stored one, only
+  published transparent inputs, its exact whole-transaction fee agreeing with the stored one
+  when present, recovered evidence that no transparent outputs exist, only
   transparent spends and shielded receipts, and the spent value equal to the receipts plus that
   fee. Otherwise it stays provisional. A net reconstruction does not prove the debit was the
   fee: another party's shielded spend paying an equal output at a padding action has the same
   evidence. The stored fee of such a transaction is the whole
   transaction's: `FeeState` stays `Unknown` and the aggregate payment is not inferred.
+
+- Mixed net-shielding reconstruction can use the qualified transparent PIR whole-transaction
+  fee when Enhance PIR omits it, without filling `transactions.fee` or attributing the fee.
+  The additive `ironwood_transparent_output_shape` migration retains the nullable output-presence
+  assertion and privately requeues its recovery for existing memo-complete route-2 wallets.
+  Unknown or conflicting shape, incomplete/unqualified effects, and failed accounting remain
+  provisional.
 
 - Transparent spend discovery retains work for unmined local spenders and resumes after they
   expire. Address and per-outpoint completion advance past expired-spender links, using expiry

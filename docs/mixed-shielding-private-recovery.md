@@ -6,7 +6,7 @@ A wallet that recovers a transparent-to-Ironwood shielding by private queries on
 - its own effects: the transparent outputs it spent (transparent PIR spend events) and the
   Ironwood note it received (compact scanning);
 - the Enhance PIR record for its received action: the authenticated memo, the service's
-  transparent shape flags, and the whole-transaction fee;
+  transparent shape flags, and optionally the whole-transaction fee;
 - the qualified transparent metadata on its spend events: the whole-transaction fee, the
   transparent input count, and whether any shielded component exists.
 
@@ -16,8 +16,15 @@ A wallet that recovers a transparent-to-Ironwood shielding by private queries on
   transaction's transparent details stay unsupported (route 2).
 - The whole-transaction fee into `transactions.fee`, only when it agrees with every known fee,
   expiry, and displayed expiry. A disagreeing response is rejected without effect.
+- The separate `has_transparent_outputs` assertion, with `NULL` for unknown shape and rejection
+  of conflicting assertions. This is trusted service display evidence; only the memo is
+  authenticated by note decryption.
 - Memo work for route-2 transactions, which is requeued on rescans and policy transitions and,
   for existing wallets, by the `ironwood_unsupported_memo_retry` migration.
+- Shape evidence for existing route-2 wallets whose memos are already known, using one
+  received-note-bound private metadata query. The additive `ironwood_transparent_output_shape`
+  migration leaves old shape evidence unknown and queues that recovery. Public authority
+  transitions and reorgs retain their existing dispatch guards; no public fallback is added.
 
 ## What the evidence cannot establish
 
@@ -68,7 +75,9 @@ reported as `HistoryClassification::NetReconstructed` only when:
 
 - every owned effect is complete;
 - qualified metadata counts exactly the account's published transparent inputs;
-- the metadata's exact fee equals the stored Enhance PIR fee;
+- qualified metadata has an exact whole-transaction fee, which agrees with the canonical fee
+  if one is stored; a missing canonical fee does not block reconstruction;
+- recovered Enhance PIR shape evidence explicitly says no transparent outputs exist;
 - the account spent only transparent funds and received only shielded outputs, with no recorded
   outputs to others;
 - spent = received + fee.
@@ -76,3 +85,20 @@ reported as `HistoryClassification::NetReconstructed` only when:
 The movement is final; the fee stays the whole transaction's (`FeeState::Unknown`) and no
 aggregate payment is inferred. Anything else stays `Provisional`: another transparent funder, an
 external payment, missing, unknown or disagreeing fees.
+
+## Qualified-fee workaround
+
+The mixed Enhance PIR publisher can currently return a memo and shape without a fee. Once that
+memo query is complete, no fee recovery work remains, so rebuilding or repeating sync cannot
+fill `transactions.fee`. History now uses the exact fee from qualified transparent metadata
+for the narrow net-shielding balance above. It does not copy that value into the canonical fee
+column. Quarantined or unqualified transparent metadata, incomplete owned effects, a foreign
+transparent input, unknown/present transparent outputs, a mismatched canonical fee, or a failed
+balance leaves the entry provisional. A recovered memo is still required for complete payment
+details. Even when net reconstruction succeeds, `FeeState::Unknown`, `AggregatePayment::Unknown`,
+and the pending mixed-details marker remain: the whole fee is not proven to be the account's.
+
+This is a wallet-library history workaround, not a publisher repair or a claim of complete
+mixed-transaction reconstruction. A consumer that supports `NetReconstructed` can display the
+owned transparent-to-Ironwood net transfer (for example 400,000 zatoshis received), but native
+Vizor behavior must be tested after repinning the library.

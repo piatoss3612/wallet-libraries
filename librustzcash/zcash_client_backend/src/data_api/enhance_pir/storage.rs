@@ -130,6 +130,7 @@ impl StoredIronwoodMetadata {
 pub struct ValidatedIronwoodEnhancement<AccountId> {
     request: EnhancePirRequest,
     has_transparent: bool,
+    has_transparent_outputs: bool,
     metadata: EnhanceTransactionMetadata,
     expected_metadata: Option<StoredIronwoodMetadata>,
     incoming: Option<MemoBytes>,
@@ -140,6 +141,9 @@ pub struct ValidatedIronwoodEnhancement<AccountId> {
 pub struct IronwoodEnhancementData<AccountId> {
     pub request: EnhancePirRequest,
     pub has_transparent: bool,
+    /// Service assertion about outputs, distinct from the presence of transparent inputs.
+    /// It is display evidence, not authenticated by note decryption.
+    pub has_transparent_outputs: bool,
     pub metadata: EnhanceTransactionMetadata,
     /// Snapshot to compare atomically before filling unknown metadata fields.
     /// Validation always captures it; `None` only reaches storage from test constructors.
@@ -156,6 +160,7 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
         IronwoodEnhancementData {
             request: self.request,
             has_transparent: self.has_transparent,
+            has_transparent_outputs: self.has_transparent_outputs,
             metadata: self.metadata,
             expected_metadata: self.expected_metadata,
             incoming: self.incoming,
@@ -175,6 +180,7 @@ impl<AccountId> ValidatedIronwoodEnhancement<AccountId> {
         Self {
             request,
             has_transparent,
+            has_transparent_outputs: false,
             metadata: EnhanceTransactionMetadata::new(0, Some(0)).expect("test metadata"),
             expected_metadata,
             incoming,
@@ -480,6 +486,7 @@ fn validate_record<DbT: EnhancePirStorage>(
     Ok(Ok(ValidatedIronwoodEnhancement {
         request,
         has_transparent: record.has_transparent(),
+        has_transparent_outputs: record.has_transparent_outputs(),
         metadata: record.metadata(),
         expected_metadata,
         incoming: memo,

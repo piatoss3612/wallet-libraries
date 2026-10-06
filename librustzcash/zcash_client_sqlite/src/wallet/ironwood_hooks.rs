@@ -177,3 +177,51 @@ pub(crate) fn put_received_note_spend(
     }
     Ok(())
 }
+
+/// A memo query already carries the shape; otherwise query one owned note even if its memo is
+/// known. No txid retrieval is inserted. Dispatch remains behind the current private authority.
+pub(crate) fn queue_ironwood_output_shape(
+    conn: &rusqlite::Connection,
+    tx_ref: Option<crate::TxRef>,
+) -> rusqlite::Result<()> {
+    // An old build may also have stranded an unknown memo with no queued work. Keep that
+    // authenticated obligation instead of querying its metadata only and discarding its memo.
+    conn.execute(
+        "INSERT INTO ironwood_memo_retrieval_queue (received_note_id, commitment_tree_position)
+         SELECT rn.id, rn.commitment_tree_position
+         FROM ironwood_received_notes rn
+         JOIN transactions t ON t.id_tx = rn.transaction_id
+         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+         WHERE r.route = 2 AND t.raw IS NULL AND t.mined_height IS NOT NULL
+           AND (:tx IS NULL OR t.id_tx = :tx)
+           AND rn.memo IS NULL AND rn.note_version = 3
+           AND rn.commitment_tree_position IS NOT NULL
+         ON CONFLICT DO NOTHING",
+        named_params![":tx": tx_ref.map(|tx_ref| tx_ref.0)],
+    )?;
+    conn.execute(
+        "INSERT INTO ironwood_enhance_metadata_queue
+             (transaction_id, commitment_tree_position, output_index, compact_bound)
+         SELECT t.id_tx, rn.commitment_tree_position, rn.action_index, 0
+         FROM transactions t
+         JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+         JOIN ironwood_received_notes rn ON rn.transaction_id = t.id_tx
+         WHERE r.route = 2 AND r.has_transparent_outputs IS NULL
+           AND t.raw IS NULL AND t.mined_height IS NOT NULL
+           AND (:tx IS NULL OR t.id_tx = :tx)
+           AND rn.note_version = 3 AND rn.commitment_tree_position IS NOT NULL
+           AND rn.ephemeral_key IS NOT NULL AND rn.compact_ciphertext IS NOT NULL
+           AND rn.id = (SELECT MIN(n.id) FROM ironwood_received_notes n
+                        WHERE n.transaction_id = t.id_tx AND n.note_version = 3
+                          AND n.commitment_tree_position IS NOT NULL
+                          AND n.ephemeral_key IS NOT NULL AND n.compact_ciphertext IS NOT NULL)
+           AND NOT EXISTS (SELECT 1 FROM ironwood_memo_retrieval_queue q
+                           JOIN ironwood_received_notes n ON n.id = q.received_note_id
+                           WHERE n.transaction_id = t.id_tx)
+         ON CONFLICT(transaction_id) DO UPDATE SET
+             commitment_tree_position = excluded.commitment_tree_position,
+             output_index = excluded.output_index, compact_bound = 0",
+        rusqlite::named_params![":tx": tx_ref.map(|tx_ref| tx_ref.0)],
+    )?;
+    Ok(())
+}
