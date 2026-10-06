@@ -87,7 +87,9 @@ impl EnhancePirStorage for TransactionContext {
         Option<zcash_client_backend::data_api::enhance_pir::storage::StoredIronwoodMetadata>,
         Self::Error,
     > {
-        panic!("transparent routing must not read transaction metadata")
+        // Validation captures the snapshot for transparent responses too; this store routes
+        // them to LWD, which neither compares nor stores it.
+        Ok(Some(Default::default()))
     }
 
     fn compare_and_apply_ironwood_enhancement(
@@ -97,12 +99,14 @@ impl EnhancePirStorage for TransactionContext {
         let zcash_client_backend::data_api::enhance_pir::storage::IronwoodEnhancementData {
             request,
             has_transparent,
+            expected_metadata,
             ..
         } = enhancement.into_parts();
         if request != self.request {
             return Ok(EnhancePirStoreResult::AlreadyResolved);
         }
         assert!(has_transparent);
+        assert_eq!(expected_metadata, Some(Default::default()));
         self.committed = true;
         Ok(EnhancePirStoreResult::LwdRequired)
     }
@@ -273,7 +277,9 @@ impl EnhancePirStorage for MetadataStore {
             }
             next_metadata = Some(expected.filled_from(data.metadata));
         } else {
-            assert_eq!(data.expected_metadata, None);
+            // Validation captures the snapshot for transparent responses too; this store
+            // routes them to LWD, which neither compares nor stores their metadata.
+            assert!(data.expected_metadata.is_some());
         }
         // A storage error after staging metadata must not leave any response effects.
         if self.fail_write {

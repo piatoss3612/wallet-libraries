@@ -54,6 +54,22 @@ macro_rules! active_private_tx {
     };
 }
 
+/// Like [`active_private_tx`], but also keeps transactions whose transparent details are
+/// unsupported (route 2) while public authority is absent (`:public_authority` false). Only
+/// received memos and received-note-bound shape metadata are retrieved for them. Note
+/// decryption authenticates a memo without authenticating the service's shape assertion. Extend the WHERE with `AND`.
+macro_rules! active_memo_tx {
+    () => {
+        concat!(
+            "JOIN ironwood_enhance_routing r ON r.transaction_id = t.id_tx
+             WHERE (r.route = ",
+            private_protected!(),
+            " OR (r.route = 2 AND NOT :public_authority))
+             AND t.raw IS NULL AND t.mined_height IS NOT NULL"
+        )
+    };
+}
+
 /// Whether transaction `:tx` has queued memo, outgoing or metadata work.
 macro_rules! has_private_work {
     () => {
@@ -72,7 +88,9 @@ mod metadata;
 // PrivateProtected survives completion and rewinds; only an explicit LWD decision or
 // transaction deletion with retrieval-intent cleanup ends protection. Route 2
 // (PrivateDetailsUnsupported) is sticky under PrivateRequired; once public authority is
-// current again it is ordinary public LWD work.
+// current again it is ordinary public LWD work. Until then it keeps private memo work for
+// its received Ironwood notes, including shape retrieval once their memos are known.
+// See [`queue_unsupported_memos`].
 // No row retains ordinary enhancement semantics for unclassified and legacy transactions. Its
 // history expiry is display-only and never controls spendability.
 const PRIVATE_PROTECTED: i64 = private_protected!();
@@ -82,6 +100,7 @@ const PRIVATE_DETAILS_UNSUPPORTED: i64 = 2;
 type PendingOutgoingRow = ([u8; 32], u32, [u8; 32], [u8; 32], [u8; 32], [u8; 52]);
 
 const ACTIVE_PRIVATE_TX: &str = active_private_tx!();
+const ACTIVE_MEMO_TX: &str = active_memo_tx!();
 
 const OUTSTANDING_OUTGOING: &str = concat!(
     "
@@ -294,7 +313,8 @@ fn require_lwd(
 }
 
 /// Marks a mixed or otherwise publicly unrecoverable transaction under PrivateRequired.
-/// Clears retryable PIR jobs without deleting financial facts or inserting a public request.
+/// Clears retryable PIR jobs without deleting financial facts or inserting a public request,
+/// then requeues the memos of its received Ironwood notes, which remain privately recoverable.
 fn require_private_details_unsupported(
     conn: &Connection,
     tx_ref: crate::TxRef,
@@ -305,6 +325,23 @@ fn require_private_details_unsupported(
         named_params![":tx": tx_ref.0, ":route": PRIVATE_DETAILS_UNSUPPORTED],
     )?;
     clear_work(conn, tx_ref)?;
+    queue_unsupported_memos(conn, Some(tx_ref))
+}
+
+/// Queues the unknown memos of the received Ironwood notes of route-2 transactions (all of them,
+/// or only `tx_ref`) for private retrieval.
+///
+/// Decrypting the scanned note authenticates its memo whether or not the transaction has
+/// transparent data, so a memo is recoverable even though the transaction's transparent details
+/// are not. Retrieval queries a commitment tree position, never the transaction ID, and is
+/// dispatched only while public authority is absent; with public authority, route 2 is ordinary
+/// LWD work instead. Recovering a memo never changes the route: the transaction stays marked as
+/// having unsupported details. A position another note already claims is left to it.
+pub(crate) fn queue_unsupported_memos(
+    conn: &Connection,
+    tx_ref: Option<crate::TxRef>,
+) -> Result<(), SqliteClientError> {
+    super::ironwood_hooks::queue_ironwood_output_shape(conn, tx_ref)?;
     Ok(())
 }
 
@@ -438,7 +475,7 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
              FROM ironwood_memo_retrieval_queue q
              JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
              JOIN transactions t ON t.id_tx = rn.transaction_id
-             {ACTIVE_PRIVATE_TX}
+             {ACTIVE_MEMO_TX}
                AND rn.memo IS NULL AND rn.commitment_tree_position = q.commitment_tree_position
              UNION
              SELECT q.commitment_tree_position, t.txid, q.output_index {OUTSTANDING_OUTGOING}
@@ -447,7 +484,7 @@ fn transaction_enhancement_work_sql(private: bool, public: bool) -> String {
              SELECT q.commitment_tree_position, t.txid, q.output_index
              FROM ironwood_enhance_metadata_queue q
              JOIN transactions t ON t.id_tx = q.transaction_id
-             {ACTIVE_PRIVATE_TX}
+             {ACTIVE_MEMO_TX}
                AND q.commitment_tree_position IS NOT NULL
          )
          {rows}
@@ -501,17 +538,20 @@ fn read_work(
     .map_err(Into::into)
 }
 
-/// Mode-independent private queue contents from one statement, for storage tests.
+/// Mode-independent private queue contents from one statement, for storage tests. Route-2 memo
+/// work is included, as it is without public authority.
 #[cfg(test)]
 pub(crate) fn work(conn: &Connection) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
-    Ok(read_work(&mut stmt, &[])?
-        .into_iter()
-        .map(|work| match work {
-            TransactionEnhancementWork::Private(work) => work,
-            TransactionEnhancementWork::Public(_) => unreachable!("public rows not selected"),
-        })
-        .collect())
+    Ok(
+        read_work(&mut stmt, named_params![":public_authority": false])?
+            .into_iter()
+            .map(|work| match work {
+                TransactionEnhancementWork::Private(work) => work,
+                TransactionEnhancementWork::Public(_) => unreachable!("public rows not selected"),
+            })
+            .collect(),
+    )
 }
 
 /// Routes public and private payload work from one snapshot: resolved mode, generation, and
@@ -595,7 +635,9 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
         &self,
         position: Position,
     ) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, Self::Error> {
-        pending(self.tx, self.params, position)
+        let public_authority =
+            transparent_ledger::retains_public_authority(self.tx, self.configured)?;
+        pending_note(self.tx, self.params, position, false, public_authority)
     }
 
     fn pending_ironwood_outgoing(
@@ -890,19 +932,36 @@ pub(super) fn outgoing_position_owned_by_other(
     .map_err(Into::into)
 }
 
+/// The pending memo work at `position`, with public authority decided by the durable policy.
+#[cfg(test)]
 pub(crate) fn pending<P: zcash_protocol::consensus::Parameters>(
     conn: &Connection,
     params: &P,
     position: Position,
 ) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, SqliteClientError> {
-    pending_note(conn, params, position, false)
+    let public_authority = transparent_ledger::retains_public_authority(conn, None)?;
+    pending_note(conn, params, position, false, public_authority)
 }
 
+/// Test helper for the received-note binding of metadata-only private work.
+#[cfg(test)]
+pub(crate) fn pending_metadata_note<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    position: Position,
+) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, SqliteClientError> {
+    let public_authority = transparent_ledger::retains_public_authority(conn, None)?;
+    pending_note(conn, params, position, true, public_authority)
+}
+
+/// Memo work (`metadata_only` false) includes route-2 transactions while `public_authority` is
+/// false; received-note-bound metadata uses the same authority guard.
 fn pending_note<P: Parameters>(
     conn: &Connection,
     params: &P,
     position: Position,
     metadata_only: bool,
+    public_authority: bool,
 ) -> Result<Option<PendingIronwoodMemo<AccountUuid>>, SqliteClientError> {
     #[allow(clippy::type_complexity)]
     let raw: Option<(
@@ -934,13 +993,17 @@ fn pending_note<P: Parameters>(
              JOIN transactions t ON t.id_tx = rn.transaction_id
              JOIN accounts a ON a.id = rn.account_id
              ",
-                active_private_tx!(),
+                active_memo_tx!(),
                 "
                AND q.commitment_tree_position = :position
                AND (:metadata OR rn.memo IS NULL)
                AND rn.commitment_tree_position = q.commitment_tree_position"
             ),
-            named_params![":position": u64::from(position), ":metadata": metadata_only],
+            named_params![
+                ":position": u64::from(position),
+                ":metadata": metadata_only,
+                ":public_authority": public_authority,
+            ],
             |row| {
                 let value = u64::try_from(row.get::<_, i64>(4)?)
                     .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, i64::MIN))?;
@@ -1045,24 +1108,26 @@ pub(crate) fn apply<P: Parameters>(
     let zcash_client_backend::data_api::enhance_pir::storage::IronwoodEnhancementData {
         request,
         has_transparent,
+        has_transparent_outputs,
         metadata,
         expected_metadata,
         incoming,
         outgoing,
     } = enhancement.into_parts();
     let id = request.request_id();
-    let target: Option<crate::TxRef> = tx
+    let public_authority = transparent_ledger::retains_public_authority(tx, configured)?;
+    let target: Option<(crate::TxRef, i64)> = tx
         .query_row(
             concat!(
-                "SELECT t.id_tx FROM transactions t ",
-                active_private_tx!(),
+                "SELECT t.id_tx, r.route FROM transactions t ",
+                active_memo_tx!(),
                 " AND t.txid = :txid"
             ),
-            named_params![":txid": id.txid().as_ref()],
-            |row| row.get(0).map(crate::TxRef),
+            named_params![":txid": id.txid().as_ref(), ":public_authority": public_authority],
+            |row| Ok((crate::TxRef(row.get(0)?), row.get(1)?)),
         )
         .optional()?;
-    let Some(tx_ref) = target else {
+    let Some((tx_ref, route)) = target else {
         return Ok(EnhancePirStoreResult::AlreadyResolved);
     };
     let memo_id: Option<i64> = tx.query_row(
@@ -1105,8 +1170,22 @@ pub(crate) fn apply<P: Parameters>(
         }
     }
     // Crucially, no routing mutation happens before the identity rechecks.
-    if has_transparent {
-        return require_transparent_details(tx, configured, tx_ref, expected_generation);
+    if has_transparent || route == PRIVATE_DETAILS_UNSUPPORTED {
+        transparent_ledger::ensure_policy_generation(tx, expected_generation)?;
+        if public_authority {
+            // Only a protected transaction can be the target here.
+            require_lwd(tx, tx_ref, expected_generation)?;
+            return Ok(EnhancePirStoreResult::LwdRequired);
+        }
+        return store_unsupported_details(
+            tx,
+            tx_ref,
+            route,
+            has_transparent_outputs,
+            metadata,
+            expected_metadata,
+            memo_id.zip(incoming),
+        );
     }
     let Some(expected) = expected_metadata else {
         return Ok(EnhancePirStoreResult::Rejected);
@@ -1219,6 +1298,113 @@ pub(crate) fn apply<P: Parameters>(
     retire_value_balanced_dummies(tx, tx_ref)?;
     retire_enhancement_if_complete(tx, tx_ref)?;
     Ok(result)
+}
+
+/// Applies a response for a transaction whose transparent details are unsupported without public
+/// authority: one with transparent data (by the response's flags, or an earlier decision), or with
+/// a non-Ironwood bundle (by the compact scan). Called after the identity rechecks of [`apply`],
+/// inside its SQL transaction, with `route` the transaction's current route.
+///
+/// Keeps only details that do not depend on the transparent data:
+/// - the memo of the authenticated received note at this action, if requested;
+/// - the whole-transaction fee, filled only when unknown. The fee is trusted service metadata,
+///   as for Ironwood-only transactions. Like those, the response must agree with every known
+///   fee, expiry, and displayed expiry, and the captured snapshot must still be current;
+///   otherwise nothing changes and the response is `Rejected`. A response without a fee keeps
+///   only the memo.
+///
+/// Outgoing and discovery work cannot be completed privately for such a transaction, and its
+/// metadata work is answered by this response. A protected transaction therefore takes the
+/// sticky route-2 marker here, keeping memo work for its other received notes, and every later
+/// response for it lands in this function again. The marker stays when every memo is known:
+/// its transparent details remain unsupported, and history keeps reporting them as pending.
+fn store_unsupported_details(
+    tx: &Transaction<'_>,
+    tx_ref: crate::TxRef,
+    route: i64,
+    has_transparent_outputs: bool,
+    metadata: zcash_client_backend::data_api::enhance_pir::EnhanceTransactionMetadata,
+    expected_metadata: Option<StoredIronwoodMetadata>,
+    memo: Option<(i64, zcash_protocol::memo::MemoBytes)>,
+) -> Result<EnhancePirStoreResult, SqliteClientError> {
+    let Some(expected) = expected_metadata else {
+        return Ok(EnhancePirStoreResult::Rejected);
+    };
+    if metadata
+        .fee_zatoshis()
+        .is_some_and(|fee| expected.fee_zatoshis.is_some_and(|known| known != fee))
+        || expected
+            .expiry_height
+            .is_some_and(|expiry| expiry != metadata.expiry_height())
+    {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
+    let displayed_expiry: Option<u32> = tx.query_row(
+        "SELECT history_expiry_height FROM ironwood_enhance_routing WHERE transaction_id = :tx",
+        named_params![":tx": tx_ref.0],
+        |row| row.get(0),
+    )?;
+    if displayed_expiry.is_some_and(|expiry| expiry != metadata.expiry_height()) {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
+    let known_outputs: Option<bool> = tx.query_row(
+        "SELECT has_transparent_outputs FROM ironwood_enhance_routing WHERE transaction_id = :tx",
+        named_params![":tx": tx_ref.0],
+        |row| row.get(0),
+    )?;
+    if known_outputs.is_some_and(|known| known != has_transparent_outputs) {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
+    // One compare-and-fill, as for Ironwood-only responses. A NULL fee leaves the known fee.
+    if tx.execute(
+        "UPDATE transactions SET fee = COALESCE(fee, :fee)
+         WHERE id_tx = :tx AND fee IS :expected_fee AND expiry_height IS :expected_expiry",
+        named_params![
+            ":fee": metadata.fee_zatoshis(),
+            ":tx": tx_ref.0,
+            ":expected_fee": expected.fee_zatoshis,
+            ":expected_expiry": expected.expiry_height,
+        ],
+    )? != 1
+    {
+        return Ok(EnhancePirStoreResult::Rejected);
+    }
+    if tx.execute(
+        "UPDATE ironwood_enhance_routing
+         SET history_expiry_height = COALESCE(history_expiry_height, :expiry),
+             has_transparent_outputs = COALESCE(has_transparent_outputs, :outputs)
+         WHERE transaction_id = :tx AND route = :route
+           AND (history_expiry_height IS NULL OR history_expiry_height = :expiry)",
+        named_params![
+            ":expiry": metadata.expiry_height(),
+            ":outputs": has_transparent_outputs,
+            ":tx": tx_ref.0,
+            ":route": route,
+        ],
+    )? != 1
+    {
+        return Err(SqliteClientError::CorruptedData(
+            "Ironwood enhancement routing changed during response application".into(),
+        ));
+    }
+    if let Some((note_id, memo)) = memo {
+        tx.execute(
+            "UPDATE ironwood_received_notes SET memo = :memo WHERE id = :id AND memo IS NULL",
+            named_params![":memo": memo_repr(Some(&memo)), ":id": note_id],
+        )?;
+        tx.execute(
+            "DELETE FROM ironwood_memo_retrieval_queue WHERE received_note_id = :id",
+            named_params![":id": note_id],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM ironwood_enhance_metadata_queue WHERE transaction_id = ?",
+        [tx_ref.0],
+    )?;
+    if route == PRIVATE_PROTECTED {
+        require_private_details_unsupported(tx, tx_ref)?;
+    }
+    Ok(EnhancePirStoreResult::PrivateDetailsUnsupported)
 }
 
 #[cfg(test)]

@@ -31,6 +31,8 @@ mod ironwood_enhance;
 mod ironwood_pool_code_views;
 mod ironwood_received_notes;
 mod ironwood_shardtree;
+mod ironwood_transparent_output_shape;
+mod ironwood_unsupported_memo_retry;
 mod ivk_item_cache;
 mod note_locking;
 mod nullifier_map;
@@ -148,6 +150,8 @@ pub mod ids {
         ironwood_pool_code_views::MIGRATION_ID as IRONWOOD_POOL_CODE_VIEWS,
         ironwood_received_notes::MIGRATION_ID as IRONWOOD_RECEIVED_NOTES,
         ironwood_shardtree::MIGRATION_ID as IRONWOOD_SHARDTREE,
+        ironwood_transparent_output_shape::MIGRATION_ID as IRONWOOD_TRANSPARENT_OUTPUT_SHAPE,
+        ironwood_unsupported_memo_retry::MIGRATION_ID as IRONWOOD_UNSUPPORTED_MEMO_RETRY,
         ivk_item_cache::MIGRATION_ID as IVK_ITEM_CACHE, note_locking::MIGRATION_ID as NOTE_LOCKING,
         nullifier_map::MIGRATION_ID as NULLIFIER_MAP,
         orchard_ironwood_migration_anchor_interval::MIGRATION_ID as ORCHARD_IRONWOOD_MIGRATION_ANCHOR_INTERVAL,
@@ -423,6 +427,8 @@ pub(super) fn all_migrations<
         Box::new(unmined_status_obligations::Migration),
         Box::new(status_reconfirmation::Migration),
         Box::new(transaction_reconfirmation_receipts::Migration),
+        Box::new(ironwood_unsupported_memo_retry::Migration),
+        Box::new(ironwood_transparent_output_shape::Migration),
     ]
 }
 
@@ -644,10 +650,7 @@ pub const V_ZAKURA_0_1_0_RC7: &[Uuid] = &[
 pub(crate) const TRANSPARENT_LEDGER_SCHEMA_ID: Uuid = transparent_ledger_schema::MIGRATION_ID;
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    v_transactions_legacy_projection::MIGRATION_ID,
-    transaction_reconfirmation_receipts::MIGRATION_ID,
-];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[ironwood_transparent_output_shape::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -826,6 +829,8 @@ pub(crate) mod tests {
             ids::UNMINED_STATUS_OBLIGATIONS,
             ids::STATUS_RECONFIRMATION,
             ids::TRANSACTION_RECONFIRMATION_RECEIPTS,
+            ids::IRONWOOD_UNSUPPORTED_MEMO_RETRY,
+            ids::IRONWOOD_TRANSPARENT_OUTPUT_SHAPE,
             ids::ZIP318_CLASSIFICATION,
         ]);
 

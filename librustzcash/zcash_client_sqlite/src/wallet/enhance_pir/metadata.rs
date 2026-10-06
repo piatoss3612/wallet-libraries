@@ -72,7 +72,10 @@ pub(super) fn pending<P: Parameters>(
     params: &P,
     position: Position,
 ) -> Result<Option<PendingIronwoodMetadata<AccountUuid>>, SqliteClientError> {
-    if let Some(note) = super::pending_note(conn, params, position, true)? {
+    // Route 2 metadata must authenticate against an owned received note, and has no public
+    // authority. Compact-only metadata still belongs to protected transactions only.
+    let public_authority = transparent_ledger::retains_public_authority(conn, None)?;
+    if let Some(note) = super::pending_note(conn, params, position, true, public_authority)? {
         return Ok(Some(PendingIronwoodMetadata::Incoming(note)));
     }
     conn.query_row(
