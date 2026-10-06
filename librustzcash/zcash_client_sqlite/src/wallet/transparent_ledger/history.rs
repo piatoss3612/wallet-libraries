@@ -900,12 +900,19 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
             _ => FeeState::Unknown,
         };
         let whole_fee = whole_fee(tx.fee, transaction_metadata.as_ref());
+        // A database may retain owned amounts from a pool disabled in this build. The effects
+        // above omit that pool, so their completeness cannot justify dropping its known amounts.
+        let effects_cover_known = known.iter().all(|(pool, received, spent)| {
+            (*received == Zatoshis::ZERO && *spent == Zatoshis::ZERO)
+                || effects.iter().any(|effect| effect.pool == *pool)
+        });
         let inferred_outgoing = match whole_fee {
             Some(fee)
                 if tx.mixed_without_full_data
                     && tx.has_transparent_outputs == Some(true)
                     && !tx.created_locally
-                    && tx.mined_height.is_some() =>
+                    && tx.mined_height.is_some()
+                    && effects_cover_known =>
             {
                 inferred_outgoing(
                     conn,
