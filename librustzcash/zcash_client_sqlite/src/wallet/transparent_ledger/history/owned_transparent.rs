@@ -44,10 +44,10 @@ pub(super) fn reconcile<P: consensus::Parameters>(
 
     let mut effects = HashMap::new();
     let mut read_effects = |account| -> Result<_, SqliteClientError> {
-        if !effects.contains_key(&account) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = effects.entry(account) {
             let history =
                 read_account_history(conn, params, gap_limits, configured, account, &[entry.txid])?;
-            effects.insert(account, history.into_iter().next());
+            slot.insert(history.into_iter().next());
         }
         Ok(effects
             .get(&account)

@@ -10,6 +10,14 @@ fn recovered_transfer(
     cross_account: bool,
     receive_first: bool,
 ) -> (State, AccountUuid, AccountUuid, ReceiveEvent) {
+    recovered_transfer_revision(cross_account, receive_first, revision(1, true))
+}
+
+fn recovered_transfer_revision(
+    cross_account: bool,
+    receive_first: bool,
+    rev: RecoveryRevision,
+) -> (State, AccountUuid, AccountUuid, ReceiveEvent) {
     let (mut donor, donor_accounts) = shadow_wallet_with(u8::from(cross_account));
     let receiver = donor_accounts[usize::from(cross_account)];
     let to = external(&watch(&donor, receiver));
@@ -52,7 +60,6 @@ fn recovered_transfer(
             )
             .unwrap();
     }
-    let rev = revision(1, true);
     cover(&mut st, receiver, &rev, vec![received.clone()]);
     if receive_first {
         st.scan_cached_blocks(height, 1);
@@ -134,4 +141,111 @@ fn owned_transfers_withdraw_on_rewind_and_account_deletion() {
             .owned_transparent_outputs
             .is_empty()
     );
+}
+
+#[test]
+fn owned_transfers_require_private_coverage_and_preserve_unknown_scope() {
+    let (mut st, sender, receiver, event) = recovered_transfer(true, false);
+    conn(&st).execute("UPDATE transparent_received_outputs SET address_id = (SELECT ad.id FROM addresses ad JOIN accounts a ON a.id = ad.account_id WHERE a.uuid = ?2 LIMIT 1) WHERE transaction_id = (SELECT id_tx FROM transactions WHERE txid = ?1)", rusqlite::params![event.outpoint.txid().as_ref(), sender.expose_uuid()]).unwrap();
+    let entry = details(&st, sender, &event);
+    assert_eq!(entry.owned_transparent_outputs[0].scope, None);
+    assert_eq!(
+        entry.owned_transparent_outputs[0].inferred_funding_account,
+        Some(sender)
+    );
+    // Public placement of the output cannot substitute for private coverage.
+    conn(&st).execute("DELETE FROM tpir_coverage WHERE account_id = (SELECT id FROM accounts WHERE uuid = ?1)", [receiver.expose_uuid()]).unwrap();
+    assert_eq!(
+        details(&st, sender, &event).owned_transparent_outputs[0].inferred_funding_account,
+        None
+    );
+    cover(&mut st, receiver, &revision(1, true), vec![]);
+    assert_eq!(
+        details(&st, sender, &event).owned_transparent_outputs[0].inferred_funding_account,
+        Some(sender)
+    );
+    conn(&st).execute("DELETE FROM tpir_coverage WHERE account_id = (SELECT id FROM accounts WHERE uuid = ?1)", [sender.expose_uuid()]).unwrap();
+    assert_eq!(
+        details(&st, sender, &event).owned_transparent_outputs[0].inferred_funding_account,
+        None
+    );
+}
+
+#[test]
+fn owned_transfers_withdraw_on_revision_replacement_without_replay() {
+    let (mut st, sender, receiver, event) =
+        recovered_transfer_revision(true, false, revision(1, false));
+    assert_eq!(
+        details(&st, sender, &event).owned_transparent_outputs[0].inferred_funding_account,
+        Some(sender)
+    );
+    let next = revision(2, false);
+    qualify(&mut st, &next);
+    cover(&mut st, receiver, &next, vec![]);
+    assert!(
+        details(&st, sender, &event)
+            .owned_transparent_outputs
+            .is_empty()
+    );
+}
+
+#[test]
+fn owned_transfers_remove_deleted_recipient_and_sender_independently() {
+    let (mut st, sender, receiver, event) = recovered_transfer(true, false);
+    st.wallet_mut().delete_account(receiver).unwrap();
+    assert!(
+        details(&st, sender, &event)
+            .owned_transparent_outputs
+            .is_empty()
+    );
+    let (mut st, sender, receiver, event) = recovered_transfer(true, false);
+    st.wallet_mut().delete_account(sender).unwrap();
+    let entry = details(&st, receiver, &event);
+    assert!(entry.known_wallet_funders.is_empty());
+    assert_eq!(
+        entry.owned_transparent_outputs[0].inferred_funding_account,
+        None
+    );
+}
+
+#[test]
+fn owned_transfers_retain_ambiguity_and_follow_current_funding_ownership() {
+    let (st, sender, receiver, event) = recovered_transfer(true, false);
+    // Add a second owned Sapling participant to the SQLite evidence fixture. This
+    // is deliberately independent of transparent sent records and of output value.
+    conn(&st).execute("INSERT INTO sapling_received_notes
+        (transaction_id, output_index, account_id, diversifier, value, rcm, is_change,
+         memo, commitment_tree_position, recipient_key_scope)
+        SELECT n.transaction_id, n.output_index + 10, a.id, n.diversifier, n.value, n.rcm,
+               n.is_change, n.memo, n.commitment_tree_position, n.recipient_key_scope
+        FROM sapling_received_notes n JOIN sapling_received_note_spends s ON s.sapling_received_note_id = n.id
+        JOIN accounts a ON a.uuid = ?2
+        JOIN transactions t ON t.id_tx = s.transaction_id WHERE t.txid = ?1",
+        rusqlite::params![event.outpoint.txid().as_ref(), receiver.expose_uuid()]).unwrap();
+    conn(&st)
+        .execute(
+            "INSERT INTO sapling_received_note_spends (sapling_received_note_id, transaction_id)
+        SELECT n.id, t.id_tx FROM sapling_received_notes n JOIN accounts a ON a.id = n.account_id
+        JOIN transactions t ON t.txid = ?1 WHERE a.uuid = ?2 AND n.output_index >= 10",
+            rusqlite::params![event.outpoint.txid().as_ref(), receiver.expose_uuid()],
+        )
+        .unwrap();
+    let entry = details(&st, sender, &event);
+    assert_eq!(entry.known_wallet_funders.len(), 2);
+    assert_eq!(
+        entry.owned_transparent_outputs[0].inferred_funding_account,
+        None
+    );
+    assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+    // Remove the first participant: there is no persisted guessed sender to undo.
+    conn(&st).execute("DELETE FROM sapling_received_note_spends WHERE sapling_received_note_id IN
+        (SELECT n.id FROM sapling_received_notes n JOIN accounts a ON a.id = n.account_id WHERE a.uuid = ?1)",
+        [sender.expose_uuid()]).unwrap();
+    let entry = details(&st, receiver, &event);
+    assert_eq!(entry.known_wallet_funders, vec![receiver]);
+    assert_eq!(
+        entry.owned_transparent_outputs[0].inferred_funding_account,
+        Some(receiver)
+    );
+    assert_eq!(entry.fee, FeeState::Unknown);
 }

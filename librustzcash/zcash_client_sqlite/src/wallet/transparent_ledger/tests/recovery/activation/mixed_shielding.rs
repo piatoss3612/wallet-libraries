@@ -1115,3 +1115,43 @@ fn deleting_the_shape_binding_account_rebinds_to_a_surviving_note() {
     assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
     assert!(reopened.transaction_enhancement_work().unwrap().is_empty());
 }
+
+/// Output display attribution cannot distinguish outside self-balanced shielded participation.
+#[test]
+fn owned_output_display_convention_does_not_prove_fee_or_complete_details() {
+    for action0 in [Some(0), Some(100_000)] {
+        let shape = Shape {
+            inputs: [120_000, 80_000],
+            shielded: 155_000,
+        };
+        let mut case = padded_shielding(&shape, Some(reported_metadata()), action0, false);
+        let ws = watch(&case.st, case.account);
+        let owned = ReceiveEvent {
+            outpoint: OutPoint::new(*case.txid.as_ref(), 0),
+            address: external(&ws),
+            value: zat(25_000),
+            coinbase: false,
+            mined_height: case.height,
+            metadata: Some(reported_metadata()),
+        };
+        cover(&mut case.st, case.account, &revision(1, true), vec![owned]);
+        let entry = history(&case.st, case.account, case.txid);
+        assert_eq!(entry.known_wallet_funders, vec![case.account]);
+        assert_eq!(
+            entry.owned_transparent_outputs[0].inferred_funding_account,
+            Some(case.account)
+        );
+        assert_eq!(entry.fee, FeeState::Unknown);
+        assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+        assert_eq!(entry.payment_details, DetailCompleteness::Incomplete);
+        assert_eq!(
+            entry
+                .effects
+                .iter()
+                .map(|e| i64::try_from(e.received.into_u64()).unwrap()
+                    - i64::try_from(e.spent.into_u64()).unwrap())
+                .sum::<i64>(),
+            -20_000
+        );
+    }
+}
