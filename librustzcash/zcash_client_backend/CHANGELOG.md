@@ -16,7 +16,16 @@ workspace.
   exclude another party's self-balanced shielded participation, so the account's movement is
   final while its payment and fee attribution are not.
 
+### Added
+- `enhance_pir::storage::TransparentShape`, the transparent input and output flags of an Enhance
+  PIR record, kept separately. `StoredIronwoodMetadata::transparent_shape` carries the shape
+  storage recorded for the transaction at its current placement (`None` is unknown), and
+  `StoredIronwoodMetadata::shape_agrees_with` compares a record's shape with it.
+
 ### Changed
+- `enhance_pir::storage::IronwoodEnhancementData::has_transparent` is replaced by `shape`
+  (with a `has_transparent()` method), and validation rejects a record whose shape contradicts
+  the known shape, whatever its route, before storage is called.
 - `enhance_pir::storage::validate_and_apply_records` captures the stored-metadata snapshot for
   has-transparent records too, so storage can compare it before keeping such a record's
   authenticated memo and agreeing fee without public authority. A `PrivateDetailsUnsupported`

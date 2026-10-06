@@ -13,21 +13,35 @@ workspace.
 - Private recovery of mixed transparent/Ironwood transactions under `PrivateRequired` keeps
   the details that do not depend on transparent data. A has-transparent Enhance PIR record (or
   a compact scan with explicit non-Ironwood fields) still takes the sticky route-2
-  (`PrivateDetailsUnsupported`) marker, but the transaction keeps private memo work for its
-  received Ironwood notes. Each memo is authenticated by note decryption, and the whole-transaction
-  fee is filled only when it agrees with every known fee, expiry, and displayed expiry; a
-  disagreeing response is rejected without effect. Memo work is dispatched only while public
-  authority is absent and is dropped when a policy transition restores it (route 1).
-  The additive `ironwood_unsupported_memo_retry` migration requeues the unknown memos of
-  route-2 transactions in existing wallets, without resetting notes, spend links, or routes.
+  (`PrivateDetailsUnsupported`) marker, but the transaction keeps private work for its received
+  Ironwood notes: memo work, and metadata work bound to its first received version-3 note while
+  the whole-transaction fee or a current transparent shape is unknown. A memo is authenticated
+  by note decryption; a fee is filled only when it agrees with every known fee, expiry, and
+  displayed expiry. A response without a fee keeps its memo and shape and leaves the fee
+  retryable at the same position. Route-2 work is dispatched only while public authority is
+  absent; a policy transition that restores it (route 1) drops the work, and returning to
+  `PrivateRequired` requeues it.
+- Enhance PIR storage records each transparent flag of a record (inputs, outputs) in
+  `ironwood_enhance_routing.transparent_flags`, with the mined height it was validated at in
+  `transparent_flags_height`. NULL is unknown, never "no transparent data", and a shape recorded
+  at another height is treated as unknown and retrieved again. A record whose shape contradicts
+  the recorded one is rejected before any write.
+- Migrations `ironwood_unsupported_memo_retry` and `ironwood_unsupported_details_retry` add the
+  shape columns and requeue the memo and metadata work of existing route-2 transactions, without
+  resetting notes, spend links, fees, routes or public retrieval intents.
 - History reconstructs a mixed transaction without full data, as
-  `HistoryClassification::NetReconstructed`, only as a transparent-to-shielded self-transfer: every owned effect complete, qualified metadata counting exactly the account's
-  published transparent inputs, its exact whole-transaction fee equal to the stored one, only
-  transparent spends and shielded receipts, and the spent value equal to the receipts plus that
-  fee. Otherwise it stays provisional. A net reconstruction does not prove the debit was the
-  fee: another party's shielded spend paying an equal output at a padding action has the same
-  evidence. The stored fee of such a transaction is the whole
-  transaction's: `FeeState` stays `Unknown` and the aggregate payment is not inferred.
+  `HistoryClassification::NetReconstructed`, only as a transparent-to-Ironwood self-transfer:
+  every owned effect complete, qualified metadata counting exactly the account's published
+  transparent inputs, its exact whole-transaction fee equal to the stored (Enhance PIR) one, a
+  recorded Enhance PIR shape with transparent inputs and explicitly no transparent outputs at the
+  current placement, only transparent spends and Ironwood receipts, no recorded outputs to
+  others, no funding known from another account of the wallet, and the spent value equal to the
+  receipts plus that fee. Otherwise it stays provisional. A net reconstruction does not prove the
+  debit was the fee: another party's Ironwood spend paying an equal output at a padding action
+  has the same evidence. The stored fee of such a transaction is the whole transaction's:
+  `FeeState` stays `Unknown` and the aggregate payment is not inferred. The Enhance PIR publisher
+  currently reports no fee for transactions with transparent data, so such records alone leave
+  these transactions provisional.
 
 - Transparent spend discovery retains work for unmined local spenders and resumes after they
   expire. Address and per-outpoint completion advance past expired-spender links, using expiry
