@@ -66,10 +66,12 @@ A newly issued key starts at the first unscanned block. Keys found only through
 restore are not scanned until their receiver-directory sweep completes (see
 [Restore sweeps](#restore-sweeps)).
 
-The planned selector will prefer swap notes during ordinary sends when doing so
-adds neither inputs nor fees, respecting existing input constraints. Confirmed
-ordinary internal change then uses normal account recovery. This preference will
-not trigger separate transactions or delete receiving keys.
+With `NoteSelection::PreferConsolidation`, swap notes fill a send's spare input
+slots before any other note, within the existing input constraints. A spare slot
+adds neither an action nor a fee, and the swap note's value moves into ordinary
+internal change, which normal account recovery finds. This never triggers a
+separate transaction or deletes a receiving key; a send without a spare slot
+leaves swap notes for a later one.
 
 ## Completion policy
 

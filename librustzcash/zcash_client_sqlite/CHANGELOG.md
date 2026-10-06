@@ -44,9 +44,11 @@ workspace.
   per-swap Ironwood refund and incoming addresses derived from the account viewing key
   with `zakura-swap-receiving`, recoverable from the seed. Keys the wallet issues are
   trial-decrypted in every scan batch until they close, and their notes spend into
-  ordinary change. Full-transaction and Enhance PIR retrieval authenticate swap notes
-  with their registered key. Builds without the feature keep these records and exclude
-  swap notes from spending.
+  ordinary change. With `NoteSelection::PreferConsolidation`, swap notes fill spare
+  input slots first, so ordinary sends move their value into ordinary internal change
+  without changing the fee or transaction shape. Full-transaction and Enhance PIR
+  retrieval authenticate swap notes with their registered key. Builds without the
+  feature keep these records and exclude swap notes from spending.
 - Swap address issuance: `WalletDb::reserve_swap_refund_key` and
   `prepare_swap_receive_reservation`, which require scanning within `ISSUANCE_TIP_LAG`
   blocks of the network tip. Incoming quotes use `begin_swap_receive_quote`,
