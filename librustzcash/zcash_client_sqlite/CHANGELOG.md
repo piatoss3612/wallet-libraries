@@ -10,6 +10,11 @@ workspace.
 
 ## [Unreleased]
 
+- Owned transparent display reconciliation counts qualified, placed spends of active,
+  unquarantined wallet accounts even before their parent outputs are recovered. A second
+  known funder keeps sender attribution ambiguous in either discovery order; this changes
+  no account movement, fee attribution, or stored sent notes.
+
 - Private recovery of mixed transparent/Ironwood transactions under `PrivateRequired` keeps
   the details that do not depend on transparent data. A has-transparent Enhance PIR record (or
   a compact scan with explicit non-Ironwood fields) still takes the sticky route-2

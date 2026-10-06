@@ -36,10 +36,34 @@ pub(super) fn reconcile<P: consensus::Parameters>(
          JOIN accounts a ON a.id = ro.account_id
          LEFT JOIN transparent_received_outputs u ON ro.pool = 0 AND u.id = ro.id_within_pool_table
          WHERE s.transaction_id = :tx AND (ro.pool != 0 OR ({current_output}))
-         ORDER BY a.uuid"
+         UNION
+         SELECT a.uuid FROM tpir_spend_events e
+         JOIN tpir_active_accounts active ON active.account_id = e.account_id
+         JOIN accounts a ON a.id = e.account_id
+         WHERE e.spending_txid = :txid AND e.mined_height = :mined_height
+         AND NOT EXISTS (SELECT 1 FROM tpir_quarantined_accounts qa
+                         WHERE qa.account_id = e.account_id)
+         AND EXISTS (
+             SELECT 1 FROM tpir_spend_observations o
+             JOIN tpir_qualified_revisions q ON q.revision_id = o.revision_id
+             JOIN tpir_revisions r ON r.id = o.revision_id
+             WHERE o.spend_id = e.id
+             AND NOT EXISTS (SELECT 1 FROM tpir_quarantined_sources qs
+                             WHERE qs.source = r.source)
+         )
+         ORDER BY uuid"
     ))?;
+    // A qualified active-ledger spend establishes participation before its parent output
+    // (and therefore its value or canonical spend link) has been recovered.
     entry.known_wallet_funders = funding
-        .query_map(named_params![":tx": tx.id], |r| r.get(0).map(AccountUuid))?
+        .query_map(
+            named_params![
+                ":tx": tx.id,
+                ":txid": entry.txid.as_ref(),
+                ":mined_height": tx.mined_height.map(u32::from),
+            ],
+            |r| r.get(0).map(AccountUuid),
+        )?
         .collect::<Result<_, _>>()?;
 
     let mut effects = HashMap::new();

@@ -145,8 +145,9 @@ pub struct TransactionHistoryDetails<AccountId> {
     /// Current owned outputs of the transaction, including those owned by other wallet accounts.
     /// Display-only reconciliation never creates sent notes or completes payment evidence.
     pub owned_transparent_outputs: Vec<OwnedTransparentOutput<AccountId>>,
-    /// Distinct accounts with currently supported spends. No order implies funding priority,
-    /// and this list cannot exclude outside participants.
+    /// Distinct accounts with currently supported spends, including qualified active private
+    /// spend evidence whose parent output has not yet been recovered. No order implies funding
+    /// priority, and this list cannot exclude outside participants.
     pub known_wallet_funders: Vec<AccountId>,
     /// Whole-transaction facts, separate from the account-related fee.
     pub transaction_metadata: Option<TransactionMetadataEvidence>,
