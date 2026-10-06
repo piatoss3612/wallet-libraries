@@ -72,7 +72,8 @@ pub(super) fn pending<P: Parameters>(
     params: &P,
     position: Position,
 ) -> Result<Option<PendingIronwoodMetadata<AccountUuid>>, SqliteClientError> {
-    if let Some(note) = super::pending_note(conn, params, position, true)? {
+    // Metadata work belongs to protected transactions only, whatever the authority.
+    if let Some(note) = super::pending_note(conn, params, position, true, true)? {
         return Ok(Some(PendingIronwoodMetadata::Incoming(note)));
     }
     conn.query_row(

@@ -125,6 +125,8 @@ impl StoredIronwoodMetadata {
 /// transaction after rechecking the captured position and action identity.
 /// Transparent metadata and send-only server association are trusted. The request
 /// identity must match pending wallet state before metadata can change routing.
+/// An incoming memo is authenticated by decrypting the scanned note, whatever the
+/// transparent flags say.
 pub struct ValidatedIronwoodEnhancement<AccountId> {
     request: EnhancePirRequest,
     has_transparent: bool,
@@ -140,7 +142,9 @@ pub struct IronwoodEnhancementData<AccountId> {
     pub has_transparent: bool,
     pub metadata: EnhanceTransactionMetadata,
     /// Snapshot to compare atomically before filling unknown metadata fields.
-    /// `None` occurs only for transparent responses, whose metadata must not be stored.
+    /// Validation always captures it; `None` only reaches storage from test constructors.
+    /// A transparent response has not been compared with it: storage compares it only
+    /// when it stores the response's details privately.
     pub expected_metadata: Option<StoredIronwoodMetadata>,
     pub incoming: Option<MemoBytes>,
     pub outgoing: IronwoodOutgoingResult<AccountId>,
@@ -230,8 +234,11 @@ pub trait EnhancePirStorage {
     /// The comparison, fills, and all action/queue writes must share a transaction; a write
     /// error must roll back every effect. Do not perform a separate metadata commit.
     ///
-    /// For an action-bound transparent response, retain the LWD routing behavior and do
-    /// not compare or store its fee/expiry. Its `expected_metadata` is `None`.
+    /// For an action-bound transparent response, retain the LWD routing behavior when public
+    /// authority is current, without comparing or storing its fee/expiry. Without public
+    /// authority, storage may keep the details that do not depend on the transparent data
+    /// (the authenticated memo, and a fee agreeing with `expected_metadata`) while marking
+    /// the transparent details unsupported; it must apply the same comparisons as above.
     fn compare_and_apply_ironwood_enhancement(
         &mut self,
         enhancement: ValidatedIronwoodEnhancement<Self::AccountId>,
@@ -322,19 +329,19 @@ pub fn validate_and_apply_records<DbT: EnhancePirStorage>(
     }
     // Transparent shape flags are sticky for later actions in the same batch. The label
     // records whether public LWD or private-unsupported routing was chosen; it never
-    // rewrites PrivateDetailsUnsupported as LwdRequired.
+    // rewrites PrivateDetailsUnsupported as LwdRequired. LWD routing ends private work, so
+    // later actions are not applied. Private-unsupported routing keeps the transaction's
+    // memo work, so later actions are still applied and only relabelled.
     let mut sticky_route: Option<EnhancePirStoreResult> = None;
     for (index, mut value) in validated {
-        if let Some(route) = sticky_route {
-            results[index] = route;
+        if sticky_route == Some(EnhancePirStoreResult::LwdRequired) {
+            results[index] = EnhancePirStoreResult::LwdRequired;
             continue;
         }
         // Earlier actions may have filled the same transaction's unknown fee.
         // The entire operation holds one storage transaction throughout.
-        if !value.has_transparent {
-            value.expected_metadata =
-                db.ironwood_transaction_metadata(value.request.request_id().txid())?;
-        }
+        value.expected_metadata =
+            db.ironwood_transaction_metadata(value.request.request_id().txid())?;
         let result = db.compare_and_apply_ironwood_enhancement(value)?;
         if result == EnhancePirStoreResult::Rejected {
             return Ok(reject(Some(index), Reason::RecordRejected));
@@ -345,7 +352,7 @@ pub fn validate_and_apply_records<DbT: EnhancePirStorage>(
         ) {
             sticky_route = Some(result);
         }
-        results[index] = result;
+        results[index] = sticky_route.unwrap_or(result);
     }
     for (index, previous) in aliases {
         results[index] = results[previous];
@@ -460,17 +467,15 @@ fn validate_record<DbT: EnhancePirStorage>(
         IronwoodOutgoingResult::NotRequested
     };
 
-    let expected_metadata = if record.has_transparent() {
-        None
-    } else {
-        let Some(known) = db.ironwood_transaction_metadata(request.request_id().txid())? else {
-            return Ok(Err(EnhancePirStoreResult::AlreadyResolved));
-        };
-        if !known.agrees_with(record.metadata()) {
-            return Ok(Err(EnhancePirStoreResult::Rejected));
-        }
-        Some(known)
+    let Some(known) = db.ironwood_transaction_metadata(request.request_id().txid())? else {
+        return Ok(Err(EnhancePirStoreResult::AlreadyResolved));
     };
+    // A transparent response may still route to public LWD, which ignores its metadata;
+    // storage compares it only if it keeps the response's details privately.
+    if !record.has_transparent() && !known.agrees_with(record.metadata()) {
+        return Ok(Err(EnhancePirStoreResult::Rejected));
+    }
+    let expected_metadata = Some(known);
 
     Ok(Ok(ValidatedIronwoodEnhancement {
         request,

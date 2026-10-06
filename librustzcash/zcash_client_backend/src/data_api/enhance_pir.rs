@@ -235,6 +235,9 @@ pub enum EnhancePirStoreResult {
     /// The transaction has transparent details that cannot be recovered over a public
     /// request under the current private-required policy. Financial facts already stored
     /// for the transaction are retained; a private-details marker replaces public LWD.
+    /// Details that do not depend on the transparent data are still kept: the memo of an
+    /// authenticated received note at this action, and a whole-transaction fee that agrees
+    /// with every known fact. Neither makes the transaction's history complete by itself.
     PrivateDetailsUnsupported,
     /// Authentication or action binding failed; nothing was changed.
     Rejected,
