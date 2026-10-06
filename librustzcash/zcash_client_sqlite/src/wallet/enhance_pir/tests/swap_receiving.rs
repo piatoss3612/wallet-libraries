@@ -140,8 +140,8 @@ fn swap_receiving_pir_without_feature_preserves_pending_work() {
     let (mut st, _, request) = fixture();
     st.wallet().conn().execute_batch(
         "INSERT INTO ironwood_receiving_keys
-         (id, account_id, purpose, derivation_version, key_index, receiver, scan_from, advances_allocation)
-         SELECT 1, account_id, 0, 1, zeroblob(8), zeroblob(43), 0, 1 FROM ironwood_received_notes LIMIT 1;
+         (id, account_id, purpose, key_index, receiver, scan_from, advances_allocation)
+         SELECT 1, account_id, 0, zeroblob(8), zeroblob(43), 0, 1 FROM ironwood_received_notes LIMIT 1;
          UPDATE ironwood_received_notes SET receiving_key_id = 1;"
     ).unwrap();
     assert!(matches!(

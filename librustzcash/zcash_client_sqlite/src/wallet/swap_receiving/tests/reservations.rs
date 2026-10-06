@@ -1,8 +1,8 @@
 use super::*;
 use zakura_swap_receiving::lifecycle::ProviderStatus;
 
-/// `(observed_at, terminal_at, expectation, expected_value, deadline)` of an operation.
-type Operation = (i64, Option<i64>, u8, Option<i64>, Option<i64>);
+/// `(observed_at, expectation, expected_value, deadline)` of an operation.
+type Operation = (i64, u8, Option<i64>, Option<i64>);
 const NOW: i64 = 1_000_000;
 
 /// A file-backed wallet with Ironwood active, scanned through one block that holds an
@@ -107,10 +107,10 @@ fn operation(st: &State, request: &str) -> Option<Operation> {
     st.wallet()
         .conn()
         .query_row(
-            "SELECT observed_at, terminal_at, expectation, expected_value, deadline
+            "SELECT observed_at, expectation, expected_value, deadline
              FROM ironwood_swap_operations WHERE operation_id = 'receive-quote:' || ?1",
             [request],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .unwrap()
@@ -222,7 +222,7 @@ fn reclaimed_hole_reuses_its_still_scanning_key_and_keeps_old_quotes() {
         db.reclaim_swap_receive_reservation(account, r.id, now)
             .unwrap()
     );
-    assert!(db.has_swap_receive_quote(account, "quote-1").unwrap());
+    assert!(operation(&st, "quote-1").is_some());
     assert_eq!(active_from(&st, r.key.key_id()), issued);
 
     let recycled = prepare(&mut st, now);
@@ -244,7 +244,7 @@ fn restart_and_rejected_quote_reuse_the_same_draft() {
     begin(&mut st, &r, "too-low").unwrap();
     assert_eq!(
         operation(&st, "too-low"),
-        Some((NOW, None, 0, None, Some(NOW + 60)))
+        Some((NOW, 0, None, Some(NOW + 60)))
     );
     st.wallet_mut()
         .db_mut()
@@ -355,10 +355,7 @@ fn provider_statuses_update_the_quote_operation_or_leave_it_alone() {
     let r = prepare(&mut st, NOW);
     quote(&mut st, &r, "payout", true);
     let deadline = Some(NOW + 60);
-    assert_eq!(
-        operation(&st, "payout"),
-        Some((NOW, None, 0, None, deadline))
-    );
+    assert_eq!(operation(&st, "payout"), Some((NOW, 0, None, deadline)));
     let now = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
     let unknown = ProviderStatus {
         status: "NEW_STATE",
@@ -373,10 +370,7 @@ fn provider_statuses_update_the_quote_operation_or_leave_it_alone() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(
-        operation(&st, "payout"),
-        Some((NOW, None, 0, None, deadline))
-    );
+    assert_eq!(operation(&st, "payout"), Some((NOW, 0, None, deadline)));
     let success = ProviderStatus {
         status: "SUCCESS",
         amount_out: Some(Zatoshis::const_from_u64(5_000)),
@@ -389,7 +383,7 @@ fn provider_statuses_update_the_quote_operation_or_leave_it_alone() {
         .unwrap();
     assert_eq!(
         operation(&st, "payout"),
-        Some((now + 1, Some(now + 1), 2, Some(5_000), deadline))
+        Some((now + 1, 2, Some(5_000), deadline))
     );
 }
 
@@ -425,7 +419,6 @@ fn paid_reservation_closes_once_every_quote_settles() {
             .unwrap()
             .is_empty()
     );
-    assert!(db.has_swap_receive_quote(account, "paid").unwrap());
     assert_eq!(
         db.swap_receive_reservation(account, r.id)
             .unwrap()
@@ -433,6 +426,7 @@ fn paid_reservation_closes_once_every_quote_settles() {
             .key_id(),
         r.key.key_id()
     );
+    assert!(operation(&st, "paid").is_some());
     assert_eq!(prepare(&mut st, expired).key.key_id().index(), 1);
 }
 

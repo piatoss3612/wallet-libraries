@@ -101,11 +101,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         )?;
         if u32::from(candidate.height) < birthday {
             conn.execute(
-                "UPDATE ironwood_receiving_keys SET advances_allocation = 1 WHERE id = ?1",
-                [key_ref],
-            )?;
-            conn.execute(
-                "INSERT OR IGNORE INTO ironwood_swap_receive_used (receiving_key_id) VALUES (?1)",
+                "UPDATE ironwood_receiving_keys SET advances_allocation = 1, used = 1 WHERE id = ?1",
                 [key_ref],
             )?;
             conn.execute(

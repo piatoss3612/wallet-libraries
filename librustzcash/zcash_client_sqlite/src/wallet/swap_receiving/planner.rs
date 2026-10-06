@@ -11,15 +11,13 @@ use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-/// One receiver's sweep target. Public metadata is not note ownership.
+/// One receiver's due sweep. Public metadata is not note ownership.
 #[derive(Clone, PartialEq, Eq)]
 pub struct DiscoveryWork {
     /// Derivation identity. Derive only when authenticating returned notes.
     pub key: KeyId,
     /// Canonical address bytes already stored at registration.
     pub receiver: [u8; 43],
-    /// Persisted, independently accepted target that retries must reach.
-    pub target: ChainPoint,
     /// A completed lookup whose candidates are durably queued. Resume those first.
     pub lookup: Option<ChainPoint>,
 }
@@ -91,10 +89,8 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Selects due sweeps without reconstructing historical keys. Each key's target
-    /// is fixed at its first selection and replaced only after a reorg removes it.
-    /// Attempts are leased separately just before I/O, so a stopped batch cannot
-    /// starve its tail.
+    /// Selects due sweeps without reconstructing historical keys. Attempts are leased
+    /// separately just before I/O, so a stopped batch cannot starve its tail.
     pub fn prepare_swap_discovery_batch(
         &mut self,
         account: AccountUuid,
@@ -118,17 +114,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                       SELECT 1 FROM ironwood_swap_payment_recovery p
                       WHERE p.receiving_key_id = s.receiving_key_id))";
             let remaining_lookups = db.conn.0.query_row(
-                &format!(
-                    "SELECT COUNT(*) {eligible} AND (s.lookup_height IS NULL
-                        OR s.target_height IS NULL OR s.lookup_height < s.target_height)"
-                ),
+                &format!("SELECT COUNT(*) {eligible} AND s.lookup_height IS NULL"),
                 params![owner.0, u32::from(through.height), now],
                 |r| r.get::<_, usize>(0),
             )?;
             let rows = {
                 let mut stmt = db.conn.0.prepare(&format!(
-                    "SELECT k.purpose, k.derivation_version, k.key_index, k.id, k.receiver,
-                        s.target_height, s.target_hash, s.lookup_height, s.lookup_hash
+                    "SELECT k.purpose, k.key_index, k.receiver, s.lookup_height, s.lookup_hash
                     {eligible} ORDER BY s.next_attempt_at, s.receiving_key_id LIMIT ?4"
                 ))?;
                 let through_height = u32::from(through.height);
@@ -137,35 +129,20 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 while let Some(r) = rows.next()? {
                     out.push((
                         stored_key_id(r)?,
-                        r.get::<_, i64>(3)?,
-                        r.get::<_, Vec<u8>>(4)?,
-                        anchor(r.get(5)?, r.get(6)?),
-                        anchor(r.get(7)?, r.get(8)?),
+                        r.get::<_, Vec<u8>>(2)?,
+                        anchor(r.get(3)?, r.get(4)?),
                     ));
                 }
                 out
             };
             let mut work = Vec::new();
-            for (key, id, receiver, target, lookup) in rows {
-                let target = match canonical(db.conn.0, target)? {
-                    Some(target) => target,
-                    None => {
-                        db.conn.0.execute(
-                            "UPDATE ironwood_swap_sweeps SET target_height = ?2, target_hash = ?3
-                             WHERE receiving_key_id = ?1",
-                            params![id, u32::from(through.height), through.hash.0],
-                        )?;
-                        through
-                    }
-                };
-                let lookup = canonical(db.conn.0, lookup)?.filter(|a| a.height >= target.height);
+            for (key, receiver, lookup) in rows {
                 work.push(DiscoveryWork {
                     key,
                     receiver: receiver
                         .try_into()
                         .map_err(|_| corrupt("invalid stored receiver"))?,
-                    target,
-                    lookup,
+                    lookup: canonical(db.conn.0, lookup)?,
                 });
             }
             Ok(DiscoveryBatch {
@@ -175,25 +152,21 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         })
     }
 
-    /// Leases `key`'s sweep for an attempt against a directory publication at
-    /// `publication`, just before its network lookups. Every attempt, including one
-    /// that fails or the process abandons, retains the target and backs off the next
-    /// from one minute to twelve hours. A publication short of the sweep's target
-    /// returns [`Error::SweepDeferred`], so no lookup is spent on it.
+    /// Leases `key`'s sweep for an attempt, just before its network lookups. Every
+    /// attempt, including one that fails or the process abandons, backs off the next
+    /// from one minute to twelve hours.
     pub fn begin_swap_discovery_attempt(
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        publication: ChainPoint,
         now: i64,
     ) -> Result<(), Error> {
-        let reached = self.transactionally(|db| {
+        self.transactionally(|db| {
             let id = key_ref(db.conn.0, account, key)?;
-            let (attempt, target): (u32, Option<u32>) = db.conn.0.query_row(
-                "SELECT attempts, target_height FROM ironwood_swap_sweeps
-                 WHERE receiving_key_id = ?1",
+            let attempt: u32 = db.conn.0.query_row(
+                "SELECT attempts FROM ironwood_swap_sweeps WHERE receiving_key_id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )?;
             let delay = (60i64 << attempt.min(10)).min(43200);
             db.conn.0.execute(
@@ -202,12 +175,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                  WHERE receiving_key_id = ?1",
                 params![id, now.saturating_add(delay)],
             )?;
-            Ok::<_, Error>(target.is_none_or(|target| u32::from(publication.height) >= target))
-        })?;
-        if !reached {
-            return Err(Error::SweepDeferred(super::SweepDeferral::TargetNotReached));
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// See [`WalletDb::queue_swap_lookup`] on a transaction-backed handle.

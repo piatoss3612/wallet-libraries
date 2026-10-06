@@ -1,8 +1,7 @@
 //! Restore sweep steps around the directory and note-data lookups an app performs.
 //!
-//! For each due [`DiscoveryWork`](super::DiscoveryWork) item, lease it against the
-//! publication with [`WalletDb::begin_swap_discovery_attempt`]. Unless its lookup
-//! is already queued,
+//! For each due [`DiscoveryWork`](super::DiscoveryWork) item, lease it with
+//! [`WalletDb::begin_swap_discovery_attempt`]. Unless its lookup is already queued,
 //! look its receiver up in the directory, retrieve note data for the positions
 //! [`WalletDb::swap_note_data_needed`] returns, and queue the lookup with
 //! [`WalletDb::queue_swap_directory_lookup`]. Then call [`WalletDb::apply_swap_sweep`].
@@ -57,8 +56,6 @@ pub enum SweepDeferral {
     UnknownAnchor,
     /// The publication is more than [`MAX_PUBLICATION_LAG`] blocks behind the wallet.
     StalePublication,
-    /// The publication does not reach the sweep's target block.
-    TargetNotReached,
 }
 
 impl std::fmt::Display for SweepDeferral {
@@ -66,7 +63,6 @@ impl std::fmt::Display for SweepDeferral {
         f.write_str(match self {
             Self::UnknownAnchor => "the directory publication's block is not on the scanned chain",
             Self::StalePublication => "the directory publication is too far behind the wallet",
-            Self::TargetNotReached => "the directory publication does not reach the sweep's target",
         })
     }
 }
@@ -173,9 +169,9 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Queues the directory's complete lookup of `key` at `anchor`, from
-    /// [`WalletDb::swap_publication_anchor`], which must reach the sweep's target. Each
-    /// new payment is joined with its note data in `note_data`: the 528 ciphertext
-    /// bytes after the directory's prefix, by position. Nothing is credited yet.
+    /// [`WalletDb::swap_publication_anchor`]. Each new payment is joined with its note
+    /// data in `note_data`: the 528 ciphertext bytes after the directory's prefix, by
+    /// position. Nothing is credited yet.
     pub fn queue_swap_directory_lookup(
         &mut self,
         account: AccountUuid,
@@ -185,20 +181,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         note_data: &BTreeMap<u64, [u8; 528]>,
     ) -> Result<(), Error> {
         self.transactionally(|db| {
-            let id = key_ref(db.conn.0, account, key)?;
-            let target: Option<u32> = db
-                .conn
-                .0
-                .query_row(
-                    "SELECT target_height FROM ironwood_swap_sweeps WHERE receiving_key_id = ?1",
-                    [id],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .flatten();
-            if target.is_some_and(|target| u32::from(anchor.height) < target) {
-                return Err(Error::SweepDeferred(SweepDeferral::TargetNotReached));
-            }
             let (mut candidates, missing) = db.sort_directory_payments(account, key, payments)?;
             for (payment, position) in missing {
                 let suffix = note_data

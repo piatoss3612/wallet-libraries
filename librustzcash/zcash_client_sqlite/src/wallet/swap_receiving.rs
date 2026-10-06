@@ -184,7 +184,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     ) -> Result<Option<RegisteredKey>, Error> {
         self.swap_receiving_key_matching(
             account,
-            "k.purpose=?2 AND k.derivation_version=1 AND k.key_index=?3",
+            "k.purpose=?2 AND k.key_index=?3",
             rusqlite::params![
                 account.0,
                 purpose_code(key_id.purpose()),
@@ -220,8 +220,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         let conn = self.conn.borrow();
         let (_, parent) = account_key(conn, &self.params, account)?;
         let mut stmt = conn.prepare_cached(&format!(
-            "SELECT k.purpose, k.derivation_version, k.key_index, k.receiver,
-                    k.scan_from, k.advances_allocation
+            "SELECT k.purpose, k.key_index, k.receiver, k.scan_from, k.advances_allocation
              FROM ironwood_receiving_keys k JOIN accounts a ON a.id=k.account_id
              WHERE a.uuid=?1 AND {predicate}",
         ))?;
@@ -260,7 +259,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         let conn = self.conn.borrow();
         let (account_ref, parent) = account_key(conn, &self.params, account)?;
         let mut stmt = conn.prepare_cached(&format!(
-            "SELECT purpose, derivation_version, key_index, receiver, scan_from, advances_allocation
+            "SELECT purpose, key_index, receiver, scan_from, advances_allocation
              FROM ironwood_receiving_keys WHERE account_id = ?1 AND {predicate}
              ORDER BY purpose, key_index",
         ))?;
@@ -307,7 +306,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         // Each union branch starts from transaction or scanning indexes. Enhancing
         // one closed key's note does not walk or derive the historical registry.
         let sql = format!(
-            "SELECT purpose,derivation_version,key_index,receiver,scan_from,advances_allocation
+            "SELECT purpose,key_index,receiver,scan_from,advances_allocation
             FROM ironwood_receiving_keys WHERE account_id=?1 AND id IN (
                 SELECT receiving_key_id FROM ironwood_received_notes
                     WHERE transaction_id=(SELECT id_tx FROM transactions WHERE txid=?2)
@@ -413,7 +412,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         tip: BlockHeight,
     ) -> Result<RegisteredKey, Error> {
         let scan_from = issuance_start(self.conn.0, tip)?;
-        if self.recover_refund_memos(account)?.unreadable > 0 {
+        if self.recover_refund_memos(account)? > 0 {
             return Err(Error::ReservationPolicy(ReservationPolicy::Unreadable));
         }
         if self.swap_refund_memos_pending(account)? {
@@ -441,8 +440,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         // this represents the entire u64 index space, including u64::MAX.
         let last: Option<Vec<u8>> = self.conn.0.query_row(
             "SELECT MAX(key_index) FROM ironwood_receiving_keys
-             WHERE account_id = :account AND purpose = :purpose
-               AND derivation_version = 1 AND advances_allocation = 1",
+             WHERE account_id = :account AND purpose = :purpose AND advances_allocation = 1",
             named_params![":account": account_ref.0, ":purpose": purpose_code(purpose)],
             |row| row.get(0),
         )?;
@@ -514,19 +512,19 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
     }
 }
 
-/// Reconstructs a key from a registry row whose first six columns are purpose,
-/// derivation_version, key_index, receiver, scan_from and advances_allocation.
+/// Reconstructs a key from a registry row whose first five columns are purpose,
+/// key_index, receiver, scan_from and advances_allocation.
 fn registered_key(
     row: &rusqlite::Row<'_>,
     account: AccountUuid,
     parent: &FullViewingKey,
 ) -> Result<RegisteredKey, Error> {
     let scanning_key = SwapScanningKey::derive(account, stored_key_id(row)?, parent)?;
-    check_receiver(row.get(3)?, scanning_key.full_viewing_key())?;
+    check_receiver(row.get(2)?, scanning_key.full_viewing_key())?;
     Ok(RegisteredKey {
         scanning_key,
-        scan_from: BlockHeight::from(row.get::<_, u32>(4)?),
-        advances_allocation: row.get(5)?,
+        scan_from: BlockHeight::from(row.get::<_, u32>(3)?),
+        advances_allocation: row.get(4)?,
     })
 }
 
@@ -541,18 +539,15 @@ fn check_receiver(stored: Vec<u8>, fvk: &FullViewingKey) -> Result<(), Error> {
     Ok(())
 }
 
-/// The key identity of a registry row whose first three columns are purpose,
-/// derivation_version and key_index.
+/// The key identity of a registry row whose first two columns are purpose and
+/// key_index.
 fn stored_key_id(row: &rusqlite::Row<'_>) -> Result<KeyId, Error> {
-    if row.get::<_, u8>(1)? != 1 {
-        return Err(corrupt("unsupported swap key derivation version"));
-    }
     let purpose = match row.get::<_, u8>(0)? {
         0 => Purpose::Refund,
         1 => Purpose::Receive,
         _ => return Err(corrupt("unsupported swap key purpose")),
     };
-    Ok(KeyId::new(purpose, decode_index(row.get(2)?)?))
+    Ok(KeyId::new(purpose, decode_index(row.get(1)?)?))
 }
 
 /// `account`'s database reference and the Orchard viewing key its swap keys derive from.
@@ -645,10 +640,10 @@ fn register<P: Parameters>(
     let updated: Option<(i64, u32, bool, Option<u32>)> = conn
         .query_row(
             "INSERT INTO ironwood_receiving_keys
-             (account_id, purpose, derivation_version, key_index, receiver, scan_from,
-              advances_allocation, registered_at)
-         VALUES (:account, :purpose, 1, :index, :receiver, :scan_from, :allocated, :now)
-         ON CONFLICT (account_id, purpose, derivation_version, key_index) DO UPDATE SET
+             (account_id, purpose, key_index, receiver, scan_from, advances_allocation,
+              registered_at)
+         VALUES (:account, :purpose, :index, :receiver, :scan_from, :allocated, :now)
+         ON CONFLICT (account_id, purpose, key_index) DO UPDATE SET
              scan_from = MIN(ironwood_receiving_keys.scan_from, excluded.scan_from),
              advances_allocation = MAX(
                  ironwood_receiving_keys.advances_allocation, excluded.advances_allocation)
@@ -760,7 +755,7 @@ pub(crate) fn rescan_missed_keys(
 ) -> Result<(), SqliteClientError> {
     let used: HashSet<_> = used.iter().copied().collect();
     let mut stmt = conn.prepare_cached(
-        "SELECT k.purpose, k.derivation_version, k.key_index, a.uuid, k.active_from
+        "SELECT k.purpose, k.key_index, a.uuid, k.active_from
          FROM ironwood_receiving_keys k JOIN accounts a ON a.id = k.account_id
          WHERE k.closed_at IS NULL AND k.active_from < ?1",
     )?;
@@ -768,8 +763,8 @@ pub(crate) fn rescan_missed_keys(
     let mut missed = Vec::new();
     while let Some(row) = rows.next()? {
         let key = stored_key_id(row).map_err(wallet_error)?;
-        if !used.contains(&(AccountUuid(row.get(3)?), key)) {
-            missed.push(BlockHeight::from(row.get::<_, u32>(4)?).max(range.start));
+        if !used.contains(&(AccountUuid(row.get(2)?), key)) {
+            missed.push(BlockHeight::from(row.get::<_, u32>(3)?).max(range.start));
         }
     }
     drop(rows);
@@ -794,8 +789,7 @@ pub(super) fn note_key(
     parent: &FullViewingKey,
 ) -> Result<(KeyId, FullViewingKey), SqliteClientError> {
     let mut stmt = conn.prepare_cached(
-        "SELECT purpose, derivation_version, key_index, receiver
-         FROM ironwood_receiving_keys WHERE id = ?1",
+        "SELECT purpose, key_index, receiver FROM ironwood_receiving_keys WHERE id = ?1",
     )?;
     let mut rows = stmt.query([id])?;
     let row = rows
@@ -803,7 +797,7 @@ pub(super) fn note_key(
         .ok_or_else(|| wallet_error(corrupt("missing swap note key")))?;
     let key_id = stored_key_id(row).map_err(wallet_error)?;
     let fvk = key_id.derive(parent).map_err(|e| wallet_error(e.into()))?;
-    check_receiver(row.get(3)?, &fvk).map_err(wallet_error)?;
+    check_receiver(row.get(2)?, &fvk).map_err(wallet_error)?;
     Ok((key_id, fvk))
 }
 

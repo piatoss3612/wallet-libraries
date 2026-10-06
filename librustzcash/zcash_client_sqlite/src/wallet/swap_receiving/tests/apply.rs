@@ -492,44 +492,6 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
     );
 }
 
-#[test]
-fn a_publication_short_of_the_target_waits() {
-    let (mut st, key, _, through, _) = fixture();
-    let account = st.test_account().unwrap().id();
-    st.wallet()
-        .conn()
-        .execute(
-            "UPDATE ironwood_swap_sweeps SET target_height = ?1",
-            [u32::from(through.height) + 1],
-        )
-        .unwrap();
-    // The attempt still counts, so a lagging publication backs off.
-    assert!(matches!(
-        st.wallet_mut()
-            .db_mut()
-            .begin_swap_discovery_attempt(account, key.key_id(), through, 0),
-        Err(Error::SweepDeferred(SweepDeferral::TargetNotReached))
-    ));
-    let attempts: u32 = st
-        .wallet()
-        .conn()
-        .query_row("SELECT attempts FROM ironwood_swap_sweeps", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(attempts, 1);
-    assert!(matches!(
-        st.wallet_mut().db_mut().queue_swap_directory_lookup(
-            account,
-            key.key_id(),
-            through,
-            &[],
-            &BTreeMap::new()
-        ),
-        Err(Error::SweepDeferred(SweepDeferral::TargetNotReached))
-    ));
-}
-
 /// The transaction IDs of the wallet's Ironwood notes.
 fn note_txids(st: &State) -> Vec<TxId> {
     let mut stmt = st
@@ -658,9 +620,8 @@ fn a_payment_before_the_birthday_marks_its_index_used_and_finishes_the_sweep() {
         .wallet()
         .conn()
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_swap_receive_used u
-                    WHERE u.receiving_key_id = k.id), k.advances_allocation
-             FROM ironwood_receiving_keys k WHERE k.purpose = 1 AND k.key_index = ?1",
+            "SELECT used, advances_allocation FROM ironwood_receiving_keys
+             WHERE purpose = 1 AND key_index = ?1",
             [id.index().to_be_bytes()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

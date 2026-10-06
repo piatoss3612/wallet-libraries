@@ -3,7 +3,7 @@ use super::{
     Error, account_key, corrupt, queue_rescan, reservations::RECEIVE_LOOKAHEAD, restore_start,
 };
 use crate::{AccountUuid, SqlTransaction, WalletDb, util::Clock, wallet};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use std::borrow::BorrowMut;
 use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
@@ -79,21 +79,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                 return Ok(false);
             }
             db.maintain_restore_discovery(account, lookahead)?;
-            // A decrypted marker can precede its own-send evidence. Keep it eligible
-            // until its inputs are known, just as we keep a missing memo eligible.
-            let pending: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
-                 JOIN transactions t ON t.id_tx = n.transaction_id
-                 WHERE n.account_id = ?1 AND n.recipient_key_scope = 1
-                   AND n.receiving_key_id IS NULL AND t.mined_height IS NOT NULL
-                   AND (n.memo IS NULL OR (substr(n.memo, 1, 5) = X'FF5A535750'
-                     AND NOT EXISTS(SELECT 1 FROM v_received_output_spends s
-                       WHERE s.transaction_id = n.transaction_id
-                         AND s.account_id = n.account_id))))",
-                [id.0],
-                |r| r.get(0),
-            )?;
-            if pending {
+            if db.swap_refund_memos_pending(account)? {
                 return Ok(false);
             }
             // Pending sweeps keep evidence from their earliest possible payment, and a
@@ -110,20 +96,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                 |r| r.get(0),
             )?;
             let next = pending.unwrap_or(u32::from(through.height).saturating_add(1));
-            let old: u32 = conn.query_row(
-                "SELECT nullifier_retention_height FROM ironwood_swap_spend_retention
-                 WHERE account_id = ?1",
-                [id.0],
-                |r| r.get(0),
-            )?;
-            if next > old {
-                conn.execute(
-                    "DELETE FROM ironwood_swap_spend_replay WHERE account_id = ?1",
-                    [id.0],
-                )?;
-            }
+            // Raising the floor ends any replay below it.
             conn.execute(
-                "UPDATE ironwood_swap_spend_retention SET nullifier_retention_height = ?2
+                "UPDATE ironwood_swap_spend_retention SET nullifier_retention_height = ?2,
+                    replay_through = CASE WHEN ?2 > nullifier_retention_height
+                        THEN NULL ELSE replay_through END
                  WHERE account_id = ?1",
                 params![id.0, next],
             )?;
@@ -158,15 +135,11 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                      MIN(nullifier_retention_height, excluded.nullifier_retention_height)",
             params![id.0, u32::from(start)],
         )?;
-        let previous: Option<u32> = self
-            .conn
-            .0
-            .query_row(
-                "SELECT through_height FROM ironwood_swap_spend_replay WHERE account_id=?1",
-                [id.0],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let previous: Option<u32> = self.conn.0.query_row(
+            "SELECT replay_through FROM ironwood_swap_spend_retention WHERE account_id = ?1",
+            [id.0],
+            |r| r.get(0),
+        )?;
         if previous.is_some_and(|h| h >= u32::from(through)) {
             return Ok(());
         }
@@ -175,8 +148,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             .unwrap_or(start)
             .max(start);
         self.conn.0.execute(
-            "INSERT INTO ironwood_swap_spend_replay(account_id,through_height) VALUES(?1,?2)
-            ON CONFLICT(account_id) DO UPDATE SET through_height=excluded.through_height",
+            "UPDATE ironwood_swap_spend_retention SET replay_through = ?2 WHERE account_id = ?1",
             params![id.0, u32::from(through)],
         )?;
         queue_rescan(self.conn.0, from..BlockHeight::from(end))

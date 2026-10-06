@@ -51,7 +51,7 @@ pub(crate) enum SpendStatus {
 pub(super) fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Result<i64, Error> {
     conn.query_row(
         "SELECT k.id FROM ironwood_receiving_keys k JOIN accounts a ON a.id = k.account_id
-         WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.derivation_version = 1 AND k.key_index = ?3",
+         WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.key_index = ?3",
         params![
             account.0,
             purpose_code(key.purpose()),

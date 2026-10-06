@@ -353,7 +353,7 @@ where
 {
     let key = item.key;
     lock.write("swap_sweep.attempt", || {
-        wallet.begin_swap_discovery_attempt(account, key, directory.anchor, now)
+        wallet.begin_swap_discovery_attempt(account, key, now)
     })?;
     if item.lookup.is_none() {
         let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;

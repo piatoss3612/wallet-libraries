@@ -4290,8 +4290,9 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // to the retained height.
     trim_scan_queue_to(conn, truncation_height)?;
     conn.execute(
-        "UPDATE ironwood_swap_spend_retention SET nullifier_retention_height =
-         MIN(nullifier_retention_height, ?1 + 1)",
+        "UPDATE ironwood_swap_spend_retention SET
+            nullifier_retention_height = MIN(nullifier_retention_height, ?1 + 1),
+            replay_through = MIN(replay_through, ?1)",
         [u32::from(truncation_height)],
     )?;
     // A sweep whose lookup or completion the rewind removed runs again. Active keys
@@ -4299,14 +4300,8 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     conn.execute(
         "UPDATE ironwood_swap_sweeps SET done_height = NULL, next_attempt_at = 0,
             lookup_height = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_height END,
-            lookup_hash = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_hash END,
-            target_height = CASE WHEN target_height > ?1 THEN NULL ELSE target_height END,
-            target_hash = CASE WHEN target_height > ?1 THEN NULL ELSE target_hash END
-         WHERE done_height > ?1 OR lookup_height > ?1 OR target_height > ?1",
-        [u32::from(truncation_height)],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_swap_spend_replay SET through_height=MIN(through_height,?1)",
+            lookup_hash = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_hash END
+         WHERE done_height > ?1 OR lookup_height > ?1",
         [u32::from(truncation_height)],
     )?;
     conn.execute(

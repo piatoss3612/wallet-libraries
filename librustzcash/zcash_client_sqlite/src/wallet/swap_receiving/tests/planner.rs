@@ -70,8 +70,8 @@ fn bounded_batches_do_not_derive_ten_thousand_restored_keys() {
     db.transactionally::<_, _, Error>(|db| {
         let mut insert = db.conn.0.prepare(
             "INSERT INTO ironwood_receiving_keys
-                (account_id, purpose, derivation_version, key_index, receiver, scan_from, advances_allocation)
-             VALUES (?1, 0, 1, ?2, zeroblob(43), ?3, 1)",
+                (account_id, purpose, key_index, receiver, scan_from, advances_allocation)
+             VALUES (?1, 0, ?2, zeroblob(43), ?3, 1)",
         )?;
         for i in 0u64..10_000 {
             insert.execute(params![owner.0, i.to_be_bytes(), u32::from(through.height)])?;
@@ -92,7 +92,7 @@ fn bounded_batches_do_not_derive_ten_thousand_restored_keys() {
     assert!(batch.work.iter().all(|w| w.receiver == [0; 43]));
     // Only the started record is leased, so a stopped batch cannot starve its tail.
     let first = batch.work[0].key;
-    db.begin_swap_discovery_attempt(account, first, through, NOW)
+    db.begin_swap_discovery_attempt(account, first, NOW)
         .unwrap();
     let batch = db
         .prepare_swap_discovery_batch(account, through, NOW, limit)
@@ -119,7 +119,7 @@ fn sweeps_are_due_once_the_chain_reaches_their_scan_from() {
 }
 
 #[test]
-fn sweep_target_is_fixed_until_a_reorg_removes_it() {
+fn a_batch_needs_a_canonical_chain_point() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let base = tip(&st);
@@ -127,23 +127,23 @@ fn sweep_target_is_fixed_until_a_reorg_removes_it() {
         .db_mut()
         .watch_swap_receive_key(account, 0, base.height)
         .unwrap();
-    let first = advance(&mut st, 1);
-    assert_eq!(batch(&mut st, first, NOW).work[0].target, first);
-    let later = advance(&mut st, 1);
-    assert_eq!(batch(&mut st, later, NOW).work[0].target, first);
+    let removed = advance(&mut st, 2);
     st.truncate_to_height(base.height);
     let replaced = advance(&mut st, 2);
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .prepare_swap_discovery_batch(account, later, NOW, NonZeroU32::new(64).unwrap())
-            .is_err()
-    );
-    assert_eq!(batch(&mut st, replaced, NOW).work[0].target, replaced);
+    assert!(matches!(
+        st.wallet_mut().db_mut().prepare_swap_discovery_batch(
+            account,
+            removed,
+            NOW,
+            NonZeroU32::new(64).unwrap()
+        ),
+        Err(Error::SweepDeferred(SweepDeferral::UnknownAnchor))
+    ));
+    assert_eq!(batch(&mut st, replaced, NOW).work.len(), 1);
 }
 
 #[test]
-fn remaining_lookups_counts_due_sweeps_without_a_lookup_at_their_target() {
+fn remaining_lookups_counts_due_sweeps_without_a_lookup() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let older = tip(&st);
@@ -155,27 +155,24 @@ fn remaining_lookups_counts_due_sweeps_without_a_lookup_at_their_target() {
                 .key_id()
         })
         .collect();
-    // A lookup older than the target set at first selection does not count.
+    // Any canonical lookup counts, however old.
     db.queue_swap_lookup(account, keys[2], older, &[]).unwrap();
     let through = advance(&mut st, 1);
-    let first = batch(&mut st, through, NOW);
-    assert_eq!(first.remaining_lookups, 3);
-    assert!(
-        first
-            .work
-            .iter()
-            .all(|w| w.target == through && w.lookup.is_none())
-    );
+    assert_eq!(batch(&mut st, through, NOW).remaining_lookups, 2);
     st.wallet_mut()
         .db_mut()
         .queue_swap_lookup(account, keys[0], through, &[])
         .unwrap();
     let second = batch(&mut st, through, NOW);
-    assert_eq!(second.remaining_lookups, 2);
+    assert_eq!(second.remaining_lookups, 1);
     let lookups: Vec<_> = second.work.iter().map(|w| (w.key, w.lookup)).collect();
     assert_eq!(
         lookups,
-        [(keys[0], Some(through)), (keys[1], None), (keys[2], None)]
+        [
+            (keys[0], Some(through)),
+            (keys[1], None),
+            (keys[2], Some(older))
+        ]
     );
 }
 
@@ -196,7 +193,7 @@ fn attempts_back_off_from_one_minute_to_twelve_hours() {
     ] {
         st.wallet_mut()
             .db_mut()
-            .begin_swap_discovery_attempt(account, key, through, now)
+            .begin_swap_discovery_attempt(account, key, now)
             .unwrap();
         assert!(due(&mut st, through, now + delay - 1).is_empty());
         assert_eq!(due(&mut st, through, now + delay), [key]);
@@ -540,8 +537,7 @@ fn history_is_pending_until_sweeps_finish_and_candidates_apply() {
     let db = st.wallet_mut().db_mut();
     assert!(db.swap_history_pending(account, through.height).unwrap());
     // Retry backoff never makes an unfinished restore appear complete.
-    db.begin_swap_discovery_attempt(account, key, through, NOW)
-        .unwrap();
+    db.begin_swap_discovery_attempt(account, key, NOW).unwrap();
     assert!(db.swap_history_pending(account, through.height).unwrap());
     db.finish_sweep(account, key, through).unwrap();
     assert!(!db.swap_history_pending(account, through.height).unwrap());
@@ -594,7 +590,7 @@ fn rewind_reruns_only_sweeps_above_the_retained_chain() {
     });
     db.finish_sweep(account, early, kept).unwrap();
     let removed = advance(&mut st, 1);
-    assert_eq!(batch(&mut st, removed, NOW).work[0].target, removed);
+    assert_eq!(due(&mut st, removed, NOW), [late]);
     let db = st.wallet_mut().db_mut();
     db.queue_swap_lookup(account, late, removed, &[]).unwrap();
     db.finish_swap_discovery_attempt(account, late, removed)
@@ -604,9 +600,7 @@ fn rewind_reruns_only_sweeps_above_the_retained_chain() {
     assert_eq!(db.swap_lookup_coverage(account, early).unwrap(), Some(kept));
     assert_eq!(db.swap_lookup_coverage(account, late).unwrap(), None);
     assert!(db.swap_history_pending(account, kept.height).unwrap());
-    let work = batch(&mut st, kept, NOW).work;
-    let targets: Vec<_> = work.iter().map(|w| (w.key, w.target)).collect();
-    assert_eq!(targets, [(late, kept)]);
+    assert_eq!(due(&mut st, kept, NOW), [late]);
 }
 
 #[test]
@@ -622,8 +616,7 @@ fn rewound_sweep_does_not_wait_out_its_last_attempt_lease() {
         .key_id();
     let removed = advance(&mut st, 1);
     let db = st.wallet_mut().db_mut();
-    db.begin_swap_discovery_attempt(account, key, removed, NOW)
-        .unwrap();
+    db.begin_swap_discovery_attempt(account, key, NOW).unwrap();
     db.queue_swap_lookup(account, key, removed, &[]).unwrap();
     db.finish_swap_discovery_attempt(account, key, removed)
         .unwrap();

@@ -58,16 +58,13 @@ fn close(st: &mut State, now: i64) -> usize {
         .unwrap()
 }
 
-/// `operation`'s stored `(observed_at, terminal_at, expectation, expected_value, deadline)`.
-fn operation_row(
-    conn: &Connection,
-    operation: &str,
-) -> (i64, Option<i64>, u8, Option<i64>, Option<i64>) {
+/// `operation`'s stored `(observed_at, expectation, expected_value, deadline)`.
+fn operation_row(conn: &Connection, operation: &str) -> (i64, u8, Option<i64>, Option<i64>) {
     conn.query_row(
-        "SELECT observed_at, terminal_at, expectation, expected_value, deadline
+        "SELECT observed_at, expectation, expected_value, deadline
          FROM ironwood_swap_operations WHERE operation_id = ?1",
         [operation],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )
     .unwrap()
 }
@@ -90,32 +87,28 @@ fn older_observations_are_ignored() {
     };
     db.record_swap_observation(account, key, "swap", stale, 100)
         .unwrap();
-    assert_eq!(
-        operation_row(&db.conn, "swap"),
-        (200, Some(200), 1, None, Some(900))
-    );
+    assert_eq!(operation_row(&db.conn, "swap"), (200, 1, None, Some(900)));
 }
 
 #[test]
-fn terminal_time_is_the_first_until_a_newer_active_status() {
+fn newer_statuses_replace_older_ones() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let key = refund_key(&mut st).key_id();
     let db = st.wallet_mut().db_mut();
-    db.observe_swap_operation(account, key, "swap", Terminal(NoReceipt), 100)
-        .unwrap();
-    db.observe_swap_operation(account, key, "swap", Terminal(Positive(None)), 200)
-        .unwrap();
-    assert_eq!(
-        operation_row(&db.conn, "swap"),
-        (200, Some(100), 2, None, None)
-    );
-    db.observe_swap_operation(account, key, "swap", Active, 300)
-        .unwrap();
-    assert_eq!(operation_row(&db.conn, "swap"), (300, None, 0, None, None));
-    db.observe_swap_operation(account, key, "swap", Terminal(NoReceipt), 400)
-        .unwrap();
-    assert_eq!(operation_row(&db.conn, "swap").1, Some(400));
+    for (status, at, expectation) in [
+        (Terminal(NoReceipt), 100, 1),
+        (Terminal(Positive(None)), 200, 2),
+        (Active, 300, 0),
+        (Terminal(Unknown), 400, 3),
+    ] {
+        db.observe_swap_operation(account, key, "swap", status, at)
+            .unwrap();
+        assert_eq!(
+            operation_row(&db.conn, "swap"),
+            (at, expectation, None, None)
+        );
+    }
 }
 
 #[test]
@@ -132,10 +125,10 @@ fn deadline_keeps_the_last_known_value() {
         .unwrap();
     db.record_swap_observation(account, key, "swap", active(None), 200)
         .unwrap();
-    assert_eq!(operation_row(&db.conn, "swap").4, Some(1_000));
+    assert_eq!(operation_row(&db.conn, "swap").3, Some(1_000));
     db.record_swap_observation(account, key, "swap", active(Some(2_000)), 300)
         .unwrap();
-    assert_eq!(operation_row(&db.conn, "swap").4, Some(2_000));
+    assert_eq!(operation_row(&db.conn, "swap").3, Some(2_000));
 }
 
 #[test]
@@ -153,7 +146,7 @@ fn expected_receipt_amount_is_stored_and_must_be_positive() {
     ));
     assert_eq!(
         operation_row(&db.conn, "swap"),
-        (100, Some(100), 2, Some(70_000), None)
+        (100, 2, Some(70_000), None)
     );
 }
 

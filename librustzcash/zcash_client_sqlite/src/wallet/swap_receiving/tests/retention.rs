@@ -550,8 +550,12 @@ fn note_before_the_birthday_is_dropped_without_queuing_replay() {
     assert_eq!(
         db.conn
             .borrow()
-            .query_row("SELECT COUNT(*) FROM ironwood_swap_spend_replay", [], |r| r
-                .get::<_, u32>(0))
+            .query_row(
+                "SELECT COUNT(*) FROM ironwood_swap_spend_retention
+                 WHERE replay_through IS NOT NULL",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
             .unwrap(),
         0
     );

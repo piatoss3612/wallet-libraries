@@ -80,14 +80,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         WHERE r.receiving_key_id = k.id AND r.closed_at IS NULL),
                     EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
                         WHERE r.receiving_key_id = k.id),
-                    EXISTS(SELECT 1 FROM ironwood_swap_receive_used u
-                        WHERE u.receiving_key_id = k.id),
+                    k.used,
                     EXISTS(SELECT 1 FROM ironwood_swap_sweeps s WHERE s.receiving_key_id = k.id),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id
-                          AND (o.terminal_at IS NULL OR o.expectation = 0)),
+                          AND o.expectation IN (0, 3)),
                     (SELECT MAX(o.deadline) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id),
                     (SELECT COALESCE(SUM(COALESCE(o.expected_value, 1)), 0)
@@ -161,10 +160,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     }
 }
 
-/// See [`WalletDb::record_swap_observation`]. Shared with reservation and memo recovery.
+/// See [`WalletDb::record_swap_observation`]. Shared with reservations and funding.
 ///
-/// An `observed_at` of 0 marks a record no provider status has updated yet. Its
-/// placeholder terminal time gives way to the first observed one.
+/// An `observed_at` of 0 marks a record no provider status has updated yet, which
+/// any observed status replaces. `expectation` stores the status: 0 active, 1 final
+/// with no receipt, 2 final with a receipt, 3 final but inconclusive.
 pub(super) fn record_observation(
     conn: &Connection,
     id: i64,
@@ -176,27 +176,21 @@ pub(super) fn record_observation(
         return Err(corrupt("invalid swap observation"));
     }
     let (expectation, amount) = match observation.status {
-        OperationStatus::Active | OperationStatus::Terminal(ReceiptExpectation::Unknown) => {
-            (0, None)
-        }
+        OperationStatus::Active => (0, None),
         OperationStatus::Terminal(ReceiptExpectation::None) => (1, None),
         OperationStatus::Terminal(ReceiptExpectation::Positive(value)) => (2, value),
+        OperationStatus::Terminal(ReceiptExpectation::Unknown) => (3, None),
     };
     let amount = amount
         .map(|v| i64::try_from(u64::from(v)).ok().filter(|v| *v > 0))
         .map(|v| v.ok_or_else(|| corrupt("expected receipt must be positive")))
         .transpose()?;
-    let terminal = matches!(observation.status, OperationStatus::Terminal(_));
     conn.execute(
         "INSERT INTO ironwood_swap_operations
-            (receiving_key_id, operation_id, observed_at, terminal_at, expectation,
-             expected_value, deadline)
-         VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN ?3 END, ?5, ?6, ?7)
+            (receiving_key_id, operation_id, observed_at, expectation, expected_value, deadline)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT (receiving_key_id, operation_id) DO UPDATE SET
             observed_at = excluded.observed_at,
-            terminal_at = CASE WHEN ?4 THEN
-                CASE WHEN observed_at > 0 THEN COALESCE(terminal_at, excluded.terminal_at)
-                    ELSE excluded.terminal_at END END,
             expectation = excluded.expectation,
             expected_value = excluded.expected_value,
             deadline = COALESCE(excluded.deadline, deadline)
@@ -205,7 +199,6 @@ pub(super) fn record_observation(
             id,
             operation,
             now,
-            terminal,
             expectation,
             amount,
             observation.deadline

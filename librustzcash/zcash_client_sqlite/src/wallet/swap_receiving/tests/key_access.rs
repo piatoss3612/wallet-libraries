@@ -16,8 +16,8 @@ fn exact_key_access_ignores_unrelated_history_and_validates_the_requested_key() 
     db.transactionally::<_, _, Error>(|db| {
         let mut insert = db.conn.0.prepare(
             "INSERT INTO ironwood_receiving_keys
-            (account_id,purpose,derivation_version,key_index,receiver,scan_from,advances_allocation)
-            VALUES(?1,0,1,?2,zeroblob(43),100,1)",
+            (account_id,purpose,key_index,receiver,scan_from,advances_allocation)
+            VALUES(?1,0,?2,zeroblob(43),100,1)",
         )?;
         for index in 1u64..=10_000 {
             insert.execute(params![account_ref.0, index.to_be_bytes()])?;

@@ -87,7 +87,7 @@ fn request_key(conn: &Connection, account: AccountUuid, request: &str) -> Result
 /// Whether key `key` ever received a payment.
 pub(super) fn used(conn: &Connection, key: i64) -> Result<bool, Error> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_swap_receive_used WHERE receiving_key_id=?1)",
+        "SELECT used FROM ironwood_receiving_keys WHERE id = ?1",
         [key],
         |r| r.get(0),
     )?)
@@ -145,9 +145,8 @@ fn close_reservation(conn: &Connection, id: i64, now: i64) -> Result<(), Error> 
     )?;
     conn.execute(
         "UPDATE ironwood_swap_operations
-         SET terminal_at = ?2, expectation = 1, expected_value = NULL,
-             observed_at = MAX(observed_at, ?2)
-         WHERE terminal_at IS NULL
+         SET expectation = 1, expected_value = NULL, observed_at = MAX(observed_at, ?2)
+         WHERE expectation = 0
            AND receiving_key_id = (SELECT receiving_key_id
                FROM ironwood_swap_receive_reservations WHERE id = ?1)
            AND operation_id IN (SELECT 'receive-quote:' || request_id
@@ -164,8 +163,7 @@ fn close_reservation(conn: &Connection, id: i64, now: i64) -> Result<(), Error> 
 fn reusable(conn: &Connection, id: i64, now: i64) -> Result<bool, Error> {
     Ok(conn.query_row(
         "SELECT r.closed_at IS NULL AND r.created_at <= ?2 - ?3
-            AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_used u
-                WHERE u.receiving_key_id = r.receiving_key_id)
+            AND NOT (SELECT used FROM ironwood_receiving_keys WHERE id = r.receiving_key_id)
             AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q
                 WHERE q.reservation_id = r.id AND q.rejected = 0 AND (
                     q.deadline IS NULL OR q.deadline > ?2 - ?3
@@ -181,19 +179,22 @@ fn reusable(conn: &Connection, id: i64, now: i64) -> Result<bool, Error> {
 }
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Whether an account-internal funding record is still unprocessed: its memo is
-    /// not retrieved yet, or [`WalletDb::recover_swap_refund_memos`] has not processed
-    /// it. Refund issuance and refund-key settling wait for these records, since one
-    /// may hold a refund index. Unrelated outgoing metadata does not block them.
+    /// Whether an account-internal funding record may still hold an unregistered refund
+    /// index after [`WalletDb::recover_refund_memos`]: its memo is not retrieved yet, or
+    /// a decrypted marker still lacks the own-send evidence that authenticates it.
+    /// Refund issuance and nullifier recovery wait for these records. Unrelated
+    /// outgoing metadata does not block them.
     pub(crate) fn swap_refund_memos_pending(&self, account: AccountUuid) -> Result<bool, Error> {
         Ok(self.conn.borrow().query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
-            JOIN transactions t ON t.id_tx=n.transaction_id JOIN accounts a ON a.id=n.account_id
-            WHERE a.uuid=?1 AND n.recipient_key_scope=1 AND n.receiving_key_id IS NULL
-            AND t.mined_height IS NOT NULL
-            AND (n.memo IS NULL OR (substr(n.memo,1,5)=X'FF5A535750'
-                AND NOT EXISTS(SELECT 1 FROM ironwood_swap_refund_memo_progress p
-                    WHERE p.note_id=n.id AND p.funding_height=t.mined_height))))",
+             JOIN transactions t ON t.id_tx = n.transaction_id
+             JOIN accounts a ON a.id = n.account_id
+             WHERE a.uuid = ?1 AND n.recipient_key_scope = 1
+               AND n.receiving_key_id IS NULL AND t.mined_height IS NOT NULL
+               AND (n.memo IS NULL OR (substr(n.memo, 1, 5) = X'FF5A535750'
+                 AND NOT EXISTS(SELECT 1 FROM v_received_output_spends s
+                   WHERE s.transaction_id = n.transaction_id
+                     AND s.account_id = n.account_id))))",
             [account.0],
             |r| r.get(0),
         )?)
@@ -215,7 +216,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
              WHERE a.uuid = ?1 AND r.closed_at IS NULL AND q.rejected = 0
                AND q.operation_id IS NOT NULL
                AND (q.checked_at IS NULL OR q.checked_at <= ?2 - 30 OR q.checked_at > ?2)
-             ORDER BY r.id, q.requested_at",
+             ORDER BY r.id, q.rowid",
         )?;
         Ok(stmt
             .query_map(params![account.0, now], |r| {
@@ -269,23 +270,6 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             .ok_or_else(|| corrupt("missing reserved receive key"))?;
         Ok(ReceiveReservation { id, key })
     }
-
-    /// Whether the provider operation is governed by the incoming reservation lifecycle.
-    pub fn has_swap_receive_quote(
-        &self,
-        account: AccountUuid,
-        operation: &str,
-    ) -> Result<bool, Error> {
-        Ok(self.conn.borrow().query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q
-                JOIN ironwood_swap_receive_reservations r ON r.id = q.reservation_id
-                JOIN ironwood_receiving_keys k ON k.id = r.receiving_key_id
-                JOIN accounts a ON a.id = k.account_id
-                WHERE a.uuid = ?1 AND q.operation_id = ?2)",
-            params![account.0, operation],
-            |r| r.get(0),
-        )?)
-    }
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
@@ -305,8 +289,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 .prepare(
                     "SELECT r.id FROM ironwood_swap_receive_reservations r
                      JOIN ironwood_receiving_keys k ON k.id = r.receiving_key_id
-                     JOIN ironwood_swap_receive_used u ON u.receiving_key_id = k.id
-                     WHERE k.account_id = ?1 AND r.closed_at IS NULL
+                     WHERE k.account_id = ?1 AND k.used = 1 AND r.closed_at IS NULL
                        AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q
                          WHERE q.reservation_id = r.id AND q.rejected = 0 AND (
                            (q.operation_id IS NULL AND (q.deadline IS NULL OR q.deadline > ?2 - ?3))
@@ -382,10 +365,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 return Err(Error::ReservationPolicy(super::ReservationPolicy::Coverage));
             }
             conn.execute(
-                "INSERT INTO ironwood_swap_receive_quotes
-                    (request_id, reservation_id, requested_at, deadline)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![request, reservation, now, deadline],
+                "INSERT INTO ironwood_swap_receive_quotes (request_id, reservation_id, deadline)
+                 VALUES (?1, ?2, ?3)",
+                params![request, reservation, deadline],
             )?;
             conn.execute(
                 "INSERT INTO ironwood_swap_operations
@@ -638,7 +620,7 @@ fn prepare<P: Parameters>(
     // A received address is permanently excluded, even if later spent or rewound.
     conn.execute(
         "UPDATE ironwood_swap_receive_reservations SET started=1
-        WHERE receiving_key_id IN (SELECT receiving_key_id FROM ironwood_swap_receive_used)",
+        WHERE receiving_key_id IN (SELECT id FROM ironwood_receiving_keys WHERE used = 1)",
         [],
     )?;
     let end = recovery_end(conn, a.0)?;
@@ -660,9 +642,7 @@ fn prepare<P: Parameters>(
     let unfunded: u32 = conn.query_row(
         "SELECT COUNT(*) FROM ironwood_swap_receive_reservations r
          JOIN ironwood_receiving_keys k ON k.id = r.receiving_key_id
-         WHERE k.account_id = ?1 AND r.closed_at IS NULL
-           AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_used u
-             WHERE u.receiving_key_id = k.id)
+         WHERE k.account_id = ?1 AND r.closed_at IS NULL AND k.used = 0
            AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_quotes q
              WHERE q.reservation_id = r.id AND q.funded = 1)",
         [a.0],
@@ -692,8 +672,7 @@ fn prepare<P: Parameters>(
         let blocked: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
                 WHERE k.account_id = ?1 AND k.purpose = 1 AND k.key_index = ?2 AND (
-                  EXISTS(SELECT 1 FROM ironwood_swap_receive_used u
-                    WHERE u.receiving_key_id = k.id)
+                  k.used = 1
                   OR EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
                     WHERE r.receiving_key_id = k.id AND r.closed_at IS NULL)
                   OR EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery p

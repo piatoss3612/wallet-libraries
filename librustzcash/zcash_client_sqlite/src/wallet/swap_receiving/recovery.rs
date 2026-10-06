@@ -8,37 +8,13 @@ use zakura_swap_receiving::RefundMemo;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
-    Discovery, Error, KeyId, Purpose, account_key, decode_index, payments::key_ref, register,
+    Discovery, Error, KeyId, Purpose, account_key, decode_index, register,
     reservations::RECEIVE_LOOKAHEAD, restore_start, retention::retain_spend_history, unix_now,
 };
 use crate::{AccountUuid, SqlTransaction, WalletDb};
 use zcash_protocol::consensus::NetworkUpgrade;
 
-/// A confirmed funding record recovered from an ordinary internal Ironwood note.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RecoveredRefund {
-    /// Refund sequence index.
-    pub(crate) index: u64,
-}
-
-/// The outcome of one pass over an account's funding records.
-pub(super) struct MemoRecovery {
-    /// Records processed by this pass.
-    pub(super) recovered: Vec<RecoveredRefund>,
-    /// Records this version cannot read. They stay unprocessed.
-    pub(super) unreadable: usize,
-}
-
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
-    /// See [`WalletDb::recover_swap_refund_memos`] on a transaction-backed handle.
-    #[cfg(test)]
-    pub(crate) fn recover_swap_refund_memos(
-        &mut self,
-        account: AccountUuid,
-    ) -> Result<Vec<RecoveredRefund>, Error> {
-        self.transactionally(|db| db.recover_swap_refund_memos(account))
-    }
-
     /// Queues one receiver-directory sweep for each of `account`'s closed swap keys, as
     /// a seed restore does, and returns how many were queued.
     ///
@@ -55,8 +31,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                  SELECT id FROM ironwood_receiving_keys
                  WHERE account_id = ?1 AND closed_at IS NOT NULL
                  ON CONFLICT (receiving_key_id) DO UPDATE SET
-                     target_height = NULL, target_hash = NULL, lookup_height = NULL,
-                     lookup_hash = NULL, attempts = 0, next_attempt_at = 0, done_height = NULL
+                     lookup_height = NULL, lookup_hash = NULL, attempts = 0,
+                     next_attempt_at = 0, done_height = NULL
                  WHERE done_height IS NOT NULL",
                 [owner.0],
             )?)
@@ -93,61 +69,39 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
 }
 
 impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
-    /// Registers refund keys from confirmed, authenticated internal funding memos.
+    /// Registers refund keys from confirmed, authenticated internal funding memos, and
+    /// returns how many funding records this version cannot read.
     ///
-    /// Run after scanning and memo enhancement, including during restore. A key this
-    /// wallet was already scanning when the funding transaction was mined needs
+    /// Run after scanning and memo enhancement, including during restore. A key that
+    /// already covers the funding block, by scanning from it or by a sweep, needs
     /// nothing more. Any other key is restored: it is queued for a receiver-directory
     /// sweep and then scans until the completion limit after the funding block, with no
     /// provider lookups. Own-send evidence must include an input belonging to the same
-    /// account. Spent and zero-value marker notes are included.
-    ///
-    /// A record whose inputs or memo are not available yet, or that this version cannot
-    /// read, stays unprocessed without failing the call, and refund issuance waits for
-    /// it (see [`WalletDb::swap_refund_memos_pending`]). Returns only records processed
-    /// by this call. Completed records are skipped across restarts unless their memo or
-    /// funding height changes. Progress is committed atomically with the key
-    /// registration.
-    pub(crate) fn recover_swap_refund_memos(
-        &mut self,
-        account: AccountUuid,
-    ) -> Result<Vec<RecoveredRefund>, Error> {
-        Ok(self.recover_refund_memos(account)?.recovered)
-    }
-
-    /// See [`WalletDb::recover_swap_refund_memos`]. Also counts unreadable records.
-    pub(super) fn recover_refund_memos(
-        &mut self,
-        account: AccountUuid,
-    ) -> Result<MemoRecovery, Error> {
+    /// account. Spent and zero-value marker notes are included. A record whose inputs
+    /// or memo are not available yet is left for a later call (see
+    /// [`WalletDb::swap_refund_memos_pending`]).
+    pub(super) fn recover_refund_memos(&mut self, account: AccountUuid) -> Result<usize, Error> {
         let (account_ref, _) = account_key(self.conn.0, &self.params, account)?;
         let records = {
             let mut stmt = self.conn.0.prepare_cached(
-                "SELECT n.memo, t.mined_height, n.id
+                "SELECT n.memo, t.mined_height
                  FROM ironwood_received_notes n
                  JOIN transactions t ON t.id_tx = n.transaction_id
                  WHERE n.account_id = ?1 AND n.recipient_key_scope = 1
                    AND n.receiving_key_id IS NULL AND t.mined_height IS NOT NULL
                    AND substr(n.memo, 1, 5) = X'FF5A535750'
-                   AND NOT EXISTS (SELECT 1 FROM ironwood_swap_refund_memo_progress p
-                                   WHERE p.note_id=n.id AND p.funding_height=t.mined_height)
                    AND EXISTS (SELECT 1 FROM v_received_output_spends s
                                WHERE s.transaction_id = n.transaction_id
                                  AND s.account_id = n.account_id)",
             )?;
             stmt.query_map([account_ref.0], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, u32>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u32>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
         let now = unix_now(&self.clock);
-        let mut recovered = Vec::new();
         let mut unreadable = 0;
-        for (bytes, height, note_id) in records {
+        for (bytes, height) in records {
             // SQLite omits trailing zero padding when storing MemoBytes.
             let memo = zcash_protocol::memo::MemoBytes::from_bytes(&bytes)
                 .ok()
@@ -157,64 +111,43 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 continue;
             };
             let key_id = KeyId::new(Purpose::Refund, memo.index());
-            let scanned_locally = self
+            // Storing the funding transaction already started a key scanned here (see
+            // `start_funded_refund_keys`), and an earlier call queued any other.
+            let covered: bool = self.conn.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys k
+                 WHERE k.account_id = ?1 AND k.purpose = 0 AND k.key_index = ?2
+                   AND k.scan_from <= ?3 AND (k.active_from <= ?3 OR EXISTS(
+                     SELECT 1 FROM ironwood_swap_sweeps s WHERE s.receiving_key_id = k.id)))",
+                params![account_ref.0, key_id.index().to_be_bytes(), height],
+                |row| row.get(0),
+            )?;
+            if covered {
+                continue;
+            }
+            // Registering at the funding block's time makes the completion limit count
+            // from the swap, so an old swap's key closes after its sweep.
+            let funded_at = self
                 .conn
                 .0
                 .query_row(
-                    "SELECT active_from <= ?3 FROM ironwood_receiving_keys
-                     WHERE account_id = ?1 AND purpose = 0 AND derivation_version = 1
-                       AND key_index = ?2",
-                    params![account_ref.0, key_id.index().to_be_bytes(), height],
-                    |row| row.get::<_, Option<bool>>(0),
+                    "SELECT time FROM blocks WHERE height = ?1",
+                    [height],
+                    |row| row.get::<_, i64>(0),
                 )
                 .optional()?
-                .flatten()
-                .unwrap_or(false);
-            // Storing the funding transaction already started a key scanned here (see
-            // `start_funded_refund_keys`).
-            let id = if scanned_locally {
-                key_ref(self.conn.0, account, key_id)?
-            } else {
-                // Registering at the funding block's time makes the completion limit
-                // count from the swap, so an old swap's key closes after its sweep.
-                let funded_at = self
-                    .conn
-                    .0
-                    .query_row(
-                        "SELECT time FROM blocks WHERE height = ?1",
-                        [height],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()?
-                    .unwrap_or(now);
-                register(
-                    self.conn.0,
-                    &self.params,
-                    account,
-                    key_id,
-                    height.into(),
-                    true,
-                    Discovery::Sweep,
-                    funded_at,
-                )?
-                .0
-            };
-            self.conn.0.execute(
-                "INSERT INTO ironwood_swap_refund_memo_progress
-                (note_id,receiving_key_id,funding_height) VALUES(?1,?2,?3)
-                ON CONFLICT(note_id) DO UPDATE SET
-                    receiving_key_id=excluded.receiving_key_id,
-                    funding_height=excluded.funding_height",
-                params![note_id, id, height],
+                .unwrap_or(now);
+            register(
+                self.conn.0,
+                &self.params,
+                account,
+                key_id,
+                height.into(),
+                true,
+                Discovery::Sweep,
+                funded_at,
             )?;
-            recovered.push(RecoveredRefund {
-                index: memo.index(),
-            });
         }
-        Ok(MemoRecovery {
-            recovered,
-            unreadable,
-        })
+        Ok(unreadable)
     }
 
     /// See [`WalletDb::maintain_swap_receiving`], keeping `lookahead` incoming keys.
@@ -234,7 +167,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         if !ready {
             return Ok(());
         }
-        self.recover_swap_refund_memos(account)?;
+        self.recover_refund_memos(account)?;
         self.extend_receive_lookahead(account, lookahead)
     }
 
@@ -272,8 +205,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                     AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
                         WHERE r.receiving_key_id = k.id)
                  FROM ironwood_receiving_keys k
-                 WHERE k.account_id = ?1 AND k.purpose = 1 AND k.derivation_version = 1
-                   AND k.advances_allocation = 1
+                 WHERE k.account_id = ?1 AND k.purpose = 1 AND k.advances_allocation = 1
                  ORDER BY k.key_index DESC LIMIT 1",
                 [account_ref.0],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -293,8 +225,8 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             let index = start.checked_add(offset).ok_or(Error::IndexExhausted)?;
             let exists: bool = self.conn.0.query_row(
                 "SELECT EXISTS (SELECT 1 FROM ironwood_receiving_keys
-                 WHERE account_id = ?1 AND purpose = 1 AND derivation_version = 1
-                   AND key_index = ?2 AND scan_from <= ?3)",
+                 WHERE account_id = ?1 AND purpose = 1 AND key_index = ?2
+                   AND scan_from <= ?3)",
                 params![account_ref.0, index.to_be_bytes(), u32::from(scan_from)],
                 |row| row.get(0),
             )?;

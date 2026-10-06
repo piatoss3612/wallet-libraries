@@ -901,9 +901,6 @@ mod tests {
             db::TABLE_IRONWOOD_SWAP_PAYMENT_RECOVERY,
             db::TABLE_IRONWOOD_SWAP_RECEIVE_QUOTES,
             db::TABLE_IRONWOOD_SWAP_RECEIVE_RESERVATIONS,
-            db::TABLE_IRONWOOD_SWAP_RECEIVE_USED,
-            db::TABLE_IRONWOOD_SWAP_REFUND_MEMO_PROGRESS,
-            db::TABLE_IRONWOOD_SWAP_SPEND_REPLAY,
             db::TABLE_IRONWOOD_SWAP_SPEND_RETENTION,
             db::TABLE_IRONWOOD_SWAP_SWEEPS,
             db::TABLE_IRONWOOD_TREE_CAP,
@@ -986,9 +983,7 @@ mod tests {
             db::INDEX_IRONWOOD_RECEIVED_NOTES_WITNESS_STABILIZED,
             db::INDEX_IRONWOOD_RECEIVING_KEYS_ACCOUNT_RECEIVER,
             db::INDEX_IRONWOOD_RECEIVING_KEYS_SCANNING,
-            db::INDEX_SWAP_RECEIVE_QUOTE_OPERATION,
             db::INDEX_ONE_OPEN_SWAP_RECEIVE_RESERVATION,
-            db::INDEX_IRONWOOD_SWAP_REFUND_MEMO_PROGRESS_KEY,
             db::INDEX_IRONWOOD_SWAP_SWEEPS_DUE,
             db::INDEX_NF_MAP_LOCATOR_IDX,
             db::INDEX_ORCHARD_RNS_NOTE,
@@ -1071,11 +1066,6 @@ mod tests {
         }
         assert_eq!(expected_idx, expected_views.len());
 
-        let expected_triggers = [
-            db::TRIGGER_IRONWOOD_SWAP_REFUND_MEMO_CHANGED,
-            db::TRIGGER_REMEMBER_SWAP_RECEIVE_INSERT,
-            db::TRIGGER_REMEMBER_SWAP_RECEIVE_UPDATE,
-        ];
         let triggers: Vec<String> = st
             .wallet()
             .db()
@@ -1086,11 +1076,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(
-            triggers.iter().map(|t| normalize(t)).collect::<Vec<_>>(),
-            expected_triggers.map(normalize),
-            "unexpected triggers"
-        );
+        assert!(triggers.is_empty(), "unexpected triggers: {triggers:?}");
     }
 
     #[test]

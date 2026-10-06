@@ -82,11 +82,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             }
             db.conn.0.execute(
                 "INSERT INTO ironwood_swap_operations
-                    (receiving_key_id, operation_id, observed_at, terminal_at, expectation,
-                     deadline)
-                 VALUES (?1, ?2, 0, ?3, 1, ?4)
+                    (receiving_key_id, operation_id, observed_at, expectation, deadline)
+                 VALUES (?1, ?2, 0, 1, ?3)
                  ON CONFLICT (receiving_key_id, operation_id) DO NOTHING",
-                params![key, deposit, now, deadline],
+                params![key, deposit, deadline],
             )?;
             Ok(())
         })
@@ -154,7 +153,7 @@ fn refund_key<P: Parameters>(
     let (account_ref, _) = account_key(conn, params, account)?;
     conn.query_row(
         "SELECT id FROM ironwood_receiving_keys
-         WHERE account_id = ?1 AND purpose = 0 AND derivation_version = 1 AND key_index = ?2
+         WHERE account_id = ?1 AND purpose = 0 AND key_index = ?2
            AND advances_allocation = 1 AND closed_at IS NULL",
         params![account_ref.0, index.to_be_bytes()],
         |r| r.get(0),
@@ -208,8 +207,8 @@ pub(crate) fn start_funded_refund_keys<P: Parameters>(
         let Some((id, scan_from)) = conn
             .query_row(
                 "SELECT id, scan_from FROM ironwood_receiving_keys
-                 WHERE account_id = ?1 AND purpose = 0 AND derivation_version = 1
-                   AND key_index = ?2 AND advances_allocation = 1",
+                 WHERE account_id = ?1 AND purpose = 0 AND key_index = ?2
+                   AND advances_allocation = 1",
                 params![account, memo.index().to_be_bytes()],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u32>(1)?)),
             )

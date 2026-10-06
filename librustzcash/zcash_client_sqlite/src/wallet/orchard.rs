@@ -634,10 +634,11 @@ pub(crate) fn put_received_note<
             "UPDATE ironwood_received_notes SET receiving_key_id = ?1 WHERE id = ?2",
             rusqlite::params![key_id, received_note_id],
         )?;
-        // A decrypted payment makes a lookahead index used. Commit this together
-        // with the note so a restart cannot allocate the paid address again.
+        // A decrypted payment makes its index used, so it advances allocation and is
+        // never issued again. Commit this together with the note so a restart cannot
+        // allocate the paid address again.
         conn.execute(
-            "UPDATE ironwood_receiving_keys SET advances_allocation = 1 WHERE id = ?1",
+            "UPDATE ironwood_receiving_keys SET advances_allocation = 1, used = 1 WHERE id = ?1",
             [key_id],
         )?;
     }
@@ -1913,8 +1914,8 @@ pub(crate) mod tests {
             );
             st.wallet().conn().execute_batch(
                 "INSERT INTO ironwood_receiving_keys
-                 (id, account_id, purpose, derivation_version, key_index, receiver, scan_from, advances_allocation)
-                 SELECT 1, account_id, 0, 1, zeroblob(8), zeroblob(43), 0, 1 FROM ironwood_received_notes LIMIT 1;
+                 (id, account_id, purpose, key_index, receiver, scan_from, advances_allocation)
+                 SELECT 1, account_id, 0, zeroblob(8), zeroblob(43), 0, 1 FROM ironwood_received_notes LIMIT 1;
                  UPDATE ironwood_received_notes SET receiving_key_id = 1;"
             ).unwrap();
             assert!(
