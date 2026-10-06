@@ -37,6 +37,10 @@ pub(crate) fn suspend_orphaned_ironwood_enhancement(
                AND rn.nf IS NOT NULL)",
         [],
     )?;
+    // Route-2 shape work cannot use compact rediscovery after its binding is orphaned.
+    // Rebind it to a surviving received note, or resume an unknown memo that can also
+    // supply the shape. With no surviving eligible note the obligation stays suspended.
+    queue_ironwood_output_shape(conn, None)?;
     Ok(())
 }
 

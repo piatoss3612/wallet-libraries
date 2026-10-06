@@ -75,15 +75,17 @@ struct Shielding {
 /// internal address is compact-scanned, and private transparent recovery publishes both spends
 /// with `metadata`. Enhance PIR has not run yet.
 fn shielding(shape: &Shape, metadata: Option<TransactionMetadata>) -> Shielding {
-    padded_shielding(shape, metadata, None)
+    padded_shielding(shape, metadata, None, false)
 }
 
 /// Like [`shielding`], with `action0` (if any) as a first Ironwood action to a key the wallet
 /// does not hold: a standard builder's zero-value padding, or another party's output.
+/// With `own_action0`, import that key as another wallet account to exercise shared ownership.
 fn padded_shielding(
     shape: &Shape,
     metadata: Option<TransactionMetadata>,
     action0: Option<u64>,
+    own_action0: bool,
 ) -> Shielding {
     let mut st = TestBuilder::new()
         .with_network(ironwood_network())
@@ -91,6 +93,9 @@ fn padded_shielding(
         .with_block_cache(BlockCache::new())
         .with_account_from_sapling_activation(BlockHash([0; 32]))
         .build();
+    if own_action0 {
+        import_account(&mut st, 0x77);
+    }
     scan_new_blocks(&mut st, 10);
     set_policy(&mut st, PrivateShadow);
     let account = st.test_account().unwrap().id();
@@ -109,12 +114,24 @@ fn padded_shielding(
         .db_mut()
         .set_enhancement_mode(EnhancementMode::PrivateIronwood);
 
-    // The shielding transaction's only owned shielded effect: its Ironwood output to the
+    // The shielding account's only owned shielded effect: its Ironwood output to the
     // account's internal address. Compact scanning finds it without its memo.
     let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
-    let foreign = IronwoodFvk(orchard::keys::FullViewingKey::from(
-        &orchard::keys::SpendingKey::from_bytes([0x77; 32]).unwrap(),
-    ));
+    let foreign = IronwoodFvk(if own_action0 {
+        orchard::keys::FullViewingKey::from(
+            zcash_keys::keys::UnifiedSpendingKey::from_seed(
+                st.network(),
+                &[0x77; 32],
+                zip32::AccountId::ZERO,
+            )
+            .unwrap()
+            .orchard(),
+        )
+    } else {
+        orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0x77; 32]).unwrap(),
+        )
+    });
     let mut outputs = vec![];
     if let Some(value) = action0 {
         outputs.push(FakeCompactOutput::new(
@@ -835,7 +852,7 @@ fn coverage_loss_and_reorg_reevaluate_the_classification() {
 fn foreign_self_balanced_shielded_participation_is_indistinguishable() {
     let shape = &CASES[0];
     let details = [Some(0), Some(100_000)].map(|action0| {
-        let mut case = padded_shielding(shape, Some(reported_metadata()), action0);
+        let mut case = padded_shielding(shape, Some(reported_metadata()), action0, false);
         // Action 0 is no outgoing candidate: the account spent no Ironwood note.
         let outgoing: i64 = conn(&case.st)
             .query_row(
@@ -957,4 +974,86 @@ fn shape_only_recovery_obeys_public_authority_transitions() {
         vec![EnhancePirStoreResult::PrivateDetailsUnsupported]
     );
     assert_reconstructed_shielding(&case, &CASES[1]);
+}
+
+/// Deleting the account chosen for shape recovery must retain the shared transaction's
+/// obligation and rebind it to another owned note, without accepting the old response.
+#[test]
+fn deleting_the_shape_binding_account_rebinds_to_a_surviving_note() {
+    let mut case = padded_shielding(&CASES[1], Some(reported_metadata()), Some(100_000), true);
+    let queries = private_queries(&case.st);
+    assert_eq!(queries.len(), 2);
+    let records = queries
+        .iter()
+        .map(|request| (*request, record(&case.st, *request, None)))
+        .collect::<Vec<_>>();
+    apply_records(&mut case.st, &records);
+    assert_reconstructed_shielding(&case, &CASES[1]);
+    // Model an older memo-complete wallet whose shape was discarded.
+    conn(&case.st).execute("UPDATE ironwood_enhance_routing SET has_transparent_outputs = NULL WHERE transaction_id = ?", [case.tx_ref]).unwrap();
+    crate::wallet::enhance_pir::queue_unsupported_memos(
+        conn(&case.st),
+        Some(crate::TxRef(case.tx_ref)),
+    )
+    .unwrap();
+    let stale = private_queries(&case.st)[0];
+    let stale_record = record(&case.st, stale, None);
+    let removed: AccountUuid = conn(&case.st).query_row(
+        "SELECT a.uuid FROM ironwood_enhance_metadata_queue q JOIN ironwood_received_notes rn ON rn.transaction_id = q.transaction_id AND rn.action_index = q.output_index JOIN accounts a ON a.id = rn.account_id WHERE q.transaction_id = ?",
+        [case.tx_ref], |row| row.get::<_, uuid::Uuid>(0).map(AccountUuid::from_uuid),
+    ).unwrap();
+    assert_ne!(removed, case.account);
+    case.st.wallet_mut().delete_account(removed).unwrap();
+    let rebound = private_queries(&case.st);
+    assert_eq!(
+        rebound.len(),
+        1,
+        "surviving account must retain a bound private shape query"
+    );
+    assert_ne!(rebound[0], stale);
+    assert_eq!(
+        apply_records(&mut case.st, &[(stale, stale_record)]),
+        vec![EnhancePirStoreResult::AlreadyResolved]
+    );
+    assert_eq!(private_queries(&case.st), rebound);
+    // A reopen must retain the new binding, not rely on an in-memory retry.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rebound.sqlite");
+    conn(&case.st)
+        .execute("VACUUM INTO ?", [path.to_str().unwrap()])
+        .unwrap();
+    let mut reopened = crate::WalletDb::for_path(
+        path,
+        *case.st.network(),
+        crate::testing::db::test_clock(),
+        crate::testing::db::test_rng(),
+    )
+    .unwrap()
+    .with_transparent_ledger_mode(PrivateRequired);
+    reopened.set_enhancement_mode(EnhancementMode::PrivateIronwood);
+    assert_eq!(
+        reopened.transaction_enhancement_work().unwrap(),
+        vec![TransactionEnhancementWork::Private(EnhancePirWork::Query(
+            rebound[0]
+        ))]
+    );
+    let response = record(&case.st, rebound[0], None);
+    assert_eq!(
+        reopened
+            .apply_ironwood_enhance_records(&[(rebound[0], response)])
+            .unwrap(),
+        EnhancePirBatchResult::Committed(vec![EnhancePirStoreResult::PrivateDetailsUnsupported])
+    );
+    let entry = reopened
+        .transaction_history_details(case.account, &[case.txid])
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        entry.classification,
+        HistoryClassification::NetReconstructed
+    );
+    assert_eq!(entry.payment_details, DetailCompleteness::Complete);
+    assert_eq!(entry.fee, FeeState::Unknown);
+    assert_eq!(entry.aggregate_payment, AggregatePayment::Unknown);
+    assert!(reopened.transaction_enhancement_work().unwrap().is_empty());
 }
