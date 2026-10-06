@@ -79,7 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: [default, orchard, transparent, transparent-import, sqlite, swap-receiving, enhance-wallet, enhance, transparent-pir]
+        config: [default, orchard, transparent, transparent-import, sqlite, swap-receiving, enhance-wallet, enhance, transparent-pir, pir-receiver]
     env:
       WALLET_LIB_BUILD_ROOT: ${{ github.workspace }}/target/dev-lanes
     steps:

@@ -56,7 +56,9 @@ regeneration command, separate from ordinary builds.
 
 The unpublished [swap receiving](zakura/swap-receiving/README.md) crate provides
 shared key derivation and refund memo helpers, with an Ironwood proof test for
-mixed ordinary, refund, and incoming inputs.
+mixed ordinary, refund, and incoming inputs. The unpublished
+[receiver PIR](zakura/pir-receiver/README.md) crate runs the restore sweeps that
+find swap payments through a receiver directory.
 
 ## How the rewiring works
 

@@ -1,0 +1,36 @@
+[package]
+name = "zakura-pir-receiver"
+version = "0.0.1-rc0"
+description = "Restore sweeps of swap receiving keys through a receiver directory over PIR"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+categories.workspace = true
+keywords = ["zcash", "privacy", "pir"]
+
+[dependencies]
+futures-util = "0.3"
+rusqlite.workspace = true
+thiserror = "2"
+zakura-pir-enhance = { version = "=0.0.1-rc1", path = "../pir-enhance", features = ["wallet"] }
+zcash_client_backend.workspace = true
+zcash_client_sqlite = { version = "0.1.0-rc7", path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "experimental-swap-receiving"] }
+zcash_protocol.workspace = true
+# The receiver crates live on wallet-pir's swap integration branch until they land on `main`.
+receiver-directory = { git = "https://github.com/valargroup/wallet-pir", rev = "b4a6f271b071f7c36e4cc0f97dc3e2290eda1414" }
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "b4a6f271b071f7c36e4cc0f97dc3e2290eda1414" }
+
+[dev-dependencies]
+axum = "0.7"
+orchard.workspace = true
+prost.workspace = true
+receiver-pir = { git = "https://github.com/valargroup/wallet-pir", rev = "b4a6f271b071f7c36e4cc0f97dc3e2290eda1414", features = ["server"] }
+receiver-pir-server = { git = "https://github.com/valargroup/wallet-pir", rev = "b4a6f271b071f7c36e4cc0f97dc3e2290eda1414" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tower = { workspace = true, features = ["util"] }
+zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
+zcash_client_sqlite = { path = "../../librustzcash/zcash_client_sqlite", package = "zakura-client-sqlite", features = ["orchard", "experimental-swap-receiving", "test-dependencies"] }
+zcash_note_encryption.workspace = true
+zcash_primitives.workspace = true
