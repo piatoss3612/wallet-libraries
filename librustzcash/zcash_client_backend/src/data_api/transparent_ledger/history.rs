@@ -104,6 +104,11 @@ pub enum HistoryClassification {
 /// One account's history view of one transaction, from one database read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionHistoryDetails {
+    /// Display-only Enhance service assertion that the transaction contains transparent
+    /// outputs. `None` means no assertion has been recovered. This transaction-wide fact
+    /// can classify activity independently of payment-detail completeness; it does not
+    /// establish recipients, output ownership, or account payment/fee attribution.
+    pub has_transparent_outputs: Option<bool>,
     /// Whole-transaction facts, separate from the account-related fee.
     pub transaction_metadata: Option<TransactionMetadataEvidence>,
     /// Aggregate outgoing amount with explicit completeness.
