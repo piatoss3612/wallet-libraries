@@ -786,6 +786,7 @@ pub(crate) fn transaction_history_details<P: consensus::Parameters>(
         };
 
         entries.push(TransactionHistoryDetails {
+            has_transparent_outputs: tx.has_transparent_outputs,
             transaction_metadata,
             aggregate_payment,
             account_movement: AccountMovement {
