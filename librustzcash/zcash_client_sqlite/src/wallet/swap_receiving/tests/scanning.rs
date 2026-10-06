@@ -1,6 +1,6 @@
 use std::{cell::Cell, ops::Range};
 
-use zakura_swap_receiving::lifecycle::{CompletionPolicy, OperationStatus, ReceiptExpectation};
+use zakura_swap_receiving::lifecycle::{OperationStatus, ReceiptExpectation};
 use zcash_client_backend::data_api::chain::{BlockSource, ChainState, error, scan_cached_blocks};
 
 use super::*;
@@ -33,9 +33,8 @@ fn close(st: &mut State, keys: &[KeyId]) {
         db.observe_swap_operation(account, *key, "swap", finished, 0)
             .unwrap();
     }
-    let grace = CompletionPolicy::default().grace_secs;
     assert_eq!(
-        db.close_finished_swap_keys_at(account, grace, tip).unwrap(),
+        db.close_finished_swap_keys_at(account, 0, tip).unwrap(),
         keys.len()
     );
 }

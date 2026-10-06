@@ -3258,6 +3258,12 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletWrite
                 &self.gap_limits,
                 sent_tx,
             )?;
+            #[cfg(feature = "experimental-swap-receiving")]
+            wallet::swap_receiving::start_funded_refund_keys(
+                self.conn.0,
+                &self.params,
+                sent_tx.tx(),
+            )?;
         }
         Ok(())
     }

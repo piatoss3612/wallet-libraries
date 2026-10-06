@@ -9,6 +9,7 @@
 mod apply;
 pub use apply::PaymentApplication;
 mod funding;
+pub(crate) use funding::start_funded_refund_keys;
 pub use funding::verify_swap_funding_proposal;
 mod lifecycle;
 mod payments;
@@ -347,8 +348,9 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
-    /// Atomically reserves and registers the next refund index. The key is
-    /// trial-decrypted from the first unscanned block until it closes.
+    /// Atomically reserves and registers the next refund index. The key starts
+    /// scanning only when this wallet stores a transaction funding its swap (see
+    /// [`WalletDb::record_swap_refund_quote`]), so a quote never funded never scans.
     ///
     /// `tip` is the chain tip the caller last observed from the network. The wallet
     /// must be scanned to within [`ISSUANCE_TIP_LAG`] blocks of it. Every funding memo
@@ -365,7 +367,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         self.transactionally(|wdb| wdb.reserve_swap_refund_key(account, tip))
     }
 
-    /// Reserves the next index scanned from `scan_from`, without readiness checks.
+    /// Reserves the next index, scanned at once from `scan_from`, without readiness
+    /// checks.
     #[cfg(test)]
     pub(crate) fn reserve_swap_receiving_key_from(
         &mut self,
@@ -373,7 +376,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         purpose: Purpose,
         scan_from: BlockHeight,
     ) -> Result<RegisteredKey, Error> {
-        self.transactionally(|wdb| wdb.reserve_swap_receiving_key_from(account, purpose, scan_from))
+        self.transactionally(|wdb| {
+            wdb.reserve_swap_receiving_key_from(account, purpose, scan_from, Discovery::Scan)
+        })
     }
 
     /// See [`WalletDb::recover_swap_receiving_key`] on a transaction-backed handle.
@@ -414,15 +419,22 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         if self.swap_refund_memos_pending(account)? {
             return Err(Error::ReservationPolicy(ReservationPolicy::Coverage));
         }
-        self.reserve_swap_receiving_key_from(account, Purpose::Refund, scan_from)
+        self.reserve_swap_receiving_key_from(
+            account,
+            Purpose::Refund,
+            scan_from,
+            Discovery::Funding,
+        )
     }
 
-    /// Reserves the next index scanned from `scan_from`, without readiness checks.
-    pub(crate) fn reserve_swap_receiving_key_from(
+    /// Reserves the next index, expecting payments from `scan_from`, without readiness
+    /// checks.
+    fn reserve_swap_receiving_key_from(
         &mut self,
         account: AccountUuid,
         purpose: Purpose,
         scan_from: BlockHeight,
+        discovery: Discovery,
     ) -> Result<RegisteredKey, Error> {
         let (account_ref, _) = account_key(self.conn.0, &self.params, account)?;
         // SQLite orders fixed-width big-endian blobs numerically. Unlike INTEGER,
@@ -449,7 +461,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             key_id,
             scan_from,
             true,
-            Discovery::Scan,
+            discovery,
             now,
         )
         .map(|(_, key)| key)
@@ -604,6 +616,9 @@ pub(super) enum Discovery {
     Scan,
     /// Sweep the receiver directory once, unless the key is already scanned.
     Sweep,
+    /// Wait for a stored transaction funding the key's swap, which starts its scan
+    /// (see [`start_funded_refund_keys`]).
+    Funding,
 }
 
 /// Registers `key_id` for `account`, or widens an existing registration, and returns
@@ -662,7 +677,7 @@ fn register<P: Parameters>(
                 [id],
             )?;
         }
-        Discovery::Sweep => {}
+        Discovery::Sweep | Discovery::Funding => {}
     }
     Ok((
         id,

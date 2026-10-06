@@ -38,11 +38,11 @@ A wallet drives the feature with these calls:
   passing that tip.
 - `reserve_swap_refund_key` for a refund address and
   `prepare_swap_receive_reservation` for an incoming one, with the latest network
-  tip. Both require scanning within `ISSUANCE_TIP_LAG` blocks of it and choose the
-  key's first scanned block.
+  tip. Both require scanning within `ISSUANCE_TIP_LAG` blocks of it.
 - For an outgoing swap, `record_swap_refund_quote` when the quote arrives, then
   `swap_funding_memo` for the funding transaction and
-  `verify_swap_funding_proposal` before signing.
+  `verify_swap_funding_proposal` before signing. Storing the funding transaction
+  starts its refund key.
 - For an incoming swap, `begin_swap_receive_quote` just before the request leaves
   the device, which returns the request's identity, `finish_swap_receive_quote`
   with its outcome, `start_swap_receive_quote` for the deposit instructions to
@@ -62,8 +62,11 @@ scanned at or above that height, and a batch whose key snapshot missed an active
 key requeues its range, so no block in a key's active range goes unchecked.
 Catching up after time offline scans active keys like any other blocks.
 
-A newly issued key starts at the first unscanned block. Keys found only through
-restore are not scanned until their receiver-directory sweep completes (see
+A newly issued incoming key starts at the first unscanned block. A refund can only
+follow its deposit, so a refund key starts when the wallet stores the transaction
+funding its swap, at the first block above the scanned chain, and a quote that is
+never funded never starts its key. Keys found only through restore are not
+scanned until their receiver-directory sweep completes (see
 [Restore sweeps](#restore-sweeps)).
 
 With `NoteSelection::PreferConsolidation`, swap notes fill a send's spare input
@@ -97,10 +100,9 @@ provider response credits a note, and a closed key keeps its notes. A rare
 payment after a key closed, such as a second refund, is found by
 `recheck_swap_history`, which sweeps every closed key once, or by a seed restore.
 
-A recorded refund quote expects nothing until it is funded, and its key keeps
-scanning for 24 hours after it was recorded in case it is funded, so abandoned
-quotes do not hold a key open for long. A status for its deposit address, or its
-mined funding memo, makes the swap's outcome decide instead.
+A recorded refund quote expects nothing until it is funded, so a stale quote never
+holds a key open. Storing its funding transaction makes the swap's outcome decide
+instead.
 
 ## Derivation
 

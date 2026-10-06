@@ -87,6 +87,8 @@ workspace.
 - Swap funding: `record_swap_refund_quote`, `swap_funding_memo` and
   `verify_swap_funding_proposal`. The refund index travels in a memo on the funding
   transaction's internal Ironwood change, whose only transparent output is the deposit.
+  A refund key starts scanning when `store_transactions_to_be_sent` stores its
+  funding transaction.
 - Swap key lifecycle: `record_swap_observation` and `close_finished_swap_keys`. A key
   closes once its final provider status is in and its expected receipts have ZIP 315's
   untrusted confirmations, or 30 days after the quote deadline, and only while the

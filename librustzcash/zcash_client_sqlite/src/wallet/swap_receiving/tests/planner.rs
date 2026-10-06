@@ -480,16 +480,16 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
             |r| r.get(0),
         )
         .unwrap();
-    // No swap is known for a restored address, so it gets the usual grace only.
-    let grace = CompletionPolicy::default().grace_secs;
+    // No swap is known for a restored address, so it is only watched.
+    let watch = CompletionPolicy::default().restore_watch_secs;
     let db = st.wallet_mut().db_mut();
     assert_eq!(
-        db.close_finished_swap_keys_at(account, registered + grace - 1, anchor.height)
+        db.close_finished_swap_keys_at(account, registered + watch - 1, anchor.height)
             .unwrap(),
         0
     );
     assert_eq!(
-        db.close_finished_swap_keys_at(account, registered + grace, anchor.height)
+        db.close_finished_swap_keys_at(account, registered + watch, anchor.height)
             .unwrap(),
         1
     );

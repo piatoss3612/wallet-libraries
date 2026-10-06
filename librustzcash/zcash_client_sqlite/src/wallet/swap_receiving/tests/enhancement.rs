@@ -155,16 +155,15 @@ fn ironwood_funded_wallet() -> (State, BlockHeight) {
     (st, first)
 }
 
-/// Sends `payments` from the test account with `memo` on Ironwood change, then
-/// mines and scans the transaction. Returns its proposal, txid and height.
-fn send_with_change_memo(
+/// Creates and stores, without mining, a transaction paying `payments` from the test
+/// account with `memo` on Ironwood change. Returns its proposal and txid.
+fn create_with_change_memo(
     st: &mut State,
     payments: Vec<Payment>,
     memo: &MemoBytes,
 ) -> (
     zcash_client_backend::proposal::Proposal<StandardFeeRule, crate::ReceivedNoteId>,
     TxId,
-    BlockHeight,
 ) {
     let account = st.test_account().cloned().unwrap();
     let strategy = standard::SingleOutputChangeStrategy::<TestDb>::new(
@@ -189,9 +188,24 @@ fn send_with_change_memo(
             &proposal,
         )
         .unwrap();
-    let (mined, _) = st.generate_next_block_including(created[0]);
+    (proposal, created[0])
+}
+
+/// [`create_with_change_memo`], then mines and scans the transaction. Returns its
+/// proposal, txid and height.
+fn send_with_change_memo(
+    st: &mut State,
+    payments: Vec<Payment>,
+    memo: &MemoBytes,
+) -> (
+    zcash_client_backend::proposal::Proposal<StandardFeeRule, crate::ReceivedNoteId>,
+    TxId,
+    BlockHeight,
+) {
+    let (proposal, txid) = create_with_change_memo(st, payments, memo);
+    let (mined, _) = st.generate_next_block_including(txid);
     st.scan_cached_blocks(mined, 1);
-    (proposal, created[0], mined)
+    (proposal, txid, mined)
 }
 
 #[test]
@@ -257,7 +271,6 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].index, 7);
-    assert_eq!(records[0].deposit_address, Some(deposit.to_string()));
     let keys = st.wallet().db().get_swap_receiving_keys(restored).unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].key_id(), KeyId::new(Purpose::Refund, 7));
@@ -434,35 +447,48 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     );
 }
 
+/// A refund key starts scanning when its funding transaction is stored, above the
+/// scanned chain, and the funded quote then waits for the swap's outcome. An unfunded
+/// quote never starts its key or holds a started one open.
 #[test]
-fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
+fn a_refund_key_starts_scanning_when_its_funding_transaction_is_stored() {
     use zakura_swap_receiving::{
         RefundMemo,
-        lifecycle::{CompletionPolicy, OperationStatus::Terminal, ReceiptExpectation},
+        lifecycle::{OperationStatus::Terminal, ReceiptExpectation},
     };
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
     let tip = st.wallet().chain_height().unwrap().unwrap();
     let now = unix_now(&test_clock());
-    let key = st
-        .wallet_mut()
-        .db_mut()
-        .reserve_swap_receiving_key_from(account, Purpose::Refund, tip + 1)
-        .unwrap()
-        .key_id();
-    let deposit = Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]));
+    let transparent = |byte| Address::Transparent(TransparentAddress::PublicKeyHash([byte; 20]));
+    let deposit = transparent(7);
     let funded = deposit.encode(&network);
-    let abandoned =
-        Address::Transparent(TransparentAddress::PublicKeyHash([8; 20])).encode(&network);
+    let stale = transparent(8).encode(&network);
+    let never = transparent(9).encode(&network);
+    let active_from = |conn: &Connection, key: KeyId| -> Option<u32> {
+        conn.query_row(
+            "SELECT active_from FROM ironwood_receiving_keys
+             WHERE purpose = 0 AND key_index = ?1",
+            [key.index().to_be_bytes()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
     let db = st.wallet_mut().db_mut();
+    let unfunded = db.reserve_swap_refund_key(account, tip).unwrap().key_id();
+    let key = db.reserve_swap_refund_key(account, tip).unwrap().key_id();
+    db.record_swap_refund_quote(account, unfunded.index(), &never, now + 3_600, now)
+        .unwrap();
     assert!(db.swap_funding_memo(account, key.index(), &funded).is_err());
-    for deposit in [&abandoned, &funded] {
+    for deposit in [&stale, &funded] {
         db.record_swap_refund_quote(account, key.index(), deposit, now + 3_600, now)
             .unwrap();
     }
+    assert_eq!(active_from(&db.conn, unfunded), None);
+    assert_eq!(active_from(&db.conn, key), None);
     let memo = db.swap_funding_memo(account, key.index(), &funded).unwrap();
-    let (proposal, _, mined) = send_with_change_memo(
+    let (proposal, txid) = create_with_change_memo(
         &mut st,
         vec![Payment::without_memo(
             deposit.to_zcash_address(&network),
@@ -471,16 +497,12 @@ fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
         &memo,
     );
     verify_swap_funding_proposal(&proposal, &memo, &funded).unwrap();
-    assert!(verify_swap_funding_proposal(&proposal, &memo, &abandoned).is_err());
+    assert!(verify_swap_funding_proposal(&proposal, &memo, &stale).is_err());
     let other = MemoBytes::from_bytes(&RefundMemo::new(key.index() + 1).encode()).unwrap();
     assert!(verify_swap_funding_proposal(&proposal, &other, &funded).is_err());
 
-    let db = st.wallet_mut().db_mut();
-    let records = db.recover_swap_refund_memos(account).unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].index, key.index());
-    assert!(db.recover_swap_refund_memos(account).unwrap().is_empty());
-    assert!(!db.swap_history_pending(account, mined).unwrap());
+    // Storing the funding transaction starts its key above the scanned chain, so no
+    // block is rescanned, and opens the funded quote until the provider reports.
     let row = |conn: &Connection, deposit: &str| -> (i64, Option<i64>, u8) {
         conn.query_row(
             "SELECT observed_at, terminal_at, expectation FROM ironwood_swap_operations
@@ -490,13 +512,22 @@ fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
         )
         .unwrap()
     };
-    assert_eq!(row(&db.conn, &abandoned), (0, Some(now), 1));
-    // The mined funding opens its quote until the provider reports an outcome.
-    assert_eq!(row(&db.conn, &funded), (0, None, 0));
-    let grace = CompletionPolicy::default().grace_secs;
+    let conn = st.wallet().conn();
+    assert_eq!(active_from(conn, key), Some(u32::from(tip) + 1));
+    assert_eq!(active_from(conn, unfunded), None);
+    assert_eq!(row(conn, &funded), (0, None, 0));
+    assert_eq!(row(conn, &stale), (0, Some(now), 1));
+
+    let (mined, _) = st.generate_next_block_including(txid);
+    st.scan_cached_blocks(mined, 1);
+    let db = st.wallet_mut().db_mut();
+    let records = db.recover_swap_refund_memos(account).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].index, key.index());
+    assert!(db.recover_swap_refund_memos(account).unwrap().is_empty());
+    assert!(!db.swap_history_pending(account, mined).unwrap());
     assert_eq!(
-        db.close_finished_swap_keys_at(account, now + grace, mined)
-            .unwrap(),
+        db.close_finished_swap_keys_at(account, now, mined).unwrap(),
         0
     );
     let finished = now + 7_200;
@@ -508,19 +539,13 @@ fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
         finished,
     )
     .unwrap();
-    assert_eq!(row(&db.conn, &funded), (finished, Some(finished), 1));
-    // The funded swap is over, but the abandoned quote could still be funded until
-    // a day after it was recorded.
+    // The swap is over; the stale quote does not hold the key open.
     assert_eq!(
-        db.close_finished_swap_keys_at(account, now + grace - 1, mined)
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.close_finished_swap_keys_at(account, now + grace, mined)
+        db.close_finished_swap_keys_at(account, finished, mined)
             .unwrap(),
         1
     );
+    assert_eq!(active_from(&db.conn, unfunded), None);
 }
 
 #[test]
@@ -577,7 +602,6 @@ fn refund_memos_restore_keys_whatever_the_funding_outputs() {
         let records = db.recover_swap_refund_memos(account).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].index, 7);
-        assert_eq!(records[0].deposit_address, None);
         assert!(
             db.get_swap_receiving_key(account, KeyId::new(Purpose::Refund, 7))
                 .unwrap()
@@ -585,27 +609,6 @@ fn refund_memos_restore_keys_whatever_the_funding_outputs() {
         );
         assert!(!db.swap_refund_memos_pending(account).unwrap());
     }
-
-    // Only the funding device stores the raw transaction. Without it, the memo still
-    // restores its key, just without the deposit address.
-    let (mut st, _) = ironwood_funded_wallet();
-    let account = st.test_account().unwrap().id();
-    let network = *st.network();
-    let deposit = transparent(7);
-    let (_, txid, _) = send_with_change_memo(&mut st, vec![payment(&deposit, &network)], &memo);
-    st.wallet()
-        .conn()
-        .execute(
-            "UPDATE transactions SET raw=NULL WHERE txid=?1",
-            [txid.as_ref()],
-        )
-        .unwrap();
-    let db = st.wallet_mut().db_mut();
-    let records = db.recover_swap_refund_memos(account).unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].index, 7);
-    assert_eq!(records[0].deposit_address, None);
-    assert!(!db.swap_refund_memos_pending(account).unwrap());
 }
 
 /// A refund record retrieved over Enhance PIR restores its key from the memo alone.
@@ -734,9 +737,6 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
         let records = db.recover_swap_refund_memos(restored).unwrap();
         if version == 1 {
             assert_eq!(records.len(), 1);
-            // Only a public retrieval stores the raw transaction naming the deposit.
-            let deposit = flagged.then(|| deposit.to_string());
-            assert_eq!(records[0].deposit_address, deposit);
         } else {
             // A newer record cannot be read here. It may hold a refund index, so
             // refund issuance waits for an upgrade instead of failing sync.
@@ -750,22 +750,16 @@ fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
 }
 
 #[test]
-fn missing_funding_memos_block_refund_issuance_and_settling() {
-    use zakura_swap_receiving::lifecycle::CompletionPolicy;
+fn missing_funding_memos_block_refund_issuance() {
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
     let tip = st.wallet().chain_height().unwrap().unwrap();
     let now = unix_now(&test_clock());
-    let key = st
-        .wallet_mut()
-        .db_mut()
-        .reserve_swap_receiving_key_from(account, Purpose::Refund, tip + 1)
-        .unwrap()
-        .key_id();
     let deposit = Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]));
     let encoded = deposit.encode(&network);
     let db = st.wallet_mut().db_mut();
+    let key = db.reserve_swap_refund_key(account, tip).unwrap().key_id();
     db.record_swap_refund_quote(account, key.index(), &encoded, now + 3_600, now)
         .unwrap();
     let memo = db
@@ -779,7 +773,8 @@ fn missing_funding_memos_block_refund_issuance_and_settling() {
         )],
         &memo,
     );
-    // Compact scanning stores the change before enhancement retrieves its memo.
+    // A restored wallet's compact scan stores the change before enhancement
+    // retrieves its memo.
     let (note, stored): (i64, Vec<u8>) = st
         .wallet()
         .conn()
@@ -800,35 +795,26 @@ fn missing_funding_memos_block_refund_issuance_and_settling() {
             .unwrap();
     };
     set_memo(&mut st, None);
-    // Without its memo, the funded quote still looks abandoned once the grace passes.
-    let settled = now + CompletionPolicy::default().grace_secs;
-    let db = st.wallet_mut().db_mut();
     assert!(matches!(
-        db.reserve_swap_refund_key(account, mined),
+        st.wallet_mut()
+            .db_mut()
+            .reserve_swap_refund_key(account, mined),
         Err(Error::ReservationPolicy(ReservationPolicy::Coverage))
     ));
-    assert_eq!(
-        db.close_finished_swap_keys_at(account, settled, mined)
-            .unwrap(),
-        0
-    );
+    // Issuance recovers the memo first, so it never reissues the funded index.
     set_memo(&mut st, Some(&stored));
     let db = st.wallet_mut().db_mut();
-    assert_eq!(
-        db.close_finished_swap_keys_at(account, settled, mined)
-            .unwrap(),
-        0
-    );
-    // Settling recovered the restored memo itself.
-    assert!(db.recover_swap_refund_memos(account).unwrap().is_empty());
     assert_eq!(
         db.reserve_swap_refund_key(account, mined).unwrap().key_id(),
         KeyId::new(Purpose::Refund, key.index() + 1)
     );
+    assert!(db.recover_swap_refund_memos(account).unwrap().is_empty());
 }
 
+/// A quote binds to a refund key reserved here that is still open; the key need not
+/// scan yet, since only its funding transaction starts it.
 #[test]
-fn refund_quote_needs_a_scanning_refund_key_and_a_canonical_transparent_deposit() {
+fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_deposit() {
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
@@ -850,8 +836,7 @@ fn refund_quote_needs_a_scanning_refund_key_and_a_canonical_transparent_deposit(
             .is_err()
     );
     for _ in 0..2 {
-        db.reserve_swap_receiving_key_from(account, Purpose::Refund, tip + 1)
-            .unwrap();
+        db.reserve_swap_refund_key(account, tip).unwrap();
     }
     let padded = format!(" {p2pkh}");
     for bad in [&unified, &tex, &mainnet, &padded] {

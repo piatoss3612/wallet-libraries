@@ -189,7 +189,12 @@ fn operation_and_reservation_commit_or_roll_back_together() {
         .unwrap();
     let db = st.wallet_mut().db_mut();
     let result = db.transactionally_with_extension(|tx, ext| {
-        let key = tx.reserve_swap_receiving_key_from(account, Purpose::Refund, start())?;
+        let key = tx.reserve_swap_receiving_key_from(
+            account,
+            Purpose::Refund,
+            start(),
+            super::Discovery::Scan,
+        )?;
         ext.execute(
             "INSERT INTO ext_swap_operations VALUES (?1)",
             [&key.key_id().index().to_le_bytes()],
@@ -200,7 +205,12 @@ fn operation_and_reservation_commit_or_roll_back_together() {
     assert!(db.get_swap_receiving_keys(account).unwrap().is_empty());
     let key = db
         .transactionally_with_extension(|tx, ext| {
-            let key = tx.reserve_swap_receiving_key_from(account, Purpose::Refund, start())?;
+            let key = tx.reserve_swap_receiving_key_from(
+                account,
+                Purpose::Refund,
+                start(),
+                super::Discovery::Scan,
+            )?;
             ext.execute(
                 "INSERT INTO ext_swap_operations VALUES (?1)",
                 [&key.key_id().index().to_le_bytes()],

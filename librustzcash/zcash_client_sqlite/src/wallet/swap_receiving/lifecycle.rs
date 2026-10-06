@@ -33,23 +33,20 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     /// A key closes as soon as every operation on it has a conclusive terminal status
     /// and its receipts cover what the provider promised, each with the untrusted
     /// confirmations of the default [`ConfirmationsPolicy`], so a reorg cannot strand a
-    /// receipt on a closed key. A quote no provider status has reached yet stays open
-    /// for [`CompletionPolicy::grace_secs`] after it was recorded, in case it is funded.
-    /// A key also closes [`CompletionPolicy::limit_secs`] after its latest quote
-    /// deadline, or after registration without one, whatever the provider reports.
-    /// Keys with an open reservation, and unpaid incoming keys this wallet issued, stay
-    /// active, so an index can be reissued without a gap in its scanned history. An
-    /// incoming key found by a restore sweep and never issued here has no known swap,
-    /// so it closes `grace_secs` after registration. A payment that arrives after its
-    /// key closed is found by [`WalletDb::recheck_swap_history`] or a seed restore.
-    /// Provider status never credits a note; a closed key keeps its notes.
+    /// receipt on a closed key. A key also closes [`CompletionPolicy::limit_secs`] after
+    /// its latest quote deadline, or after registration without one, whatever the
+    /// provider reports. Keys with an open reservation, and unpaid incoming keys this
+    /// wallet issued, stay active, so an index can be reissued without a gap in its
+    /// scanned history. An incoming key found by a restore sweep and never issued here
+    /// has no known swap, so it closes [`CompletionPolicy::restore_watch_secs`] after
+    /// registration. A payment that arrives after its key closed is found by
+    /// [`WalletDb::recheck_swap_history`] or a seed restore. Provider status never
+    /// credits a note; a closed key keeps its notes.
     ///
     /// `tip` is the chain tip the caller has just confirmed with the network. The
     /// stored tip can be stale after time offline, so nothing closes unless the
     /// stored tip and the fully scanned height both equal `tip`, and a queued rescan
-    /// never skips a key. Confirmed funding memos are recovered first, and no refund
-    /// key settles while a funding memo is still missing, so a funded refund is not
-    /// mistaken for an abandoned quote.
+    /// never skips a key.
     ///
     /// `now` is the caller's clock. Closing uses the earlier of it and `tip`'s block
     /// time, so a clock that runs fast cannot end scanning early, and one that runs
@@ -76,8 +73,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
             let confirmed_below = u32::from(tip)
                 .saturating_add(1)
                 .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
-            db.recover_swap_refund_memos(account)?;
-            let memos_pending = db.swap_refund_memos_pending(account)?;
             let policy = CompletionPolicy::default();
             let mut stmt = db.conn.0.prepare(
                 "SELECT k.id, k.registered_at, k.purpose = 1,
@@ -93,8 +88,6 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id
                           AND (o.terminal_at IS NULL OR o.expectation = 0)),
-                    (SELECT MAX(o.terminal_at) FROM ironwood_swap_operations o
-                        WHERE o.receiving_key_id = k.id AND o.observed_at = 0),
                     (SELECT MAX(o.deadline) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id),
                     (SELECT COALESCE(SUM(COALESCE(o.expected_value, 1)), 0)
@@ -117,29 +110,21 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                     let swept: bool = row.get(6)?;
                     let operations: u32 = row.get(7)?;
                     let unresolved: u32 = row.get(8)?;
-                    let quoted: Option<i64> = row.get(9)?;
-                    let deadline: Option<i64> = row.get(10)?;
-                    let expected: i64 = row.get(11)?;
-                    let received: i64 = row.get(12)?;
+                    let deadline: Option<i64> = row.get(9)?;
+                    let expected: i64 = row.get(10)?;
+                    let received: i64 = row.get(11)?;
                     let restored = incoming && swept && !ever_reserved;
                     if incoming && (open_reservation || !(paid || restored)) {
                         return Ok((id, false));
                     }
                     let limit = if restored {
-                        registered_at.saturating_add(policy.grace_secs)
+                        registered_at.saturating_add(policy.restore_watch_secs)
                     } else {
                         deadline
                             .unwrap_or(registered_at)
                             .saturating_add(policy.limit_secs)
                     };
-                    let funding_window_over =
-                        quoted.is_none_or(|t| now >= t.saturating_add(policy.grace_secs));
-                    // A refund key's missing funding memo could still reopen its quote.
-                    let settled = (incoming || !memos_pending)
-                        && operations > 0
-                        && unresolved == 0
-                        && received >= expected
-                        && funding_window_over;
+                    let settled = operations > 0 && unresolved == 0 && received >= expected;
                     Ok((id, settled || now >= limit))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;

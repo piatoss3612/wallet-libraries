@@ -7,10 +7,9 @@ use zcash_protocol::value::Zatoshis;
 /// consensus parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompletionPolicy {
-    /// Seconds a quote no provider status has reached keeps its key scanning in case
-    /// it is funded, and seconds a key found only by a restore sweep is watched for a
-    /// payment in flight at restore.
-    pub grace_secs: i64,
+    /// Seconds an incoming key found only by a restore sweep keeps scanning, for a
+    /// payout from a swap in flight at restore.
+    pub restore_watch_secs: i64,
     /// Seconds after the quote deadline, or after registration when no deadline
     /// is known, after which scanning stops whatever the provider reports.
     pub limit_secs: i64,
@@ -19,7 +18,7 @@ pub struct CompletionPolicy {
 impl Default for CompletionPolicy {
     fn default() -> Self {
         Self {
-            grace_secs: 24 * 60 * 60,
+            restore_watch_secs: 24 * 60 * 60,
             limit_secs: 30 * 24 * 60 * 60,
         }
     }

@@ -611,8 +611,8 @@ fn issuance_during_the_restore_watch_starts_at_the_top_of_the_window() {
     assert_eq!(first.key.key_id().index(), RECEIVE_GAP_LIMIT - 1);
     quote(&mut st, &first, "first", true);
     // Once the watch ends, issuance fills from the lowest free index again.
-    let grace = zakura_swap_receiving::lifecycle::CompletionPolicy::default().grace_secs;
-    let closes = unix_now(&test_clock()) + grace;
+    let watch = zakura_swap_receiving::lifecycle::CompletionPolicy::default().restore_watch_secs;
+    let closes = unix_now(&test_clock()) + watch;
     st.wallet_mut()
         .db_mut()
         .close_finished_swap_keys_at(account, closes, swept_at.height)
@@ -719,9 +719,9 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
         .unwrap()
         .key_id();
     assert_eq!(refund, KeyId::new(Purpose::Refund, 0));
-    for key in [r.key.key_id(), refund] {
-        assert_eq!(active_from(&st, key), Some(through.height + 1));
-    }
+    assert_eq!(active_from(&st, r.key.key_id()), Some(through.height + 1));
+    // A refund key starts scanning only when its funding transaction is stored.
+    assert_eq!(active_from(&st, refund), None);
 }
 
 #[test]

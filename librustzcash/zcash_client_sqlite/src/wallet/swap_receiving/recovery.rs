@@ -5,16 +5,13 @@ use std::borrow::BorrowMut;
 use crate::{util::Clock, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
 use zakura_swap_receiving::RefundMemo;
-use zcash_keys::encoding::AddressCodec as _;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
-    Discovery, Error, KeyId, Purpose, account_key, decode_index, lifecycle::record_observation,
-    payments::key_ref, register, reservations::RECEIVE_LOOKAHEAD, restore_start,
-    retention::retain_spend_history, unix_now,
+    Discovery, Error, KeyId, Purpose, account_key, decode_index, payments::key_ref, register,
+    reservations::RECEIVE_LOOKAHEAD, restore_start, retention::retain_spend_history, unix_now,
 };
 use crate::{AccountUuid, SqlTransaction, WalletDb};
-use zakura_swap_receiving::lifecycle::{Observation, OperationStatus};
 use zcash_protocol::consensus::NetworkUpgrade;
 
 /// A confirmed funding record recovered from an ordinary internal Ironwood note.
@@ -22,9 +19,6 @@ use zcash_protocol::consensus::NetworkUpgrade;
 pub(crate) struct RecoveredRefund {
     /// Refund sequence index.
     pub(crate) index: u64,
-    /// Address of the funding transaction's only transparent output (P2PKH or P2SH),
-    /// or `None` when the transaction did not have exactly one or is not stored.
-    pub(crate) deposit_address: Option<String>,
 }
 
 /// The outcome of one pass over an account's funding records.
@@ -103,12 +97,10 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
     ///
     /// Run after scanning and memo enhancement, including during restore. A key this
     /// wallet was already scanning when the funding transaction was mined needs
-    /// nothing more, except that its stored funding transaction marks the funded quote
-    /// as waiting for its outcome. Any other key is restored: it is queued for a
-    /// receiver-directory sweep and then scans until the completion limit after the
-    /// funding block, with no provider lookups. Own-send evidence must include an
-    /// input belonging to the same account. Spent and zero-value marker notes are
-    /// included.
+    /// nothing more. Any other key is restored: it is queued for a receiver-directory
+    /// sweep and then scans until the completion limit after the funding block, with no
+    /// provider lookups. Own-send evidence must include an input belonging to the same
+    /// account. Spent and zero-value marker notes are included.
     ///
     /// A record whose inputs or memo are not available yet, or that this version cannot
     /// read, stays unprocessed without failing the call, and refund issuance waits for
@@ -131,7 +123,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         let (account_ref, _) = account_key(self.conn.0, &self.params, account)?;
         let records = {
             let mut stmt = self.conn.0.prepare_cached(
-                "SELECT n.memo, t.mined_height, n.id, t.raw
+                "SELECT n.memo, t.mined_height, n.id
                  FROM ironwood_received_notes n
                  JOIN transactions t ON t.id_tx = n.transaction_id
                  WHERE n.account_id = ?1 AND n.recipient_key_scope = 1
@@ -148,7 +140,6 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, u32>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, Option<Vec<u8>>>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -156,7 +147,7 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         let now = unix_now(&self.clock);
         let mut recovered = Vec::new();
         let mut unreadable = 0;
-        for (bytes, height, note_id, raw) in records {
+        for (bytes, height, note_id) in records {
             // SQLite omits trailing zero padding when storing MemoBytes.
             let memo = zcash_protocol::memo::MemoBytes::from_bytes(&bytes)
                 .ok()
@@ -165,20 +156,6 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 unreadable += 1;
                 continue;
             };
-            // Only the device that funded the swap stores the raw transaction, which
-            // names the deposit; a restored key needs neither.
-            let deposit_address = raw
-                .and_then(|raw| {
-                    wallet::parse_tx(&self.params, &raw, Some(height.into()), None).ok()
-                })
-                .and_then(
-                    |(_, tx)| match tx.transparent_bundle().map(|b| &b.vout[..]) {
-                        Some([output]) => output
-                            .recipient_address()
-                            .map(|address| address.encode(&self.params)),
-                        _ => None,
-                    },
-                );
             let key_id = KeyId::new(Purpose::Refund, memo.index());
             let scanned_locally = self
                 .conn
@@ -193,19 +170,10 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 .optional()?
                 .flatten()
                 .unwrap_or(false);
+            // Storing the funding transaction already started a key scanned here (see
+            // `start_funded_refund_keys`).
             let id = if scanned_locally {
-                let id = key_ref(self.conn.0, account, key_id)?;
-                // The mined funding transaction proves a deposit, so the quote's record,
-                // which expects nothing, must wait for the swap's outcome. Observation
-                // time 0 changes only a record no provider status has updated.
-                if let Some(deposit) = &deposit_address {
-                    let funded = Observation {
-                        status: OperationStatus::Active,
-                        deadline: None,
-                    };
-                    record_observation(self.conn.0, id, deposit, funded, 0)?;
-                }
-                id
+                key_ref(self.conn.0, account, key_id)?
             } else {
                 // Registering at the funding block's time makes the completion limit
                 // count from the swap, so an old swap's key closes after its sweep.
@@ -241,7 +209,6 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             )?;
             recovered.push(RecoveredRefund {
                 index: memo.index(),
-                deposit_address,
             });
         }
         Ok(MemoRecovery {
