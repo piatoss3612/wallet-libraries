@@ -1096,8 +1096,7 @@ fn rewinds_and_re_mining_reconsider_the_recorded_shape() {
     apply_records(&mut case.st, &[(request, memo_only.clone())]);
 
     // Unmined: the captured request is stale, and no work is dispatched.
-    case.st
-        .truncate_to_height_retaining_cache(case.height - 1);
+    case.st.truncate_to_height_retaining_cache(case.height - 1);
     assert!(private_queries(&case.st).is_empty());
     assert_eq!(
         apply_records(&mut case.st, &[(request, with_fee(&memo_only, Some(FEE)))]),

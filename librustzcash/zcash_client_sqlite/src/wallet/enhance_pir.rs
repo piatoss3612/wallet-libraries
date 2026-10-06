@@ -1279,9 +1279,8 @@ pub(crate) fn apply<P: Parameters>(
     // Crucially, no routing mutation happens before the identity rechecks. A shape that
     // contradicts the captured one, or a captured shape that is no longer current, rejects the
     // response before any write on every route.
-    if expected_metadata.is_some_and(|expected| {
-        !expected.shape_agrees_with(shape)
-    }) || current_shape(tx, tx_ref)? != expected_metadata.and_then(|e| e.transparent_shape)
+    if expected_metadata.is_some_and(|expected| !expected.shape_agrees_with(shape))
+        || current_shape(tx, tx_ref)? != expected_metadata.and_then(|e| e.transparent_shape)
     {
         return Ok(EnhancePirStoreResult::Rejected);
     }
