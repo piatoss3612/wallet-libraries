@@ -624,10 +624,14 @@ fn prepare<P: Parameters>(
     scan_from: BlockHeight,
 ) -> Result<i64, Error> {
     let (a, _) = account_key(conn, params, account)?;
+    // Restore sweeps decide which indices are free. A reissued key's sweep covers only
+    // its own past, so it does not hold up other reservations.
     let sweeping: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_swap_sweeps s
         JOIN ironwood_receiving_keys k ON k.id=s.receiving_key_id
-        WHERE k.account_id=?1 AND k.purpose=1 AND s.done_height IS NULL)",
+        WHERE k.account_id=?1 AND k.purpose=1 AND s.done_height IS NULL
+          AND NOT EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
+              WHERE r.receiving_key_id=k.id AND r.closed_at IS NULL))",
         [a.0],
         |r| r.get(0),
     )?;
@@ -687,6 +691,13 @@ fn prepare<P: Parameters>(
             continue;
         }
         let key_id = KeyId::new(Purpose::Receive, index);
+        let closed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_receiving_keys
+                WHERE account_id = ?1 AND purpose = 1 AND key_index = ?2
+                  AND closed_at IS NOT NULL)",
+            params![a.0, index.to_be_bytes()],
+            |r| r.get(0),
+        )?;
         let (key, _) = register(
             conn,
             params,
@@ -697,6 +708,11 @@ fn prepare<P: Parameters>(
             Discovery::Scan,
             now,
         )?;
+        // A closed key was not scanned since it closed. It scans from issuance now,
+        // and a sweep covers the time in between.
+        if closed {
+            super::queue_sweep(conn, key)?;
+        }
         conn.execute(
             "INSERT INTO ironwood_swap_receive_reservations (receiving_key_id, created_at)
              VALUES (?1, ?2)",

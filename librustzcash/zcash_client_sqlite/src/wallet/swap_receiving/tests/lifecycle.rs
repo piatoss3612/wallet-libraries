@@ -11,6 +11,8 @@ const HOUR: i64 = 60 * 60;
 const GRACE: i64 = 24 * HOUR;
 /// `CompletionPolicy::default().limit_secs`.
 const LIMIT: i64 = 7 * 24 * HOUR;
+/// `CompletionPolicy::default().late_watch_secs`.
+const LATE: i64 = 30 * 24 * HOUR;
 
 /// Unix time the fixed test clock stamps on registered keys as `registered_at`.
 fn registered_at() -> i64 {
@@ -49,7 +51,7 @@ fn close(st: &mut State, now: i64) -> usize {
     let tip = st.wallet().chain_height().unwrap().unwrap();
     st.wallet_mut()
         .db_mut()
-        .close_finished_swap_keys(account, now, tip)
+        .close_finished_swap_keys_at(account, now, tip)
         .unwrap()
 }
 
@@ -266,7 +268,7 @@ fn limit_counts_from_the_latest_deadline_whatever_the_status() {
     let (earlier, later) = (registered + HOUR, registered + 2 * HOUR);
     let db = st.wallet_mut().db_mut();
     for (operation, status, deadline) in [
-        ("refunded", Terminal(Positive(None)), earlier),
+        ("finished", Terminal(NoReceipt), earlier),
         ("pending", Active, later),
     ] {
         let observation = Observation {
@@ -279,6 +281,61 @@ fn limit_counts_from_the_latest_deadline_whatever_the_status() {
     assert_eq!(close(&mut st, earlier + LIMIT), 0);
     assert_eq!(close(&mut st, later + LIMIT - 1), 0);
     assert_eq!(close(&mut st, later + LIMIT), 1);
+}
+
+#[test]
+fn a_promised_refund_keeps_its_key_open_past_the_limit() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(&mut st).key_id();
+    let promised = Terminal(Positive(Some(Zatoshis::const_from_u64(10_000))));
+    st.wallet_mut()
+        .db_mut()
+        .observe_swap_operation(account, key, "swap", promised, registered_at() + HOUR)
+        .unwrap();
+    assert_eq!(close(&mut st, registered_at() + LIMIT), 0);
+    assert_eq!(close(&mut st, registered_at() + LIMIT + LATE - 1), 0);
+    assert_eq!(close(&mut st, registered_at() + LIMIT + LATE), 1);
+}
+
+#[test]
+fn a_late_promise_sweeps_and_reopens_a_closed_key() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let key = refund_key(&mut st).key_id();
+    st.generate_and_scan_empty_blocks(2);
+    st.wallet_mut()
+        .db_mut()
+        .observe_swap_operation(
+            account,
+            key,
+            "swap",
+            Terminal(Unknown),
+            registered_at() + HOUR,
+        )
+        .unwrap();
+    assert_eq!(close(&mut st, registered_at() + LIMIT), 1);
+    assert!(scanning_keys(&st).is_empty());
+    let anchor = tip(&st);
+    let refunded = Terminal(Positive(None));
+    let later = registered_at() + LIMIT + HOUR;
+    let db = st.wallet_mut().db_mut();
+    db.observe_swap_operation(account, key, "swap", refunded, later)
+        .unwrap();
+    // The key stays closed until a sweep covers the time it was not scanned.
+    assert!(db.swap_history_pending(account, anchor.height).unwrap());
+    assert!(scanning_keys(&st).is_empty());
+    let db = st.wallet_mut().db_mut();
+    db.finish_sweep(account, key, anchor).unwrap();
+    assert_eq!(scanning_keys(&st), [key]);
+    // Repeating the promise sweeps nothing again.
+    let db = st.wallet_mut().db_mut();
+    db.observe_swap_operation(account, key, "swap", refunded, later + HOUR)
+        .unwrap();
+    assert!(!db.swap_history_pending(account, anchor.height).unwrap());
+    // The reopened key waits for the refund until the extended limit.
+    assert_eq!(close(&mut st, registered_at() + LIMIT + LATE - 1), 0);
+    assert_eq!(close(&mut st, registered_at() + LIMIT + LATE), 1);
 }
 
 #[test]
@@ -296,6 +353,43 @@ fn limit_without_a_deadline_counts_from_registration() {
     assert_eq!(scanning_keys(&st), [unobserved, pending]);
     assert_eq!(close(&mut st, registered_at() + LIMIT - 1), 0);
     assert_eq!(close(&mut st, registered_at() + LIMIT), 2);
+}
+
+#[test]
+fn closing_uses_the_earlier_of_the_clock_and_the_tip_block_time() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    refund_key(&mut st);
+    let tip = st.wallet().chain_height().unwrap().unwrap();
+    let limit = registered_at() + LIMIT;
+    let year = 365 * 24 * HOUR;
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.close_finished_swap_keys_at(account, limit - 1, tip)
+            .unwrap(),
+        0
+    );
+    // A clock that runs fast does not move the tip block's time.
+    assert_eq!(
+        db.close_finished_swap_keys(account, limit + year, tip)
+            .unwrap(),
+        0
+    );
+    st.wallet()
+        .conn()
+        .execute(
+            "UPDATE blocks SET time = ?2 WHERE height = ?1",
+            rusqlite::params![u32::from(tip), limit + year],
+        )
+        .unwrap();
+    // One that runs slow only delays closing.
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(
+        db.close_finished_swap_keys(account, limit - 1, tip)
+            .unwrap(),
+        0
+    );
+    assert_eq!(db.close_finished_swap_keys(account, limit, tip).unwrap(), 1);
 }
 
 #[test]
@@ -488,12 +582,12 @@ fn keys_close_only_at_the_confirmed_tip() {
         .unwrap();
     // The network reports a block the wallet has not stored or scanned yet.
     assert_eq!(
-        db.close_finished_swap_keys(account, terminal + GRACE, tip + 1)
+        db.close_finished_swap_keys_at(account, terminal + GRACE, tip + 1)
             .unwrap(),
         0
     );
     assert_eq!(
-        db.close_finished_swap_keys(account, terminal + GRACE, tip)
+        db.close_finished_swap_keys_at(account, terminal + GRACE, tip)
             .unwrap(),
         1
     );

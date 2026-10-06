@@ -422,6 +422,19 @@ fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
     }
 }
 
+/// Starts or extends trial decryption of `key` from `from`, as registration and
+/// finished refund sweeps do.
+fn activate_key(st: &mut State, key: KeyId, from: BlockHeight) {
+    let account = st.test_account().unwrap().id();
+    st.wallet_mut()
+        .db_mut()
+        .transactionally::<_, _, Error>(|db| {
+            let id = super::payments::key_ref(db.conn.0, account, key)?;
+            activate(db.conn.0, id, from)
+        })
+        .unwrap();
+}
+
 /// Encrypts `note` with a `[4; 512]` memo, as a directory candidate carries it.
 fn encrypt_note(note: Note) -> EncryptedNote {
     let enc = IronwoodNoteEncryption::new(None, note, [4; 512]);

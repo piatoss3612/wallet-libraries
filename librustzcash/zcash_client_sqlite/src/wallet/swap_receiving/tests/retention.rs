@@ -180,6 +180,46 @@ fn scanned_keys_never_hold_spend_evidence() {
 }
 
 #[test]
+fn a_late_watch_keeps_spend_evidence_from_the_close() {
+    use zakura_swap_receiving::lifecycle::{CompletionPolicy, ReceiptExpectation};
+    let (mut st, _, through) = swept();
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    let refund = db
+        .recover_swap_receiving_key(account, KeyId::new(Purpose::Refund, 0), through.height)
+        .unwrap()
+        .key_id();
+    db.finish_sweep(account, refund, through).unwrap();
+    let failed = OperationStatus::Terminal(ReceiptExpectation::Unknown);
+    db.observe_swap_operation(account, refund, "deposit", failed, 0)
+        .unwrap();
+    let policy = CompletionPolicy::default();
+    let closed = unix_now(&test_clock()) + policy.limit_secs;
+    db.close_finished_swap_keys_at(account, closed, through.height)
+        .unwrap();
+    assert!(db.get_swap_scanning_keys().unwrap().is_empty());
+    assert!(
+        !db.finish_swap_nullifier_recovery_with(account, through, 1)
+            .unwrap()
+    );
+    assert_eq!(
+        crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
+        Some(through.height)
+    );
+    // Once the watch ends, release reaches the tip.
+    db.conn
+        .execute(
+            "UPDATE blocks SET time = ?2 WHERE height = ?1",
+            rusqlite::params![u32::from(through.height), closed + policy.late_watch_secs],
+        )
+        .unwrap();
+    assert!(
+        db.finish_swap_nullifier_recovery_with(account, through, 1)
+            .unwrap()
+    );
+}
+
+#[test]
 fn retention_prunes_other_pools_and_respects_the_oldest_account() {
     use zcash_protocol::PoolType;
     let mut st = wallet(false);

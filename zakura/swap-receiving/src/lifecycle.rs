@@ -22,6 +22,10 @@ pub struct CompletionPolicy {
     /// Seconds after the quote deadline, or after registration when no deadline
     /// is known, after which scanning stops whatever the provider reports.
     pub limit_secs: i64,
+    /// Seconds a key keeps scanning past `limit_secs` while the provider promises a
+    /// receipt that has not arrived. After a key closes with an inconclusive status,
+    /// also how long its provider status is still checked, daily, for a late promise.
+    pub late_watch_secs: i64,
 }
 
 impl Default for CompletionPolicy {
@@ -29,6 +33,7 @@ impl Default for CompletionPolicy {
         Self {
             grace_secs: 24 * 60 * 60,
             limit_secs: 7 * 24 * 60 * 60,
+            late_watch_secs: 30 * 24 * 60 * 60,
         }
     }
 }

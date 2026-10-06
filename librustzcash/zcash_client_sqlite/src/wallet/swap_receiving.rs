@@ -718,6 +718,22 @@ pub(super) fn activate(
     queue_rescan(conn, from..BlockHeight::from(rescan_end))
 }
 
+/// Queues a fresh receiver-directory sweep of key `id`, unless one is pending.
+///
+/// A key reopened after closing was not scanned in between, so like a restored key
+/// its history is swept, and it scans from the block after the sweep's anchor.
+pub(super) fn queue_sweep(conn: &Connection, id: i64) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO ironwood_swap_sweeps (receiving_key_id) VALUES (?1)
+         ON CONFLICT (receiving_key_id) DO UPDATE SET
+             target_height = NULL, target_hash = NULL, lookup_height = NULL,
+             lookup_hash = NULL, attempts = 0, next_attempt_at = 0, done_height = NULL
+         WHERE done_height IS NOT NULL",
+        [id],
+    )?;
+    Ok(())
+}
+
 /// Queues `range` for a forced rescan with historic priority.
 pub(super) fn queue_rescan(
     conn: &rusqlite::Transaction<'_>,
@@ -822,6 +838,45 @@ pub(super) fn validate_received_key<
         ));
     }
     Ok(Some(id))
+}
+
+/// Moves a stored Ironwood note with nullifier `nf` to `action_index` of `tx_ref`,
+/// where scanning or a full transaction has just found it.
+///
+/// A sweep stores a note under the transaction ID its directory claims; only the note
+/// itself is authenticated. The transaction it is found in is authoritative, so the
+/// note moves there with its key and spends, and the claimed transaction is deleted
+/// once nothing else refers to it.
+pub(super) fn adopt_found_note(
+    conn: &Connection,
+    nf: &[u8; 32],
+    tx_ref: crate::TxRef,
+    action_index: usize,
+) -> Result<(), SqliteClientError> {
+    let index = i64::try_from(action_index).expect("output indices are representable as i64");
+    let stored: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT id, transaction_id FROM ironwood_received_notes
+             WHERE nf = ?1 AND (transaction_id != ?2 OR action_index != ?3)",
+            rusqlite::params![nf, tx_ref.0, index],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, claimed)) = stored else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE ironwood_received_notes SET transaction_id = ?2, action_index = ?3 WHERE id = ?1",
+        rusqlite::params![id, tx_ref.0, index],
+    )?;
+    conn.execute(
+        "DELETE FROM transactions WHERE id_tx = ?1 AND raw IS NULL
+         AND NOT EXISTS(SELECT 1 FROM v_received_outputs WHERE transaction_id = ?1)
+         AND NOT EXISTS(SELECT 1 FROM v_received_output_spends WHERE transaction_id = ?1)
+         AND NOT EXISTS(SELECT 1 FROM sent_notes WHERE transaction_id = ?1)",
+        [claimed],
+    )?;
+    Ok(())
 }
 
 /// Converts a swap error for storage-trait callers. Database errors pass through.

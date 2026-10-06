@@ -8334,13 +8334,12 @@ dependencies = [
 name = "zakura-swap-receiving"
 version = "0.0.0"
 dependencies = [
+ "blake2b_simd",
  "ff 0.14.0",
  "hex",
- "hmac 0.12.1",
  "incrementalmerkletree",
  "rand 0.10.3",
  "serde_json",
- "sha2 0.10.9",
  "shardtree",
  "time",
  "zakura-orchard",

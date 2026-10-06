@@ -591,6 +591,48 @@ fn undone_incoming_sweep_blocks_new_reservations() {
 }
 
 #[test]
+fn reissue_sweeps_of_closed_keys_do_not_block_issuance() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let swept_at = tip(&st);
+    let db = st.wallet_mut().db_mut();
+    for index in 0..2 {
+        let key = db
+            .watch_swap_receive_key(account, index, swept_at.height)
+            .unwrap();
+        db.finish_sweep(account, key.key_id(), swept_at).unwrap();
+    }
+    let grace = zakura_swap_receiving::lifecycle::CompletionPolicy::default().grace_secs;
+    let closes = unix_now(&test_clock()) + grace;
+    assert_eq!(
+        db.close_finished_swap_keys_at(account, closes, swept_at.height)
+            .unwrap(),
+        2
+    );
+    let first = prepare(&mut st, NOW);
+    assert_eq!(first.key.key_id().index(), 0);
+    quote(&mut st, &first, "first", true);
+    // The first key's sweep is pending, but only a restore sweep holds up issuance.
+    let second = prepare(&mut st, NOW);
+    assert_eq!(second.key.key_id().index(), 1);
+    let due: Vec<_> = st
+        .wallet_mut()
+        .db_mut()
+        .prepare_swap_discovery_batch(
+            account,
+            swept_at,
+            NOW,
+            std::num::NonZeroU32::new(8).unwrap(),
+        )
+        .unwrap()
+        .work
+        .into_iter()
+        .map(|w| w.key.index())
+        .collect();
+    assert_eq!(due, [0, 1]);
+}
+
+#[test]
 fn payout_during_restore_watch_excludes_the_index() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();

@@ -98,7 +98,14 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                 return Ok(false);
             }
             // Pending sweeps keep evidence from their earliest possible payment, and a
-            // queued candidate from its height. Scanned keys never need it.
+            // queued candidate from its height. Scanned keys never need it. A closed
+            // refund key's late watch keeps it from the close, so a refund that a later
+            // sweep finds can be checked for spends without a replay.
+            let time: i64 = conn.query_row(
+                "SELECT time FROM blocks WHERE height = ?1",
+                [u32::from(through.height)],
+                |r| r.get(0),
+            )?;
             let pending: Option<u32> = conn.query_row(
                 "SELECT MIN(h) FROM (
                     SELECT k.scan_from AS h FROM ironwood_swap_sweeps s
@@ -106,8 +113,15 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         WHERE k.account_id = ?1 AND s.done_height IS NULL
                     UNION ALL SELECT p.height FROM ironwood_swap_payment_recovery p
                         JOIN ironwood_receiving_keys k ON k.id = p.receiving_key_id
-                        WHERE k.account_id = ?1)",
-                [id.0],
+                        WHERE k.account_id = ?1
+                    UNION ALL SELECT w.retain_from FROM ironwood_swap_refund_watches w
+                        JOIN ironwood_receiving_keys k ON k.id = w.receiving_key_id
+                        JOIN ironwood_swap_operations s ON s.receiving_key_id = w.receiving_key_id
+                            AND s.operation_id = w.operation_id
+                        WHERE k.account_id = ?1 AND k.closed_at IS NOT NULL
+                          AND w.expires_at > ?2
+                          AND (s.terminal_at IS NULL OR s.expectation = 0))",
+                params![id.0, time],
                 |r| r.get(0),
             )?;
             let next = pending.unwrap_or(u32::from(through.height).saturating_add(1));

@@ -460,7 +460,7 @@ fn watched_key_finds_a_payout_after_its_sweep() {
 }
 
 #[test]
-fn issuing_a_key_after_its_watch_needs_no_rescan() {
+fn issuing_a_closed_watch_key_sweeps_instead_of_rescanning() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let anchor = tip(&st);
@@ -483,12 +483,12 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
     let grace = CompletionPolicy::default().grace_secs;
     let db = st.wallet_mut().db_mut();
     assert_eq!(
-        db.close_finished_swap_keys(account, registered + grace - 1, anchor.height)
+        db.close_finished_swap_keys_at(account, registered + grace - 1, anchor.height)
             .unwrap(),
         0
     );
     assert_eq!(
-        db.close_finished_swap_keys(account, registered + grace, anchor.height)
+        db.close_finished_swap_keys_at(account, registered + grace, anchor.height)
             .unwrap(),
         1
     );
@@ -502,6 +502,8 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
     assert_eq!(reservation.key.key_id(), key);
     assert_eq!(scanning_keys(&st), [key]);
     assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
+    // A sweep covers the blocks scanned while the key was closed.
+    assert_eq!(due(&mut st, through, NOW), [key]);
 }
 
 #[test]

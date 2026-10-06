@@ -1,5 +1,5 @@
 //! Provider observations and the rule that ends a key's trial decryption.
-use super::{Error, KeyId, account_key, corrupt, payments::key_ref};
+use super::{Error, KeyId, account_key, corrupt, payments::key_ref, recovery::LATE_CHECK_SECS};
 use crate::{AccountUuid, WalletDb, util::Clock, wallet};
 use rusqlite::{Connection, params};
 use std::borrow::BorrowMut;
@@ -33,7 +33,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     /// the expected receipts are mined, and [`CompletionPolicy::grace_secs`] have
     /// passed since the first terminal status. It also closes
     /// [`CompletionPolicy::limit_secs`] after its latest quote deadline, or after
-    /// registration without one, whatever the provider reports. Keys with an open
+    /// registration without one, whatever the provider reports, or
+    /// [`CompletionPolicy::late_watch_secs`] later while the provider promises ZEC its
+    /// mined notes do not cover. A refund key that closes with an inconclusive status
+    /// keeps a daily provider check (see [`WalletDb::take_swap_refund_status_checks`]),
+    /// and a later promise of ZEC sweeps and reopens it. Keys with an open
     /// reservation, and unpaid incoming keys this wallet issued, stay active, so an
     /// index can be reissued without a gap in its scanned history. An incoming key
     /// found by a restore sweep and never issued here has no known swap, so it
@@ -46,6 +50,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     /// never skips a key. Confirmed funding memos are recovered first, and no refund
     /// key settles while a funding memo is still missing, so a funded refund is not
     /// mistaken for an abandoned quote.
+    ///
+    /// `now` is the caller's clock. Closing uses the earlier of it and `tip`'s block
+    /// time, so a clock that runs fast cannot end scanning early, and one that runs
+    /// slow only delays it.
     pub fn close_finished_swap_keys(
         &mut self,
         account: AccountUuid,
@@ -59,10 +67,16 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
             {
                 return Ok(0);
             }
+            let tip_time: i64 = db.conn.0.query_row(
+                "SELECT time FROM blocks WHERE height = ?1",
+                [u32::from(tip)],
+                |r| r.get(0),
+            )?;
+            let now = now.min(tip_time);
             db.recover_swap_refund_memos(account)?;
             let memos_pending = db.swap_refund_memos_pending(account)?;
             let policy = CompletionPolicy::default();
-            let mut stmt = db.conn.0.prepare(
+            let mut stmt = db.conn.0.prepare(&format!(
                 "SELECT k.id, k.registered_at, k.purpose = 1,
                     EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
                         WHERE r.receiving_key_id = k.id AND r.closed_at IS NULL),
@@ -80,15 +94,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         WHERE o.receiving_key_id = k.id),
                     (SELECT MAX(o.deadline) FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id),
-                    (SELECT COALESCE(SUM(COALESCE(o.expected_value, 1)), 0)
-                        FROM ironwood_swap_operations o
-                        WHERE o.receiving_key_id = k.id AND o.expectation = 2),
-                    (SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
-                        JOIN transactions t ON t.id_tx = n.transaction_id
-                        WHERE n.receiving_key_id = k.id AND t.mined_height IS NOT NULL)
+                    {EXPECTED}, {RECEIVED}
                  FROM ironwood_receiving_keys k
-                 WHERE k.account_id = ?1 AND k.active_from IS NOT NULL AND k.closed_at IS NULL",
-            )?;
+                 WHERE k.account_id = ?1 AND k.active_from IS NOT NULL AND k.closed_at IS NULL"
+            ))?;
             let finished = stmt
                 .query_map([owner.0], |row| {
                     let id: i64 = row.get(0)?;
@@ -106,14 +115,20 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                     let received: i64 = row.get(12)?;
                     let restored = incoming && swept && !ever_reserved;
                     if incoming && (open_reservation || !(paid || restored)) {
-                        return Ok((id, false));
+                        return Ok((id, incoming, false));
                     }
                     let limit = if restored {
                         registered_at.saturating_add(policy.grace_secs)
                     } else {
+                        let late = if received < expected {
+                            policy.late_watch_secs
+                        } else {
+                            0
+                        };
                         deadline
                             .unwrap_or(registered_at)
                             .saturating_add(policy.limit_secs)
+                            .saturating_add(late)
                     };
                     let graced =
                         last_terminal.is_some_and(|t| now >= t.saturating_add(policy.grace_secs));
@@ -123,21 +138,61 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         && unresolved == 0
                         && received >= expected
                         && graced;
-                    Ok((id, settled || now >= limit))
+                    Ok((id, incoming, settled || now >= limit))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             let mut closed = 0;
-            for (id, finished) in finished {
+            for (id, incoming, finished) in finished {
                 if finished {
                     db.conn.0.execute(
                         "UPDATE ironwood_receiving_keys SET closed_at = ?2 WHERE id = ?1",
                         params![id, now],
                     )?;
+                    if !incoming {
+                        // Keeps checking the provider, and spend evidence from here, in
+                        // case a refund comes after all. The first close sets the window.
+                        db.conn.0.execute(
+                            "INSERT INTO ironwood_swap_refund_watches
+                                (receiving_key_id, operation_id, next_check_at, expires_at,
+                                 retain_from)
+                             SELECT receiving_key_id, operation_id, ?2 + ?3, ?2 + ?4, ?5
+                             FROM ironwood_swap_operations
+                             WHERE receiving_key_id = ?1 AND (terminal_at IS NULL OR expectation = 0)
+                             ON CONFLICT (receiving_key_id, operation_id) DO UPDATE SET
+                                 expires_at = COALESCE(expires_at, excluded.expires_at),
+                                 retain_from = COALESCE(retain_from, excluded.retain_from)",
+                            params![
+                                id,
+                                now,
+                                LATE_CHECK_SECS,
+                                policy.late_watch_secs,
+                                u32::from(tip)
+                            ],
+                        )?;
+                    }
                     closed += 1;
                 }
             }
             Ok(closed)
         })
+    }
+}
+
+#[cfg(test)]
+impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
+    /// [`WalletDb::close_finished_swap_keys`] with `tip`'s block time set to `now`, as
+    /// when the caller's clock agrees with the chain.
+    pub(crate) fn close_finished_swap_keys_at(
+        &mut self,
+        account: AccountUuid,
+        now: i64,
+        tip: BlockHeight,
+    ) -> Result<usize, Error> {
+        self.conn.borrow_mut().execute(
+            "UPDATE blocks SET time = ?2 WHERE height = ?1",
+            params![u32::from(tip), now],
+        )?;
+        self.close_finished_swap_keys(account, now, tip)
     }
 }
 
@@ -167,6 +222,7 @@ pub(super) fn record_observation(
         .map(|v| v.ok_or_else(|| corrupt("expected receipt must be positive")))
         .transpose()?;
     let terminal = matches!(observation.status, OperationStatus::Terminal(_));
+    let owed = owed_while_closed(conn, id)?;
     conn.execute(
         "INSERT INTO ironwood_swap_operations
             (receiving_key_id, operation_id, observed_at, terminal_at, expectation,
@@ -191,5 +247,31 @@ pub(super) fn record_observation(
             observation.deadline
         ],
     )?;
+    // A provider that newly promises ZEC to a closed key may have paid it while the
+    // key was not scanned.
+    if !owed && owed_while_closed(conn, id)? {
+        super::queue_sweep(conn, id)?;
+    }
     Ok(())
+}
+
+/// Receipts the provider promises key `k`, counting an unknown amount as one zatoshi.
+const EXPECTED: &str = "(SELECT COALESCE(SUM(COALESCE(o.expected_value, 1)), 0)
+    FROM ironwood_swap_operations o WHERE o.receiving_key_id = k.id AND o.expectation = 2)";
+
+/// The value of key `k`'s mined notes.
+const RECEIVED: &str = "(SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
+    JOIN transactions t ON t.id_tx = n.transaction_id
+    WHERE n.receiving_key_id = k.id AND t.mined_height IS NOT NULL)";
+
+/// Whether key `id` is closed while the provider promises ZEC its mined notes do not cover.
+fn owed_while_closed(conn: &Connection, id: i64) -> Result<bool, Error> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT k.closed_at IS NOT NULL AND {EXPECTED} > {RECEIVED}
+             FROM ironwood_receiving_keys k WHERE k.id = ?1"
+        ),
+        [id],
+        |r| r.get(0),
+    )?)
 }

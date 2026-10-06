@@ -35,22 +35,9 @@ fn close(st: &mut State, keys: &[KeyId]) {
     }
     let grace = CompletionPolicy::default().grace_secs;
     assert_eq!(
-        db.close_finished_swap_keys(account, grace, tip).unwrap(),
+        db.close_finished_swap_keys_at(account, grace, tip).unwrap(),
         keys.len()
     );
-}
-
-/// Starts or extends trial decryption of `key` from `from`, as registration and
-/// finished refund sweeps do.
-fn activate_key(st: &mut State, key: KeyId, from: BlockHeight) {
-    let account = st.test_account().unwrap().id();
-    st.wallet_mut()
-        .db_mut()
-        .transactionally::<_, _, Error>(|db| {
-            let id = super::super::payments::key_ref(db.conn.0, account, key)?;
-            activate(db.conn.0, id, from)
-        })
-        .unwrap();
 }
 
 #[test]

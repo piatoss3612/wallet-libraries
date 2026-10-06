@@ -36,6 +36,10 @@ pub(super) struct MemoRecovery {
     pub(super) unreadable: usize,
 }
 
+/// Seconds between provider checks of a refund key that closed with an inconclusive
+/// status.
+pub(super) const LATE_CHECK_SECS: i64 = 24 * 60 * 60;
+
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
     /// See [`WalletDb::recover_swap_refund_memos`] on a transaction-backed handle.
     #[cfg(test)]
@@ -46,10 +50,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         self.transactionally(|db| db.recover_swap_refund_memos(account))
     }
 
-    /// Claims due provider lookups for authenticated refund records. Call at sync
-    /// time, including when no new blocks arrive. The persisted retry time also
-    /// bounds failed requests across restarts. Unknown responses and inconclusive
-    /// terminal statuses, such as `FAILED`, leave watches active.
+    /// Claims due provider lookups for authenticated refund records. A refund key
+    /// that closed with an inconclusive status is checked once a day until its late
+    /// watch ends (see [`WalletDb::close_finished_swap_keys`]). Call at sync time,
+    /// including when no new blocks arrive. The persisted retry time also bounds
+    /// failed requests across restarts. Unknown responses and inconclusive terminal
+    /// statuses, such as `FAILED`, leave watches active.
     /// Applications pass a Unix timestamp and perform network I/O after this returns.
     /// Unchecked records are returned first, up to `limit`, so old failed requests
     /// cannot starve newly restored records.
@@ -65,12 +71,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         self.transactionally(|db| {
             let (id, _) = account_key(db.conn.0, &db.params, account)?;
             let mut stmt = db.conn.0.prepare_cached(
-                "SELECT k.key_index, w.receiving_key_id, w.operation_id
+                "SELECT k.key_index, w.receiving_key_id, w.operation_id, k.closed_at IS NOT NULL
                  FROM ironwood_swap_refund_watches w
                  JOIN ironwood_receiving_keys k ON k.id=w.receiving_key_id
                  JOIN ironwood_swap_operations s ON s.receiving_key_id=w.receiving_key_id
                     AND s.operation_id=w.operation_id
-                 WHERE k.account_id=?1 AND k.closed_at IS NULL
+                 WHERE k.account_id=?1 AND (k.closed_at IS NULL OR w.expires_at > ?2)
                    AND (s.terminal_at IS NULL OR s.expectation=0) AND w.next_check_at<=?2
                  ORDER BY w.next_check_at,w.receiving_key_id,w.operation_id LIMIT ?3",
             )?;
@@ -80,14 +86,15 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         r.get::<_, Vec<u8>>(0)?,
                         r.get::<_, i64>(1)?,
                         r.get::<_, String>(2)?,
+                        r.get::<_, bool>(3)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            let next = now
-                .checked_add(60)
-                .ok_or_else(|| super::corrupt("provider-check time overflow"))?;
             let mut result = Vec::new();
-            for (index, id, operation) in rows {
+            for (index, id, operation, closed) in rows {
+                let next = now
+                    .checked_add(if closed { LATE_CHECK_SECS } else { 60 })
+                    .ok_or_else(|| super::corrupt("provider-check time overflow"))?;
                 let key = KeyId::new(Purpose::Refund, decode_index(index)?);
                 db.conn.0.execute(
                     "UPDATE ironwood_swap_refund_watches SET next_check_at=?3

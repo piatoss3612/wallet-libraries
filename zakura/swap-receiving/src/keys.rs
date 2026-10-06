@@ -1,9 +1,13 @@
 use ff::{FromUniformBytes, PrimeField};
-use hmac::{Hmac, Mac};
 use orchard::keys::FullViewingKey;
 use pasta_curves::pallas;
-use sha2::Sha512;
 use zeroize::Zeroizing;
+
+/// First byte of the `PRF^expand` input that derives a swap key's `rivk`.
+///
+/// Unused by the protocol specification and ZIPs when chosen; it must be reserved
+/// with the ZIP editors before any address goes live.
+const SWAP_RIVK_DOMAIN: u8 = 0x85;
 
 /// Independent v1 receiving sequences under one account's spending authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -42,77 +46,70 @@ impl KeyId {
 
     /// Derives this key's v1 FVK from the account's **external** FVK.
     ///
+    /// The result keeps the account's `ak` and `nk` and replaces `rivk` with
+    /// `ToScalar(PRF^expand_rivk([SWAP_RIVK_DOMAIN] || ak || nk || [purpose] || index))`,
+    /// where `purpose` is 0 for refund and 1 for incoming and `index` is little-endian.
+    /// This is ZIP 32's internal-key derivation (first byte `0x83`, no suffix) with
+    /// another domain byte and a suffix, so a ZIP 2005 recovery circuit can check
+    /// it the same way.
+    ///
     /// Use external diversifier index zero for the swap receiver. The account FVK
     /// is sufficient; this never needs a spending key. Network and pool belong to
     /// the caller's key identity, but are not inputs to the v1 KDF. The caller must
-    /// reserve the index durably before exposing its address.
+    /// reserve the index durably before exposing its address. With negligible
+    /// probability the result is not a valid FVK, and that index has no key.
     pub fn derive(self, account: &FullViewingKey) -> Result<FullViewingKey, DerivationError> {
-        derive_with(
-            account,
-            self.purpose,
-            self.index,
-            u32::MAX,
-            FullViewingKey::from_bytes,
-        )
+        let mut bytes = Zeroizing::new(account.to_bytes());
+        let mut suffix = [0; 9];
+        suffix[0] = self.purpose.code();
+        suffix[1..].copy_from_slice(&self.index.to_le_bytes());
+        let rivk = expand_rivk(&bytes, SWAP_RIVK_DOMAIN, &suffix);
+        bytes[64..].copy_from_slice(&rivk);
+        // Parsing checks both external and derived internal IVKs.
+        FullViewingKey::from_bytes(&bytes).ok_or(DerivationError)
     }
 }
 
 impl Purpose {
-    fn label(self) -> &'static [u8] {
+    /// The purpose byte in the v1 derivation input.
+    fn code(self) -> u8 {
         match self {
-            Self::Refund => b"swap-refund-v1",
-            Self::Receive => b"swap-receive-v1",
+            Self::Refund => 0,
+            Self::Receive => 1,
         }
     }
 }
 
-/// No valid viewing key was found in the v1 retry space.
+/// The derived `rivk` does not give a valid viewing key, so the index has no key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DerivationError;
 
 impl core::fmt::Display for DerivationError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("swap receiving key derivation exhausted its retry space")
+        f.write_str("swap receiving key index has no valid viewing key")
     }
 }
 
 impl std::error::Error for DerivationError {}
 
-fn derive_with<T>(
-    account: &FullViewingKey,
-    purpose: Purpose,
-    index: u64,
-    last_attempt: u32,
-    mut accept: impl FnMut(&[u8; 96]) -> Option<T>,
-) -> Result<T, DerivationError> {
-    let account_bytes = Zeroizing::new(account.to_bytes());
-    let mut candidate = Zeroizing::new(*account_bytes);
-    for attempt in 0..=last_attempt {
-        candidate[64..].copy_from_slice(&derive_rivk(
-            account_bytes[64..].try_into().expect("32-byte rivk"),
-            purpose,
-            index,
-            attempt,
-        ));
-        // Parsing checks both external and derived internal IVKs. A retry must
-        // keep ak/nk unchanged, since those bind spending and nullifier authority.
-        if let Some(fvk) = accept(&candidate) {
-            return Ok(fvk);
-        }
-    }
-    Err(DerivationError)
-}
-
-fn derive_rivk(key: &[u8; 32], purpose: Purpose, index: u64, attempt: u32) -> [u8; 32] {
-    let label = purpose.label();
-    let mut mac = Hmac::<Sha512>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
-    mac.update(&[label.len() as u8]);
-    mac.update(label);
-    mac.update(&index.to_le_bytes());
-    mac.update(&attempt.to_le_bytes());
-    let wide = Zeroizing::new(<[u8; 64]>::from(mac.finalize().into_bytes()));
-    // FromUniformBytes reduces a little-endian integer modulo the Pallas
-    // scalar order. Using pallas::Base here would define a different KDF.
+/// `ToScalar^Orchard(PRF^expand_rivk([domain] || ak || nk || suffix))` over the raw
+/// FVK encoding `ak || nk || rivk` (protocol §5.6.4.4), as ZIP 32 derives an
+/// internal `rivk`.
+fn expand_rivk(fvk: &[u8; 96], domain: u8, suffix: &[u8]) -> [u8; 32] {
+    let wide = Zeroizing::new(
+        *blake2b_simd::Params::new()
+            .hash_length(64)
+            .personal(b"Zcash_ExpandSeed")
+            .to_state()
+            .update(&fvk[64..])
+            .update(&[domain])
+            .update(&fvk[..64])
+            .update(suffix)
+            .finalize()
+            .as_array(),
+    );
+    // FromUniformBytes reduces a little-endian integer modulo the Pallas scalar
+    // order, which is ToScalar^Orchard. pallas::Base would define a different KDF.
     pallas::Scalar::from_uniform_bytes(&wide).to_repr()
 }
 
@@ -130,15 +127,21 @@ pub fn has_same_spending_authority(account: &FullViewingKey, candidate: &FullVie
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchard::keys::SpendingKey;
+    use orchard::keys::{Scope, SpendingKey};
+
+    /// The first Orchard key-component test vector's spending key, published in
+    /// zakura-orchard's `src/test_vectors/keys.rs`. No wallet secrets are used.
+    fn vector_account() -> FullViewingKey {
+        let sk = hex::decode("5d7a8f739a2d9e945b0ce152a8049e294c4d6e66b164939daffa2ef6ee692148")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        FullViewingKey::from(&SpendingKey::from_bytes(sk).unwrap())
+    }
 
     #[test]
-    fn matches_python_hmac_and_integer_reduction_vectors() {
-        let key: [u8; 32] =
-            hex::decode("021ccf89604f5f7cc6e034b32d338908b819fbe325fee6458b56b4ca71a7e43d")
-                .unwrap()
-                .try_into()
-                .unwrap();
+    fn matches_python_prf_expand_vectors() {
+        let account = vector_account();
         for row in include_str!("../tests/vectors/rivk.csv").lines().skip(1) {
             let fields: Vec<_> = row.split(',').collect();
             let purpose = match fields[0] {
@@ -146,48 +149,28 @@ mod tests {
                 "receive" => Purpose::Receive,
                 _ => panic!("unknown vector purpose"),
             };
-            let actual = derive_rivk(
-                &key,
-                purpose,
-                fields[1].parse().unwrap(),
-                fields[2].parse().unwrap(),
-            );
-            assert_eq!(hex::encode(actual), fields[3], "{row}");
+            let key = KeyId::new(purpose, fields[1].parse().unwrap())
+                .derive(&account)
+                .unwrap();
+            assert_eq!(hex::encode(&key.to_bytes()[64..]), fields[2], "{row}");
         }
     }
 
     #[test]
-    fn retries_keep_authority_and_stop_without_wrapping() {
-        let account = FullViewingKey::from(&SpendingKey::from_bytes([0; 32]).unwrap());
-        let bytes = account.to_bytes();
-        let mut attempts = 0;
-        let result = derive_with(&account, Purpose::Refund, u64::MAX, 1, |candidate| {
-            assert_eq!(candidate[..64], bytes[..64]);
-            assert_eq!(
-                candidate[64..],
-                derive_rivk(
-                    bytes[64..].try_into().unwrap(),
-                    Purpose::Refund,
-                    u64::MAX,
-                    attempts
-                )
-            );
-            attempts += 1;
-            None::<()>
-        });
-        assert_eq!(result, Err(DerivationError));
-        assert_eq!(attempts, 2);
-
-        let mut attempts = 0;
-        let retried = derive_with(&account, Purpose::Receive, 0, 2, |candidate| {
-            attempts += 1;
-            (attempts == 2).then_some(*candidate)
-        })
-        .unwrap();
-        assert_eq!(attempts, 2);
+    fn zip32_internal_byte_reproduces_the_orchard_internal_key() {
+        let account = vector_account();
+        let internal = expand_rivk(&account.to_bytes(), 0x83, &[]);
         assert_eq!(
-            retried[64..],
-            derive_rivk(bytes[64..].try_into().unwrap(), Purpose::Receive, 0, 1)
+            hex::encode(internal),
+            "901a30b99ae1570cb80bb616aeef3bb916c640c4cc620f9b4b4499c74332eb2a"
+        );
+        let mut bytes = account.to_bytes();
+        bytes[64..].copy_from_slice(&internal);
+        assert_eq!(
+            FullViewingKey::from_bytes(&bytes)
+                .unwrap()
+                .address_at(0u32, Scope::External),
+            account.address_at(0u32, Scope::Internal)
         );
     }
 }

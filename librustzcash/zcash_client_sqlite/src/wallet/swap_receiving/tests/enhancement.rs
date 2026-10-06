@@ -518,7 +518,7 @@ fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
     assert_eq!(row(&db.conn, &funded), (0, None, 0));
     let grace = CompletionPolicy::default().grace_secs;
     assert_eq!(
-        db.close_finished_swap_keys(account, now + grace, mined)
+        db.close_finished_swap_keys_at(account, now + grace, mined)
             .unwrap(),
         0
     );
@@ -533,12 +533,12 @@ fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
     .unwrap();
     assert_eq!(row(&db.conn, &funded), (finished, Some(finished), 1));
     assert_eq!(
-        db.close_finished_swap_keys(account, finished + grace - 1, mined)
+        db.close_finished_swap_keys_at(account, finished + grace - 1, mined)
             .unwrap(),
         0
     );
     assert_eq!(
-        db.close_finished_swap_keys(account, finished + grace, mined)
+        db.close_finished_swap_keys_at(account, finished + grace, mined)
             .unwrap(),
         1
     );
@@ -571,7 +571,7 @@ fn reissued_refund_key_sweeps_history_before_its_scan_start() {
 }
 
 #[test]
-fn refund_status_checks_skip_closed_keys() {
+fn closed_refund_keys_keep_a_daily_status_check() {
     use zakura_swap_receiving::{RefundMemo, lifecycle::CompletionPolicy};
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
@@ -601,14 +601,22 @@ fn refund_status_checks_skip_closed_keys() {
         vec![(key, deposit.to_string())]
     );
     assert_eq!(
-        db.close_finished_swap_keys(account, limit, mined).unwrap(),
+        db.close_finished_swap_keys_at(account, limit, mined)
+            .unwrap(),
         1
     );
-    assert!(
-        db.take_swap_refund_status_checks(account, limit + 60, batch)
+    // The check scheduled while the key was open runs, and then one a day follows.
+    let due = vec![(key, deposit.to_string())];
+    let day = 24 * 60 * 60;
+    let mut take = |now| {
+        db.take_swap_refund_status_checks(account, now, batch)
             .unwrap()
-            .is_empty()
-    );
+    };
+    assert_eq!(take(limit + 60), due);
+    assert!(take(limit + 60 + day - 1).is_empty());
+    assert_eq!(take(limit + 60 + day), due);
+    // The late watch ends `late_watch_secs` after the key closed.
+    assert!(take(limit + CompletionPolicy::default().late_watch_secs).is_empty());
 }
 
 #[test]
@@ -902,14 +910,14 @@ fn missing_funding_memos_block_refund_issuance_and_settling() {
         Err(Error::ReservationPolicy(ReservationPolicy::Coverage))
     ));
     assert_eq!(
-        db.close_finished_swap_keys(account, settled, mined)
+        db.close_finished_swap_keys_at(account, settled, mined)
             .unwrap(),
         0
     );
     set_memo(&mut st, Some(&stored));
     let db = st.wallet_mut().db_mut();
     assert_eq!(
-        db.close_finished_swap_keys(account, settled, mined)
+        db.close_finished_swap_keys_at(account, settled, mined)
             .unwrap(),
         0
     );

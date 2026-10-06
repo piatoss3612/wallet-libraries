@@ -29,14 +29,16 @@ pub enum PaymentApplication {
     /// The authenticated note predates the public account restore range. Widen that
     /// range before retrying.
     OutsideRecoveryRange,
-    /// Note, memo, witness, key identity, and any known spend were committed together.
+    /// Note, memo, witness, key identity, and any known spend were committed together,
+    /// or the wallet already stored the note under another transaction.
     Applied,
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Applies a queued payment using a supplied path or a locally available one.
-    /// Transaction identity remains directory-provided. Inclusion authenticates the
-    /// note and position, not its transaction ID. Conflicts with local data fail.
+    /// Transaction identity remains directory-provided until scanning finds the note.
+    /// Inclusion authenticates the note and position, not its transaction ID.
+    /// Conflicts with local data fail.
     pub(crate) fn apply_pending_swap_payment(
         &mut self,
         account: AccountUuid,
@@ -69,6 +71,28 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             return Err(corrupt("swap payment is not queued or changed"));
         }
         let (key_ref, recovered) = authenticate(conn, &self.params, account, key, candidate)?;
+        // Scanning stores a note under the transaction it is found in, which no
+        // directory claim overrides (see `adopt_found_note`), so a copy stored under
+        // another transaction makes this answer redundant.
+        let stored_elsewhere: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
+                 JOIN transactions t ON t.id_tx = n.transaction_id
+                 WHERE n.nf = ?1 AND (t.txid != ?2 OR n.action_index != ?3))",
+            params![
+                recovered.nullifier().to_bytes(),
+                candidate.txid.as_ref(),
+                candidate.action_index
+            ],
+            |r| r.get(0),
+        )?;
+        if stored_elsewhere {
+            conn.execute(
+                "DELETE FROM ironwood_swap_payment_recovery
+                 WHERE receiving_key_id = ?1 AND txid = ?2 AND action_index = ?3",
+                params![key_ref, candidate.txid.as_ref(), candidate.action_index],
+            )?;
+            return Ok(PaymentApplication::Applied);
+        }
         let birthday: u32 = conn.query_row(
             "SELECT birthday_height FROM accounts WHERE uuid = ?1",
             [account.0],

@@ -546,6 +546,10 @@ pub(crate) fn put_received_note<
         super::swap_receiving::validate_received_key(conn, params, shielded_pool, output)?;
     #[cfg(not(feature = "experimental-swap-receiving"))]
     let receiving_key_id: Option<i64> = None;
+    #[cfg(feature = "experimental-swap-receiving")]
+    if let (ShieldedPool::Ironwood, Some(nf)) = (shielded_pool, output.nullifier()) {
+        super::swap_receiving::adopt_found_note(conn, &nf.to_bytes(), tx_ref, output.index())?;
+    }
     if shielded_pool == ShieldedPool::Ironwood {
         use rusqlite::OptionalExtension;
         let stored_key: Option<i64> = conn

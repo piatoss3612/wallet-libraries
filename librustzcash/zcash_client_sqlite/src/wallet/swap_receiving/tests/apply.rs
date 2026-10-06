@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
+use zcash_primitives::transaction::TxId;
 
 /// Pays receive key 8 at the tip before registering it, so scanning misses the note,
 /// then watches the key from the next block and queues the payment. Also returns the
@@ -533,4 +534,101 @@ fn a_publication_short_of_the_target_waits() {
         ),
         Err(Error::SweepDeferred(SweepDeferral::TargetNotReached))
     ));
+}
+
+/// The transaction IDs of the wallet's Ironwood notes.
+fn note_txids(st: &State) -> Vec<TxId> {
+    let mut stmt = st
+        .wallet()
+        .conn()
+        .prepare(
+            "SELECT t.txid FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id ORDER BY n.id",
+        )
+        .unwrap();
+    stmt.query_map([], |r| Ok(TxId::from_bytes(r.get(0)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Whether the wallet stores a transaction with `txid`.
+fn has_transaction(st: &State, txid: TxId) -> bool {
+    st.wallet()
+        .conn()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM transactions WHERE txid = ?1)",
+            [txid.as_ref()],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn scanning_moves_a_mislabeled_import_to_its_transaction() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let id = KeyId::new(Purpose::Refund, 0);
+    let candidate = pay_candidate(&mut st, id);
+    let through = tip(&st);
+    let forged = PendingPayment {
+        txid: TxId::from_bytes([7; 32]),
+        ..candidate.clone()
+    };
+    let db = st.wallet_mut().db_mut();
+    let key = db
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, through.height + 1)
+        .unwrap();
+    assert_eq!(key.key_id(), id);
+    db.queue_swap_payment(account, id, &forged).unwrap();
+    assert_eq!(
+        db.apply_pending_swap_payment(
+            account,
+            id,
+            &forged,
+            through,
+            Some((through, &first_leaf_path()))
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    assert_eq!(note_txids(&st), vec![forged.txid]);
+
+    // Rescanning the payment's block with the key finds the same nullifier, which
+    // previously failed the scan on the unique constraint.
+    activate_key(&mut st, id, candidate.height);
+    st.scan_cached_blocks(candidate.height, 1);
+    assert_eq!(note_txids(&st), vec![candidate.txid]);
+    assert!(!has_transaction(&st, forged.txid));
+    assert_eq!(unspent_keys(&st, through.height), vec![Some(id)]);
+}
+
+#[test]
+fn a_mislabeled_answer_for_a_scanned_note_is_dropped() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let from = st.wallet().chain_height().unwrap().unwrap() + 1;
+    let key = st
+        .wallet_mut()
+        .db_mut()
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, from)
+        .unwrap()
+        .key_id();
+    let candidate = pay_candidate(&mut st, key);
+    assert_eq!(note_txids(&st), vec![candidate.txid]);
+    let through = tip(&st);
+    let forged = PendingPayment {
+        txid: TxId::from_bytes([7; 32]),
+        ..candidate
+    };
+    let db = st.wallet_mut().db_mut();
+    db.queue_swap_payment(account, key, &forged).unwrap();
+    assert_eq!(
+        db.apply_pending_swap_payment(account, key, &forged, through, None)
+            .unwrap(),
+        PaymentApplication::Applied
+    );
+    assert!(db.pending_swap_payments(account, key).unwrap().is_empty());
+    assert_eq!(note_txids(&st), vec![candidate.txid]);
+    assert!(!has_transaction(&st, forged.txid));
 }

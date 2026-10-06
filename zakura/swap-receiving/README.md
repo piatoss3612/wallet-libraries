@@ -88,10 +88,19 @@ leave the previous observation unchanged.
 on it has a conclusive terminal status (`FAILED` is not), mined receipts cover
 the expected amounts, and 24 hours have passed since the first terminal status.
 It also stops seven days after the latest quote deadline (or registration,
-without one), whatever the provider reports. Incoming keys this wallet issued
-stay active until paid and their reservation ends. Nothing closes unless the
-wallet is scanned to the tip the caller confirmed. No provider response credits
-a note, and a closed key keeps its notes.
+without one), whatever the provider reports, or 30 days after that while the
+provider promises ZEC the mined notes do not cover. Incoming keys this wallet
+issued stay active until paid and their reservation ends. Nothing closes unless
+the wallet is scanned to the tip the caller confirmed, and closing uses the
+earlier of the caller's clock and that tip's block time, so a clock that runs
+fast cannot end scanning early. No provider response credits a note, and a
+closed key keeps its notes.
+
+A refund key that closes with an inconclusive status keeps a provider check once
+a day for 30 days (`take_swap_refund_status_checks`), and the wallet keeps
+Ironwood spend evidence from the close meanwhile. If the provider then promises
+ZEC, the key is swept for the time it was closed and reopens, like a restored
+key, so a refund paid late is found without a seed restore.
 
 A recorded refund quote expects nothing until it is funded, so abandoned quotes
 do not hold a key open. A status for its deposit address, or its mined funding
@@ -99,15 +108,25 @@ memo, makes the swap's outcome decide instead.
 
 ## Derivation
 
-The HMAC key is the account's canonical 32-byte external `rivk`. The message is
-the one-byte label length, ASCII label, little-endian `u64` index, and
-little-endian `u32` retry counter. Labels are `swap-refund-v1` and `swap-receive-v1`.
-Network and pool identify stored keys but are not v1 derivation inputs.
+A swap key keeps the account's `ak` and `nk` and replaces its external `rivk`:
 
-Interpret HMAC-SHA-512 output as a little-endian integer and reduce modulo the
-Pallas scalar order. Keep the account's `ak` and `nk`, replace `rivk`, and accept
-the first valid FVK starting at retry zero. Parsing validates both external and
-internal incoming viewing keys. Exhaustion returns an error.
+```text
+rivk' = ToScalar(PRF^expand_rivk([0x85] || ak || nk || [purpose] || I2LEOSP_64(index)))
+```
+
+`PRF^expand` is BLAKE2b-512 personalized with `Zcash_ExpandSeed` over
+`rivk || input`, and `ToScalar` reduces its little-endian output modulo the Pallas
+scalar order. `purpose` is 0 for refund and 1 for incoming. This is ZIP 32's
+internal-key derivation (first byte `0x83`, no suffix) with a different first byte
+and a 9-byte suffix. The input fits one BLAKE2b block, as the internal key's does,
+so a ZIP 2005 recovery circuit could accept swap keys as one more `rivk` case
+with purpose and index as private inputs. Network and pool identify stored keys
+but are not derivation inputs.
+
+`0x85` was unused by the protocol specification and ZIPs when chosen. Reserve it
+with the ZIP editors before issuing live addresses. Parsing the result validates
+both external and internal incoming viewing keys; with negligible probability an
+index has no valid key, and derivation returns an error.
 
 ## Refund memo
 
@@ -136,8 +155,9 @@ From the workspace root:
 cargo test -p zakura-swap-receiving --locked
 ```
 
-The tests check independent Python HMAC/scalar vectors, purpose separation,
-boundary indices, retry behavior, authority substitutions, and malformed memos.
+The tests check independent Python BLAKE2b/scalar vectors, that the same
+construction with `0x83` reproduces zakura-orchard's internal key, purpose
+separation, boundary indices, authority substitutions, and malformed memos.
 Regenerate the vectors from this directory with
 `python3 tests/vectors/generate.py > tests/vectors/rivk.csv`.
 
@@ -210,7 +230,10 @@ note, memo, key and known spend atomically. Incomplete inputs preserve the queue
 without adding balance. A synthetic test spends a privately imported note into
 ordinary internal change. Transaction IDs and Action indices remain directory
 assertions, checked for conflicts with local data. The inclusion proof binds the
-commitment and position.
+commitment and position. When scanning or a full transaction finds the same
+nullifier, that transaction is authoritative: the note moves to it and the
+claimed transaction is removed, and a directory answer for a note already stored
+under another transaction is dropped.
 
 `maintain_swap_receiving` retains Ironwood spend evidence from the account's
 birthday, so a recovered note's spend state is checked locally rather than taken
@@ -239,11 +262,13 @@ are:
 A step that must wait for more scanning or a newer publication returns
 `Error::SweepDeferred`. After its sweep, a key scans from the next block: a refund key until its
 swap closes, and an incoming key never issued here for 24 hours after it was
-registered, catching a payout from a swap in flight at restore. Issuing a restored incoming key later starts at the
-tip without a rescan. Reorgs below a sweep reopen it. Until restore sweeps
-finish, new incoming reservations wait.
+registered, catching a payout from a swap in flight at restore. Issuing a closed
+key again starts scanning at the tip and queues another sweep for the time it
+was closed; that sweep does not hold up other reservations. Reorgs below a sweep
+reopen it. Until restore sweeps finish, new incoming reservations wait.
 
-Historical spend retention follows the earliest unfinished sweep or pending note.
+Historical spend retention follows the earliest unfinished sweep, pending note, or
+closed refund key's late watch.
 Missing spend evidence queues one coalesced replay of the public account recovery
 interval. A note before that interval stays explicitly blocked until the
 account's restore range is widened.
