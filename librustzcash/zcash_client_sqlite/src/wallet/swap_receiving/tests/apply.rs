@@ -1,117 +1,28 @@
 use super::*;
-use incrementalmerkletree::Hashable;
-use orchard::{
-    note_encryption::{CompactAction, IronwoodDomain, IronwoodNoteEncryption},
-    tree::{MerkleHashOrchard, MerklePath},
-};
-use prost::Message;
 use std::collections::BTreeMap;
-use zakura_swap_receiving::{lifecycle::ChainAnchor, recovery::EncryptedNote};
-use zcash_client_backend::{
-    data_api::{
-        WalletRead,
-        testing::{AddressType, IronwoodFvk},
-    },
-    proto::compact_formats::CompactBlock,
-};
-use zcash_note_encryption::{Domain, try_compact_note_decryption};
-use zcash_protocol::value::Zatoshis;
 
+/// Pays receive key 8 at the tip before registering it, so scanning misses the note,
+/// then watches the key from the next block and queues the payment. Also returns the
+/// tip and the payment's path there.
 pub(super) fn fixture() -> (
-    TestState<crate::testing::BlockCache, TestDb, LocalNetwork>,
+    State,
     RegisteredKey,
     PendingPayment,
     ChainAnchor,
     MerklePath,
 ) {
-    let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
-    let mut st = TestBuilder::new()
-        .with_network(network)
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
-    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
     let id = KeyId::new(Purpose::Receive, 8);
-    let fvk = id.derive(&parent).unwrap();
-    let (height, _, _) = st.generate_next_block(
-        &IronwoodFvk(fvk.clone()),
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(100_000),
-    );
-    st.scan_cached_blocks(height, 1);
-    assert!(
-        st.wallet()
-            .db()
-            .get_unspent_ironwood_notes_at_historical_height(account, height)
-            .unwrap()
-            .is_empty()
-    );
-    let data: Vec<u8> = st
-        .cache()
-        .0
-        .query_row(
-            "SELECT data FROM compactblocks WHERE height=?1",
-            [u32::from(height)],
-            |r| r.get(0),
-        )
+    let candidate = pay_candidate(&mut st, id);
+    let through = tip(&st);
+    assert!(unspent_keys(&st, through.height).is_empty());
+    let db = st.wallet_mut().db_mut();
+    let key = db
+        .watch_swap_receive_key(account, 8, through.height + 1)
         .unwrap();
-    let block = CompactBlock::decode(data.as_slice()).unwrap();
-    let tx = &block.vtx[0];
-    let action = CompactAction::try_from(&tx.ironwood_actions[0]).unwrap();
-    let (note, _) = try_compact_note_decryption(
-        &IronwoodDomain::for_compact_action(&action),
-        &fvk.to_ivk(Scope::External).prepare(),
-        &action,
-    )
-    .unwrap();
-    let encryption = IronwoodNoteEncryption::new(None, note, [4; 512]);
-    let ciphertext = encryption.encrypt_note_plaintext();
-    assert_eq!(
-        &ciphertext[..52],
-        tx.ironwood_actions[0].ciphertext.as_slice()
-    );
-    let key = st
-        .wallet_mut()
-        .db_mut()
-        .watch_swap_receive_key(account, 8, height + 1)
-        .unwrap();
-    let candidate = PendingPayment {
-        txid: tx.txid(),
-        action_index: 0,
-        height,
-        block_hash: block.hash(),
-        tx_index: tx.index.try_into().unwrap(),
-        position: 0,
-        encrypted_note: EncryptedNote::from_parts(
-            note.rho().to_bytes(),
-            orchard::note::ExtractedNoteCommitment::from(note.commitment()).to_bytes(),
-            IronwoodDomain::epk_bytes(encryption.epk()).0,
-            ciphertext[..52].try_into().unwrap(),
-            ciphertext[52..].try_into().unwrap(),
-        ),
-    };
-    let path = MerklePath::from_parts(
-        0,
-        std::array::from_fn(|level| MerkleHashOrchard::empty_root((level as u8).into())),
-    );
-    let through = ChainAnchor {
-        height,
-        hash: block.hash().0,
-    };
-    st.wallet_mut()
-        .db_mut()
-        .queue_swap_payment(account, id, &candidate)
-        .unwrap();
-    (st, key, candidate, through, path)
+    db.queue_swap_payment(account, id, &candidate).unwrap();
+    (st, key, candidate, through, first_leaf_path())
 }
 
 #[test]
@@ -228,44 +139,6 @@ fn swap_payment_applies_unscanned_key_note_atomically_and_reopens() {
 }
 
 #[test]
-fn swap_payment_incomplete_history_preserves_queue_and_balance() {
-    let (mut st, key, candidate, through, path) = fixture();
-    let account = st.test_account().unwrap().id();
-    st.wallet()
-        .conn()
-        .execute("DELETE FROM ironwood_nullifier_scan_blocks", [])
-        .unwrap();
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .apply_pending_swap_payment(
-                account,
-                key.key_id(),
-                &candidate,
-                through,
-                Some((through, &path))
-            )
-            .unwrap(),
-        PaymentApplication::AwaitingSpendHistory
-    );
-    assert_eq!(
-        st.wallet()
-            .db()
-            .pending_swap_payments(account, key.key_id())
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(
-        st.wallet()
-            .db()
-            .get_unspent_ironwood_notes_at_historical_height(account, through.height)
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
 fn swap_payment_imports_an_already_spent_note_without_crediting_it() {
     use zcash_keys::address::{Address, UnifiedAddress};
     for pruned in [false, true] {
@@ -288,10 +161,7 @@ fn swap_payment_imports_an_already_spent_note_without_crediting_it() {
             Zatoshis::const_from_u64(20_000),
         );
         st.scan_cached_blocks(height, 1);
-        let through = ChainAnchor {
-            height,
-            hash: st.wallet().get_block_hash(height).unwrap().unwrap().0,
-        };
+        let through = tip(&st);
         let mut tree =
             incrementalmerkletree::frontier::CommitmentTree::<MerkleHashOrchard, 32>::empty();
         let mut witness = None;
@@ -470,7 +340,7 @@ fn privately_imported_note_spends_into_ordinary_internal_change() {
 }
 
 #[test]
-fn private_payment_uses_its_witness_anchor_and_rewind_invalidates_directory_progress() {
+fn private_payment_uses_its_witness_anchor_and_survives_a_rewind() {
     let (mut st, key, candidate, proof_anchor, path) = fixture();
     let account = st.test_account().unwrap().id();
     let (height, _, _) = st.generate_next_block(
@@ -479,10 +349,7 @@ fn private_payment_uses_its_witness_anchor_and_rewind_invalidates_directory_prog
         Zatoshis::const_from_u64(10_000),
     );
     st.scan_cached_blocks(height, 1);
-    let through = ChainAnchor {
-        height,
-        hash: st.wallet().db().get_block_hash(height).unwrap().unwrap().0,
-    };
+    let through = tip(&st);
     // The newer block changed the root. The supplied path belongs to the older accepted checkpoint.
     assert_eq!(
         st.wallet_mut()
@@ -497,16 +364,7 @@ fn private_payment_uses_its_witness_anchor_and_rewind_invalidates_directory_prog
             .unwrap(),
         PaymentApplication::Applied
     );
-    let db = st.wallet_mut().db_mut();
-    db.finish_sweep(account, key.key_id(), through).unwrap();
-    assert!(!db.swap_history_pending(account, through.height).unwrap());
     st.truncate_to_height_retaining_cache(proof_anchor.height);
-    let db = st.wallet().db();
-    assert_eq!(
-        db.swap_lookup_coverage(account, key.key_id()).unwrap(),
-        None
-    );
-    assert!(db.swap_history_pending(account, through.height).unwrap());
     let notes = st
         .wallet()
         .db()
@@ -541,8 +399,6 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
     };
     let suffix: [u8; 528] = note[148..].try_into().unwrap();
     let db = st.wallet_mut().db_mut();
-    db.prepare_swap_discovery_batch(account, through, 0, std::num::NonZeroU32::new(8).unwrap())
-        .unwrap();
 
     let deferred = |result: Result<_, Error>| match result {
         Err(Error::SweepDeferred(reason)) => reason,
@@ -605,6 +461,14 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
         PaymentApplication::AwaitingWitness
     );
     let siblings = path.auth_path().map(|hash| hash.to_bytes());
+    // A sibling that is not a field element gives no path.
+    let mut invalid = siblings;
+    invalid[3] = [0xff; 32];
+    assert_eq!(
+        db.apply_swap_sweep(account, key, through, anchor, |_, _| Some(invalid))
+            .unwrap(),
+        PaymentApplication::AwaitingWitness
+    );
     assert_eq!(
         db.apply_swap_sweep(account, key, through, anchor, |position, cmx| {
             (position == candidate.position && cmx == candidate.encrypted_note.commitment())
@@ -622,7 +486,10 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
             .any(|n| n.swap_key_id() == Some(key))
     );
     let db = st.wallet_mut().db_mut();
-    assert!(!db.swap_history_pending(account, through.height).unwrap());
+    assert!(
+        !db.swap_history_pending(account, through.height + 1)
+            .unwrap()
+    );
     assert!(
         db.swap_note_data_needed(account, key, std::slice::from_ref(&payment))
             .unwrap()

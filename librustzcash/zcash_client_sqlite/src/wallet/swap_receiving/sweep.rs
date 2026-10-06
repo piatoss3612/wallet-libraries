@@ -12,7 +12,7 @@ use std::{
 };
 
 use orchard::tree::{MerkleHashOrchard, MerklePath};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use zakura_swap_receiving::{lifecycle::ChainAnchor, recovery::EncryptedNote};
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -103,17 +103,21 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         payments: &[DirectoryPayment],
     ) -> Result<Vec<u64>, Error> {
         let (_, missing) = self.sort_directory_payments(account, key, payments)?;
-        Ok(missing.iter().map(|p| p.position).collect())
+        Ok(missing.iter().map(|(p, _)| p.position).collect())
     }
 
     /// Splits `payments` into the queued candidates they repeat and payments not yet
-    /// known, skipping imported ones.
+    /// known, with their positions, skipping imported ones. A payment that contradicts
+    /// an imported output is an error rather than another payment.
+    #[allow(clippy::type_complexity)]
     fn sort_directory_payments<'a>(
         &self,
         account: AccountUuid,
         key: KeyId,
         payments: &'a [DirectoryPayment],
-    ) -> Result<(Vec<PendingPayment>, Vec<&'a DirectoryPayment>), Error> {
+    ) -> Result<(Vec<PendingPayment>, Vec<(&'a DirectoryPayment, u32)>), Error> {
+        let conn = self.conn.borrow();
+        let id = key_ref(conn, account, key)?;
         let queued = self.pending_swap_payments(account, key)?;
         let mut kept = Vec::new();
         let mut missing = Vec::new();
@@ -123,15 +127,25 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             let txid = TxId::from_bytes(payment.txid);
             let block_hash = BlockHash(payment.block_hash);
             let height = BlockHeight::from(payment.height);
-            if self.has_swap_payment(
-                account,
-                key,
-                txid,
-                payment.action_index,
-                height,
-                block_hash,
-                position,
-            )? {
+            let imported: Option<(Option<i64>, u32, u32)> = conn
+                .query_row(
+                    "SELECT n.receiving_key_id, t.mined_height, n.commitment_tree_position
+                     FROM ironwood_received_notes n
+                     JOIN transactions t ON t.id_tx = n.transaction_id
+                     WHERE t.txid = ?1 AND n.action_index = ?2 AND t.mined_height IS NOT NULL
+                       AND n.commitment_tree_position IS NOT NULL",
+                    params![txid.as_ref(), payment.action_index],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            if let Some((owner, mined, imported_at)) = imported {
+                if owner != Some(id)
+                    || mined != payment.height
+                    || imported_at != position
+                    || wallet::get_block_hash(conn, height)? != Some(block_hash)
+                {
+                    return Err(corrupt("conflicting recovered payment identity"));
+                }
                 continue;
             }
             match queued
@@ -152,7 +166,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                     kept.push(old.clone())
                 }
                 Some(_) => return Err(corrupt("directory payment conflicts with a queued one")),
-                None => missing.push(payment),
+                None => missing.push((payment, position)),
             }
         }
         Ok((kept, missing))
@@ -188,7 +202,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 return Err(Error::SweepDeferred(SweepDeferral::TargetNotReached));
             }
             let (mut candidates, missing) = db.sort_directory_payments(account, key, payments)?;
-            for payment in missing {
+            for (payment, position) in missing {
                 let suffix = note_data
                     .get(&payment.position)
                     .ok_or_else(|| corrupt("missing note data for a directory payment"))?;
@@ -201,10 +215,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                         .tx_index
                         .try_into()
                         .map_err(|_| corrupt("directory payment index out of range"))?,
-                    position: payment
-                        .position
-                        .try_into()
-                        .map_err(|_| corrupt("directory payment position out of range"))?,
+                    position,
                     encrypted_note: EncryptedNote::from_parts(
                         payment.action_nullifier,
                         payment.cmx,

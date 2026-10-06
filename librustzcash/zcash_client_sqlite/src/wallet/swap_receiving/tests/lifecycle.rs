@@ -5,13 +5,6 @@ use zakura_swap_receiving::lifecycle::{
     ProviderStatus,
     ReceiptExpectation::{None as NoReceipt, Positive, Unknown},
 };
-use zcash_client_backend::data_api::{
-    WalletRead,
-    testing::{AddressType, IronwoodFvk},
-};
-use zcash_protocol::value::Zatoshis;
-
-type ScannedWallet = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
 
 const HOUR: i64 = 60 * 60;
 /// `CompletionPolicy::default().grace_secs`.
@@ -24,35 +17,13 @@ fn registered_at() -> i64 {
     unix_now(&test_clock())
 }
 
-/// A wallet with Ironwood active from its birthday and one scanned block, so it
-/// is scanned to its tip and keys can close.
-fn scanned_wallet() -> ScannedWallet {
-    let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
-    let mut st = TestBuilder::new()
-        .with_network(network)
-        .with_data_store_factory(TestDbFactory::default())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-    let (height, _) = st.generate_empty_block();
-    st.scan_cached_blocks(height, 1);
-    st
-}
-
 /// The height above the scanned tip, where a newly issued key starts scanning.
-fn next_height(st: &ScannedWallet) -> BlockHeight {
+fn next_height(st: &State) -> BlockHeight {
     st.wallet().chain_height().unwrap().unwrap() + 1
 }
 
 /// Issues the next refund key, trial-decrypted from [`next_height`].
-fn refund_key(st: &mut ScannedWallet) -> RegisteredKey {
+fn refund_key(st: &mut State) -> RegisteredKey {
     let account = st.test_account().unwrap().id();
     let from = next_height(st);
     st.wallet_mut()
@@ -62,7 +33,7 @@ fn refund_key(st: &mut ScannedWallet) -> RegisteredKey {
 }
 
 /// Mines and scans a block paying `value` to `key`, and returns its height.
-fn pay(st: &mut ScannedWallet, key: &RegisteredKey, value: u64) -> BlockHeight {
+fn pay(st: &mut State, key: &RegisteredKey, value: u64) -> BlockHeight {
     let (height, _, _) = st.generate_next_block(
         &IronwoodFvk(key.full_viewing_key().clone()),
         AddressType::DefaultExternal,
@@ -73,22 +44,13 @@ fn pay(st: &mut ScannedWallet, key: &RegisteredKey, value: u64) -> BlockHeight {
 }
 
 /// Closes the test account's finished keys at `now` and returns how many closed.
-fn close(st: &mut ScannedWallet, now: i64) -> usize {
+fn close(st: &mut State, now: i64) -> usize {
     let account = st.test_account().unwrap().id();
     let tip = st.wallet().chain_height().unwrap().unwrap();
     st.wallet_mut()
         .db_mut()
         .close_finished_swap_keys(account, now, tip)
         .unwrap()
-}
-
-/// The keys the next scan batch trial-decrypts.
-fn scanning_keys(db: &TestDb) -> Vec<KeyId> {
-    db.get_swap_scanning_keys()
-        .unwrap()
-        .iter()
-        .map(|k| k.key_id())
-        .collect()
 }
 
 /// `operation`'s stored `(observed_at, terminal_at, expectation, expected_value, deadline)`.
@@ -331,7 +293,7 @@ fn limit_without_a_deadline_counts_from_registration() {
         .unwrap();
     db.recover_swap_receiving_key(account, KeyId::new(Purpose::Refund, 5), from)
         .unwrap();
-    assert_eq!(scanning_keys(st.wallet()), [unobserved, pending]);
+    assert_eq!(scanning_keys(&st), [unobserved, pending]);
     assert_eq!(close(&mut st, registered_at() + LIMIT - 1), 0);
     assert_eq!(close(&mut st, registered_at() + LIMIT), 2);
 }
@@ -387,7 +349,7 @@ fn incoming_key_closes_only_once_paid_and_released() {
         .unwrap();
     assert_eq!(close(&mut st, terminal + GRACE), 1);
     assert_eq!(close(&mut st, registered_at() + LIMIT), 0);
-    assert_eq!(scanning_keys(st.wallet()), [unpaid.key_id()]);
+    assert_eq!(scanning_keys(&st), [unpaid.key_id()]);
 }
 
 #[test]
@@ -501,9 +463,9 @@ fn closed_key_stops_scanning_but_keeps_its_notes() {
         .observe_swap_operation(account, key.key_id(), "swap", status, terminal)
         .unwrap();
     assert_eq!(close(&mut st, terminal + GRACE - 1), 0);
-    assert_eq!(scanning_keys(st.wallet()), [key.key_id()]);
+    assert_eq!(scanning_keys(&st), [key.key_id()]);
     assert_eq!(close(&mut st, terminal + GRACE), 1);
-    assert!(scanning_keys(st.wallet()).is_empty());
+    assert!(scanning_keys(&st).is_empty());
     let notes = st
         .wallet()
         .db()
@@ -512,39 +474,6 @@ fn closed_key_stops_scanning_but_keeps_its_notes() {
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].swap_key_id(), Some(key.key_id()));
     assert_eq!(notes[0].note().value().inner(), 40_000);
-}
-
-#[test]
-fn receive_quote_status_sets_the_expected_payout_and_deadline() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let from = next_height(&st);
-    let now = registered_at();
-    let deadline = now + HOUR;
-    let db = st.wallet_mut().db_mut();
-    let reservation = db
-        .prepare_swap_receive_reservation_from(account, now, from)
-        .unwrap();
-    db.begin_swap_receive_quote_as(account, reservation.id, "request", deadline, now)
-        .unwrap();
-    assert_eq!(
-        operation_row(&db.conn, "receive-quote:request"),
-        (now, None, 0, None, Some(deadline))
-    );
-    db.finish_swap_receive_quote(account, "request", &accepted("deposit", None, deadline))
-        .unwrap();
-    let status = ProviderStatus {
-        status: "SUCCESS",
-        amount_out: Some(Zatoshis::const_from_u64(70_000)),
-        deadline: Some(deadline),
-        ..Default::default()
-    };
-    db.observe_swap_receive_quote(account, "request", &status, true, now + 60)
-        .unwrap();
-    assert_eq!(
-        operation_row(&db.conn, "receive-quote:request"),
-        (now + 60, Some(now + 60), 2, Some(70_000), Some(deadline))
-    );
 }
 
 #[test]

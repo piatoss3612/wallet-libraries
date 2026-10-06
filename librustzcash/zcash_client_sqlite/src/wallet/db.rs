@@ -1994,7 +1994,6 @@ pub(super) const TABLE_IRONWOOD_SWAP_PAYMENT_RECOVERY: &str = "CREATE TABLE iron
                 PRIMARY KEY (txid, action_index)
             )";
 
-#[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_OPERATIONS: &str = "CREATE TABLE ironwood_swap_operations (
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 operation_id TEXT NOT NULL,
@@ -2006,7 +2005,6 @@ pub(super) const TABLE_IRONWOOD_SWAP_OPERATIONS: &str = "CREATE TABLE ironwood_s
                 PRIMARY KEY (receiving_key_id, operation_id)
             )";
 
-#[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_SWEEPS: &str = "CREATE TABLE ironwood_swap_sweeps (
                 receiving_key_id INTEGER PRIMARY KEY REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 target_height INTEGER CHECK (target_height BETWEEN 0 AND 4294967295),
@@ -2018,7 +2016,6 @@ pub(super) const TABLE_IRONWOOD_SWAP_SWEEPS: &str = "CREATE TABLE ironwood_swap_
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295)
             )";
 
-#[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_SPEND_RETENTION: &str =
     "CREATE TABLE ironwood_swap_spend_retention (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
@@ -2026,26 +2023,22 @@ pub(super) const TABLE_IRONWOOD_SWAP_SPEND_RETENTION: &str =
                     CHECK (nullifier_retention_height BETWEEN 0 AND 4294967295)
             )";
 
-#[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_SPEND_REPLAY: &str =
     "CREATE TABLE ironwood_swap_spend_replay (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 through_height INTEGER NOT NULL
             )";
 
-#[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_REFUND_MEMO_PROGRESS: &str = "CREATE TABLE ironwood_swap_refund_memo_progress (
                 note_id INTEGER PRIMARY KEY REFERENCES ironwood_received_notes(id) ON DELETE CASCADE,
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 funding_height INTEGER NOT NULL CHECK (funding_height BETWEEN 0 AND 4294967295)
             )";
 
-#[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_USED: &str = "CREATE TABLE ironwood_swap_receive_used (
                 receiving_key_id INTEGER PRIMARY KEY REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE
             )";
 
-#[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_RESERVATIONS: &str = "CREATE TABLE ironwood_swap_receive_reservations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
@@ -2054,7 +2047,6 @@ pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_RESERVATIONS: &str = "CREATE TABLE 
                 closed_at INTEGER
             )";
 
-#[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_QUOTES: &str = "CREATE TABLE ironwood_swap_receive_quotes (
                 request_id TEXT PRIMARY KEY,
                 reservation_id INTEGER NOT NULL REFERENCES ironwood_swap_receive_reservations(id) ON DELETE CASCADE,
@@ -2068,7 +2060,6 @@ pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_QUOTES: &str = "CREATE TABLE ironwo
                 rejected INTEGER NOT NULL DEFAULT 0 CHECK (rejected IN (0, 1))
             )";
 
-#[cfg(test)]
 pub(super) const TABLE_IRONWOOD_SWAP_REFUND_WATCHES: &str = "CREATE TABLE ironwood_swap_refund_watches (
                 receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
                 operation_id TEXT NOT NULL,
@@ -2076,35 +2067,28 @@ pub(super) const TABLE_IRONWOOD_SWAP_REFUND_WATCHES: &str = "CREATE TABLE ironwo
                 PRIMARY KEY (receiving_key_id, operation_id)
             )";
 
-#[cfg(test)]
 pub(super) const INDEX_IRONWOOD_RECEIVING_KEYS_ACCOUNT_RECEIVER: &str =
     "CREATE INDEX ironwood_receiving_keys_account_receiver
                 ON ironwood_receiving_keys(account_id, receiver)";
 
-#[cfg(test)]
 pub(super) const INDEX_IRONWOOD_RECEIVING_KEYS_SCANNING: &str =
     "CREATE INDEX ironwood_receiving_keys_scanning
                 ON ironwood_receiving_keys(closed_at, active_from)";
 
-#[cfg(test)]
 pub(super) const INDEX_IRONWOOD_SWAP_SWEEPS_DUE: &str =
     "CREATE INDEX ironwood_swap_sweeps_due ON ironwood_swap_sweeps(done_height, next_attempt_at)";
 
-#[cfg(test)]
 pub(super) const INDEX_IRONWOOD_SWAP_REFUND_MEMO_PROGRESS_KEY: &str =
     "CREATE INDEX ironwood_swap_refund_memo_progress_key
                 ON ironwood_swap_refund_memo_progress(receiving_key_id)";
 
-#[cfg(test)]
 pub(super) const INDEX_ONE_OPEN_SWAP_RECEIVE_RESERVATION: &str =
     "CREATE UNIQUE INDEX one_open_swap_receive_reservation
                 ON ironwood_swap_receive_reservations(receiving_key_id) WHERE closed_at IS NULL";
 
-#[cfg(test)]
 pub(super) const INDEX_SWAP_RECEIVE_QUOTE_OPERATION: &str =
     "CREATE INDEX swap_receive_quote_operation ON ironwood_swap_receive_quotes(operation_id)";
 
-#[cfg(test)]
 pub(super) const TRIGGER_IRONWOOD_SWAP_REFUND_MEMO_CHANGED: &str =
     "CREATE TRIGGER ironwood_swap_refund_memo_changed
             AFTER UPDATE OF memo, account_id, recipient_key_scope, receiving_key_id, transaction_id
@@ -2117,14 +2101,12 @@ pub(super) const TRIGGER_IRONWOOD_SWAP_REFUND_MEMO_CHANGED: &str =
                 DELETE FROM ironwood_swap_refund_memo_progress WHERE note_id = NEW.id;
             END";
 
-#[cfg(test)]
 pub(super) const TRIGGER_REMEMBER_SWAP_RECEIVE_INSERT: &str =
     "CREATE TRIGGER remember_swap_receive_insert AFTER INSERT ON ironwood_received_notes
                 WHEN NEW.receiving_key_id IS NOT NULL BEGIN
                 INSERT OR IGNORE INTO ironwood_swap_receive_used VALUES (NEW.receiving_key_id);
             END";
 
-#[cfg(test)]
 pub(super) const TRIGGER_REMEMBER_SWAP_RECEIVE_UPDATE: &str = "CREATE TRIGGER remember_swap_receive_update AFTER UPDATE OF receiving_key_id ON ironwood_received_notes
                 WHEN NEW.receiving_key_id IS NOT NULL BEGIN
                 INSERT OR IGNORE INTO ironwood_swap_receive_used VALUES (NEW.receiving_key_id);

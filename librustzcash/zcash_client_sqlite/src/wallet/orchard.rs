@@ -133,7 +133,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
             })?;
             #[cfg(feature = "experimental-swap-receiving")]
             let swap_key = receiving_key_id
-                .map(|id| super::swap_receiving::note_key(conn, params, id, fvk))
+                .map(|id| super::swap_receiving::note_key(conn, id, fvk))
                 .transpose()?;
             #[cfg(feature = "experimental-swap-receiving")]
             let fvk = swap_key.as_ref().map_or(fvk, |(_, fvk)| fvk);
@@ -624,19 +624,18 @@ pub(crate) fn put_received_note<
         .query_row(sql_args, |row| row.get::<_, i64>(0))
         .map_err(SqliteClientError::from)?;
 
-    if shielded_pool == ShieldedPool::Ironwood {
-        if let Some(key_id) = receiving_key_id {
-            conn.execute(
-                "UPDATE ironwood_received_notes SET receiving_key_id = ?1 WHERE id = ?2",
-                rusqlite::params![key_id, received_note_id],
-            )?;
-            // A decrypted payment makes a lookahead index used. Commit this together
-            // with the note so a restart cannot allocate the paid address again.
-            conn.execute(
-                "UPDATE ironwood_receiving_keys SET advances_allocation = 1 WHERE id = ?1",
-                [key_id],
-            )?;
-        }
+    // Only validated Ironwood swap outputs carry a key.
+    if let Some(key_id) = receiving_key_id {
+        conn.execute(
+            "UPDATE ironwood_received_notes SET receiving_key_id = ?1 WHERE id = ?2",
+            rusqlite::params![key_id, received_note_id],
+        )?;
+        // A decrypted payment makes a lookahead index used. Commit this together
+        // with the note so a restart cannot allocate the paid address again.
+        conn.execute(
+            "UPDATE ironwood_receiving_keys SET advances_allocation = 1 WHERE id = ?1",
+            [key_id],
+        )?;
     }
     super::ironwood_hooks::put_received_note_encryption_fields(
         conn,
@@ -1882,8 +1881,8 @@ pub(crate) mod tests {
             }
         }
 
-        /// A build without the POC must not silently reconstruct a swap note with
-        /// the account's ordinary FVK after opening a POC-created database.
+        /// A build without swap receiving must not silently reconstruct a swap note
+        /// with the account's ordinary FVK after opening a database that has one.
         #[cfg(not(feature = "experimental-swap-receiving"))]
         #[test]
         fn swap_receiving_notes_are_unavailable_without_feature() {

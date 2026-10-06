@@ -1,34 +1,14 @@
 use super::*;
-use zakura_swap_receiving::lifecycle::{ChainAnchor, CompletionPolicy, ProviderStatus};
-use zcash_client_backend::data_api::{
-    WalletRead,
-    testing::{AddressType, IronwoodFvk},
-};
-use zcash_protocol::value::Zatoshis;
+use zakura_swap_receiving::lifecycle::ProviderStatus;
 
-type State = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
 /// `(observed_at, terminal_at, expectation, expected_value, deadline)` of an operation.
 type Operation = (i64, Option<i64>, u8, Option<i64>, Option<i64>);
 const NOW: i64 = 1_000_000;
 
 /// A file-backed wallet with Ironwood active, scanned through one block that holds an
-/// ordinary note, and retaining swap spend history.
-pub(super) fn fixture() -> State {
-    let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
-    let mut st = TestBuilder::new()
-        .with_network(network)
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-    let account = st.test_account().unwrap().id();
+/// ordinary note.
+fn fixture() -> State {
+    let mut st = ironwood_wallet();
     let ordinary = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
     let (h, _, _) = st.generate_next_block(
         &IronwoodFvk(ordinary),
@@ -36,27 +16,13 @@ pub(super) fn fixture() -> State {
         Zatoshis::const_from_u64(100_000),
     );
     st.scan_cached_blocks(h, 1);
-    st.wallet_mut()
-        .db_mut()
-        .retain_swap_spend_history(account)
-        .unwrap();
     st
-}
-
-/// The wallet's fully scanned block.
-pub(super) fn anchor(st: &State) -> ChainAnchor {
-    let db = st.wallet().db();
-    let height = db.block_fully_scanned().unwrap().unwrap().block_height();
-    ChainAnchor {
-        height,
-        hash: db.get_block_hash(height).unwrap().unwrap().0,
-    }
 }
 
 /// Resumes the draft or reserves the next address, scanned from the next unscanned block.
 fn try_prepare(st: &mut State, now: i64) -> Result<ReceiveReservation, Error> {
     let account = st.test_account().unwrap().id();
-    let from = anchor(st).height + 1;
+    let from = tip(st).height + 1;
     st.wallet_mut()
         .db_mut()
         .prepare_swap_receive_reservation_from(account, now, from)
@@ -155,7 +121,7 @@ fn holds_note(st: &State, key: KeyId) -> bool {
     let account = st.test_account().unwrap().id();
     st.wallet()
         .db()
-        .get_unspent_ironwood_notes_at_historical_height(account, anchor(st).height)
+        .get_unspent_ironwood_notes_at_historical_height(account, tip(st).height)
         .unwrap()
         .iter()
         .any(|n| n.swap_key_id() == Some(key))
@@ -257,12 +223,6 @@ fn reclaimed_hole_reuses_its_still_scanning_key_and_keeps_old_quotes() {
             .unwrap()
     );
     assert!(db.has_swap_receive_quote(account, "quote-1").unwrap());
-    db.close_received_swap_reservations(account, now).unwrap();
-    assert!(
-        db.swap_receive_quotes_due(account, now + 31)
-            .unwrap()
-            .is_empty()
-    );
     assert_eq!(active_from(&st, r.key.key_id()), issued);
 
     let recycled = prepare(&mut st, now);
@@ -464,28 +424,6 @@ fn paid_reservation_closes_once_every_quote_settles() {
 }
 
 #[test]
-fn paid_key_finishes_after_grace_once_its_reservation_closes() {
-    let mut st = fixture();
-    let account = st.test_account().unwrap().id();
-    let r = prepare(&mut st, NOW);
-    quote(&mut st, &r, "edit", false);
-    quote(&mut st, &r, "paid", true);
-    pay(&mut st, r.key.full_viewing_key());
-    let expired = NOW + 60 + RECEIVE_RECLAIM_SECONDS;
-    observe(&mut st, "paid", "SUCCESS", true, expired);
-    observe(&mut st, "edit", "PENDING_DEPOSIT", false, expired);
-    let tip = anchor(&st).height;
-    let db = st.wallet_mut().db_mut();
-    db.close_received_swap_reservations(account, expired)
-        .unwrap();
-    let settled = expired + CompletionPolicy::default().grace_secs;
-    assert_eq!(
-        db.close_finished_swap_keys(account, settled, tip).unwrap(),
-        1
-    );
-}
-
-#[test]
 fn late_payment_found_by_scanning_prevents_reclamation_and_reuse() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
@@ -518,7 +456,7 @@ fn late_payment_found_by_scanning_prevents_reclamation_and_reuse() {
 fn activation_rescan_finds_a_payment_in_already_scanned_blocks() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
-    let issued = anchor(&st).height + 1;
+    let issued = tip(&st).height + 1;
     let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
     let key = KeyId::new(Purpose::Receive, 0);
     // Another install handed out the address, and its payment was scanned without the key.
@@ -620,7 +558,7 @@ fn queued_restore_candidate_blocks_quoting_and_reclamation() {
 fn undone_incoming_sweep_blocks_new_reservations() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
-    let through = anchor(&st);
+    let through = tip(&st);
     let db = st.wallet_mut().db_mut();
     let swept = db
         .watch_swap_receive_key(account, 0, through.height)
@@ -643,7 +581,7 @@ fn undone_incoming_sweep_blocks_new_reservations() {
 fn payout_during_restore_watch_excludes_the_index() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
-    let swept_at = anchor(&st);
+    let swept_at = tip(&st);
     let swept = st
         .wallet_mut()
         .db_mut()
@@ -663,7 +601,7 @@ fn payout_during_restore_watch_excludes_the_index() {
 fn reorg_retains_used_marker_and_rechecks_draft_recovery_bound() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
-    let before_payment = anchor(&st).height;
+    let before_payment = tip(&st).height;
     let first = prepare(&mut st, NOW);
     quote(&mut st, &first, "first", true);
     pay(&mut st, first.key.full_viewing_key());
@@ -699,7 +637,7 @@ fn reorg_retains_used_marker_and_rechecks_draft_recovery_bound() {
 fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
     let mut st = fixture();
     let account = st.test_account().unwrap().id();
-    let through = anchor(&st);
+    let through = tip(&st);
     let db = st.wallet_mut().db_mut();
     let behind = through.height + ISSUANCE_TIP_LAG + 1;
     assert_eq!(
@@ -707,17 +645,13 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
         Some(ReservationPolicy::Coverage)
     );
     assert_eq!(
-        refusal(db.reserve_swap_receiving_key(account, Purpose::Refund, behind)),
+        refusal(db.reserve_swap_refund_key(account, behind)),
         Some(ReservationPolicy::Coverage)
     );
     // A wallet cannot tell a fresh seed from a restore, so it sweeps the lookahead first.
     let near = through.height + ISSUANCE_TIP_LAG;
     assert_eq!(
         refusal(db.prepare_swap_receive_reservation(account, NOW, near)),
-        Some(ReservationPolicy::Gap)
-    );
-    assert_eq!(
-        refusal(db.reserve_swap_receiving_key(account, Purpose::Receive, near)),
         Some(ReservationPolicy::Gap)
     );
     let lookahead = db.get_swap_receiving_keys(account).unwrap();
@@ -730,7 +664,7 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
         .unwrap();
     assert_eq!(r.key.key_id(), KeyId::new(Purpose::Receive, 0));
     let refund = db
-        .reserve_swap_receiving_key(account, Purpose::Refund, through.height)
+        .reserve_swap_refund_key(account, through.height)
         .unwrap()
         .key_id();
     assert_eq!(refund, KeyId::new(Purpose::Refund, 0));

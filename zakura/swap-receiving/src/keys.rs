@@ -40,9 +40,20 @@ impl KeyId {
         self.index
     }
 
-    /// Reconstructs this key from the account's external FVK.
+    /// Derives this key's v1 FVK from the account's **external** FVK.
+    ///
+    /// Use external diversifier index zero for the swap receiver. The account FVK
+    /// is sufficient; this never needs a spending key. Network and pool belong to
+    /// the caller's key identity, but are not inputs to the v1 KDF. The caller must
+    /// reserve the index durably before exposing its address.
     pub fn derive(self, account: &FullViewingKey) -> Result<FullViewingKey, DerivationError> {
-        derive_full_viewing_key(account, self.purpose, self.index)
+        derive_with(
+            account,
+            self.purpose,
+            self.index,
+            u32::MAX,
+            FullViewingKey::from_bytes,
+        )
     }
 }
 
@@ -66,26 +77,6 @@ impl core::fmt::Display for DerivationError {
 }
 
 impl std::error::Error for DerivationError {}
-
-/// Derives a v1 FVK from the account's **external** FVK, purpose, and index.
-///
-/// Use external diversifier index zero for the swap receiver. The account FVK
-/// is sufficient; this function never needs a spending key. Network and pool
-/// belong to the caller's key identity, but are not inputs to the v1 KDF.
-/// The caller must reserve the index durably before exposing its address.
-pub fn derive_full_viewing_key(
-    account: &FullViewingKey,
-    purpose: Purpose,
-    index: u64,
-) -> Result<FullViewingKey, DerivationError> {
-    derive_with(
-        account,
-        purpose,
-        index,
-        u32::MAX,
-        FullViewingKey::from_bytes,
-    )
-}
 
 fn derive_with<T>(
     account: &FullViewingKey,

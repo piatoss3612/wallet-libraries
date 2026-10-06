@@ -40,54 +40,37 @@ workspace.
   facts atomically, and promotion refuses a transfer that introduces missing coverage.
 
 ### Added
-- Direct swap receiving-key lookups by identity and receiver. Reservation lookup
-  reconstructs only its key, and scanning reuses that validated derivation.
-- Restore sweeps: one receiver-directory pass for each swap key recovered from
-  the seed, with metadata-only work selection, atomic candidate queues, persisted
-  backoff and a fixed target. After its sweep, a refund key is scanned from the
-  next block until it closes, and an unpaid incoming key for 24 hours. Covered
-  spend history can be released independently of provider status.
-- `record_swap_observation` and `close_finished_swap_keys`. Swap keys the wallet
-  issues are trial-decrypted until their swap closes: 24 hours after the final
-  provider status once the expected receipts are mined, or 7 days after the quote
-  deadline. An inconclusive status such as `FAILED` closes a key only by that
-  limit. Keys close only while the wallet is scanned to the chain tip.
-- Typed receive-reservation policy errors replace message-prefix classification.
-- `maintain_swap_receiving` runs swap recovery maintenance at each sync start and
-  tip in one call, using the library's incoming gap limit.
-- Outgoing swap funding helpers: `record_swap_refund_quote` binds a quote's
-  deposit address to its reserved refund key, `swap_funding_memo` requires that
-  record, and `verify_swap_funding_proposal` checks the single-transaction shape
-  that refund recovery needs. A recorded quote expects nothing until its funding
-  is observed or mined, so abandoned quotes do not keep a key scanning.
-- `reap_swap_receive_reservations` closes settled paid reservations and reclaims
-  abandoned ones. The individual reclaim helpers are no longer public.
-- Swap address issuance takes the latest network tip instead of a scan start. It
-  requires scanning within `ISSUANCE_TIP_LAG` blocks of the tip, starts the key at
-  the first unscanned block, recovers funding memos before a refund reservation,
-  and keeps the incoming lookahead before an incoming one.
-- `close_finished_swap_keys` takes the tip the caller confirmed with the network,
-  recovers funding memos first, and settles no refund key while a funding memo
-  is missing.
-- `begin_swap_receive_quote` takes the requested deposit deadline. An unknown
-  quote outcome now holds its reservation only until that deadline is 48 hours
-  past. `start_swap_receive_quote` matches the deposit memo as well as the address.
-- `finish_swap_nullifier_recovery` no longer takes a lookahead, and
-  `maintain_swap_receive_lookahead` is no longer public.
-- Funding-memo recovery no longer fails on a record it cannot read or whose raw
-  transaction is missing. Such records stay unprocessed, and refund issuance waits
-  for them, with `ReservationPolicy::Unreadable` for an unreadable one. A funding
-  transaction without exactly one transparent output restores its refund key
-  without a provider watch, so `RecoveredRefund::deposit_address` is optional.
-- The incoming quote lifecycle is `begin_swap_receive_quote`, which returns the
-  request identity, `finish_swap_receive_quote` with a `QuoteOutcome`, and
-  `start_swap_receive_quote`, which returns the `ReceiveDeposit` to show. These
-  replace `record_swap_receive_quote` and `reject_swap_receive_quote`.
-- Restore sweep steps: `swap_publication_anchor`, `swap_note_data_needed`,
-  `queue_swap_directory_lookup` and `apply_swap_sweep` take an app's directory
-  and note-data lookups as plain data. A step that must wait returns
-  `Error::SweepDeferred`. `begin_swap_discovery_attempt` takes the publication
-  anchor and defers a publication short of the sweep's target before any lookup.
+- Experimental swap receiving, behind the `experimental-swap-receiving` feature:
+  per-swap Ironwood refund and incoming addresses derived from the account viewing key
+  with `zakura-swap-receiving`, recoverable from the seed. Keys the wallet issues are
+  trial-decrypted in every scan batch until they close, and their notes spend into
+  ordinary change. Full-transaction and Enhance PIR retrieval authenticate swap notes
+  with their registered key. Builds without the feature keep these records and exclude
+  swap notes from spending.
+- Swap address issuance: `WalletDb::reserve_swap_refund_key` and
+  `prepare_swap_receive_reservation`, which require scanning within `ISSUANCE_TIP_LAG`
+  blocks of the network tip. Incoming quotes use `begin_swap_receive_quote`,
+  `finish_swap_receive_quote`, `start_swap_receive_quote`, `swap_receive_quotes_due`,
+  `observe_swap_receive_quote`, `has_swap_receive_quote` and
+  `reap_swap_receive_reservations`, holding at most `RECEIVE_UNFUNDED_LIMIT` unfunded
+  addresses within a `RECEIVE_GAP_LIMIT` recovery gap.
+- Swap funding: `record_swap_refund_quote`, `swap_funding_memo` and
+  `verify_swap_funding_proposal`. The refund index travels in a memo on the funding
+  transaction's internal Ironwood change, whose only transparent output is the deposit.
+- Swap key lifecycle: `record_swap_observation`, `take_swap_refund_status_checks` and
+  `close_finished_swap_keys`. A key closes 24 hours after its final provider status
+  once its expected receipts are mined, or 7 days after the quote deadline, and only
+  while the wallet is scanned to the chain tip.
+- Swap recovery: `maintain_swap_receiving`, called at each sync start and tip, recovers
+  funding memos and keeps an incoming lookahead. Each recovered key is swept once
+  through a receiver directory with `prepare_swap_discovery_batch`,
+  `begin_swap_discovery_attempt`, `swap_publication_anchor`, `swap_note_data_needed`,
+  `queue_swap_directory_lookup` and `apply_swap_sweep`, which credit a note only after
+  verifying its inclusion and spend state locally. `swap_history_pending` reports
+  unfinished sweeps, and `finish_swap_nullifier_recovery` releases the Ironwood spend
+  history they need.
+- Swap key reads: `get_swap_receiving_key`, `get_swap_receiving_key_for_receiver` and
+  `get_swap_receiving_keys`.
 - `WalletDb::transaction_history_summaries` returns typed account-scoped transaction
   metadata and monetary effects without reading raw transaction payloads. It shares
   the corrected accounting definition of `v_transactions`, filters account inputs
@@ -236,21 +219,6 @@ workspace.
   completion marker is stored.
 
 ### Changed
-- Funding-memo recovery persists completion per note, so maintenance and restart
-  process only new or deferred records. Activating a key rescans only blocks
-  already scanned without it.
-- Restored swap keys use a restore sweep instead of a historical rescan.
-  Temporary Ironwood spend history is released after memo, lookahead and payment
-  recovery completes. Other pools keep ordinary pruning. Missing spend history
-  queues the account's public compact-block recovery interval after note
-  inclusion is verified, without substituting public address discovery for PIR.
-  Funding memos also restore provider-status polling.
-- Funding-memo recovery reads the provider deposit address from the stored raw
-  funding transaction's single P2PKH or P2SH output, since the memo now carries
-  only the refund index. A missing raw transaction or any other output shape is
-  reported as corrupted data. A refund record retrieved through Enhance PIR routes
-  its funding transaction to a raw fetch whatever the server's unauthenticated
-  transparent flags say.
 - Unmined shielded history remains incomplete when scanning discovers a funding
   note whose spend was not linked at payload ingestion. A scanned chain tip and
   stored raw data certify completeness only once all known owned nullifiers
@@ -372,9 +340,6 @@ payload enhancement work.
   Orchard support; without it, every payload request is public work.
 
 ### Changed
-- Preserve all spend evidence during large scan batches once
-  `retain_swap_spend_history` is called, allowing old discovered notes to
-  establish their spent state.
 - Enhance PIR storage and routing are now part of Orchard support; the separate
   `zakura-pir-enhance` feature has been removed.
 - `WalletRead::transaction_data_requests` no longer returns payload work and no
@@ -399,27 +364,6 @@ payload enhancement work.
 - `ironwood_enhance_metadata_queue` records a compact binding with a single
   `compact_bound` flag instead of unused `ephemeral_key` and
   `compact_ciphertext` copies.
-- Add an opt-in experimental swap receiving-key registry with atomic per-purpose
-  reservations, recovered-index tracking, and incoming lookahead keys. Issued keys
-  are trial-decrypted in every compact scan batch until they close; activating a
-  key rescans already scanned blocks from its start, so no block in its active
-  range goes unchecked. Persist incoming quote attempts before provider requests
-  and reuse the lowest never-paid slot after 48 hours and successful provider
-  reconciliation, once scanning reaches the tip. Limit unfunded reservations to
-  three and issuance to a 30-slot recovery gap. Retain used markers and old quote
-  associations across reclamation and restart. The schema preserves these records
-  across builds with the feature disabled. Compact scanning retains the derived
-  key on each note and reconstructs inputs with that key after reopening. Builds
-  without the feature exclude these notes from reconstruction. Full-transaction
-  and Enhance PIR retrieval authenticate memos using the note's registered key.
-  Unsupported builds preserve PIR work and report missing swap support. Privately
-  retrieved payments can be authenticated and persisted as pending candidates
-  without crediting balance. Local spentness checks require retained scan coverage
-  and consult both known wallet spends and unlinked nullifiers. Rewinds invalidate
-  affected candidates and sweeps, and pruning trims nullifier coverage. Verified
-  candidates can be applied atomically with their memo, receiving key, inclusion
-  path, and any known spend. Incomplete chain, witness, or spend coverage stays
-  pending.
 
 ## [0.1.0-rc6] - 2026-09-24
 

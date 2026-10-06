@@ -2,7 +2,7 @@
 //! Preparing metadata does not derive viewing keys.
 use super::{
     Error, KeyId, PendingPayment, Purpose, account_key, activate, corrupt, payments::key_ref,
-    stored_key_id,
+    reservations::used, stored_key_id,
 };
 use crate::{AccountUuid, SqlTransaction, WalletDb, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -49,7 +49,7 @@ fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<ChainAnchor> {
 
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Last atomically persisted lookup, independent of candidate application.
-    pub fn swap_lookup_coverage(
+    pub(crate) fn swap_lookup_coverage(
         &self,
         account: AccountUuid,
         key: KeyId,
@@ -58,7 +58,8 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         let id = key_ref(conn, account, key)?;
         let lookup = conn
             .query_row(
-                "SELECT lookup_height, lookup_hash FROM ironwood_swap_sweeps WHERE receiving_key_id = ?1",
+                "SELECT lookup_height, lookup_hash FROM ironwood_swap_sweeps
+                 WHERE receiving_key_id = ?1",
                 [id],
                 |r| Ok(anchor(r.get(0)?, r.get(1)?)),
             )
@@ -81,42 +82,11 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
                 WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.done_height IS NULL)
              OR EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery p
-                JOIN ironwood_receiving_keys k ON k.id = p.receiving_key_id WHERE k.account_id = ?1)",
+                JOIN ironwood_receiving_keys k ON k.id = p.receiving_key_id
+                WHERE k.account_id = ?1)",
             params![owner.0, u32::from(through)],
             |r| r.get(0),
         )?)
-    }
-
-    /// Whether an already imported output agrees with this directory location.
-    /// A conflicting identity fails rather than treating it as another payment.
-    #[allow(clippy::too_many_arguments)]
-    pub fn has_swap_payment(
-        &self,
-        account: AccountUuid,
-        key: KeyId,
-        txid: zcash_primitives::transaction::TxId,
-        action: u32,
-        height: BlockHeight,
-        hash: BlockHash,
-        position: u32,
-    ) -> Result<bool, Error> {
-        let conn = self.conn.borrow();
-        let id = key_ref(conn, account, key)?;
-        let found:Option<(i64,u32,u32)>=conn.query_row("SELECT n.receiving_key_id,t.mined_height,n.commitment_tree_position
-            FROM ironwood_received_notes n JOIN transactions t ON t.id_tx=n.transaction_id
-            WHERE t.txid=?1 AND n.action_index=?2 AND t.mined_height IS NOT NULL AND n.commitment_tree_position IS NOT NULL",
-            params![txid.as_ref(),action],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        if let Some((owner, h, p)) = found {
-            if owner != id
-                || h != u32::from(height)
-                || p != position
-                || wallet::get_block_hash(conn, height)? != Some(hash)
-            {
-                return Err(corrupt("conflicting recovered payment identity"));
-            }
-            return Ok(true);
-        }
-        Ok(false)
     }
 }
 
@@ -137,17 +107,21 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         }
         self.transactionally(|db| {
             let (owner, _) = account_key(db.conn.0, &db.params, account)?;
-            if wallet::get_block_hash(db.conn.0, through.height)? != Some(BlockHash(through.hash)) {
+            if canonical(db.conn.0, Some(through))?.is_none() {
                 return Err(corrupt("discovery target is not canonical"));
             }
             // A finished sweep is offered again while a late lookup left candidates queued.
-            let eligible = "FROM ironwood_swap_sweeps s JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
+            let eligible = "FROM ironwood_swap_sweeps s
+                JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
                 WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.next_attempt_at <= ?3
-                  AND (s.done_height IS NULL OR EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery p
+                  AND (s.done_height IS NULL OR EXISTS(
+                      SELECT 1 FROM ironwood_swap_payment_recovery p
                       WHERE p.receiving_key_id = s.receiving_key_id))";
             let remaining_lookups = db.conn.0.query_row(
-                &format!("SELECT COUNT(*) {eligible} AND (s.lookup_height IS NULL
-                    OR s.target_height IS NULL OR s.lookup_height < s.target_height)"),
+                &format!(
+                    "SELECT COUNT(*) {eligible} AND (s.lookup_height IS NULL
+                        OR s.target_height IS NULL OR s.lookup_height < s.target_height)"
+                ),
                 params![owner.0, u32::from(through.height), now],
                 |r| r.get::<_, usize>(0),
             )?;
@@ -157,7 +131,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                         s.target_height, s.target_hash, s.lookup_height, s.lookup_hash
                     {eligible} ORDER BY s.next_attempt_at, s.receiving_key_id LIMIT ?4"
                 ))?;
-                let mut rows = stmt.query(params![owner.0, u32::from(through.height), now, limit.get()])?;
+                let through_height = u32::from(through.height);
+                let mut rows = stmt.query(params![owner.0, through_height, now, limit.get()])?;
                 let mut out = Vec::new();
                 while let Some(r) = rows.next()? {
                     out.push((
@@ -186,12 +161,17 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 let lookup = canonical(db.conn.0, lookup)?.filter(|a| a.height >= target.height);
                 work.push(DiscoveryWork {
                     key,
-                    receiver: receiver.try_into().map_err(|_| corrupt("invalid stored receiver"))?,
+                    receiver: receiver
+                        .try_into()
+                        .map_err(|_| corrupt("invalid stored receiver"))?,
                     target,
                     lookup,
                 });
             }
-            Ok(DiscoveryBatch { work, remaining_lookups })
+            Ok(DiscoveryBatch {
+                work,
+                remaining_lookups,
+            })
         })
     }
 
@@ -210,13 +190,15 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         let reached = self.transactionally(|db| {
             let id = key_ref(db.conn.0, account, key)?;
             let (attempt, target): (u32, Option<u32>) = db.conn.0.query_row(
-                "SELECT attempts, target_height FROM ironwood_swap_sweeps WHERE receiving_key_id = ?1",
+                "SELECT attempts, target_height FROM ironwood_swap_sweeps
+                 WHERE receiving_key_id = ?1",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let delay = (60i64 << attempt.min(10)).min(43200);
             db.conn.0.execute(
-                "UPDATE ironwood_swap_sweeps SET attempts = MIN(attempts + 1, 30), next_attempt_at = ?2
+                "UPDATE ironwood_swap_sweeps
+                 SET attempts = MIN(attempts + 1, 30), next_attempt_at = ?2
                  WHERE receiving_key_id = ?1",
                 params![id, now.saturating_add(delay)],
             )?;
@@ -228,10 +210,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         Ok(())
     }
 
-    /// Atomically persist an entire validated lookup and authenticated ciphertexts.
-    /// No balance is credited here. The caller validates the publication's complete
-    /// coverage and pagination before invoking this method, including for empty results.
-    pub fn queue_swap_lookup(
+    /// See [`WalletDb::queue_swap_lookup`] on a transaction-backed handle.
+    #[cfg(test)]
+    pub(crate) fn queue_swap_lookup(
         &mut self,
         account: AccountUuid,
         key: KeyId,
@@ -248,7 +229,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// catch a payout from a swap in flight at restore. Returns an error while
     /// candidates remain queued, unless a canonical lookup reached `anchor`, or if
     /// `anchor` is no longer canonical.
-    pub fn finish_swap_discovery_attempt(
+    pub(crate) fn finish_swap_discovery_attempt(
         &mut self,
         account: AccountUuid,
         key: KeyId,
@@ -257,29 +238,22 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         self.transactionally(|db| {
             let id = key_ref(db.conn.0, account, key)?;
             let (pending, lookup): (bool, Option<ChainAnchor>) = db.conn.0.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery WHERE receiving_key_id = ?1),
+                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery
+                        WHERE receiving_key_id = ?1),
                     lookup_height, lookup_hash
                  FROM ironwood_swap_sweeps WHERE receiving_key_id = ?1",
                 [id],
                 |r| Ok((r.get(0)?, self::anchor(r.get(1)?, r.get(2)?))),
             )?;
             let covered = canonical(db.conn.0, lookup)?.is_some_and(|l| l.height >= anchor.height);
-            if pending
-                || !covered
-                || wallet::get_block_hash(db.conn.0, anchor.height)? != Some(BlockHash(anchor.hash))
-            {
+            if pending || !covered || canonical(db.conn.0, Some(anchor))?.is_none() {
                 return Err(corrupt("sweep is incomplete or its anchor changed"));
             }
             db.conn.0.execute(
                 "UPDATE ironwood_swap_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
                 params![id, u32::from(anchor.height)],
             )?;
-            let paid: bool = db.conn.0.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_receive_used WHERE receiving_key_id = ?1)",
-                [id],
-                |r| r.get(0),
-            )?;
-            if key.purpose() == Purpose::Refund || !paid {
+            if key.purpose() == Purpose::Refund || !used(db.conn.0, id)? {
                 activate(db.conn.0, id, anchor.height + 1)?;
             }
             Ok(())
@@ -288,8 +262,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
 }
 
 impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
-    /// Transaction-scoped form of [`WalletDb::queue_swap_lookup`].
-    pub fn queue_swap_lookup(
+    /// Atomically persists an entire validated lookup and authenticated ciphertexts.
+    /// No balance is credited here. The caller validates the publication's complete
+    /// coverage and pagination before invoking this method, including for empty results.
+    pub(crate) fn queue_swap_lookup(
         &mut self,
         account: AccountUuid,
         key: KeyId,
@@ -297,7 +273,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         payments: &[PendingPayment],
     ) -> Result<(), Error> {
         let id = key_ref(self.conn.0, account, key)?;
-        if wallet::get_block_hash(self.conn.0, anchor.height)? != Some(BlockHash(anchor.hash)) {
+        if canonical(self.conn.0, Some(anchor))?.is_none() {
             return Err(corrupt("lookup anchor changed"));
         }
         for payment in payments {

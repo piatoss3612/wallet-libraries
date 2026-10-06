@@ -54,7 +54,7 @@ or `zakura/` and are listed in `layout.extra_members` in
 `manifests/sources.toml`. Checked-in protobuf bindings have an explicit
 regeneration command, separate from ordinary builds.
 
-The unpublished [swap receiving POC](zakura/swap-receiving/README.md) provides
+The unpublished [swap receiving](zakura/swap-receiving/README.md) crate provides
 shared key derivation and refund memo helpers, with an Ironwood proof test for
 mixed ordinary, refund, and incoming inputs.
 

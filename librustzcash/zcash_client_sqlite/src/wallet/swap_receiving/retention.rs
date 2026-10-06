@@ -1,23 +1,24 @@
 //! Temporary spend evidence for notes that a restore sweep finds after ordinary scanning.
-use super::{Error, account_key, corrupt, reservations::RECEIVE_LOOKAHEAD, restore_start};
+use super::{
+    Error, account_key, corrupt, queue_rescan, reservations::RECEIVE_LOOKAHEAD, restore_start,
+};
 use crate::{AccountUuid, SqlTransaction, WalletDb, util::Clock, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::BorrowMut;
 use zakura_swap_receiving::lifecycle::ChainAnchor;
-use zcash_client_backend::data_api::scanning::{ScanPriority, ScanRange};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Retains `account`'s Ironwood spend evidence from its birthday until
-    /// [`WalletDb::finish_swap_nullifier_recovery`] releases it. Call before the
-    /// first scan; evidence already pruned cannot be recovered without a rescan.
-    pub fn retain_swap_spend_history(&mut self, account: AccountUuid) -> Result<(), Error> {
+    /// See [`retain_spend_history`].
+    #[cfg(test)]
+    pub(crate) fn retain_swap_spend_history(&mut self, account: AccountUuid) -> Result<(), Error> {
         self.transactionally(|db| retain_spend_history(db.conn.0, &db.params, account))
     }
 }
 
-/// See [`WalletDb::retain_swap_spend_history`].
+/// Retains `account`'s Ironwood spend evidence from its birthday, or Ironwood
+/// activation if later, until [`WalletDb::finish_swap_nullifier_recovery`] releases it.
 pub(super) fn retain_spend_history<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -64,37 +65,41 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
             return Err(corrupt("swap recovery requires a nonzero lookahead"));
         }
         self.transactionally(|db| {
-            let (id, _) = account_key(db.conn.0, &db.params, account)?;
-            let enabled: bool = db.conn.0.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_spend_retention WHERE account_id=?1)",
-                [id.0], |r| r.get(0),
+            let conn = db.conn.0;
+            let (id, _) = account_key(conn, &db.params, account)?;
+            let enabled: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ironwood_swap_spend_retention WHERE account_id = ?1)",
+                [id.0],
+                |r| r.get(0),
             )?;
-            if !enabled { return Ok(false); }
-            if wallet::fully_scanned_height(db.conn.0)? != Some(through.height)
-                || wallet::chain_tip_height(db.conn.0)? != Some(through.height)
-                || wallet::get_block_hash(db.conn.0, through.height)? != Some(BlockHash(through.hash))
+            if !enabled
+                || wallet::fully_scanned_height(conn)? != Some(through.height)
+                || wallet::chain_tip_height(conn)? != Some(through.height)
+                || wallet::get_block_hash(conn, through.height)? != Some(BlockHash(through.hash))
             {
                 return Ok(false);
             }
             db.maintain_restore_discovery(account, lookahead)?;
             // A decrypted marker can precede its own-send evidence. Keep it eligible
             // until its inputs are known, just as we keep a missing memo eligible.
-            let pending: bool = db.conn.0.query_row(
+            let pending: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
-                 JOIN transactions t ON t.id_tx=n.transaction_id
-                 WHERE n.account_id=?1 AND n.recipient_key_scope=1
-                 AND n.receiving_key_id IS NULL AND t.mined_height IS NOT NULL
-                 AND (n.memo IS NULL OR (substr(n.memo,1,5)=X'FF5A535750' AND NOT EXISTS(
-                    SELECT 1 FROM v_received_output_spends s
-                    WHERE s.transaction_id=n.transaction_id AND s.account_id=n.account_id))))
-                ",
-
-                params![id.0], |r| r.get(0),
+                 JOIN transactions t ON t.id_tx = n.transaction_id
+                 WHERE n.account_id = ?1 AND n.recipient_key_scope = 1
+                   AND n.receiving_key_id IS NULL AND t.mined_height IS NOT NULL
+                   AND (n.memo IS NULL OR (substr(n.memo, 1, 5) = X'FF5A535750'
+                     AND NOT EXISTS(SELECT 1 FROM v_received_output_spends s
+                       WHERE s.transaction_id = n.transaction_id
+                         AND s.account_id = n.account_id))))",
+                [id.0],
+                |r| r.get(0),
             )?;
-            if pending { return Ok(false); }
+            if pending {
+                return Ok(false);
+            }
             // Pending sweeps keep evidence from their earliest possible payment, and a
             // queued candidate from its height. Scanned keys never need it.
-            let pending: Option<u32> = db.conn.0.query_row(
+            let pending: Option<u32> = conn.query_row(
                 "SELECT MIN(h) FROM (
                     SELECT k.scan_from AS h FROM ironwood_swap_sweeps s
                         JOIN ironwood_receiving_keys k ON k.id = s.receiving_key_id
@@ -106,15 +111,26 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                 |r| r.get(0),
             )?;
             let next = pending.unwrap_or(u32::from(through.height).saturating_add(1));
-            let old:u32=db.conn.0.query_row("SELECT nullifier_retention_height FROM ironwood_swap_spend_retention WHERE account_id=?1",[id.0],|r|r.get(0))?;
-            if next>old {db.conn.0.execute("DELETE FROM ironwood_swap_spend_replay WHERE account_id=?1",[id.0])?;}
-
-            db.conn.0.execute(
-                "UPDATE ironwood_swap_spend_retention SET nullifier_retention_height=?2
-                 WHERE account_id=?1", params![id.0, next],
+            let old: u32 = conn.query_row(
+                "SELECT nullifier_retention_height FROM ironwood_swap_spend_retention
+                 WHERE account_id = ?1",
+                [id.0],
+                |r| r.get(0),
             )?;
-            wallet::prune_nullifier_map(db.conn.0, through.height.saturating_sub(crate::PRUNING_DEPTH))?;
-            Ok(next>u32::from(through.height))
+            if next > old {
+                conn.execute(
+                    "DELETE FROM ironwood_swap_spend_replay WHERE account_id = ?1",
+                    [id.0],
+                )?;
+            }
+            conn.execute(
+                "UPDATE ironwood_swap_spend_retention SET nullifier_retention_height = ?2
+                 WHERE account_id = ?1",
+                params![id.0, next],
+            )?;
+            let prune_below = through.height.saturating_sub(crate::PRUNING_DEPTH);
+            wallet::prune_nullifier_map(conn, prune_below)?;
+            Ok(next > u32::from(through.height))
         })
     }
 }
@@ -137,10 +153,11 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             return Err(corrupt("empty spend recovery interval"));
         }
         self.conn.0.execute(
-            "INSERT INTO ironwood_swap_spend_retention(account_id,nullifier_retention_height)
-             VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET
-             nullifier_retention_height=MIN(nullifier_retention_height,excluded.nullifier_retention_height)",
-            params![id.0,u32::from(start)],
+            "INSERT INTO ironwood_swap_spend_retention (account_id, nullifier_retention_height)
+             VALUES (?1, ?2) ON CONFLICT (account_id) DO UPDATE SET
+                 nullifier_retention_height =
+                     MIN(nullifier_retention_height, excluded.nullifier_retention_height)",
+            params![id.0, u32::from(start)],
         )?;
         let previous: Option<u32> = self
             .conn
@@ -163,13 +180,6 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             ON CONFLICT(account_id) DO UPDATE SET through_height=excluded.through_height",
             params![id.0, u32::from(through)],
         )?;
-        let range = from..BlockHeight::from(end);
-        wallet::scanning::replace_queue_entries::<crate::error::SqliteClientError>(
-            self.conn.0,
-            &range,
-            std::iter::once(ScanRange::from_parts(range.clone(), ScanPriority::Historic)),
-            true,
-        )?;
-        Ok(())
+        queue_rescan(self.conn.0, from..BlockHeight::from(end))
     }
 }

@@ -15,7 +15,5 @@ pub mod recovery;
 mod keys;
 mod memo;
 
-pub use keys::{
-    DerivationError, KeyId, Purpose, derive_full_viewing_key, has_same_spending_authority,
-};
+pub use keys::{DerivationError, KeyId, Purpose, has_same_spending_authority};
 pub use memo::{MemoError, RefundMemo};

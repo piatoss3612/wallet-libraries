@@ -1,7 +1,6 @@
 use super::apply::fixture;
 use super::*;
-use zakura_swap_receiving::lifecycle::{ChainAnchor, OperationStatus};
-use zcash_client_backend::data_api::WalletRead;
+use zakura_swap_receiving::lifecycle::OperationStatus;
 
 /// Completes the restore sweep of every key registered to `account` at `through`.
 fn finish_sweeps<CL, R>(
@@ -14,8 +13,10 @@ fn finish_sweeps<CL, R>(
     }
 }
 
-#[test]
-fn retention_completion_waits_for_candidates_and_extended_lookahead() {
+/// [`fixture`] retaining spend history, with its payment applied and the sweeps
+/// finished at its tip, including those of the lookahead the import extends.
+/// Release waits for the queued payment and then for that lookahead.
+fn swept() -> (State, RegisteredKey, ChainAnchor) {
     let (mut st, key, candidate, through, path) = fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
@@ -41,6 +42,23 @@ fn retention_completion_waits_for_candidates_and_extended_lookahead() {
             .unwrap()
     );
     finish_sweeps(db, account, through);
+    (st, key, through)
+}
+
+#[test]
+fn retention_completion_waits_for_candidates_and_extended_lookahead() {
+    let (mut st, key, through) = swept();
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    // A provider outcome still pending does not hold covered history.
+    db.observe_swap_operation(
+        account,
+        key.key_id(),
+        "restored",
+        OperationStatus::Active,
+        1000,
+    )
+    .unwrap();
     assert!(
         db.finish_swap_nullifier_recovery_with(account, through, 1)
             .unwrap()
@@ -85,11 +103,7 @@ fn undone_sweeps_and_queued_candidates_hold_spend_evidence() {
         let (height, _) = st.generate_empty_block();
         st.scan_cached_blocks(height, 1);
     }
-    let height = original.height + 2;
-    let tip = ChainAnchor {
-        height,
-        hash: st.wallet().get_block_hash(height).unwrap().unwrap().0,
-    };
+    let tip = tip(&st);
     let db = st.wallet_mut().db_mut();
     assert!(
         !db.finish_swap_nullifier_recovery_with(account, tip, 1)
@@ -137,23 +151,9 @@ fn undone_sweeps_and_queued_candidates_hold_spend_evidence() {
 
 #[test]
 fn scanned_keys_never_hold_spend_evidence() {
-    let (mut st, key, candidate, through, path) = fixture();
+    let (mut st, _, through) = swept();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
-    db.retain_swap_spend_history(account).unwrap();
-    db.apply_pending_swap_payment(
-        account,
-        key.key_id(),
-        &candidate,
-        through,
-        Some((through, &path)),
-    )
-    .unwrap();
-    assert!(
-        !db.finish_swap_nullifier_recovery_with(account, through, 1)
-            .unwrap()
-    );
-    finish_sweeps(db, account, through);
     let refund = db
         .recover_swap_receiving_key(account, KeyId::new(Purpose::Refund, 0), through.height)
         .unwrap();
@@ -165,10 +165,7 @@ fn scanned_keys_never_hold_spend_evidence() {
     db.finish_sweep(account, refund.key_id(), through).unwrap();
     let (height, _) = st.generate_empty_block();
     st.scan_cached_blocks(height, 1);
-    let tip = ChainAnchor {
-        height,
-        hash: st.wallet().get_block_hash(height).unwrap().unwrap().0,
-    };
+    let tip = tip(&st);
     let db = st.wallet_mut().db_mut();
     let scanning = db.get_swap_scanning_keys().unwrap();
     assert!(scanning.iter().any(|k| k.key_id() == refund.key_id()));
@@ -336,23 +333,8 @@ fn missing_spend_history_queues_replay_and_recovers_after_restart() {
 
 #[test]
 fn retention_waits_for_internal_memos_and_own_send_evidence() {
-    let (mut st, key, candidate, through, path) = fixture();
+    let (mut st, _, through) = swept();
     let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    db.retain_swap_spend_history(account).unwrap();
-    db.apply_pending_swap_payment(
-        account,
-        key.key_id(),
-        &candidate,
-        through,
-        Some((through, &path)),
-    )
-    .unwrap();
-    assert!(
-        !db.finish_swap_nullifier_recovery_with(account, through, 1)
-            .unwrap()
-    );
-    finish_sweeps(db, account, through);
     // Model a normal internal note whose memo enhancement has not finished.
     st.wallet().conn().execute("UPDATE ironwood_received_notes SET receiving_key_id=NULL,recipient_key_scope=1,memo=NULL", []).unwrap();
     assert!(
@@ -390,33 +372,17 @@ fn retention_waits_for_internal_memos_and_own_send_evidence() {
 
 #[test]
 fn retention_rewinds_and_resumes_for_new_blocks() {
-    let (mut st, key, candidate, original, path) = fixture();
+    let (mut st, _, original) = swept();
     let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    db.retain_swap_spend_history(account).unwrap();
-    db.apply_pending_swap_payment(
-        account,
-        key.key_id(),
-        &candidate,
-        original,
-        Some((original, &path)),
-    )
-    .unwrap();
     assert!(
-        !db.finish_swap_nullifier_recovery_with(account, original, 1)
-            .unwrap()
-    );
-    finish_sweeps(db, account, original);
-    assert!(
-        db.finish_swap_nullifier_recovery_with(account, original, 1)
+        st.wallet_mut()
+            .db_mut()
+            .finish_swap_nullifier_recovery_with(account, original, 1)
             .unwrap()
     );
     let (height, _) = st.generate_empty_block();
     st.scan_cached_blocks(height, 1);
-    let tip = ChainAnchor {
-        height,
-        hash: st.wallet().get_block_hash(height).unwrap().unwrap().0,
-    };
+    let tip = tip(&st);
     finish_sweeps(st.wallet_mut().db_mut(), account, tip);
     assert!(
         st.wallet_mut()
@@ -460,36 +426,19 @@ fn retention_rewinds_and_resumes_for_new_blocks() {
 
 #[test]
 fn completed_recovery_retains_the_next_large_batch_until_reconciled() {
-    let (mut st, key, candidate, original, path) = fixture();
+    let (mut st, _, original) = swept();
     let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    db.retain_swap_spend_history(account).unwrap();
-    db.apply_pending_swap_payment(
-        account,
-        key.key_id(),
-        &candidate,
-        original,
-        Some((original, &path)),
-    )
-    .unwrap();
     assert!(
-        !db.finish_swap_nullifier_recovery_with(account, original, 1)
-            .unwrap()
-    );
-    finish_sweeps(db, account, original);
-    assert!(
-        db.finish_swap_nullifier_recovery_with(account, original, 1)
+        st.wallet_mut()
+            .db_mut()
+            .finish_swap_nullifier_recovery_with(account, original, 1)
             .unwrap()
     );
     for _ in 0..201 {
         st.generate_empty_block();
     }
     st.scan_cached_blocks(original.height + 1, 201);
-    let height = original.height + 201;
-    let through = ChainAnchor {
-        height,
-        hash: st.wallet().get_block_hash(height).unwrap().unwrap().0,
-    };
+    let through = tip(&st);
     let count = |conn: &Connection| {
         conn.query_row(
             "SELECT COUNT(*) FROM ironwood_nullifier_scan_blocks WHERE height>?1",
@@ -509,7 +458,7 @@ fn completed_recovery_retains_the_next_large_batch_until_reconciled() {
     assert_eq!(
         st.wallet()
             .db()
-            .get_unspent_ironwood_notes_at_historical_height(account, height)
+            .get_unspent_ironwood_notes_at_historical_height(account, through.height)
             .unwrap()
             .len(),
         1
@@ -543,39 +492,6 @@ fn completion_does_not_enable_discovery_for_an_unregistered_account() {
     assert_eq!(
         crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap(),
         None
-    );
-}
-
-#[test]
-fn covered_history_releases_while_provider_outcome_is_pending() {
-    let (mut st, key, candidate, through, path) = fixture();
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    db.retain_swap_spend_history(account).unwrap();
-    db.observe_swap_operation(
-        account,
-        key.key_id(),
-        "restored",
-        OperationStatus::Active,
-        1000,
-    )
-    .unwrap();
-    db.apply_pending_swap_payment(
-        account,
-        key.key_id(),
-        &candidate,
-        through,
-        Some((through, &path)),
-    )
-    .unwrap();
-    assert!(
-        !db.finish_swap_nullifier_recovery_with(account, through, 1)
-            .unwrap()
-    );
-    finish_sweeps(db, account, through);
-    assert!(
-        db.finish_swap_nullifier_recovery_with(account, through, 1)
-            .unwrap()
     );
 }
 

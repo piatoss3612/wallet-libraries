@@ -12,7 +12,7 @@ use zcash_note_encryption::{EphemeralKeyBytes, ShieldedOutput, try_note_decrypti
 /// Serialized encrypted context size, independent of the discovery transport.
 pub const ENCRYPTED_NOTE_BYTES: usize = 676;
 
-/// Authenticated recovery failure. Neither variant establishes an unused receiver.
+/// Authenticated recovery failure. No variant establishes an unused receiver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryError {
     /// Key derivation failed.
@@ -122,7 +122,6 @@ impl EncryptedNote {
             nullifier: note.nullifier(&key),
             note,
             memo,
-            key_id,
         })
     }
 }
@@ -144,7 +143,6 @@ pub struct RecoveredNote {
     note: Note,
     memo: [u8; 512],
     nullifier: Nullifier,
-    key_id: KeyId,
 }
 impl RecoveredNote {
     /// Authenticated note plaintext.
@@ -159,11 +157,6 @@ impl RecoveredNote {
     pub fn nullifier(&self) -> &Nullifier {
         &self.nullifier
     }
-    /// Derivation identity that must be retained for input reconstruction.
-    pub fn key_id(&self) -> KeyId {
-        self.key_id
-    }
-
     /// Binds a claimed position to the note commitment at a wallet-accepted root.
     /// A root supplied by the same discovery service is not independent validation.
     /// This does not bind transaction metadata or establish that the note is unspent.

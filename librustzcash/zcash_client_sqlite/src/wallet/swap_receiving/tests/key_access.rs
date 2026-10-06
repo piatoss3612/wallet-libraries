@@ -114,7 +114,6 @@ fn exact_key_access_keeps_accounts_and_reservations_separate() {
 
 #[test]
 fn transaction_keys_exclude_unscanned_history_and_preserve_self_payments() {
-    use zcash_client_backend::data_api::WalletRead;
     use zcash_primitives::transaction::TxId;
     let mut st = wallet(false);
     let account = st.test_account().unwrap().id();
@@ -155,7 +154,6 @@ fn transaction_keys_exclude_unscanned_history_and_preserve_self_payments() {
 
 #[test]
 fn unscanned_transaction_keys_follow_pending_and_imported_output_identity() {
-    use zcash_client_backend::data_api::WalletRead;
     let (mut st, key, candidate, through, path) = super::apply::fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();

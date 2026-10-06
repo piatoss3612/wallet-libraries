@@ -2,7 +2,7 @@
 use super::{Error, KeyId, account_key, corrupt, purpose_code};
 use crate::{AccountUuid, SqlTransaction, WalletDb, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::borrow::{Borrow, BorrowMut};
+use std::borrow::Borrow;
 use zakura_swap_receiving::{lifecycle::ChainAnchor, recovery::EncryptedNote};
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{
@@ -13,7 +13,7 @@ use zcash_protocol::{
 /// A privately retrieved output awaiting chain inclusion and spendability checks.
 /// Transaction metadata remains an indexer assertion until independently checked.
 #[derive(Clone, PartialEq, Eq)]
-pub struct PendingPayment {
+pub(crate) struct PendingPayment {
     /// Transaction hash in protocol byte order.
     pub txid: TxId,
     /// Original Action index.
@@ -32,7 +32,7 @@ pub struct PendingPayment {
 
 /// Local spend evidence as of one independently checked scan anchor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpendStatus {
+pub(crate) enum SpendStatus {
     /// Scan coverage is missing, pruned, or the requested anchor is not yet scanned.
     Unknown,
     /// Every block retains its unlinked nullifiers, and no recorded wallet spend matches.
@@ -46,10 +46,11 @@ pub enum SpendStatus {
     },
 }
 
+/// The registry ID of `account`'s key `key`.
 pub(super) fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Result<i64, Error> {
     conn.query_row(
-        "SELECT k.id FROM ironwood_receiving_keys k JOIN accounts a ON a.id=k.account_id
-        WHERE a.uuid=?1 AND k.purpose=?2 AND k.derivation_version=1 AND k.key_index=?3",
+        "SELECT k.id FROM ironwood_receiving_keys k JOIN accounts a ON a.id = k.account_id
+         WHERE a.uuid = ?1 AND k.purpose = ?2 AND k.derivation_version = 1 AND k.key_index = ?3",
         params![
             account.0,
             purpose_code(key.purpose()),
@@ -60,6 +61,9 @@ pub(super) fn key_ref(conn: &Connection, account: AccountUuid, key: KeyId) -> Re
     .optional()?
     .ok_or_else(|| corrupt("unregistered swap recovery key"))
 }
+
+/// Decrypts `candidate` with `key` and checks that it pays the receiver registered
+/// for it. Returns the key's registry ID and the note.
 pub(super) fn authenticate<P: Parameters>(
     conn: &Connection,
     parameters: &P,
@@ -83,6 +87,9 @@ pub(super) fn authenticate<P: Parameters>(
     }
     Ok((id, note))
 }
+
+/// Reads a queued candidate from columns txid, action_index, height, block_hash,
+/// tx_index, position and encrypted_note.
 fn payment(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingPayment> {
     let bytes: Vec<u8> = row.get(6)?;
     let bytes = bytes
@@ -98,9 +105,74 @@ fn payment(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingPayment> {
         encrypted_note: EncryptedNote::from_bytes(bytes),
     })
 }
+
+/// Checks retained nullifiers for `nullifier`, the spend nullifier of authenticated
+/// `candidate`, without accepting a service's claim of absence. The result is bound
+/// to `through`. The caller must separately authenticate inclusion and position
+/// before crediting the note.
+pub(super) fn spend_status(
+    conn: &Connection,
+    candidate: &PendingPayment,
+    nullifier: &orchard::note::Nullifier,
+    through: ChainAnchor,
+) -> Result<SpendStatus, Error> {
+    if through.height < candidate.height
+        || wallet::fully_scanned_height(conn)?.is_none_or(|h| h < through.height)
+    {
+        return Ok(SpendStatus::Unknown);
+    }
+    if wallet::get_block_hash(conn, through.height)? != Some(BlockHash(through.hash))
+        || wallet::get_block_hash(conn, candidate.height)? != Some(candidate.block_hash)
+    {
+        return Err(corrupt("swap recovery anchor changed"));
+    }
+    let spent = conn
+        .query_row(
+            // The scanner removes known wallet spends from the unlinked nullifier map.
+            // Both stores must be checked before interpreting absence as unspent.
+            "SELECT t.txid, t.block_height FROM nullifier_map n
+             JOIN tx_locator_map t USING (block_height, tx_index)
+             WHERE n.spend_pool = ?1 AND n.nf = ?2 AND t.block_height BETWEEN ?3 AND ?4
+             UNION ALL
+             SELECT t.txid, t.mined_height FROM ironwood_received_notes n
+             JOIN ironwood_received_note_spends s ON s.ironwood_received_note_id = n.id
+             JOIN transactions t ON t.id_tx = s.transaction_id
+             JOIN blocks b ON b.height = t.block AND b.height = t.mined_height
+             WHERE n.nf = ?2 AND t.mined_height BETWEEN ?3 AND ?4
+             LIMIT 1",
+            params![
+                wallet::encoding::pool_code(PoolType::IRONWOOD),
+                nullifier.to_bytes(),
+                u32::from(candidate.height),
+                u32::from(through.height)
+            ],
+            |r| {
+                Ok(SpendStatus::Spent {
+                    txid: TxId::from_bytes(r.get(0)?),
+                    height: BlockHeight::from(r.get::<_, u32>(1)?),
+                })
+            },
+        )
+        .optional()?;
+    if let Some(spent) = spent {
+        return Ok(spent);
+    }
+    let covered: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM ironwood_nullifier_scan_blocks WHERE height BETWEEN ?1 AND ?2",
+        params![u32::from(candidate.height), u32::from(through.height)],
+        |r| r.get(0),
+    )?;
+    let blocks = u64::from(u32::from(through.height) - u32::from(candidate.height)) + 1;
+    Ok(if covered == blocks {
+        SpendStatus::Unspent
+    } else {
+        SpendStatus::Unknown
+    })
+}
+
 impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     /// Reload pending work for one registered key. Loading does not credit or complete it.
-    pub fn pending_swap_payments(
+    pub(crate) fn pending_swap_payments(
         &self,
         account: AccountUuid,
         key: KeyId,
@@ -108,28 +180,30 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         let conn = self.conn.borrow();
         let id = key_ref(conn, account, key)?;
         let mut stmt = conn.prepare(
-            "SELECT txid,action_index,height,block_hash,tx_index,position,encrypted_note
-            FROM ironwood_swap_payment_recovery WHERE receiving_key_id=?1 ORDER BY position",
+            "SELECT txid, action_index, height, block_hash, tx_index, position, encrypted_note
+             FROM ironwood_swap_payment_recovery WHERE receiving_key_id = ?1 ORDER BY position",
         )?;
         Ok(stmt.query_map([id], payment)?.collect::<Result<_, _>>()?)
     }
 }
-impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Checks local spend evidence in one database snapshot. This result is bound to
-    /// `through`; recheck it in the transaction that applies a recovered note.
-    pub fn swap_payment_spend_status(
+#[cfg(test)]
+impl<C: std::borrow::BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
+    /// Authenticates `candidate` and checks its spend evidence with [`spend_status`].
+    pub(crate) fn swap_payment_spend_status(
         &mut self,
         account: AccountUuid,
         key: KeyId,
         candidate: &PendingPayment,
         through: ChainAnchor,
     ) -> Result<SpendStatus, Error> {
-        self.transactionally(|db| db.swap_payment_spend_status(account, key, candidate, through))
+        self.transactionally(|db| {
+            let (_, note) = authenticate(db.conn.0, &db.params, account, key, candidate)?;
+            spend_status(db.conn.0, candidate, note.nullifier(), through)
+        })
     }
 
-    /// Authenticates and persists one candidate atomically. It does not change balance,
-    /// scan coverage, allocation, or completion state. Retries are idempotent.
-    pub fn queue_swap_payment(
+    /// See [`WalletDb::queue_swap_payment`] on a transaction-backed handle.
+    pub(crate) fn queue_swap_payment(
         &mut self,
         account: AccountUuid,
         key: KeyId,
@@ -139,74 +213,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 }
 impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
-    /// Checks retained nullifiers without accepting a service's claim of absence.
-    /// The caller must separately authenticate inclusion and position before crediting a note.
-    pub fn swap_payment_spend_status(
-        &self,
-        account: AccountUuid,
-        key: KeyId,
-        candidate: &PendingPayment,
-        through: ChainAnchor,
-    ) -> Result<SpendStatus, Error> {
-        let conn = self.conn.0;
-        let (_, note) = authenticate(conn, &self.params, account, key, candidate)?;
-        if through.height < candidate.height
-            || wallet::fully_scanned_height(conn)?.is_none_or(|h| h < through.height)
-        {
-            return Ok(SpendStatus::Unknown);
-        }
-        if wallet::get_block_hash(conn, through.height)? != Some(BlockHash(through.hash))
-            || wallet::get_block_hash(conn, candidate.height)? != Some(candidate.block_hash)
-        {
-            return Err(corrupt("swap recovery anchor changed"));
-        }
-        let spent = conn
-            .query_row(
-                // The scanner removes known wallet spends from the unlinked nullifier map.
-                // Both stores must be checked before interpreting absence as unspent.
-                "SELECT t.txid,t.block_height FROM nullifier_map n
-            JOIN tx_locator_map t USING(block_height,tx_index)
-            WHERE n.spend_pool=?1 AND n.nf=?2 AND t.block_height BETWEEN ?3 AND ?4
-            UNION ALL
-            SELECT t.txid,t.mined_height FROM ironwood_received_notes n
-            JOIN ironwood_received_note_spends s ON s.ironwood_received_note_id=n.id
-            JOIN transactions t ON t.id_tx=s.transaction_id
-            JOIN blocks b ON b.height=t.block AND b.height=t.mined_height
-            WHERE n.nf=?2 AND t.mined_height BETWEEN ?3 AND ?4
-            LIMIT 1",
-                params![
-                    wallet::encoding::pool_code(PoolType::IRONWOOD),
-                    note.nullifier().to_bytes(),
-                    u32::from(candidate.height),
-                    u32::from(through.height)
-                ],
-                |r| {
-                    Ok(SpendStatus::Spent {
-                        txid: TxId::from_bytes(r.get(0)?),
-                        height: BlockHeight::from(r.get::<_, u32>(1)?),
-                    })
-                },
-            )
-            .optional()?;
-        if let Some(spent) = spent {
-            return Ok(spent);
-        }
-        let covered: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM ironwood_nullifier_scan_blocks WHERE height BETWEEN ?1 AND ?2",
-            params![u32::from(candidate.height), u32::from(through.height)],
-            |r| r.get(0),
-        )?;
-        Ok(
-            if covered == u64::from(u32::from(through.height) - u32::from(candidate.height)) + 1 {
-                SpendStatus::Unspent
-            } else {
-                SpendStatus::Unknown
-            },
-        )
-    }
-
-    /// Transaction-scoped form of [`WalletDb::queue_swap_payment`].
-    pub fn queue_swap_payment(
+    /// Authenticates and persists one candidate. It does not change balance, scan
+    /// coverage, allocation, or completion state. Retries are idempotent.
+    pub(crate) fn queue_swap_payment(
         &mut self,
         account: AccountUuid,
         key: KeyId,
@@ -223,7 +232,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             .query_row(
                 "SELECT txid, action_index, height, block_hash, tx_index, position,
                     encrypted_note, receiving_key_id
-             FROM ironwood_swap_payment_recovery WHERE txid=?1 AND action_index=?2",
+                 FROM ironwood_swap_payment_recovery WHERE txid = ?1 AND action_index = ?2",
                 params![candidate.txid.as_ref(), candidate.action_index],
                 |r| Ok((payment(r)?, r.get::<_, i64>(7)?)),
             )

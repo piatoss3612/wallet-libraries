@@ -1,4 +1,4 @@
-# Swap receiving POC
+# Swap receiving
 
 Unpublished implementation of the draft v1 receiving-key and refund-memo
 conventions. It supports refund and incoming keys with the account's existing
@@ -8,7 +8,7 @@ issuing live addresses.
 ## Wallet integration
 
 1. Reserve a purpose-specific index durably before exposing an address.
-2. Call `derive_full_viewing_key(account_external_fvk, purpose, index)` and select
+2. Call `KeyId::new(purpose, index).derive(account_external_fvk)` and select
    `address_at(0u32, Scope::External)` for the receiver.
 3. Register that FVK for scanning and retain its purpose/index with received notes.
 4. For a refund, encode `RefundMemo` in an ordinary internal note in the funding
@@ -24,12 +24,9 @@ owns reservation, persistence, coverage, lifecycle, and note selection. There is
 no alternate balance store in this crate.
 
 The SQLite backend's `experimental-swap-receiving` feature adds durable key
-registration. `reserve_swap_receiving_key` advances a purpose's sequence,
-`recover_swap_receiving_key` records validated recovery evidence, and
-`watch_swap_receive_key` retains an unpaid incoming lookahead key without
-advancing allocation. `get_swap_receiving_keys` reconstructs and verifies stored
-receivers after reopen. These are `WalletDb` methods, also usable inside its
-transaction helpers so a reservation and an application's operation record can
+registration. `get_swap_receiving_keys` reconstructs and verifies stored receivers
+after reopen. `reserve_swap_refund_key` is also usable inside the wallet's
+transaction helpers, so a reservation and an application's operation record can
 commit together. Do not expose an address until that transaction commits.
 
 A wallet drives the feature with these calls:
@@ -39,7 +36,7 @@ A wallet drives the feature with these calls:
   incoming lookahead.
 - `close_finished_swap_keys` once sync reaches a tip it confirmed with the network,
   passing that tip.
-- `reserve_swap_receiving_key` for a refund address and
+- `reserve_swap_refund_key` for a refund address and
   `prepare_swap_receive_reservation` for an incoming one, with the latest network
   tip. Both require scanning within `ISSUANCE_TIP_LAG` blocks of it and choose the
   key's first scanned block.
@@ -50,7 +47,9 @@ A wallet drives the feature with these calls:
   the device, which returns the request's identity, `finish_swap_receive_quote`
   with its outcome, `start_swap_receive_quote` for the deposit instructions to
   show, and `reap_swap_receive_reservations` after reconciling due quotes.
-- For restore sweeps, the steps in [Restore sweeps](#restore-sweeps).
+- For restore sweeps, the steps in [Restore sweeps](#restore-sweeps), then
+  `finish_swap_nullifier_recovery` at the scanned tip. `swap_history_pending`
+  reports sweeps still unfinished.
 
 The registry stores full `u64` indices as fixed-width big-endian blobs for SQLite
 ordering. This is an internal storage encoding; the KDF and memo remain
@@ -64,8 +63,7 @@ key requeues its range, so no block in a key's active range goes unchecked.
 Catching up after time offline scans active keys like any other blocks.
 
 A newly issued key starts at the first unscanned block. Keys found only through
-restore (`recover_swap_receiving_key`, `watch_swap_receive_key`) are not scanned
-until their receiver-directory sweep completes (see
+restore are not scanned until their receiver-directory sweep completes (see
 [Restore sweeps](#restore-sweeps)).
 
 The planned selector will prefer swap notes during ordinary sends when doing so
@@ -141,7 +139,7 @@ boundary indices, retry behavior, authority substitutions, and malformed memos.
 Regenerate the vectors from this directory with
 `python3 tests/vectors/generate.py > tests/vectors/rivk.csv`.
 
-The protocol POC builds Ironwood outputs and discards the derived keys. It
+The protocol test builds Ironwood outputs and discards the derived keys. It
 decrypts a zero-value internal recovery memo, reconstructs the refund key and
 an incoming lookahead key, then spends those notes with an ordinary note. It
 verifies real proofs and spend/binding signatures and decrypts ordinary internal
@@ -166,7 +164,9 @@ Enhance PIR resolves the registered key after restart and rejects altered
 ciphertext without clearing pending work. A build without swap support reports
 an error for that retrieval instead of trying the ordinary account key.
 
-PCZT/firmware qualification remains required before live use.
+Software PCZT signing of swap notes works through the same builder. Hardware
+signers need firmware qualification before swap keys are enabled for hardware
+accounts.
 
 ## Protocol baseline
 
@@ -179,7 +179,7 @@ Zcash Protocol Specification **v2026.7.0-202-gafa086, NU6.3 proposal**, commit
   PDF anchor `orchardfullviewingkeyencoding`.
 
 The swap KDF and memo format are proposed wallet conventions, separate from
-these protocol requirements. Passing the POC is not a cryptographic review.
+these protocol requirements. Passing these tests is not a cryptographic review.
 
 ## Private recovery authentication
 
@@ -200,21 +200,19 @@ purposes, wrong account/index, altered compact and memo ciphertext, wrong roots,
 and substituted or overflowing positions. Decryption and Merkle hashing delegate
 to `zakura-orchard`, following the pinned NU6.3 proposal at `afa086bd976e316612a5c06fb139429958d07d84`.
 
-The SQLite `apply_pending_swap_payment` helper commits a queued candidate only
-at the wallet's fully scanned tip. It authenticates ciphertext again, checks
-receipt bounds and retained spend evidence, and verifies a supplied witness at
-its explicit local block anchor (or uses an available local witness). It marks
-the leaf for future witness updates and writes the note, memo, key and known
-spend atomically. Incomplete inputs preserve the queue without adding balance.
-A synthetic test spends a privately imported note into ordinary internal change.
-Transaction IDs and Action indices remain directory assertions, checked for
-conflicts with local data. The inclusion proof binds the commitment and position.
+SQLite's `apply_swap_sweep` commits each queued candidate only at the wallet's
+fully scanned tip. It authenticates ciphertext again, checks receipt bounds and
+retained spend evidence, and verifies the publication's inclusion path at its
+local block anchor. It marks the leaf for future witness updates and writes the
+note, memo, key and known spend atomically. Incomplete inputs preserve the queue
+without adding balance. A synthetic test spends a privately imported note into
+ordinary internal change. Transaction IDs and Action indices remain directory
+assertions, checked for conflicts with local data. The inclusion proof binds the
+commitment and position.
 
-`retain_swap_spend_history` keeps the shared nullifier map without pruning
-while any account uses it, trading storage for locally verifiable spend history
-of recovered notes. Large scan batches also retain every block instead of
-skipping old entries at a contiguous scan frontier. Call it before the first
-scan; it cannot repair evidence pruned or skipped by earlier scans.
+`maintain_swap_receiving` retains Ironwood spend evidence from the account's
+birthday, so a recovered note's spend state is checked locally rather than taken
+from the directory. Other pools keep ordinary pruning.
 
 ### Restore sweeps
 

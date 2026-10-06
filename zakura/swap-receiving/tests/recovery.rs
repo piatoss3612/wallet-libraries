@@ -41,7 +41,6 @@ fn authenticate_derived_key_and_bind_position() {
         assert_eq!(recovered.note(), &note);
         assert_eq!(recovered.memo(), &[4; 512]);
         assert_eq!(recovered.nullifier(), &note.nullifier(&key));
-        assert_eq!(recovered.key_id(), id);
         assert!(restored.decrypt(&account, KeyId::new(purpose, 8)).is_err());
         let other = FullViewingKey::from(&SpendingKey::from_bytes([1; 32]).unwrap());
         assert!(restored.decrypt(&other, id).is_err());

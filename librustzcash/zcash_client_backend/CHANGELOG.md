@@ -11,11 +11,17 @@ workspace.
 ## [Unreleased]
 
 ### Added
-- `WalletRead::get_swap_transaction_keys` scopes full-transaction enhancement to
-  known outputs, queued payments, active keys and ordinarily recovered recipients.
-  The default remains conservative for stores without a specialized selector.
-- `SwapScanningKey::full_viewing_key` exposes the already derived viewing key so
-  stores can validate registrations and reuse it for scanning.
+- Experimental swap receiving, behind the `experimental-swap-receiving` feature.
+  `scanning::swap_receiving::SwapScanningKey` is a key derived for one swap index, and
+  received notes and outputs report theirs through `swap_key_id`. Compact scanning
+  trial-decrypts every key from `WalletRead::get_swap_scanning_keys` in each batch and
+  passes that snapshot to `WalletWrite::put_blocks_with_swap_keys`, so stores can
+  rescan blocks that a key activated mid-batch missed. Full-transaction enhancement
+  uses `WalletRead::get_swap_transaction_keys`, and Enhance PIR authenticates swap
+  memos with `PendingIronwoodMemo::receiving_ivk`. Transaction construction spends a
+  swap note with its derived viewing key and sends change to the ordinary account key.
+  `LowLevelWalletRead::ironwood_nullifier_retention_height` lets stores keep Ironwood
+  spend evidence for notes found after scanning.
 - `tor::Client::connect_lightwalletd_channel` returns the Tor-routed `tonic` channel that
   `connect_to_lightwalletd` wraps, so callers can layer `tower` services over it.
 - `data_api::transparent_ledger`: the storage-neutral contract for transparent
@@ -121,9 +127,6 @@ workspace.
   for that. See `docs/zip318_removal.md`.
 
 ### Changed
-- Replace the experimental full-nullifier-history switch with a pool-specific
-  Ironwood retention height. Late discovery no longer disables ordinary Sapling
-  and Orchard insertion limits.
 - `InputSelector::propose_transaction` and `InputSelector::propose_shielding`
   no longer take ZIP 318 parameters; they read the grid from
   `InputSource::anchor_retention_interval`.
@@ -145,9 +148,6 @@ enhancement and makes Enhance PIR part of Orchard support.
 
 
 ### Added
-- Add `LowLevelWalletRead::requires_full_nullifier_history` so stores supporting late
-  note discovery can retain spend evidence throughout large scan batches.
-
 - Add a typed `WalletRead::transaction_status_requests` view of
   `transaction_data_requests`. The method has a default for custom stores and does
   not grant disclosure consent.
@@ -187,16 +187,6 @@ enhancement and makes Enhance PIR part of Orchard support.
 - `data_api::enhance_pir::storage::validate_and_apply_record`. Apply a single
   record as a batch of one with `validate_and_apply_records`, as
   `zakura-client-sqlite` already does.
-- Add opt-in experimental swap-key identity through Ironwood scanning, received
-  notes, and transaction construction. Derived inputs use their own FVK while
-  change continues to use ordinary account keys. Full-transaction enhancement
-  decrypts swap memos and retains their receiving-key identity. Enhance PIR
-  authenticates these memos with a storage-resolved receiving key. Compact scanning
-  includes every key from `WalletRead::get_swap_scanning_keys` in each batch and
-  passes that snapshot to `WalletWrite::put_blocks_with_swap_keys`, so storage
-  backends can rescan blocks that a key activated mid-batch missed.
-- `PendingIronwoodMemo` gains `receiving_ivk`. Storage backends use `None` for
-  ordinary account keys and supply a validated key for registered receivers.
 
 ## [0.1.0-rc6] - 2026-09-24
 

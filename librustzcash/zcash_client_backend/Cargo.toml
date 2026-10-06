@@ -210,7 +210,7 @@ spend-index = ["transparent-inputs"]
 ## Orchard note-handling code, not the crate linkage.
 orchard = ["dep:pasta_curves", "zcash_keys/orchard"]
 
-## Enables experimental derived Ironwood receiving keys for the local swap POC.
+## Enables experimental derived Ironwood receiving keys for swap receiving.
 experimental-swap-receiving = ["orchard", "dep:zakura-swap-receiving"]
 
 ## Enables compatibility with legacy zcashd wallet data

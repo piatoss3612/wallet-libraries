@@ -148,8 +148,8 @@ orchard = [
     "pczt/tx-extractor",
 ]
 
-## Enables the unpublished swap receiving-key registry for local POC work.
-## Registration alone does not enable scanning or spending these notes.
+## Enables experimental swap receiving: derived Ironwood refund and incoming keys,
+## their scanning, seed recovery and spending.
 experimental-swap-receiving = ["orchard", "dep:zcash_note_encryption", "dep:zakura-swap-receiving", "zcash_client_backend/experimental-swap-receiving"]
 
 ## Exposes APIs that are useful for testing, such as `proptest` strategies.

@@ -92,7 +92,7 @@ pub fn near_observation(
 ) -> Option<Observation> {
     use crate::Purpose;
     use OperationStatus::*;
-    use ReceiptExpectation::*;
+    use ReceiptExpectation::{Positive, Unknown};
     let refund = status.refunded_amount.filter(|v| !v.is_zero());
     let outcome = match (status.status, purpose) {
         ("KNOWN_DEPOSIT_TX" | "PENDING_DEPOSIT" | "INCOMPLETE_DEPOSIT" | "PROCESSING", _) => Active,
@@ -101,15 +101,13 @@ pub fn near_observation(
         }
         ("SUCCESS", Purpose::Refund) => Terminal(match refund {
             Some(value) => Positive(Some(value)),
-            std::option::Option::None if status.swap_type == Some("EXACT_OUTPUT") => {
-                Positive(std::option::Option::None)
-            }
-            std::option::Option::None => None,
+            None if status.swap_type == Some("EXACT_OUTPUT") => Positive(None),
+            None => ReceiptExpectation::None,
         }),
         ("REFUNDED", Purpose::Refund) => Terminal(Positive(refund)),
-        ("REFUNDED", Purpose::Receive) => Terminal(None),
+        ("REFUNDED", Purpose::Receive) => Terminal(ReceiptExpectation::None),
         ("FAILED", _) => Terminal(Unknown),
-        _ => return std::option::Option::None,
+        _ => return None,
     };
     Some(Observation {
         status: outcome,

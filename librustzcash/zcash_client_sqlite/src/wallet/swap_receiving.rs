@@ -18,8 +18,7 @@ mod recovery;
 mod reservations;
 mod retention;
 mod sweep;
-pub use payments::{PendingPayment, SpendStatus};
-pub use recovery::RecoveredRefund;
+use payments::{PendingPayment, SpendStatus};
 pub use reservations::{
     QuoteOutcome, RECEIVE_GAP_LIMIT, RECEIVE_RECLAIM_SECONDS, RECEIVE_UNFUNDED_LIMIT,
     ReceiveDeposit, ReceiveQuote, ReceiveReservation,
@@ -66,11 +65,20 @@ pub enum ReservationPolicy {
 impl std::fmt::Display for ReservationPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Gap=>"Incoming address recovery is pending. Wait for a payment or abandoned-address reconciliation.",
-            Self::Limit=>"Three incoming swaps are awaiting deposits. Resume an existing swap or wait for reconciliation.",
-            Self::Stale=>"This receive reservation is no longer available. Request a new quote.",
-            Self::Coverage=>"Finish syncing to the chain tip before requesting a quote.",
-            Self::Unreadable=>"A swap refund record could not be read. Update the app before swapping ZEC again.",
+            Self::Gap => {
+                "Incoming address recovery is pending. \
+                 Wait for a payment or abandoned-address reconciliation."
+            }
+            Self::Limit => {
+                "Three incoming swaps are awaiting deposits. \
+                 Resume an existing swap or wait for reconciliation."
+            }
+            Self::Stale => "This receive reservation is no longer available. Request a new quote.",
+            Self::Coverage => "Finish syncing to the chain tip before requesting a quote.",
+            Self::Unreadable => {
+                "A swap refund record could not be read. \
+                 Update the app before swapping ZEC again."
+            }
         })
     }
 }
@@ -140,10 +148,6 @@ pub struct RegisteredKey {
 }
 
 impl RegisteredKey {
-    /// The owning wallet account.
-    pub fn account(&self) -> AccountUuid {
-        *self.scanning_key.account_id()
-    }
     /// The purpose/index identity to retain with operations and received notes.
     pub fn key_id(&self) -> KeyId {
         self.scanning_key.key_id()
@@ -151,9 +155,6 @@ impl RegisteredKey {
     /// The derived FVK to use for note reconstruction and spending.
     pub fn full_viewing_key(&self) -> &FullViewingKey {
         self.scanning_key.full_viewing_key()
-    }
-    pub(crate) fn into_scanning_key(self) -> SwapScanningKey<AccountUuid> {
-        self.scanning_key
     }
 
     /// The receiver at external diversifier index zero.
@@ -206,8 +207,9 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         )
     }
 
-    // Keep selection and decoding in one query. Row IDs may be reused if another
-    // connection deletes a registration. Predicates are library-owned SQL only.
+    /// The key registered to `account` matching `predicate`, selected and decoded in
+    /// one query because row IDs may be reused if another connection deletes a
+    /// registration. Predicates are library-owned SQL only.
     fn swap_receiving_key_matching(
         &self,
         account: AccountUuid,
@@ -247,7 +249,8 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         self.swap_receiving_keys_where(account, "active_from IS NOT NULL AND closed_at IS NULL")
     }
 
-    // `predicate` is library-owned SQL over `ironwood_receiving_keys`.
+    /// `account`'s keys matching `predicate`, library-owned SQL over
+    /// `ironwood_receiving_keys`.
     fn swap_receiving_keys_where(
         &self,
         account: AccountUuid,
@@ -268,6 +271,9 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         Ok(keys)
     }
 
+    /// Keys that may own outputs of `txid`: those its stored notes or queued payments
+    /// name, open keys active by the next block (by `height` without a chain tip),
+    /// and keys registered for `receivers`.
     pub(crate) fn swap_receiving_transaction_keys(
         &self,
         account: AccountUuid,
@@ -280,7 +286,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         let height = super::chain_tip_height(conn)?
             .map(|h| BlockHeight::from(u32::from(h).saturating_add(1)))
             .or(height);
-        let mut selected = std::collections::HashSet::new();
+        let mut selected = HashSet::new();
         let mut by_receiver = conn.prepare_cached(
             "SELECT id FROM ironwood_receiving_keys WHERE account_id=?1 AND receiver=?2",
         )?;
@@ -321,32 +327,42 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         }
         Ok(keys)
     }
+
+    /// The scanning keys `keys` returns for each account with an Orchard viewing key.
+    pub(crate) fn swap_keys_by_account(
+        &self,
+        keys: impl Fn(AccountUuid) -> Result<Vec<RegisteredKey>, Error>,
+    ) -> Result<Vec<SwapScanningKey<AccountUuid>>, SqliteClientError> {
+        let mut result = Vec::new();
+        for (account, ufvk) in
+            super::get_unified_full_viewing_keys(self.conn.borrow(), &self.params)?
+        {
+            if ufvk.orchard().is_some() {
+                let found = keys(account).map_err(wallet_error)?;
+                result.extend(found.into_iter().map(|key| key.scanning_key));
+            }
+        }
+        Ok(result)
+    }
 }
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
-    /// Atomically reserves and registers the next index for this purpose. The key is
+    /// Atomically reserves and registers the next refund index. The key is
     /// trial-decrypted from the first unscanned block until it closes.
     ///
     /// `tip` is the chain tip the caller last observed from the network. The wallet
-    /// must be scanned to within [`ISSUANCE_TIP_LAG`] blocks of it. A refund
-    /// reservation first recovers every funding memo, and an incoming one waits for
-    /// the restore lookahead's sweeps, so an index the seed already used is never
-    /// issued again. This commits a missing lookahead even when it must wait.
+    /// must be scanned to within [`ISSUANCE_TIP_LAG`] blocks of it. Every funding memo
+    /// is recovered first, so an index the seed already used is never issued again.
     /// Only a committed result may be exposed. On a concurrent-write error, retry
     /// the whole operation. To also persist application operation state, call this
-    /// on the wallet handle inside `transactionally_with_extension`.
-    pub fn reserve_swap_receiving_key(
+    /// on the wallet handle inside `transactionally_with_extension`. Incoming
+    /// addresses come from [`WalletDb::prepare_swap_receive_reservation`].
+    pub fn reserve_swap_refund_key(
         &mut self,
         account: AccountUuid,
-        purpose: Purpose,
         tip: BlockHeight,
     ) -> Result<RegisteredKey, Error> {
-        if purpose == Purpose::Receive {
-            self.transactionally(|wdb| {
-                wdb.extend_receive_lookahead(account, reservations::RECEIVE_LOOKAHEAD)
-            })?;
-        }
-        self.transactionally(|wdb| wdb.reserve_swap_receiving_key(account, purpose, tip))
+        self.transactionally(|wdb| wdb.reserve_swap_refund_key(account, tip))
     }
 
     /// Reserves the next index scanned from `scan_from`, without readiness checks.
@@ -360,14 +376,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         self.transactionally(|wdb| wdb.reserve_swap_receiving_key_from(account, purpose, scan_from))
     }
 
-    /// Registers a key backed by authenticated recovery evidence.
-    ///
-    /// For refunds the caller must validate its own funding memo. For incoming
-    /// keys it must validate a payment, including one already spent. An empty
-    /// directory result is not evidence. Repeated registration is idempotent.
-    /// Set `scan_from` no later than the first possible payment. A key this
-    /// wallet never scanned is queued for a receiver-directory sweep.
-    pub fn recover_swap_receiving_key(
+    /// See [`WalletDb::recover_swap_receiving_key`] on a transaction-backed handle.
+    #[cfg(test)]
+    pub(crate) fn recover_swap_receiving_key(
         &mut self,
         account: AccountUuid,
         key_id: KeyId,
@@ -376,9 +387,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         self.transactionally(|wdb| wdb.recover_swap_receiving_key(account, key_id, scan_from))
     }
 
-    /// Registers an incoming lookahead key for a receiver-directory sweep without
-    /// advancing address allocation.
-    pub fn watch_swap_receive_key(
+    /// See [`WalletDb::watch_swap_receive_key`] on a transaction-backed handle.
+    #[cfg(test)]
+    pub(crate) fn watch_swap_receive_key(
         &mut self,
         account: AccountUuid,
         index: u64,
@@ -390,30 +401,20 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
 
 impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
     /// Reserves in the enclosing transaction. Expose the address only after commit.
-    /// See [`WalletDb::reserve_swap_receiving_key`] on a connection-backed handle.
-    /// A lookahead registered here commits only with the enclosing transaction;
-    /// [`WalletDb::maintain_swap_receiving`] commits it on its own.
-    pub fn reserve_swap_receiving_key(
+    /// See [`WalletDb::reserve_swap_refund_key`] on a connection-backed handle.
+    pub fn reserve_swap_refund_key(
         &mut self,
         account: AccountUuid,
-        purpose: Purpose,
         tip: BlockHeight,
     ) -> Result<RegisteredKey, Error> {
         let scan_from = issuance_start(self.conn.0, tip)?;
-        match purpose {
-            Purpose::Refund => {
-                if self.recover_refund_memos(account)?.unreadable > 0 {
-                    return Err(Error::ReservationPolicy(ReservationPolicy::Unreadable));
-                }
-                if self.swap_refund_memos_pending(account)? {
-                    return Err(Error::ReservationPolicy(ReservationPolicy::Coverage));
-                }
-            }
-            Purpose::Receive => {
-                self.extend_receive_lookahead(account, reservations::RECEIVE_LOOKAHEAD)?
-            }
+        if self.recover_refund_memos(account)?.unreadable > 0 {
+            return Err(Error::ReservationPolicy(ReservationPolicy::Unreadable));
         }
-        self.reserve_swap_receiving_key_from(account, purpose, scan_from)
+        if self.swap_refund_memos_pending(account)? {
+            return Err(Error::ReservationPolicy(ReservationPolicy::Coverage));
+        }
+        self.reserve_swap_receiving_key_from(account, Purpose::Refund, scan_from)
     }
 
     /// Reserves the next index scanned from `scan_from`, without readiness checks.
@@ -439,26 +440,31 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 .ok_or(Error::IndexExhausted)?,
             None => 0,
         };
+        let key_id = KeyId::new(purpose, index);
+        let now = unix_now(&self.clock);
         register(
             self.conn.0,
             &self.params,
             account,
-            KeyId::new(purpose, index),
+            key_id,
             scan_from,
             true,
-            Discovery::Scan(scan_from),
-            unix_now(&self.clock),
+            Discovery::Scan,
+            now,
         )
+        .map(|(_, key)| key)
     }
 
-    /// Records authenticated recovery evidence in the enclosing transaction.
-    /// See [`WalletDb::recover_swap_receiving_key`] on a connection-backed handle.
-    pub fn recover_swap_receiving_key(
+    /// Registers a key as recovered evidence would, from `scan_from`. A key this wallet
+    /// never scanned is queued for a receiver-directory sweep.
+    #[cfg(test)]
+    pub(crate) fn recover_swap_receiving_key(
         &mut self,
         account: AccountUuid,
         key_id: KeyId,
         scan_from: BlockHeight,
     ) -> Result<RegisteredKey, Error> {
+        let now = unix_now(&self.clock);
         register(
             self.conn.0,
             &self.params,
@@ -467,51 +473,64 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
             scan_from,
             true,
             Discovery::Sweep,
-            unix_now(&self.clock),
+            now,
         )
+        .map(|(_, key)| key)
     }
 
-    /// Watches an unpaid incoming index in the enclosing transaction.
-    pub fn watch_swap_receive_key(
+    /// Registers an incoming lookahead key for a receiver-directory sweep without
+    /// advancing address allocation.
+    pub(crate) fn watch_swap_receive_key(
         &mut self,
         account: AccountUuid,
         index: u64,
         scan_from: BlockHeight,
     ) -> Result<RegisteredKey, Error> {
+        let key_id = KeyId::new(Purpose::Receive, index);
+        let now = unix_now(&self.clock);
         register(
             self.conn.0,
             &self.params,
             account,
-            KeyId::new(Purpose::Receive, index),
+            key_id,
             scan_from,
             false,
             Discovery::Sweep,
-            unix_now(&self.clock),
+            now,
         )
+        .map(|(_, key)| key)
     }
 }
 
-// Shared registry projection adds receiver, scan_from and advances_allocation.
+/// Reconstructs a key from a registry row whose first six columns are purpose,
+/// derivation_version, key_index, receiver, scan_from and advances_allocation.
 fn registered_key(
     row: &rusqlite::Row<'_>,
     account: AccountUuid,
     parent: &FullViewingKey,
 ) -> Result<RegisteredKey, Error> {
-    let key = RegisteredKey {
-        scanning_key: SwapScanningKey::derive(account, stored_key_id(row)?, parent)?,
+    let scanning_key = SwapScanningKey::derive(account, stored_key_id(row)?, parent)?;
+    check_receiver(row.get(3)?, scanning_key.full_viewing_key())?;
+    Ok(RegisteredKey {
+        scanning_key,
         scan_from: BlockHeight::from(row.get::<_, u32>(4)?),
         advances_allocation: row.get(5)?,
-    };
-    let receiver: Vec<u8> = row.get(3)?;
-    if receiver != key.receiver().to_raw_address_bytes() {
+    })
+}
+
+/// Checks a stored receiver against the one `fvk` derives. Since keys derive from
+/// their account's viewing key, this also rejects a key registered to another account.
+fn check_receiver(stored: Vec<u8>, fvk: &FullViewingKey) -> Result<(), Error> {
+    if stored != fvk.address_at(0u32, Scope::External).to_raw_address_bytes() {
         return Err(corrupt(
             "stored swap receiver does not match its derived key",
         ));
     }
-    Ok(key)
+    Ok(())
 }
 
-// Shared column order: purpose, derivation_version, key_index.
+/// The key identity of a registry row whose first three columns are purpose,
+/// derivation_version and key_index.
 fn stored_key_id(row: &rusqlite::Row<'_>) -> Result<KeyId, Error> {
     if row.get::<_, u8>(1)? != 1 {
         return Err(corrupt("unsupported swap key derivation version"));
@@ -524,6 +543,7 @@ fn stored_key_id(row: &rusqlite::Row<'_>) -> Result<KeyId, Error> {
     Ok(KeyId::new(purpose, decode_index(row.get(2)?)?))
 }
 
+/// `account`'s database reference and the Orchard viewing key its swap keys derive from.
 fn account_key<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -580,12 +600,14 @@ pub(super) fn issuance_start(conn: &Connection, tip: BlockHeight) -> Result<Bloc
 /// How a newly registered key's history is covered.
 #[derive(Clone, Copy)]
 pub(super) enum Discovery {
-    /// Trial-decrypt from this height until the key closes.
-    Scan(BlockHeight),
+    /// Trial-decrypt from `scan_from` until the key closes.
+    Scan,
     /// Sweep the receiver directory once, unless the key is already scanned.
     Sweep,
 }
 
+/// Registers `key_id` for `account`, or widens an existing registration, and returns
+/// its row ID with the key. Payments to it are expected from `scan_from`.
 #[allow(clippy::too_many_arguments)]
 fn register<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
@@ -596,7 +618,7 @@ fn register<P: Parameters>(
     advances_allocation: bool,
     discovery: Discovery,
     now: i64,
-) -> Result<RegisteredKey, Error> {
+) -> Result<(i64, RegisteredKey), Error> {
     let (account_ref, parent) = account_key(conn, params, account)?;
     let scanning_key = SwapScanningKey::derive(account, key_id, &parent)?;
     let receiver = scanning_key
@@ -605,33 +627,36 @@ fn register<P: Parameters>(
         .to_raw_address_bytes();
     // Repeated recovery can widen required history or promote a lookahead key.
     // It must never forget a reservation, narrow history, or replace a receiver.
-    let updated: Option<(i64, u32, bool, Option<u32>)> = conn.query_row(
-        "INSERT INTO ironwood_receiving_keys
+    let updated: Option<(i64, u32, bool, Option<u32>)> = conn
+        .query_row(
+            "INSERT INTO ironwood_receiving_keys
              (account_id, purpose, derivation_version, key_index, receiver, scan_from,
               advances_allocation, registered_at)
          VALUES (:account, :purpose, 1, :index, :receiver, :scan_from, :allocated, :now)
          ON CONFLICT (account_id, purpose, derivation_version, key_index) DO UPDATE SET
              scan_from = MIN(ironwood_receiving_keys.scan_from, excluded.scan_from),
-             advances_allocation = MAX(ironwood_receiving_keys.advances_allocation, excluded.advances_allocation)
+             advances_allocation = MAX(
+                 ironwood_receiving_keys.advances_allocation, excluded.advances_allocation)
          WHERE ironwood_receiving_keys.receiver = excluded.receiver
          RETURNING id, scan_from, advances_allocation, active_from",
-        named_params![
-            ":account": account_ref.0,
-            ":purpose": purpose_code(key_id.purpose()),
-            ":index": &key_id.index().to_be_bytes(),
-            ":receiver": &receiver,
-            ":scan_from": u32::from(scan_from),
-            ":allocated": advances_allocation,
-            ":now": now,
-        ],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).optional()?;
-    let (id, scan_from, advances_allocation, active_from) =
+            named_params![
+                ":account": account_ref.0,
+                ":purpose": purpose_code(key_id.purpose()),
+                ":index": &key_id.index().to_be_bytes(),
+                ":receiver": &receiver,
+                ":scan_from": u32::from(scan_from),
+                ":allocated": advances_allocation,
+                ":now": now,
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let (id, stored_from, advances_allocation, active_from) =
         updated.ok_or_else(|| corrupt("stored swap receiver does not match its derived key"))?;
     match discovery {
-        Discovery::Scan(from) => activate(conn, id, from)?,
+        Discovery::Scan => activate(conn, id, scan_from)?,
         // Only a key scanned from its earliest possible payment needs no directory history.
-        Discovery::Sweep if active_from.is_none_or(|start| start > scan_from) => {
+        Discovery::Sweep if active_from.is_none_or(|start| start > stored_from) => {
             conn.execute(
                 "INSERT OR IGNORE INTO ironwood_swap_sweeps (receiving_key_id) VALUES (?1)",
                 [id],
@@ -639,11 +664,14 @@ fn register<P: Parameters>(
         }
         Discovery::Sweep => {}
     }
-    Ok(RegisteredKey {
-        scanning_key,
-        scan_from: scan_from.into(),
-        advances_allocation,
-    })
+    Ok((
+        id,
+        RegisteredKey {
+            scanning_key,
+            scan_from: stored_from.into(),
+            advances_allocation,
+        },
+    ))
 }
 
 /// Starts or extends trial decryption of key `id` from `from`, reopening a closed key.
@@ -659,7 +687,8 @@ pub(super) fn activate(
 ) -> Result<(), Error> {
     let (active_from, closed, swept, sweep_done): (Option<u32>, bool, bool, Option<u32>) = conn
         .query_row(
-            "SELECT k.active_from, k.closed_at IS NOT NULL, s.receiving_key_id IS NOT NULL, s.done_height
+            "SELECT k.active_from, k.closed_at IS NOT NULL,
+                    s.receiving_key_id IS NOT NULL, s.done_height
              FROM ironwood_receiving_keys k
              LEFT JOIN ironwood_swap_sweeps s ON s.receiving_key_id = k.id
              WHERE k.id = ?1",
@@ -690,7 +719,10 @@ pub(super) fn activate(
 }
 
 /// Queues `range` for a forced rescan with historic priority.
-fn queue_rescan(conn: &rusqlite::Transaction<'_>, range: Range<BlockHeight>) -> Result<(), Error> {
+pub(super) fn queue_rescan(
+    conn: &rusqlite::Transaction<'_>,
+    range: Range<BlockHeight>,
+) -> Result<(), Error> {
     if !range.is_empty() {
         crate::wallet::scanning::replace_queue_entries::<SqliteClientError>(
             conn,
@@ -740,55 +772,28 @@ fn unix_now(clock: &impl Clock) -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-/// Reconstruct a note's key and check that its registry account is the selected account.
-pub(super) fn note_key<P: Parameters>(
+/// Re-derives registered key `id` from `parent`, the viewing key of its note's account.
+pub(super) fn note_key(
     conn: &Connection,
-    params: &P,
     id: i64,
     parent: &FullViewingKey,
 ) -> Result<(KeyId, FullViewingKey), SqliteClientError> {
-    let (account, purpose, version, index, receiver): (AccountUuid, u8, u8, Vec<u8>, Vec<u8>) =
-        conn.query_row(
-            "SELECT a.uuid, k.purpose, k.derivation_version, k.key_index, k.receiver
-         FROM ironwood_receiving_keys k JOIN accounts a ON a.id = k.account_id
-         WHERE k.id = ?1",
-            [id],
-            |row| {
-                Ok((
-                    AccountUuid(row.get(0)?),
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )?;
-    let (_, registered_parent) = account_key(conn, params, account).map_err(wallet_error)?;
-    if registered_parent.to_bytes() != parent.to_bytes() || version != 1 {
-        return Err(SqliteClientError::CorruptedData(
-            "swap note key belongs to another account or version".into(),
-        ));
-    }
-    let purpose = match purpose {
-        0 => Purpose::Refund,
-        1 => Purpose::Receive,
-        _ => {
-            return Err(SqliteClientError::CorruptedData(
-                "invalid swap key purpose".into(),
-            ));
-        }
-    };
-    let key_id = KeyId::new(purpose, decode_index(index).map_err(wallet_error)?);
+    let mut stmt = conn.prepare_cached(
+        "SELECT purpose, derivation_version, key_index, receiver
+         FROM ironwood_receiving_keys WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query([id])?;
+    let row = rows
+        .next()?
+        .ok_or_else(|| wallet_error(corrupt("missing swap note key")))?;
+    let key_id = stored_key_id(row).map_err(wallet_error)?;
     let fvk = key_id.derive(parent).map_err(|e| wallet_error(e.into()))?;
-    if receiver != fvk.address_at(0u32, Scope::External).to_raw_address_bytes() {
-        return Err(SqliteClientError::CorruptedData(
-            "stored swap receiver does not match its derived key".into(),
-        ));
-    }
+    check_receiver(row.get(3)?, &fvk).map_err(wallet_error)?;
     Ok((key_id, fvk))
 }
 
-/// Validate scan metadata before it can change a note or advance sequence allocation.
+/// Validates scan metadata naming a swap key before it can change a note or advance
+/// allocation. Returns the key's registry ID.
 pub(super) fn validate_received_key<
     P: Parameters,
     T: zcash_client_backend::data_api::ll::ReceivedOrchardOutput<AccountId = AccountUuid>,
@@ -801,18 +806,9 @@ pub(super) fn validate_received_key<
     let Some(key_id) = output.swap_key_id() else {
         return Ok(None);
     };
-    let (account, parent) = account_key(conn, params, output.account_id()).map_err(wallet_error)?;
-    let id: i64 = conn.query_row(
-        "SELECT id FROM ironwood_receiving_keys WHERE account_id = ?1
-         AND purpose = ?2 AND derivation_version = 1 AND key_index = ?3",
-        rusqlite::params![
-            account.0,
-            purpose_code(key_id.purpose()),
-            key_id.index().to_be_bytes()
-        ],
-        |row| row.get(0),
-    )?;
-    let (_, fvk) = note_key(conn, params, id, &parent)?;
+    let (_, parent) = account_key(conn, params, output.account_id()).map_err(wallet_error)?;
+    let id = payments::key_ref(conn, output.account_id(), key_id).map_err(wallet_error)?;
+    let (_, fvk) = note_key(conn, id, &parent)?;
     if pool != zcash_protocol::ShieldedPool::Ironwood
         || output.note().version() != orchard::note::NoteVersion::V3
         || output.recipient_key_scope() != Some(Scope::External)
@@ -828,6 +824,7 @@ pub(super) fn validate_received_key<
     Ok(Some(id))
 }
 
+/// Converts a swap error for storage-trait callers. Database errors pass through.
 fn wallet_error(error: Error) -> SqliteClientError {
     match error {
         Error::Wallet(error) => error,
@@ -835,6 +832,7 @@ fn wallet_error(error: Error) -> SqliteClientError {
     }
 }
 
+/// The stored code of `purpose`.
 fn purpose_code(purpose: Purpose) -> u8 {
     match purpose {
         Purpose::Refund => 0,
@@ -842,6 +840,7 @@ fn purpose_code(purpose: Purpose) -> u8 {
     }
 }
 
+/// Decodes a stored big-endian key index.
 fn decode_index(bytes: Vec<u8>) -> Result<u64, Error> {
     bytes
         .try_into()
@@ -849,6 +848,7 @@ fn decode_index(bytes: Vec<u8>) -> Result<u64, Error> {
         .map_err(|_| corrupt("invalid swap key index"))
 }
 
+/// A corrupted-data error with `message`.
 fn corrupt(message: &str) -> Error {
     SqliteClientError::CorruptedData(message.to_owned()).into()
 }

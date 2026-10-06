@@ -12,7 +12,7 @@ use orchard::{
 };
 use rand::rng;
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
-use zakura_swap_receiving::{Purpose, RefundMemo, derive_full_viewing_key};
+use zakura_swap_receiving::{KeyId, Purpose, RefundMemo};
 
 #[test]
 fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
@@ -29,8 +29,8 @@ fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
     // Only a proven bundle and fixture output indices survive this scope. Recovery below
     // must reconstruct the swap FVKs instead of retaining them from issuance.
     let (received, positions) = {
-        let refund = derive_full_viewing_key(&account, Purpose::Refund, 7).unwrap();
-        let incoming = derive_full_viewing_key(&account, Purpose::Receive, 0).unwrap();
+        let refund = KeyId::new(Purpose::Refund, 7).derive(&account).unwrap();
+        let incoming = KeyId::new(Purpose::Receive, 0).derive(&account).unwrap();
         let mut builder = Builder::new(
             BundleType::DEFAULT,
             BundleVersion::ironwood_v3(),
@@ -93,9 +93,11 @@ fn receive_restore_and_spend_both_purposes_with_ordinary_change() {
         .unwrap();
     assert_eq!(marker.value(), NoteValue::ZERO);
     let record = RefundMemo::decode(&recovered_memo).unwrap().unwrap();
-    let refund = derive_full_viewing_key(&account, Purpose::Refund, record.index()).unwrap();
+    let refund = KeyId::new(Purpose::Refund, record.index())
+        .derive(&account)
+        .unwrap();
     // The incoming index is enumerated by lookahead, not read from a refund memo.
-    let incoming = derive_full_viewing_key(&account, Purpose::Receive, 0).unwrap();
+    let incoming = KeyId::new(Purpose::Receive, 0).derive(&account).unwrap();
 
     for position in &positions[2..] {
         for scope in [Scope::External, Scope::Internal] {

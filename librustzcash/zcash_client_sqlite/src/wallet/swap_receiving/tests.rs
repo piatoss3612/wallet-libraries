@@ -1,16 +1,31 @@
 use std::sync::{Arc, Barrier};
 
-use secrecy::{ExposeSecret, SecretVec};
-use zcash_client_backend::data_api::{
-    WalletWrite,
-    testing::{TestBuilder, TestState},
+use incrementalmerkletree::Hashable;
+use orchard::{
+    note::Note,
+    note_encryption::{CompactAction, IronwoodDomain, IronwoodNoteEncryption},
+    tree::{MerkleHashOrchard, MerklePath},
 };
+use prost::Message;
+use secrecy::{ExposeSecret, SecretVec};
+use zakura_swap_receiving::{lifecycle::ChainAnchor, recovery::EncryptedNote};
+use zcash_client_backend::{
+    data_api::{
+        WalletRead, WalletWrite,
+        testing::{AddressType, IronwoodFvk, TestBuilder, TestState},
+    },
+    proto::compact_formats::CompactBlock,
+};
+use zcash_note_encryption::{Domain, try_compact_note_decryption};
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::local_consensus::LocalNetwork;
+use zcash_protocol::{local_consensus::LocalNetwork, value::Zatoshis};
 
 use crate::testing::db::{TestDb, TestDbFactory, test_clock, test_rng};
 
 use super::*;
+
+/// A test wallet with a block cache.
+type State = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
 
 fn wallet(file_backed: bool) -> TestState<(), TestDb, LocalNetwork> {
     TestBuilder::new()
@@ -21,6 +36,30 @@ fn wallet(file_backed: bool) -> TestState<(), TestDb, LocalNetwork> {
         })
         .with_account_from_sapling_activation(BlockHash([0; 32]))
         .build()
+}
+
+/// A file-backed wallet with a block cache and Ironwood active from its first block.
+fn ironwood_wallet() -> State {
+    let activation = BlockHeight::from_u32(100_000);
+    TestBuilder::new()
+        .with_network(LocalNetwork {
+            nu6: Some(activation),
+            nu6_1: Some(activation),
+            nu6_2: Some(activation),
+            nu6_3: Some(activation),
+            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
+        })
+        .with_data_store_factory(TestDbFactory::file_backed())
+        .with_block_cache(crate::testing::BlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build()
+}
+
+/// An Ironwood wallet scanned through one empty block, so it is at its tip.
+fn scanned_wallet() -> State {
+    let mut st = ironwood_wallet();
+    st.generate_and_scan_empty_blocks(1);
+    st
 }
 
 fn start() -> BlockHeight {
@@ -93,11 +132,6 @@ fn lookahead_does_not_skip_unissued_addresses_and_recovery_promotes_it() {
                 .advances_allocation()
         );
     }
-    // An unswept lookahead index waits for its sweep rather than being skipped.
-    assert!(matches!(
-        db.reserve_swap_receiving_key_from(account, Purpose::Receive, start()),
-        Err(Error::ReservationPolicy(ReservationPolicy::Gap))
-    ));
     let key_id = KeyId::new(Purpose::Receive, 18);
     let recovered = db
         .recover_swap_receiving_key(account, key_id, 80.into())
@@ -107,6 +141,7 @@ fn lookahead_does_not_skip_unissued_addresses_and_recovery_promotes_it() {
     assert!(repeated.advances_allocation());
     assert_eq!(repeated.scan_from(), BlockHeight::from_u32(80));
     assert_eq!(db.get_swap_receiving_keys(account).unwrap().len(), 20);
+    // The unswept lookahead index 19 waits for its sweep rather than being skipped.
     assert!(matches!(
         db.reserve_swap_receiving_key_from(account, Purpose::Receive, start()),
         Err(Error::ReservationPolicy(ReservationPolicy::Gap))
@@ -280,7 +315,7 @@ fn account_deletion_cascades_and_unknown_accounts_cannot_reserve() {
 }
 
 #[test]
-fn maintained_lookahead_advances_only_after_reservation_or_payment() {
+fn maintained_lookahead_extends_only_above_a_restored_key() {
     let mut st = wallet(false);
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
@@ -311,6 +346,101 @@ fn accepted(address: &str, memo: Option<&str>, deadline: i64) -> QuoteOutcome {
         memo: memo.map(Into::into),
         deadline,
     })
+}
+
+/// The wallet's fully scanned tip.
+fn tip(st: &State) -> ChainAnchor {
+    let block = st.wallet().block_fully_scanned().unwrap().unwrap();
+    ChainAnchor {
+        height: block.block_height(),
+        hash: block.block_hash().0,
+    }
+}
+
+/// The swap key of each unspent Ironwood note at `height`, `None` for ordinary notes.
+fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
+    st.wallet()
+        .db()
+        .get_unspent_ironwood_notes_at_historical_height(st.test_account().unwrap().id(), height)
+        .unwrap()
+        .iter()
+        .map(|n| n.swap_key_id())
+        .collect()
+}
+
+/// Keys the scanner trial-decrypts with.
+fn scanning_keys(st: &State) -> Vec<KeyId> {
+    let keys = st.wallet().get_swap_scanning_keys().unwrap();
+    keys.iter().map(|k| k.key_id()).collect()
+}
+
+/// Pays `key` in a new scanned block and returns the output as a directory
+/// candidate. The output must be the chain's first Ironwood leaf.
+fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
+    let fvk = key
+        .derive(&FullViewingKey::from(
+            st.test_account().unwrap().usk().orchard(),
+        ))
+        .unwrap();
+    let (height, _, _) = st.generate_next_block(
+        &IronwoodFvk(fvk.clone()),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(100_000),
+    );
+    st.scan_cached_blocks(height, 1);
+    let data: Vec<u8> = st
+        .cache()
+        .0
+        .query_row(
+            "SELECT data FROM compactblocks WHERE height = ?1",
+            [u32::from(height)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let block = CompactBlock::decode(data.as_slice()).unwrap();
+    let tx = &block.vtx[0];
+    let action = CompactAction::try_from(&tx.ironwood_actions[0]).unwrap();
+    let (note, _) = try_compact_note_decryption(
+        &IronwoodDomain::for_compact_action(&action),
+        &fvk.to_ivk(Scope::External).prepare(),
+        &action,
+    )
+    .unwrap();
+    let encrypted_note = encrypt_note(note);
+    assert_eq!(
+        &encrypted_note.to_bytes()[96..148],
+        tx.ironwood_actions[0].ciphertext.as_slice()
+    );
+    PendingPayment {
+        txid: tx.txid(),
+        action_index: 0,
+        height,
+        block_hash: block.hash(),
+        tx_index: tx.index.try_into().unwrap(),
+        position: 0,
+        encrypted_note,
+    }
+}
+
+/// Encrypts `note` with a `[4; 512]` memo, as a directory candidate carries it.
+fn encrypt_note(note: Note) -> EncryptedNote {
+    let enc = IronwoodNoteEncryption::new(None, note, [4; 512]);
+    let bytes = enc.encrypt_note_plaintext();
+    EncryptedNote::from_parts(
+        note.rho().to_bytes(),
+        orchard::note::ExtractedNoteCommitment::from(note.commitment()).to_bytes(),
+        IronwoodDomain::epk_bytes(enc.epk()).0,
+        bytes[..52].try_into().unwrap(),
+        bytes[52..].try_into().unwrap(),
+    )
+}
+
+/// The authentication path of the first leaf in an otherwise empty tree.
+fn first_leaf_path() -> MerklePath {
+    MerklePath::from_parts(
+        0,
+        std::array::from_fn(|level| MerkleHashOrchard::empty_root((level as u8).into())),
+    )
 }
 
 mod apply;

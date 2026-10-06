@@ -1,7 +1,5 @@
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use zakura_swap_receiving::{
-    MemoError, Purpose, RefundMemo, derive_full_viewing_key, has_same_spending_authority,
-};
+use zakura_swap_receiving::{KeyId, MemoError, Purpose, RefundMemo, has_same_spending_authority};
 
 #[test]
 fn derived_keys_separate_purposes_and_preserve_only_authority() {
@@ -10,15 +8,11 @@ fn derived_keys_separate_purposes_and_preserve_only_authority() {
     let mut receivers = vec![account.address_at(0u32, Scope::External)];
     for index in [0, 1, u64::MAX] {
         for purpose in [Purpose::Refund, Purpose::Receive] {
-            let key = derive_full_viewing_key(&account, purpose, index).unwrap();
+            let id = KeyId::new(purpose, index);
+            let key = id.derive(&account).unwrap();
             assert!(has_same_spending_authority(&account, &key));
             assert!(!has_same_spending_authority(&foreign, &key));
-            assert_eq!(
-                key.to_bytes(),
-                derive_full_viewing_key(&account, purpose, index)
-                    .unwrap()
-                    .to_bytes()
-            );
+            assert_eq!(key.to_bytes(), id.derive(&account).unwrap().to_bytes());
             let address = key.address_at(0u32, Scope::External);
             assert!(!receivers.contains(&address));
             receivers.push(address);

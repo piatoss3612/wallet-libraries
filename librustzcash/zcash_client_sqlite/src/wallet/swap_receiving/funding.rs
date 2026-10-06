@@ -72,10 +72,10 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
             if elsewhere {
                 return Err(corrupt("swap deposit address is quoted for another key"));
             }
-            // `observed_at` 0 marks a record that no provider status has updated yet.
             db.conn.0.execute(
                 "INSERT INTO ironwood_swap_operations
-                    (receiving_key_id, operation_id, observed_at, terminal_at, expectation, deadline)
+                    (receiving_key_id, operation_id, observed_at, terminal_at, expectation,
+                     deadline)
                  VALUES (?1, ?2, 0, ?3, 1, ?4)
                  ON CONFLICT (receiving_key_id, operation_id) DO NOTHING",
                 params![key, deposit, now, deadline],

@@ -66,15 +66,22 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                 "SELECT k.id, k.registered_at, k.purpose = 1,
                     EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
                         WHERE r.receiving_key_id = k.id AND r.closed_at IS NULL),
-                    EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r WHERE r.receiving_key_id = k.id),
-                    EXISTS(SELECT 1 FROM ironwood_swap_receive_used u WHERE u.receiving_key_id = k.id),
+                    EXISTS(SELECT 1 FROM ironwood_swap_receive_reservations r
+                        WHERE r.receiving_key_id = k.id),
+                    EXISTS(SELECT 1 FROM ironwood_swap_receive_used u
+                        WHERE u.receiving_key_id = k.id),
                     EXISTS(SELECT 1 FROM ironwood_swap_sweeps s WHERE s.receiving_key_id = k.id),
-                    (SELECT COUNT(*) FROM ironwood_swap_operations o WHERE o.receiving_key_id = k.id),
                     (SELECT COUNT(*) FROM ironwood_swap_operations o
-                        WHERE o.receiving_key_id = k.id AND (o.terminal_at IS NULL OR o.expectation = 0)),
-                    (SELECT MAX(o.terminal_at) FROM ironwood_swap_operations o WHERE o.receiving_key_id = k.id),
-                    (SELECT MAX(o.deadline) FROM ironwood_swap_operations o WHERE o.receiving_key_id = k.id),
-                    (SELECT COALESCE(SUM(COALESCE(o.expected_value, 1)), 0) FROM ironwood_swap_operations o
+                        WHERE o.receiving_key_id = k.id),
+                    (SELECT COUNT(*) FROM ironwood_swap_operations o
+                        WHERE o.receiving_key_id = k.id
+                          AND (o.terminal_at IS NULL OR o.expectation = 0)),
+                    (SELECT MAX(o.terminal_at) FROM ironwood_swap_operations o
+                        WHERE o.receiving_key_id = k.id),
+                    (SELECT MAX(o.deadline) FROM ironwood_swap_operations o
+                        WHERE o.receiving_key_id = k.id),
+                    (SELECT COALESCE(SUM(COALESCE(o.expected_value, 1)), 0)
+                        FROM ironwood_swap_operations o
                         WHERE o.receiving_key_id = k.id AND o.expectation = 2),
                     (SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
                         JOIN transactions t ON t.id_tx = n.transaction_id
@@ -108,12 +115,14 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                             .unwrap_or(registered_at)
                             .saturating_add(policy.limit_secs)
                     };
+                    let graced =
+                        last_terminal.is_some_and(|t| now >= t.saturating_add(policy.grace_secs));
                     // A refund key's missing funding memo could still reopen its quote.
                     let settled = (incoming || !memos_pending)
                         && operations > 0
                         && unresolved == 0
                         && received >= expected
-                        && last_terminal.is_some_and(|t| now >= t.saturating_add(policy.grace_secs));
+                        && graced;
                     Ok((id, settled || now >= limit))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -160,7 +169,8 @@ pub(super) fn record_observation(
     let terminal = matches!(observation.status, OperationStatus::Terminal(_));
     conn.execute(
         "INSERT INTO ironwood_swap_operations
-            (receiving_key_id, operation_id, observed_at, terminal_at, expectation, expected_value, deadline)
+            (receiving_key_id, operation_id, observed_at, terminal_at, expectation,
+             expected_value, deadline)
          VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN ?3 END, ?5, ?6, ?7)
          ON CONFLICT (receiving_key_id, operation_id) DO UPDATE SET
             observed_at = excluded.observed_at,
@@ -171,7 +181,15 @@ pub(super) fn record_observation(
             expected_value = excluded.expected_value,
             deadline = COALESCE(excluded.deadline, deadline)
          WHERE observed_at <= excluded.observed_at",
-        params![id, operation, now, terminal, expectation, amount, observation.deadline],
+        params![
+            id,
+            operation,
+            now,
+            terminal,
+            expectation,
+            amount,
+            observation.deadline
+        ],
     )?;
     Ok(())
 }

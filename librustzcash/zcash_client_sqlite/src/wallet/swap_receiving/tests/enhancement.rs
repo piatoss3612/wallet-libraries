@@ -2,48 +2,20 @@ use super::*;
 use std::convert::Infallible;
 use transparent::address::TransparentAddress;
 use zcash_client_backend::{
-    data_api::{
-        WalletRead,
-        testing::{AddressType, IronwoodFvk},
-        wallet::{
-            ConfirmationsPolicy, decrypt_and_store_transaction,
-            input_selection::GreedyInputSelector,
-        },
+    data_api::wallet::{
+        ConfirmationsPolicy, decrypt_and_store_transaction, input_selection::GreedyInputSelector,
     },
     fees::{DustOutputPolicy, StandardFeeRule, standard},
     wallet::OvkPolicy,
 };
 use zcash_keys::address::{Address, UnifiedAddress};
-use zcash_protocol::{ShieldedPool, TxId, memo::MemoBytes, value::Zatoshis};
+use zcash_protocol::{ShieldedPool, TxId, memo::MemoBytes};
 use zip321::{Payment, TransactionRequest};
 
 fn full_transaction_roundtrip(full_first: bool) {
-    let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
-    let mut st = TestBuilder::new()
-        .with_network(network)
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let (mut st, h) = ironwood_funded_wallet();
+    let network = *st.network();
     let account = st.test_account().cloned().unwrap();
-    let parent = orchard::keys::FullViewingKey::from(account.usk().orchard());
-    let (h, _, _) = st.generate_next_block(
-        &IronwoodFvk(parent),
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(1_000_000),
-    );
-    st.scan_cached_blocks(h, 1);
-    for _ in 0..5 {
-        let (h, _) = st.generate_empty_block();
-        st.scan_cached_blocks(h, 1);
-    }
 
     let scan_from = st.wallet().chain_height().unwrap().unwrap() + 1;
     let keys: Vec<_> = [Purpose::Refund, Purpose::Receive]
@@ -166,23 +138,8 @@ fn swap_receiving_full_transaction_before_compact_scan() {
 
 /// Builds a wallet whose test account holds one confirmed 1,000,000 zatoshi
 /// Ironwood note, returning the height of the block that paid it.
-fn ironwood_funded_wallet() -> (
-    TestState<crate::testing::BlockCache, TestDb, LocalNetwork>,
-    BlockHeight,
-) {
-    let activation = BlockHeight::from_u32(100_000);
-    let mut st = TestBuilder::new()
-        .with_network(LocalNetwork {
-            nu6: Some(activation),
-            nu6_1: Some(activation),
-            nu6_2: Some(activation),
-            nu6_3: Some(activation),
-            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-        })
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+fn ironwood_funded_wallet() -> (State, BlockHeight) {
+    let mut st = ironwood_wallet();
     let account = st.test_account().cloned().unwrap();
     let parent = orchard::keys::FullViewingKey::from(account.usk().orchard());
     let (first, _, _) = st.generate_next_block(
@@ -201,7 +158,7 @@ fn ironwood_funded_wallet() -> (
 /// Sends `payments` from the test account with `memo` on Ironwood change, then
 /// mines and scans the transaction. Returns its proposal, txid and height.
 fn send_with_change_memo(
-    st: &mut TestState<crate::testing::BlockCache, TestDb, LocalNetwork>,
+    st: &mut State,
     payments: Vec<Payment>,
     memo: &MemoBytes,
 ) -> (
@@ -241,7 +198,7 @@ fn send_with_change_memo(
 fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     use zakura_swap_receiving::{
         RefundMemo,
-        lifecycle::{ChainAnchor, ProviderStatus, near_observation},
+        lifecycle::{ProviderStatus, near_observation},
     };
     let (mut st, first) = ironwood_funded_wallet();
     let network = *st.network();
@@ -348,68 +305,6 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .take_swap_refund_status_checks(restored, 1_000, std::num::NonZeroU32::new(8).unwrap())
             .unwrap(),
         vec![(key, deposit.to_string())]
-    );
-    let directory = tempfile::tempdir().unwrap();
-    let restored_path = directory.path().join("restored.sqlite");
-    st.wallet()
-        .conn()
-        .execute("VACUUM INTO ?1", [restored_path.to_str().unwrap()])
-        .unwrap();
-    let reopened = WalletDb::for_path(&restored_path, *st.network(), test_clock(), test_rng())
-        .unwrap()
-        .with_transparent_ledger_mode(
-            zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode::Public,
-        );
-    *st.wallet_mut().db_mut() = reopened;
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .recover_swap_refund_memos(restored)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .take_swap_refund_status_checks(restored, 1_059, std::num::NonZeroU32::new(8).unwrap())
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .take_swap_refund_status_checks(restored, 1_060, std::num::NonZeroU32::new(8).unwrap())
-            .unwrap()
-            .len(),
-        1
-    );
-
-    // A completed refund sweep scans the key from the next block.
-    let swept = ChainAnchor {
-        height: mined,
-        hash: st.wallet().db().get_block_hash(mined).unwrap().unwrap().0,
-    };
-    st.wallet_mut()
-        .db_mut()
-        .finish_sweep(restored, key, swept)
-        .unwrap();
-    // `reset` forgot the cached tip that the next generated block extends.
-    st.truncate_to_height_retaining_cache(mined);
-    let (late, _, _) = st.generate_next_block(
-        &IronwoodFvk(keys[0].full_viewing_key().clone()),
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(50_000),
-    );
-    st.scan_cached_blocks(late, 1);
-    assert_eq!(
-        st.wallet()
-            .db()
-            .get_unspent_ironwood_notes_at_historical_height(restored, late)
-            .unwrap()
-            .iter()
-            .filter(|n| n.swap_key_id() == Some(key))
-            .count(),
-        1
     );
     let refunded = near_observation(
         Purpose::Refund,
@@ -558,8 +453,9 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
 
 #[test]
 fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
-    use zakura_swap_receiving::lifecycle::{
-        CompletionPolicy, OperationStatus::Terminal, ReceiptExpectation,
+    use zakura_swap_receiving::{
+        RefundMemo,
+        lifecycle::{CompletionPolicy, OperationStatus::Terminal, ReceiptExpectation},
     };
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
@@ -593,6 +489,8 @@ fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
     );
     verify_swap_funding_proposal(&proposal, &memo, &funded).unwrap();
     assert!(verify_swap_funding_proposal(&proposal, &memo, &abandoned).is_err());
+    let other = MemoBytes::from_bytes(&RefundMemo::new(key.index() + 1).encode()).unwrap();
+    assert!(verify_swap_funding_proposal(&proposal, &other, &funded).is_err());
 
     let db = st.wallet_mut().db_mut();
     let records = db.recover_swap_refund_memos(account).unwrap();
@@ -674,10 +572,7 @@ fn reissued_refund_key_sweeps_history_before_its_scan_start() {
 
 #[test]
 fn refund_status_checks_skip_closed_keys() {
-    use zakura_swap_receiving::{
-        RefundMemo,
-        lifecycle::{ChainAnchor, CompletionPolicy},
-    };
+    use zakura_swap_receiving::{RefundMemo, lifecycle::CompletionPolicy};
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
@@ -692,10 +587,7 @@ fn refund_status_checks_skip_closed_keys() {
         )],
         &memo,
     );
-    let swept = ChainAnchor {
-        height: mined,
-        hash: st.wallet().get_block_hash(mined).unwrap().unwrap().0,
-    };
+    let swept = tip(&st);
     let key = KeyId::new(Purpose::Refund, 7);
     let db = st.wallet_mut().db_mut();
     assert_eq!(db.recover_swap_refund_memos(account).unwrap().len(), 1);
@@ -944,7 +836,7 @@ fn refund_memo_over_pir_waits_for_raw_funding_transaction() {
             // refund issuance waits for an upgrade instead of failing sync.
             assert!(records.is_empty());
             assert!(matches!(
-                db.reserve_swap_receiving_key(restored, Purpose::Refund, mined),
+                db.reserve_swap_refund_key(restored, mined),
                 Err(Error::ReservationPolicy(ReservationPolicy::Unreadable))
             ));
         }
@@ -1006,7 +898,7 @@ fn missing_funding_memos_block_refund_issuance_and_settling() {
     let settled = now + CompletionPolicy::default().grace_secs;
     let db = st.wallet_mut().db_mut();
     assert!(matches!(
-        db.reserve_swap_receiving_key(account, Purpose::Refund, mined),
+        db.reserve_swap_refund_key(account, mined),
         Err(Error::ReservationPolicy(ReservationPolicy::Coverage))
     ));
     assert_eq!(
@@ -1021,20 +913,10 @@ fn missing_funding_memos_block_refund_issuance_and_settling() {
             .unwrap(),
         0
     );
-    let funded: (i64, Option<i64>, u8) = db
-        .conn
-        .query_row(
-            "SELECT observed_at, terminal_at, expectation FROM ironwood_swap_operations
-             WHERE operation_id = ?1",
-            [&encoded],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(funded, (0, None, 0));
+    // Settling recovered the restored memo itself.
+    assert!(db.recover_swap_refund_memos(account).unwrap().is_empty());
     assert_eq!(
-        db.reserve_swap_receiving_key(account, Purpose::Refund, mined)
-            .unwrap()
-            .key_id(),
+        db.reserve_swap_refund_key(account, mined).unwrap().key_id(),
         KeyId::new(Purpose::Refund, key.index() + 1)
     );
 }

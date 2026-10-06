@@ -1,15 +1,11 @@
 use super::*;
 use orchard::{
-    note::{Note, NoteVersion, RandomSeed, Rho},
-    note_encryption::{IronwoodDomain, IronwoodNoteEncryption},
+    note::{NoteVersion, RandomSeed, Rho},
     value::NoteValue,
 };
-use zakura_swap_receiving::{lifecycle::ChainAnchor, recovery::EncryptedNote};
-use zcash_client_backend::data_api::WalletRead;
-use zcash_note_encryption::Domain;
 use zcash_primitives::transaction::TxId;
 
-fn state() -> TestState<crate::testing::BlockCache, TestDb, LocalNetwork> {
+fn state() -> State {
     TestBuilder::new()
         .with_data_store_factory(TestDbFactory::file_backed())
         .with_block_cache(crate::testing::BlockCache::new())
@@ -27,18 +23,6 @@ fn encrypted(key: &RegisteredKey) -> EncryptedNote {
     )
     .unwrap();
     encrypt_note(note)
-}
-
-fn encrypt_note(note: Note) -> EncryptedNote {
-    let enc = IronwoodNoteEncryption::new(None, note, [4; 512]);
-    let bytes = enc.encrypt_note_plaintext();
-    EncryptedNote::from_parts(
-        note.rho().to_bytes(),
-        orchard::note::ExtractedNoteCommitment::from(note.commitment()).to_bytes(),
-        IronwoodDomain::epk_bytes(enc.epk()).0,
-        bytes[..52].try_into().unwrap(),
-        bytes[52..].try_into().unwrap(),
-    )
 }
 
 #[test]
@@ -193,10 +177,7 @@ fn swap_payment_absence_requires_retained_contiguous_nullifiers() {
         position: 0,
         encrypted_note: encrypted(&key),
     };
-    let through = ChainAnchor {
-        height: last,
-        hash: st.wallet().get_block_hash(last).unwrap().unwrap().0,
-    };
+    let through = tip(&st);
     assert_eq!(
         st.wallet_mut()
             .db_mut()
@@ -285,28 +266,14 @@ fn swap_payment_absence_requires_retained_contiguous_nullifiers() {
 
 #[test]
 fn swap_payment_spentness_includes_spends_already_linked_by_scanning() {
-    use zcash_client_backend::data_api::testing::{AddressType, IronwoodFvk};
     use zcash_keys::address::{Address, UnifiedAddress};
-    use zcash_protocol::value::Zatoshis;
-    let activation = BlockHeight::from_u32(100_000);
-    let network = LocalNetwork {
-        nu6: Some(activation),
-        nu6_1: Some(activation),
-        nu6_2: Some(activation),
-        nu6_3: Some(activation),
-        ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-    };
-    let mut st = TestBuilder::new()
-        .with_network(network)
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
+    let birthday = st.sapling_activation_height();
     let key = st
         .wallet_mut()
         .db_mut()
-        .reserve_swap_receiving_key_from(account, Purpose::Refund, activation)
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, birthday)
         .unwrap();
     let fvk = IronwoodFvk(key.full_viewing_key().clone());
     let (height, _, nf) = st.generate_next_block(
@@ -349,10 +316,7 @@ fn swap_payment_spentness_includes_spends_already_linked_by_scanning() {
         )
         .unwrap();
     assert_eq!(unlinked, 0);
-    let through = ChainAnchor {
-        height: spent_height,
-        hash: st.wallet().get_block_hash(spent_height).unwrap().unwrap().0,
-    };
+    let through = tip(&st);
     let status = st
         .wallet_mut()
         .db_mut()

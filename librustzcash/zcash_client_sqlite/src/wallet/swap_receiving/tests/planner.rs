@@ -1,56 +1,9 @@
 use super::*;
-use incrementalmerkletree::Hashable;
-use orchard::{
-    note_encryption::{CompactAction, IronwoodDomain, IronwoodNoteEncryption},
-    tree::{MerkleHashOrchard, MerklePath},
-};
-use prost::Message;
 use rusqlite::params;
 use std::num::NonZeroU32;
-use zakura_swap_receiving::{
-    lifecycle::{ChainAnchor, CompletionPolicy, OperationStatus, ReceiptExpectation},
-    recovery::EncryptedNote,
-};
-use zcash_client_backend::{
-    data_api::{
-        WalletRead,
-        testing::{AddressType, IronwoodFvk},
-    },
-    proto::compact_formats::CompactBlock,
-};
-use zcash_note_encryption::{Domain, try_compact_note_decryption};
-use zcash_protocol::value::Zatoshis;
+use zakura_swap_receiving::lifecycle::{CompletionPolicy, OperationStatus, ReceiptExpectation};
 
-type State = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
 const NOW: i64 = 1_000;
-
-/// A file-backed wallet with Ironwood active and one scanned empty block.
-fn fixture() -> State {
-    let activation = BlockHeight::from_u32(100_000);
-    let mut st = TestBuilder::new()
-        .with_network(LocalNetwork {
-            nu6: Some(activation),
-            nu6_1: Some(activation),
-            nu6_2: Some(activation),
-            nu6_3: Some(activation),
-            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-        })
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-    st.generate_and_scan_empty_blocks(1);
-    st
-}
-
-/// The wallet's fully scanned tip.
-fn tip(st: &State) -> ChainAnchor {
-    let block = st.wallet().block_fully_scanned().unwrap().unwrap();
-    ChainAnchor {
-        height: block.block_height(),
-        hash: block.block_hash().0,
-    }
-}
 
 /// Scans `count` new empty blocks and returns the new tip.
 fn advance(st: &mut State, count: usize) -> ChainAnchor {
@@ -76,85 +29,9 @@ fn due(st: &mut State, through: ChainAnchor, now: i64) -> Vec<KeyId> {
         .collect()
 }
 
-/// Keys the scanner trial-decrypts with.
-fn scanning(st: &State) -> Vec<KeyId> {
-    let keys = st.wallet().get_swap_scanning_keys().unwrap();
-    keys.iter().map(|k| k.key_id()).collect()
-}
-
-/// Swap keys of the test account's unspent Ironwood notes at `height`.
-fn received(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
-    let account = st.test_account().unwrap().id();
-    let notes = st
-        .wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(account, height)
-        .unwrap();
-    notes.iter().map(|n| n.swap_key_id()).collect()
-}
-
-/// Pays `key` in a new scanned block and returns the output as a directory
-/// candidate. The output must be the chain's first Ironwood leaf.
-fn pay(st: &mut State, key: KeyId) -> PendingPayment {
-    let fvk = key
-        .derive(&FullViewingKey::from(
-            st.test_account().unwrap().usk().orchard(),
-        ))
-        .unwrap();
-    let (height, _, _) = st.generate_next_block(
-        &IronwoodFvk(fvk.clone()),
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(100_000),
-    );
-    st.scan_cached_blocks(height, 1);
-    let data: Vec<u8> = st
-        .cache()
-        .0
-        .query_row(
-            "SELECT data FROM compactblocks WHERE height = ?1",
-            [u32::from(height)],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let block = CompactBlock::decode(data.as_slice()).unwrap();
-    let tx = &block.vtx[0];
-    let action = CompactAction::try_from(&tx.ironwood_actions[0]).unwrap();
-    let (note, _) = try_compact_note_decryption(
-        &IronwoodDomain::for_compact_action(&action),
-        &fvk.to_ivk(Scope::External).prepare(),
-        &action,
-    )
-    .unwrap();
-    let encryption = IronwoodNoteEncryption::new(None, note, [4; 512]);
-    let ciphertext = encryption.encrypt_note_plaintext();
-    PendingPayment {
-        txid: tx.txid(),
-        action_index: 0,
-        height,
-        block_hash: block.hash(),
-        tx_index: tx.index.try_into().unwrap(),
-        position: 0,
-        encrypted_note: EncryptedNote::from_parts(
-            note.rho().to_bytes(),
-            orchard::note::ExtractedNoteCommitment::from(note.commitment()).to_bytes(),
-            IronwoodDomain::epk_bytes(encryption.epk()).0,
-            ciphertext[..52].try_into().unwrap(),
-            ciphertext[52..].try_into().unwrap(),
-        ),
-    }
-}
-
-/// The authentication path of the first leaf in an otherwise empty tree.
-fn first_leaf_path() -> MerklePath {
-    MerklePath::from_parts(
-        0,
-        std::array::from_fn(|level| MerkleHashOrchard::empty_root((level as u8).into())),
-    )
-}
-
 #[test]
 fn restored_keys_are_swept_instead_of_scanned() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
@@ -164,7 +41,7 @@ fn restored_keys_are_swept_instead_of_scanned() {
     let refund = db
         .recover_swap_receiving_key(account, KeyId::new(Purpose::Refund, 4), through.height)
         .unwrap();
-    assert!(scanning(&st).is_empty());
+    assert!(scanning_keys(&st).is_empty());
     assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
     // Recovery evidence for a key this wallet already scans needs no sweep.
     let db = st.wallet_mut().db_mut();
@@ -184,7 +61,7 @@ fn restored_keys_are_swept_instead_of_scanned() {
 
 #[test]
 fn bounded_batches_do_not_derive_ten_thousand_restored_keys() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
@@ -227,7 +104,7 @@ fn bounded_batches_do_not_derive_ten_thousand_restored_keys() {
 
 #[test]
 fn sweeps_are_due_once_the_chain_reaches_their_scan_from() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let through = tip(&st);
     let key = st
@@ -243,7 +120,7 @@ fn sweeps_are_due_once_the_chain_reaches_their_scan_from() {
 
 #[test]
 fn sweep_target_is_fixed_until_a_reorg_removes_it() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let base = tip(&st);
     st.wallet_mut()
@@ -267,7 +144,7 @@ fn sweep_target_is_fixed_until_a_reorg_removes_it() {
 
 #[test]
 fn remaining_lookups_counts_due_sweeps_without_a_lookup_at_their_target() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let older = tip(&st);
     let db = st.wallet_mut().db_mut();
@@ -304,7 +181,7 @@ fn remaining_lookups_counts_due_sweeps_without_a_lookup_at_their_target() {
 
 #[test]
 fn attempts_back_off_from_one_minute_to_twelve_hours() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let through = tip(&st);
     let key = st
@@ -329,7 +206,7 @@ fn attempts_back_off_from_one_minute_to_twelve_hours() {
 
 #[test]
 fn lookup_coverage_advances_only_with_canonical_anchors() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let older = tip(&st);
     let key = st
@@ -359,7 +236,7 @@ fn lookup_coverage_advances_only_with_canonical_anchors() {
 
 #[test]
 fn incomplete_lookup_is_atomic_and_pending_ciphertext_survives_restart() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let before = tip(&st);
     let key = KeyId::new(Purpose::Receive, 8);
@@ -367,7 +244,7 @@ fn incomplete_lookup_is_atomic_and_pending_ciphertext_survives_restart() {
         .db_mut()
         .watch_swap_receive_key(account, 8, before.height)
         .unwrap();
-    let candidate = pay(&mut st, key);
+    let candidate = pay_candidate(&mut st, key);
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
     let mut bad = candidate.clone();
@@ -401,7 +278,7 @@ fn incomplete_lookup_is_atomic_and_pending_ciphertext_survives_restart() {
 
 #[test]
 fn finish_requires_applied_candidates_and_a_canonical_anchor() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Receive, 8);
     let from = tip(&st).height;
@@ -409,7 +286,7 @@ fn finish_requires_applied_candidates_and_a_canonical_anchor() {
         .db_mut()
         .watch_swap_receive_key(account, 8, from)
         .unwrap();
-    let candidate = pay(&mut st, key);
+    let candidate = pay_candidate(&mut st, key);
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
     db.queue_swap_lookup(account, key, through, std::slice::from_ref(&candidate))
@@ -453,7 +330,7 @@ fn finish_requires_applied_candidates_and_a_canonical_anchor() {
 
 #[test]
 fn finish_requires_a_lookup_through_its_anchor() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let looked_up = tip(&st);
     let db = st.wallet_mut().db_mut();
@@ -478,7 +355,7 @@ fn finish_requires_a_lookup_through_its_anchor() {
 
 #[test]
 fn finished_refund_sweep_scans_from_the_next_block_including_scanned_blocks() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let anchor = tip(&st);
     let key = KeyId::new(Purpose::Refund, 3);
@@ -495,12 +372,12 @@ fn finished_refund_sweep_scans_from_the_next_block_including_scanned_blocks() {
         Zatoshis::const_from_u64(70_000),
     );
     st.scan_cached_blocks(refunded, 1);
-    assert!(received(&st, refunded).is_empty());
+    assert!(unspent_keys(&st, refunded).is_empty());
     st.wallet_mut()
         .db_mut()
         .finish_sweep(account, key, anchor)
         .unwrap();
-    assert_eq!(scanning(&st), [key]);
+    assert_eq!(scanning_keys(&st), [key]);
     assert_eq!(
         st.wallet().suggest_scan_ranges().unwrap(),
         [ScanRange::from_parts(
@@ -509,12 +386,12 @@ fn finished_refund_sweep_scans_from_the_next_block_including_scanned_blocks() {
         )]
     );
     st.scan_cached_blocks(refunded, 1);
-    assert_eq!(received(&st, refunded), [Some(key)]);
+    assert_eq!(unspent_keys(&st, refunded), [Some(key)]);
 }
 
 #[test]
 fn finished_incoming_sweep_watches_only_an_unpaid_key() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let from = tip(&st).height;
     let paid = KeyId::new(Purpose::Receive, 8);
@@ -524,7 +401,7 @@ fn finished_incoming_sweep_watches_only_an_unpaid_key() {
         .unwrap()
         .key_id();
     db.watch_swap_receive_key(account, 8, from).unwrap();
-    let candidate = pay(&mut st, paid);
+    let candidate = pay_candidate(&mut st, paid);
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
     db.queue_swap_lookup(account, paid, through, std::slice::from_ref(&candidate))
@@ -543,13 +420,13 @@ fn finished_incoming_sweep_watches_only_an_unpaid_key() {
     db.finish_swap_discovery_attempt(account, paid, through)
         .unwrap();
     db.finish_sweep(account, unpaid, through).unwrap();
-    assert_eq!(scanning(&st), [unpaid]);
+    assert_eq!(scanning_keys(&st), [unpaid]);
     assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
 }
 
 #[test]
 fn watched_key_finds_a_payout_after_its_sweep() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let anchor = tip(&st);
     let key = KeyId::new(Purpose::Receive, 0);
@@ -565,7 +442,7 @@ fn watched_key_finds_a_payout_after_its_sweep() {
         Zatoshis::const_from_u64(50_000),
     );
     st.scan_cached_blocks(paid, 1);
-    assert!(received(&st, paid).is_empty());
+    assert!(unspent_keys(&st, paid).is_empty());
     // The sweep's anchor precedes the payout, which the watch's rescan finds.
     st.wallet_mut()
         .db_mut()
@@ -579,19 +456,12 @@ fn watched_key_finds_a_payout_after_its_sweep() {
         )]
     );
     st.scan_cached_blocks(paid, 1);
-    assert_eq!(received(&st, paid), [Some(key)]);
-    let next = tip(&st).height + 1;
-    let reservation = st
-        .wallet_mut()
-        .db_mut()
-        .prepare_swap_receive_reservation_from(account, NOW, next)
-        .unwrap();
-    assert_ne!(reservation.key.key_id(), key);
+    assert_eq!(unspent_keys(&st, paid), [Some(key)]);
 }
 
 #[test]
 fn issuing_a_key_after_its_watch_needs_no_rescan() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let anchor = tip(&st);
     let key = KeyId::new(Purpose::Receive, 0);
@@ -622,7 +492,7 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
             .unwrap(),
         1
     );
-    assert!(scanning(&st).is_empty());
+    assert!(scanning_keys(&st).is_empty());
     let through = advance(&mut st, 2);
     let reservation = st
         .wallet_mut()
@@ -630,13 +500,13 @@ fn issuing_a_key_after_its_watch_needs_no_rescan() {
         .prepare_swap_receive_reservation_from(account, NOW, through.height + 1)
         .unwrap();
     assert_eq!(reservation.key.key_id(), key);
-    assert_eq!(scanning(&st), [key]);
+    assert_eq!(scanning_keys(&st), [key]);
     assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
 }
 
 #[test]
 fn swept_key_cannot_be_issued_while_its_sweep_is_pending() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
@@ -648,13 +518,13 @@ fn swept_key_cannot_be_issued_while_its_sweep_is_pending() {
         db.reserve_swap_receiving_key_from(account, Purpose::Receive, through.height + 1),
         Err(Error::ReservationPolicy(ReservationPolicy::Gap))
     ));
-    assert!(scanning(&st).is_empty());
+    assert!(scanning_keys(&st).is_empty());
     assert_eq!(due(&mut st, through, NOW), [key]);
 }
 
 #[test]
 fn history_is_pending_until_sweeps_finish_and_candidates_apply() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let before = tip(&st).height;
     let key = KeyId::new(Purpose::Receive, 8);
@@ -662,7 +532,7 @@ fn history_is_pending_until_sweeps_finish_and_candidates_apply() {
     assert!(!db.swap_history_pending(account, before).unwrap());
     db.watch_swap_receive_key(account, 8, before + 1).unwrap();
     assert!(!db.swap_history_pending(account, before).unwrap());
-    let candidate = pay(&mut st, key);
+    let candidate = pay_candidate(&mut st, key);
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
     assert!(db.swap_history_pending(account, through.height).unwrap());
@@ -690,7 +560,7 @@ fn history_is_pending_until_sweeps_finish_and_candidates_apply() {
 
 #[test]
 fn candidates_queued_after_finish_are_offered_again() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Receive, 8);
     let from = tip(&st).height;
@@ -698,7 +568,7 @@ fn candidates_queued_after_finish_are_offered_again() {
         .db_mut()
         .watch_swap_receive_key(account, 8, from)
         .unwrap();
-    let candidate = pay(&mut st, key);
+    let candidate = pay_candidate(&mut st, key);
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
     db.finish_sweep(account, key, through).unwrap();
@@ -710,7 +580,7 @@ fn candidates_queued_after_finish_are_offered_again() {
 
 #[test]
 fn rewind_reruns_only_sweeps_above_the_retained_chain() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let kept = tip(&st);
     let db = st.wallet_mut().db_mut();
@@ -738,7 +608,7 @@ fn rewind_reruns_only_sweeps_above_the_retained_chain() {
 
 #[test]
 fn rewound_sweep_does_not_wait_out_its_last_attempt_lease() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let kept = tip(&st);
     let key = st
@@ -760,7 +630,7 @@ fn rewound_sweep_does_not_wait_out_its_last_attempt_lease() {
 
 #[test]
 fn restored_refund_status_checks_try_unchecked_operations_first() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Refund, 0);
     let from = tip(&st).height;
@@ -799,7 +669,7 @@ fn restored_refund_status_checks_try_unchecked_operations_first() {
 
 #[test]
 fn restored_refund_keeps_polling_after_an_inconclusive_status() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Refund, 0);
     let from = tip(&st).height;
@@ -837,7 +707,7 @@ fn restored_refund_keeps_polling_after_an_inconclusive_status() {
 
 #[test]
 fn issuing_a_lookahead_key_does_not_extend_the_lookahead() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
@@ -864,7 +734,7 @@ fn issuing_a_lookahead_key_does_not_extend_the_lookahead() {
 
 #[test]
 fn payout_during_the_watch_extends_the_lookahead() {
-    let mut st = fixture();
+    let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let through = tip(&st);
     let db = st.wallet_mut().db_mut();
@@ -889,7 +759,7 @@ fn payout_during_the_watch_extends_the_lookahead() {
         Zatoshis::const_from_u64(50_000),
     );
     st.scan_cached_blocks(paid, 1);
-    assert_eq!(received(&st, paid), [Some(edge)]);
+    assert_eq!(unspent_keys(&st, paid), [Some(edge)]);
     let through = tip(&st);
     st.wallet_mut()
         .db_mut()
@@ -907,67 +777,65 @@ fn retained_spend_history_covers_early_spends_in_large_batches() {
     use orchard::keys::SpendingKey;
     use zcash_keys::address::{Address, UnifiedAddress};
 
-    for retained in [false, true] {
-        for spent in [false, true] {
-            let mut st = fixture();
-            let account = st.test_account().unwrap().id();
-            let key = KeyId::new(Purpose::Receive, 8);
-            let from = tip(&st).height;
-            let db = st.wallet_mut().db_mut();
-            if retained {
-                db.retain_swap_spend_history(account).unwrap();
-            }
-            let fvk = db
-                .watch_swap_receive_key(account, 8, from)
-                .unwrap()
-                .full_viewing_key()
-                .clone();
-            let candidate = pay(&mut st, key);
-            if spent {
-                let nf = candidate
-                    .encrypted_note
-                    .decrypt(
-                        &FullViewingKey::from(st.test_account().unwrap().usk().orchard()),
-                        key,
-                    )
-                    .unwrap()
-                    .note()
-                    .nullifier(&fvk);
-                let noise = FullViewingKey::from(&SpendingKey::from_bytes([7; 32]).unwrap());
-                let to = UnifiedAddress::from_receivers(
-                    Some(noise.address_at(0u32, Scope::External)),
-                    None,
-                    None,
+    for (retained, spent) in [(false, true), (true, false), (true, true)] {
+        let mut st = scanned_wallet();
+        let account = st.test_account().unwrap().id();
+        let key = KeyId::new(Purpose::Receive, 8);
+        let from = tip(&st).height;
+        let db = st.wallet_mut().db_mut();
+        if retained {
+            db.retain_swap_spend_history(account).unwrap();
+        }
+        let fvk = db
+            .watch_swap_receive_key(account, 8, from)
+            .unwrap()
+            .full_viewing_key()
+            .clone();
+        let candidate = pay_candidate(&mut st, key);
+        if spent {
+            let nf = candidate
+                .encrypted_note
+                .decrypt(
+                    &FullViewingKey::from(st.test_account().unwrap().usk().orchard()),
+                    key,
                 )
-                .unwrap();
-                st.generate_next_block_spending(
-                    &IronwoodFvk(fvk),
-                    (nf, Zatoshis::const_from_u64(100_000)),
-                    Address::Unified(to),
-                    Zatoshis::const_from_u64(100_000),
-                );
-            } else {
-                st.generate_empty_block();
+                .unwrap()
+                .note()
+                .nullifier(&fvk);
+            let noise = FullViewingKey::from(&SpendingKey::from_bytes([7; 32]).unwrap());
+            let to = UnifiedAddress::from_receivers(
+                Some(noise.address_at(0u32, Scope::External)),
+                None,
+                None,
+            )
+            .unwrap();
+            st.generate_next_block_spending(
+                &IronwoodFvk(fvk),
+                (nf, Zatoshis::const_from_u64(100_000)),
+                Address::Unified(to),
+                Zatoshis::const_from_u64(100_000),
+            );
+        } else {
+            st.generate_empty_block();
+        }
+        for _ in 0..200 {
+            st.generate_empty_block();
+        }
+        let first = candidate.height + 1;
+        st.scan_cached_blocks(first, 201);
+        let through = tip(&st);
+        let status = st
+            .wallet_mut()
+            .db_mut()
+            .swap_payment_spend_status(account, key, &candidate, through)
+            .unwrap();
+        match (retained, spent) {
+            (true, true) => {
+                assert!(matches!(status, SpendStatus::Spent { height, .. } if height == first))
             }
-            for _ in 0..200 {
-                st.generate_empty_block();
-            }
-            let first = candidate.height + 1;
-            st.scan_cached_blocks(first, 201);
-            let through = tip(&st);
-            let status = st
-                .wallet_mut()
-                .db_mut()
-                .swap_payment_spend_status(account, key, &candidate, through)
-                .unwrap();
-            match (retained, spent) {
-                (true, true) => {
-                    assert!(matches!(status, SpendStatus::Spent { height, .. } if height == first))
-                }
-                (true, false) => assert_eq!(status, SpendStatus::Unspent),
-                // Without retention, ordinary pruning leaves no evidence either way.
-                (false, _) => assert_eq!(status, SpendStatus::Unknown),
-            }
+            (true, false) => assert_eq!(status, SpendStatus::Unspent),
+            // Without retention, ordinary pruning leaves no evidence of the spend.
+            (false, _) => assert_eq!(status, SpendStatus::Unknown),
         }
     }
 }

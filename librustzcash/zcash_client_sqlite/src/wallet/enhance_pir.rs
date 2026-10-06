@@ -1019,7 +1019,7 @@ fn pending_note<P: Parameters>(
                 .ok_or_else(|| {
                     SqliteClientError::CorruptedData("missing swap account FVK".into())
                 })?;
-            super::swap_receiving::note_key(conn, params, id, parent).map(|(_, fvk)| fvk)
+            super::swap_receiving::note_key(conn, id, parent).map(|(_, fvk)| fvk)
         })
         .transpose()?;
     #[cfg(feature = "experimental-swap-receiving")]

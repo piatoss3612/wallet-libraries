@@ -1,36 +1,9 @@
 use std::{cell::Cell, ops::Range};
 
 use zakura_swap_receiving::lifecycle::{CompletionPolicy, OperationStatus, ReceiptExpectation};
-use zcash_client_backend::{
-    data_api::{
-        WalletRead,
-        chain::{BlockSource, ChainState, error, scan_cached_blocks},
-        testing::{AddressType, IronwoodFvk},
-    },
-    proto::compact_formats::CompactBlock,
-};
-use zcash_protocol::value::Zatoshis;
+use zcash_client_backend::data_api::chain::{BlockSource, ChainState, error, scan_cached_blocks};
 
 use super::*;
-
-type State = TestState<crate::testing::BlockCache, TestDb, LocalNetwork>;
-
-/// A file-backed wallet with a block cache and Ironwood active from its first block.
-fn fixture() -> State {
-    let activation = BlockHeight::from_u32(100_000);
-    TestBuilder::new()
-        .with_network(LocalNetwork {
-            nu6: Some(activation),
-            nu6_1: Some(activation),
-            nu6_2: Some(activation),
-            nu6_3: Some(activation),
-            ..TestBuilder::<(), ()>::DEFAULT_NETWORK
-        })
-        .with_data_store_factory(TestDbFactory::file_backed())
-        .with_block_cache(crate::testing::BlockCache::new())
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build()
-}
 
 /// Block ranges the wallet still has to scan.
 fn queued(st: &State) -> Vec<Range<BlockHeight>> {
@@ -39,17 +12,6 @@ fn queued(st: &State) -> Vec<Range<BlockHeight>> {
         .unwrap()
         .iter()
         .map(|r| r.block_range().clone())
-        .collect()
-}
-
-/// The swap key of each unspent Ironwood note at `height`, `None` for ordinary notes.
-fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>> {
-    st.wallet()
-        .db()
-        .get_unspent_ironwood_notes_at_historical_height(st.test_account().unwrap().id(), height)
-        .unwrap()
-        .iter()
-        .map(|n| n.swap_key_id())
         .collect()
 }
 
@@ -114,7 +76,7 @@ fn scan_reopen_and_spend(close_keys: bool) {
     use zcash_protocol::ShieldedPool;
     use zip321::{Payment, TransactionRequest};
 
-    let mut st = fixture();
+    let mut st = ironwood_wallet();
     let network = *st.network();
     let account = st.test_account().cloned().unwrap();
     let ordinary = FullViewingKey::from(account.usk().orchard());
@@ -363,15 +325,13 @@ fn swap_receiving_reconstructs_only_with_the_registered_account() {
         .unwrap();
     let parent = orchard::keys::FullViewingKey::from(st.test_account().unwrap().usk().orchard());
     assert_eq!(
-        note_key(st.wallet().conn(), st.network(), id, &parent)
-            .unwrap()
-            .0,
+        note_key(st.wallet().conn(), id, &parent).unwrap().0,
         key.key_id()
     );
     let other = orchard::keys::FullViewingKey::from(
         &orchard::keys::SpendingKey::from_bytes([9; 32]).unwrap(),
     );
-    assert!(note_key(st.wallet().conn(), st.network(), id, &other).is_err());
+    assert!(note_key(st.wallet().conn(), id, &other).is_err());
     st.wallet()
         .conn()
         .execute(
@@ -379,12 +339,12 @@ fn swap_receiving_reconstructs_only_with_the_registered_account() {
             [],
         )
         .unwrap();
-    assert!(note_key(st.wallet().conn(), st.network(), id, &parent).is_err());
+    assert!(note_key(st.wallet().conn(), id, &parent).is_err());
 }
 
 #[test]
 fn lookahead_keys_are_swept_instead_of_scanned() {
-    let mut st = fixture();
+    let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Receive, 1);
     let (first, _, _) = st.generate_next_block(
@@ -417,7 +377,7 @@ fn lookahead_keys_are_swept_instead_of_scanned() {
 
 #[test]
 fn active_keys_scan_whole_batches_across_their_start() {
-    let mut st = fixture();
+    let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let (first, _) = st.generate_empty_block();
     st.scan_cached_blocks(first, 1);
@@ -444,7 +404,7 @@ fn active_keys_scan_whole_batches_across_their_start() {
 
 #[test]
 fn activation_rescans_scanned_blocks_from_its_start_and_survives_reopen() {
-    let mut st = fixture();
+    let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Refund, 0);
     let (first, _) = st.generate_empty_block();
@@ -486,7 +446,7 @@ fn activation_rescans_scanned_blocks_from_its_start_and_survives_reopen() {
 
 #[test]
 fn reopening_a_closed_key_rescans_blocks_scanned_without_it() {
-    let mut st = fixture();
+    let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let (first, _) = st.generate_empty_block();
     let key = st
@@ -513,7 +473,7 @@ fn reopening_a_closed_key_rescans_blocks_scanned_without_it() {
 
 #[test]
 fn reactivating_an_open_key_rescans_only_blocks_below_its_start() {
-    let mut st = fixture();
+    let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let (first, _) = st.generate_empty_block();
     for _ in 0..3 {
@@ -564,7 +524,7 @@ impl<B: BlockSource, F: Fn()> BlockSource for RegisterDuringScan<'_, B, F> {
 
 #[test]
 fn key_activated_mid_batch_is_requeued_for_the_blocks_it_missed() {
-    let mut st = fixture();
+    let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Receive, 0);
     let (first, _) = st.generate_empty_block();
