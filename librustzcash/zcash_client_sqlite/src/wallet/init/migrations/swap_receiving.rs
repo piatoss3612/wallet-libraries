@@ -9,7 +9,7 @@ use super::ironwood_enhance;
 use crate::wallet::init::WalletMigrationError;
 
 /// Identifier for the swap receiving migration.
-pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x75bb24bd_c390_4791_9694_368a878a7b76);
+pub const MIGRATION_ID: Uuid = Uuid::from_u128(0x19038f09_9eba_45e6_bf67_e8a912a82f99);
 
 pub(super) struct Migration;
 
@@ -97,14 +97,6 @@ impl RusqliteMigration for Migration {
             CREATE TABLE ironwood_swap_spend_replay (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
                 through_height INTEGER NOT NULL
-            );
-            CREATE TABLE ironwood_swap_refund_watches (
-                receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
-                operation_id TEXT NOT NULL,
-                next_check_at INTEGER NOT NULL DEFAULT 0,
-                expires_at INTEGER,
-                retain_from INTEGER CHECK (retain_from BETWEEN 0 AND 4294967295),
-                PRIMARY KEY (receiving_key_id, operation_id)
             );
             CREATE TABLE ironwood_swap_refund_memo_progress (
                 note_id INTEGER PRIMARY KEY REFERENCES ironwood_received_notes(id) ON DELETE CASCADE,

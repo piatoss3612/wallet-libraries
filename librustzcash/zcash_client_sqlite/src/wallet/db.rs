@@ -2061,15 +2061,6 @@ pub(super) const TABLE_IRONWOOD_SWAP_RECEIVE_QUOTES: &str = "CREATE TABLE ironwo
                 rejected INTEGER NOT NULL DEFAULT 0 CHECK (rejected IN (0, 1))
             )";
 
-pub(super) const TABLE_IRONWOOD_SWAP_REFUND_WATCHES: &str = "CREATE TABLE ironwood_swap_refund_watches (
-                receiving_key_id INTEGER NOT NULL REFERENCES ironwood_receiving_keys(id) ON DELETE CASCADE,
-                operation_id TEXT NOT NULL,
-                next_check_at INTEGER NOT NULL DEFAULT 0,
-                expires_at INTEGER,
-                retain_from INTEGER CHECK (retain_from BETWEEN 0 AND 4294967295),
-                PRIMARY KEY (receiving_key_id, operation_id)
-            )";
-
 pub(super) const INDEX_IRONWOOD_RECEIVING_KEYS_ACCOUNT_RECEIVER: &str =
     "CREATE INDEX ironwood_receiving_keys_account_receiver
                 ON ironwood_receiving_keys(account_id, receiver)";

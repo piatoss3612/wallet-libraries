@@ -87,13 +87,11 @@ workspace.
 - Swap funding: `record_swap_refund_quote`, `swap_funding_memo` and
   `verify_swap_funding_proposal`. The refund index travels in a memo on the funding
   transaction's internal Ironwood change, whose only transparent output is the deposit.
-- Swap key lifecycle: `record_swap_observation`, `take_swap_refund_status_checks` and
-  `close_finished_swap_keys`. A key closes 24 hours after its final provider status
-  once its expected receipts are mined, or 7 days after the quote deadline (30 days
-  later while a promised receipt is missing), and only while the wallet is scanned to
-  the chain tip, by the earlier of the caller's clock and the tip's block time. A
-  refund key closed with an inconclusive status keeps a daily provider check for 30
-  days; a later promise of ZEC sweeps and reopens it, as does reissuing a closed key.
+- Swap key lifecycle: `record_swap_observation` and `close_finished_swap_keys`. A key
+  closes once its final provider status is in and its expected receipts have ZIP 315's
+  untrusted confirmations, or 30 days after the quote deadline, and only while the
+  wallet is scanned to the chain tip, by the earlier of the caller's clock and the
+  tip's block time. `recheck_swap_history` sweeps closed keys again on request.
 - Swap recovery: `maintain_swap_receiving`, called at each sync start and tip, recovers
   funding memos and keeps an incoming lookahead. Each recovered key is swept once
   through a receiver directory with `prepare_swap_discovery_batch`,

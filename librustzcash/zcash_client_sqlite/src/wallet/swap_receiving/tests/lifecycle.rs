@@ -10,9 +10,7 @@ const HOUR: i64 = 60 * 60;
 /// `CompletionPolicy::default().grace_secs`.
 const GRACE: i64 = 24 * HOUR;
 /// `CompletionPolicy::default().limit_secs`.
-const LIMIT: i64 = 7 * 24 * HOUR;
-/// `CompletionPolicy::default().late_watch_secs`.
-const LATE: i64 = 30 * 24 * HOUR;
+const LIMIT: i64 = 30 * 24 * HOUR;
 
 /// Unix time the fixed test clock stamps on registered keys as `registered_at`.
 fn registered_at() -> i64 {
@@ -43,6 +41,11 @@ fn pay(st: &mut State, key: &RegisteredKey, value: u64) -> BlockHeight {
     );
     st.scan_cached_blocks(height, 1);
     height
+}
+
+/// Mines blocks until the latest receipt has the untrusted confirmations closing needs.
+fn confirm(st: &mut State) {
+    st.generate_and_scan_empty_blocks(9);
 }
 
 /// Closes the test account's finished keys at `now` and returns how many closed.
@@ -155,7 +158,7 @@ fn expected_receipt_amount_is_stored_and_must_be_positive() {
 }
 
 #[test]
-fn refund_without_expected_receipt_closes_after_grace() {
+fn refund_without_expected_receipt_closes_at_its_final_status() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let key = refund_key(&mut st).key_id();
@@ -164,8 +167,7 @@ fn refund_without_expected_receipt_closes_after_grace() {
         .db_mut()
         .observe_swap_operation(account, key, "swap", Terminal(NoReceipt), terminal)
         .unwrap();
-    assert_eq!(close(&mut st, terminal + GRACE - 1), 0);
-    assert_eq!(close(&mut st, terminal + GRACE), 1);
+    assert_eq!(close(&mut st, terminal), 1);
     assert_eq!(close(&mut st, terminal + LIMIT), 0);
     let closed_at: Option<i64> = st
         .wallet()
@@ -174,7 +176,7 @@ fn refund_without_expected_receipt_closes_after_grace() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(closed_at, Some(terminal + GRACE));
+    assert_eq!(closed_at, Some(terminal));
 }
 
 #[test]
@@ -191,8 +193,8 @@ fn inconclusive_status_keeps_key_open_until_the_limit() {
     assert_eq!(close(&mut st, registered_at() + LIMIT), 1);
 }
 
-/// Expects `expected` on a refund key, then pays it `payments` in turn: past the
-/// grace period the key stays open until the last payment is mined, then closes.
+/// Expects `expected` on a refund key, then pays it `payments` in turn: the key stays
+/// open until the last payment has the untrusted confirmations, then closes.
 fn closes_once_received(expected: Option<u64>, payments: &[u64]) {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
@@ -204,10 +206,13 @@ fn closes_once_received(expected: Option<u64>, payments: &[u64]) {
         .observe_swap_operation(account, key.key_id(), "swap", status, terminal)
         .unwrap();
     for value in payments {
-        assert_eq!(close(&mut st, terminal + GRACE), 0);
+        assert_eq!(close(&mut st, terminal), 0);
         pay(&mut st, &key, *value);
     }
-    assert_eq!(close(&mut st, terminal + GRACE), 1);
+    st.generate_and_scan_empty_blocks(8);
+    assert_eq!(close(&mut st, terminal), 0);
+    st.generate_and_scan_empty_blocks(1);
+    assert_eq!(close(&mut st, terminal), 1);
 }
 
 #[test]
@@ -232,14 +237,15 @@ fn rewound_receipt_keeps_key_open_until_mined_again() {
         .observe_swap_operation(account, key.key_id(), "swap", status, terminal)
         .unwrap();
     let height = pay(&mut st, &key, 10_000);
+    confirm(&mut st);
     st.truncate_to_height_retaining_cache(height - 1);
-    assert_eq!(close(&mut st, terminal + GRACE), 0);
-    st.scan_cached_blocks(height, 1);
-    assert_eq!(close(&mut st, terminal + GRACE), 1);
+    assert_eq!(close(&mut st, terminal), 0);
+    st.scan_cached_blocks(height, 10);
+    assert_eq!(close(&mut st, terminal), 1);
 }
 
 #[test]
-fn grace_starts_when_the_last_operation_turns_terminal() {
+fn a_key_closes_once_its_last_operation_is_final() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let key = refund_key(&mut st).key_id();
@@ -255,8 +261,7 @@ fn grace_starts_when_the_last_operation_turns_terminal() {
         .db_mut()
         .observe_swap_operation(account, key, "pending", Terminal(NoReceipt), last)
         .unwrap();
-    assert_eq!(close(&mut st, last + GRACE - 1), 0);
-    assert_eq!(close(&mut st, last + GRACE), 1);
+    assert_eq!(close(&mut st, last), 1);
 }
 
 #[test]
@@ -281,61 +286,6 @@ fn limit_counts_from_the_latest_deadline_whatever_the_status() {
     assert_eq!(close(&mut st, earlier + LIMIT), 0);
     assert_eq!(close(&mut st, later + LIMIT - 1), 0);
     assert_eq!(close(&mut st, later + LIMIT), 1);
-}
-
-#[test]
-fn a_promised_refund_keeps_its_key_open_past_the_limit() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st).key_id();
-    let promised = Terminal(Positive(Some(Zatoshis::const_from_u64(10_000))));
-    st.wallet_mut()
-        .db_mut()
-        .observe_swap_operation(account, key, "swap", promised, registered_at() + HOUR)
-        .unwrap();
-    assert_eq!(close(&mut st, registered_at() + LIMIT), 0);
-    assert_eq!(close(&mut st, registered_at() + LIMIT + LATE - 1), 0);
-    assert_eq!(close(&mut st, registered_at() + LIMIT + LATE), 1);
-}
-
-#[test]
-fn a_late_promise_sweeps_and_reopens_a_closed_key() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = refund_key(&mut st).key_id();
-    st.generate_and_scan_empty_blocks(2);
-    st.wallet_mut()
-        .db_mut()
-        .observe_swap_operation(
-            account,
-            key,
-            "swap",
-            Terminal(Unknown),
-            registered_at() + HOUR,
-        )
-        .unwrap();
-    assert_eq!(close(&mut st, registered_at() + LIMIT), 1);
-    assert!(scanning_keys(&st).is_empty());
-    let anchor = tip(&st);
-    let refunded = Terminal(Positive(None));
-    let later = registered_at() + LIMIT + HOUR;
-    let db = st.wallet_mut().db_mut();
-    db.observe_swap_operation(account, key, "swap", refunded, later)
-        .unwrap();
-    // The key stays closed until a sweep covers the time it was not scanned.
-    assert!(db.swap_history_pending(account, anchor.height).unwrap());
-    assert!(scanning_keys(&st).is_empty());
-    let db = st.wallet_mut().db_mut();
-    db.finish_sweep(account, key, anchor).unwrap();
-    assert_eq!(scanning_keys(&st), [key]);
-    // Repeating the promise sweeps nothing again.
-    let db = st.wallet_mut().db_mut();
-    db.observe_swap_operation(account, key, "swap", refunded, later + HOUR)
-        .unwrap();
-    assert!(!db.swap_history_pending(account, anchor.height).unwrap());
-    // The reopened key waits for the refund until the extended limit.
-    assert_eq!(close(&mut st, registered_at() + LIMIT + LATE - 1), 0);
-    assert_eq!(close(&mut st, registered_at() + LIMIT + LATE), 1);
 }
 
 #[test]
@@ -436,6 +386,7 @@ fn incoming_key_closes_only_once_paid_and_released() {
             .unwrap();
     }
     pay(&mut st, &reserved, 10_000);
+    confirm(&mut st);
     assert_eq!(close(&mut st, terminal + GRACE), 0);
     st.wallet_mut()
         .db_mut()
@@ -465,6 +416,7 @@ fn abandoned_quote_edit_does_not_hold_a_released_key_open() {
     }
     db.start_swap_receive_quote(account, "accepted").unwrap();
     pay(&mut st, &reservation.key, 70_000);
+    confirm(&mut st);
     let released = deadline + RECEIVE_RECLAIM_SECONDS;
     let payout = Some(Zatoshis::const_from_u64(70_000));
     let db = st.wallet_mut().db_mut();
@@ -539,9 +491,10 @@ fn reissued_key_limit_ignores_an_earlier_reservations_deadline() {
         .unwrap();
     db.close_received_swap_reservations(account, settled)
         .unwrap();
-    assert_eq!(close(&mut st, settled + GRACE), 0);
+    assert_eq!(close(&mut st, settled), 0);
     pay(&mut st, &second.key, 69_000);
-    assert_eq!(close(&mut st, settled + GRACE), 1);
+    confirm(&mut st);
+    assert_eq!(close(&mut st, settled), 1);
 }
 
 #[test]
@@ -556,9 +509,11 @@ fn closed_key_stops_scanning_but_keeps_its_notes() {
         .db_mut()
         .observe_swap_operation(account, key.key_id(), "swap", status, terminal)
         .unwrap();
-    assert_eq!(close(&mut st, terminal + GRACE - 1), 0);
+    // The receipt is not deep enough yet to survive a reorg on a closed key.
+    assert_eq!(close(&mut st, terminal), 0);
     assert_eq!(scanning_keys(&st), [key.key_id()]);
-    assert_eq!(close(&mut st, terminal + GRACE), 1);
+    confirm(&mut st);
+    assert_eq!(close(&mut st, terminal), 1);
     assert!(scanning_keys(&st).is_empty());
     let notes = st
         .wallet()

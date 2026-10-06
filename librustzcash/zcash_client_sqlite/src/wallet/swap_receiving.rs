@@ -718,22 +718,6 @@ pub(super) fn activate(
     queue_rescan(conn, from..BlockHeight::from(rescan_end))
 }
 
-/// Queues a fresh receiver-directory sweep of key `id`, unless one is pending.
-///
-/// A key reopened after closing was not scanned in between, so like a restored key
-/// its history is swept, and it scans from the block after the sweep's anchor.
-pub(super) fn queue_sweep(conn: &Connection, id: i64) -> Result<(), Error> {
-    conn.execute(
-        "INSERT INTO ironwood_swap_sweeps (receiving_key_id) VALUES (?1)
-         ON CONFLICT (receiving_key_id) DO UPDATE SET
-             target_height = NULL, target_hash = NULL, lookup_height = NULL,
-             lookup_hash = NULL, attempts = 0, next_attempt_at = 0, done_height = NULL
-         WHERE done_height IS NOT NULL",
-        [id],
-    )?;
-    Ok(())
-}
-
 /// Queues `range` for a forced rescan with historic priority.
 pub(super) fn queue_rescan(
     conn: &rusqlite::Transaction<'_>,

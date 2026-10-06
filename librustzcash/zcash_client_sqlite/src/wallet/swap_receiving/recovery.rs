@@ -18,13 +18,12 @@ use zakura_swap_receiving::lifecycle::{Observation, OperationStatus};
 use zcash_protocol::consensus::NetworkUpgrade;
 
 /// A confirmed funding record recovered from an ordinary internal Ironwood note.
-/// The deposit address restores the provider-status lookup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecoveredRefund {
     /// Refund sequence index.
     pub(crate) index: u64,
     /// Address of the funding transaction's only transparent output (P2PKH or P2SH),
-    /// or `None` when the transaction did not have exactly one.
+    /// or `None` when the transaction did not have exactly one or is not stored.
     pub(crate) deposit_address: Option<String>,
 }
 
@@ -36,10 +35,6 @@ pub(super) struct MemoRecovery {
     pub(super) unreadable: usize,
 }
 
-/// Seconds between provider checks of a refund key that closed with an inconclusive
-/// status.
-pub(super) const LATE_CHECK_SECS: i64 = 24 * 60 * 60;
-
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R> {
     /// See [`WalletDb::recover_swap_refund_memos`] on a transaction-backed handle.
     #[cfg(test)]
@@ -50,60 +45,27 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
         self.transactionally(|db| db.recover_swap_refund_memos(account))
     }
 
-    /// Claims due provider lookups for authenticated refund records. A refund key
-    /// that closed with an inconclusive status is checked once a day until its late
-    /// watch ends (see [`WalletDb::close_finished_swap_keys`]). Call at sync time,
-    /// including when no new blocks arrive. The persisted retry time also bounds
-    /// failed requests across restarts. Unknown responses and inconclusive terminal
-    /// statuses, such as `FAILED`, leave watches active.
-    /// Applications pass a Unix timestamp and perform network I/O after this returns.
-    /// Unchecked records are returned first, up to `limit`, so old failed requests
-    /// cannot starve newly restored records.
-    pub fn take_swap_refund_status_checks(
-        &mut self,
-        account: AccountUuid,
-        now: i64,
-        limit: std::num::NonZeroU32,
-    ) -> Result<Vec<(KeyId, String)>, Error> {
-        if now < 0 {
-            return Err(super::corrupt("invalid provider-check time"));
-        }
+    /// Queues one receiver-directory sweep for each of `account`'s closed swap keys, as
+    /// a seed restore does, and returns how many were queued.
+    ///
+    /// A key stops scanning once its swap settles, so a rare later payment, such as a
+    /// second refund, is found only by a sweep. Call this when the user asks to recheck
+    /// swap history. A finished sweep reopens its key from the sweep's anchor until it
+    /// closes again, and new incoming reservations wait for these sweeps as they do
+    /// after a restore.
+    pub fn recheck_swap_history(&mut self, account: AccountUuid) -> Result<usize, Error> {
         self.transactionally(|db| {
-            let (id, _) = account_key(db.conn.0, &db.params, account)?;
-            let mut stmt = db.conn.0.prepare_cached(
-                "SELECT k.key_index, w.receiving_key_id, w.operation_id, k.closed_at IS NOT NULL
-                 FROM ironwood_swap_refund_watches w
-                 JOIN ironwood_receiving_keys k ON k.id=w.receiving_key_id
-                 JOIN ironwood_swap_operations s ON s.receiving_key_id=w.receiving_key_id
-                    AND s.operation_id=w.operation_id
-                 WHERE k.account_id=?1 AND (k.closed_at IS NULL OR w.expires_at > ?2)
-                   AND (s.terminal_at IS NULL OR s.expectation=0) AND w.next_check_at<=?2
-                 ORDER BY w.next_check_at,w.receiving_key_id,w.operation_id LIMIT ?3",
-            )?;
-            let rows = stmt
-                .query_map(params![id.0, now, limit.get()], |r| {
-                    Ok((
-                        r.get::<_, Vec<u8>>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, bool>(3)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut result = Vec::new();
-            for (index, id, operation, closed) in rows {
-                let next = now
-                    .checked_add(if closed { LATE_CHECK_SECS } else { 60 })
-                    .ok_or_else(|| super::corrupt("provider-check time overflow"))?;
-                let key = KeyId::new(Purpose::Refund, decode_index(index)?);
-                db.conn.0.execute(
-                    "UPDATE ironwood_swap_refund_watches SET next_check_at=?3
-                    WHERE receiving_key_id=?1 AND operation_id=?2",
-                    params![id, operation, next],
-                )?;
-                result.push((key, operation));
-            }
-            Ok(result)
+            let (owner, _) = account_key(db.conn.0, &db.params, account)?;
+            Ok(db.conn.0.execute(
+                "INSERT INTO ironwood_swap_sweeps (receiving_key_id)
+                 SELECT id FROM ironwood_receiving_keys
+                 WHERE account_id = ?1 AND closed_at IS NOT NULL
+                 ON CONFLICT (receiving_key_id) DO UPDATE SET
+                     target_height = NULL, target_hash = NULL, lookup_height = NULL,
+                     lookup_hash = NULL, attempts = 0, next_attempt_at = 0, done_height = NULL
+                 WHERE done_height IS NOT NULL",
+                [owner.0],
+            )?)
         })
     }
 
@@ -141,18 +103,19 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
     ///
     /// Run after scanning and memo enhancement, including during restore. A key this
     /// wallet was already scanning when the funding transaction was mined needs
-    /// nothing more. Any other key is restored: it is queued for a receiver-directory
-    /// sweep and a provider-status watch. Own-send evidence must include an input
-    /// belonging to the same account. Spent and zero-value marker notes are included.
+    /// nothing more, except that its stored funding transaction marks the funded quote
+    /// as waiting for its outcome. Any other key is restored: it is queued for a
+    /// receiver-directory sweep and then scans until the completion limit after the
+    /// funding block, with no provider lookups. Own-send evidence must include an
+    /// input belonging to the same account. Spent and zero-value marker notes are
+    /// included.
     ///
-    /// A record whose inputs, memo or raw transaction are not available yet, or that
-    /// this version cannot read, stays unprocessed without failing the call, and
-    /// refund issuance waits for it (see [`WalletDb::swap_refund_memos_pending`]). A
-    /// funding transaction without exactly one transparent output still restores its
-    /// refund key, but no provider watch. Returns only records processed by this
-    /// call. Completed records are skipped across restarts unless their memo or
+    /// A record whose inputs or memo are not available yet, or that this version cannot
+    /// read, stays unprocessed without failing the call, and refund issuance waits for
+    /// it (see [`WalletDb::swap_refund_memos_pending`]). Returns only records processed
+    /// by this call. Completed records are skipped across restarts unless their memo or
     /// funding height changes. Progress is committed atomically with the key
-    /// registration and provider watch.
+    /// registration.
     pub(crate) fn recover_swap_refund_memos(
         &mut self,
         account: AccountUuid,
@@ -202,18 +165,20 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 unreadable += 1;
                 continue;
             };
-            let Some(raw) = raw else { continue };
-            let Ok((_, tx)) = wallet::parse_tx(&self.params, &raw, Some(height.into()), None)
-            else {
-                unreadable += 1;
-                continue;
-            };
-            let deposit_address = match tx.transparent_bundle().map(|b| &b.vout[..]) {
-                Some([output]) => output
-                    .recipient_address()
-                    .map(|address| address.encode(&self.params)),
-                _ => None,
-            };
+            // Only the device that funded the swap stores the raw transaction, which
+            // names the deposit; a restored key needs neither.
+            let deposit_address = raw
+                .and_then(|raw| {
+                    wallet::parse_tx(&self.params, &raw, Some(height.into()), None).ok()
+                })
+                .and_then(
+                    |(_, tx)| match tx.transparent_bundle().map(|b| &b.vout[..]) {
+                        Some([output]) => output
+                            .recipient_address()
+                            .map(|address| address.encode(&self.params)),
+                        _ => None,
+                    },
+                );
             let key_id = KeyId::new(Purpose::Refund, memo.index());
             let scanned_locally = self
                 .conn
@@ -242,7 +207,19 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                 }
                 id
             } else {
-                let (id, _) = register(
+                // Registering at the funding block's time makes the completion limit
+                // count from the swap, so an old swap's key closes after its sweep.
+                let funded_at = self
+                    .conn
+                    .0
+                    .query_row(
+                        "SELECT time FROM blocks WHERE height = ?1",
+                        [height],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?
+                    .unwrap_or(now);
+                register(
                     self.conn.0,
                     &self.params,
                     account,
@@ -250,25 +227,9 @@ impl<P: Parameters, CL: Clock, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
                     height.into(),
                     true,
                     Discovery::Sweep,
-                    now,
-                )?;
-                // Restoring a seed has no local activity record. The provider
-                // identity schedules status polling for the restored refund.
-                if let Some(deposit) = &deposit_address {
-                    self.conn.0.execute(
-                        "INSERT OR IGNORE INTO ironwood_swap_refund_watches
-                            (receiving_key_id, operation_id)
-                         VALUES (?1, ?2)",
-                        params![id, deposit],
-                    )?;
-                    self.conn.0.execute(
-                        "INSERT OR IGNORE INTO ironwood_swap_operations
-                            (receiving_key_id, operation_id)
-                         VALUES (?1, ?2)",
-                        params![id, deposit],
-                    )?;
-                }
-                id
+                    funded_at,
+                )?
+                .0
             };
             self.conn.0.execute(
                 "INSERT INTO ironwood_swap_refund_memo_progress

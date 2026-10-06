@@ -1,39 +1,26 @@
 //! Shared swap completion policy. Wallet storage owns canonical-chain validation,
 //! receipt attribution, and atomic persistence of this state with scanning.
 
-use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
-
-/// A block on the wallet's accepted Zcash chain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChainAnchor {
-    /// Block height.
-    pub height: BlockHeight,
-    /// Block hash in the wallet's canonical byte representation.
-    pub hash: [u8; 32],
-}
+use zcash_protocol::value::Zatoshis;
 
 /// When a key's trial decryption may stop. Defaults are wallet conventions, not
 /// consensus parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompletionPolicy {
-    /// Seconds to keep scanning after the first terminal status, once every
-    /// expected receipt has been found.
+    /// Seconds a quote no provider status has reached keeps its key scanning in case
+    /// it is funded, and seconds a key found only by a restore sweep is watched for a
+    /// payment in flight at restore.
     pub grace_secs: i64,
     /// Seconds after the quote deadline, or after registration when no deadline
     /// is known, after which scanning stops whatever the provider reports.
     pub limit_secs: i64,
-    /// Seconds a key keeps scanning past `limit_secs` while the provider promises a
-    /// receipt that has not arrived. After a key closes with an inconclusive status,
-    /// also how long its provider status is still checked, daily, for a late promise.
-    pub late_watch_secs: i64,
 }
 
 impl Default for CompletionPolicy {
     fn default() -> Self {
         Self {
             grace_secs: 24 * 60 * 60,
-            limit_secs: 7 * 24 * 60 * 60,
-            late_watch_secs: 30 * 24 * 60 * 60,
+            limit_secs: 30 * 24 * 60 * 60,
         }
     }
 }

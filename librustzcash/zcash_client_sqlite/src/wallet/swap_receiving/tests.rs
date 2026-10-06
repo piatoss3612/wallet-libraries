@@ -8,7 +8,8 @@ use orchard::{
 };
 use prost::Message;
 use secrecy::{ExposeSecret, SecretVec};
-use zakura_swap_receiving::{lifecycle::ChainAnchor, recovery::EncryptedNote};
+use zakura_swap_receiving::recovery::EncryptedNote;
+use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_client_backend::{
     data_api::{
         WalletRead, WalletWrite,
@@ -349,11 +350,11 @@ fn accepted(address: &str, memo: Option<&str>, deadline: i64) -> QuoteOutcome {
 }
 
 /// The wallet's fully scanned tip.
-fn tip(st: &State) -> ChainAnchor {
+fn tip(st: &State) -> ChainPoint {
     let block = st.wallet().block_fully_scanned().unwrap().unwrap();
-    ChainAnchor {
+    ChainPoint {
         height: block.block_height(),
-        hash: block.block_hash().0,
+        hash: block.block_hash(),
     }
 }
 
@@ -488,7 +489,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        anchor: zakura_swap_receiving::lifecycle::ChainAnchor,
+        anchor: zcash_client_backend::data_api::transparent_ledger::ChainPoint,
     ) -> Result<(), Error> {
         self.queue_swap_lookup(account, key, anchor, &[])?;
         self.finish_swap_discovery_attempt(account, key, anchor)

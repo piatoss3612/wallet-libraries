@@ -3,7 +3,8 @@ use super::{Error, KeyId, account_key, corrupt, purpose_code};
 use crate::{AccountUuid, SqlTransaction, WalletDb, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::Borrow;
-use zakura_swap_receiving::{lifecycle::ChainAnchor, recovery::EncryptedNote};
+use zakura_swap_receiving::recovery::EncryptedNote;
+use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::{
     PoolType,
@@ -114,17 +115,17 @@ pub(super) fn spend_status(
     conn: &Connection,
     candidate: &PendingPayment,
     nullifier: &orchard::note::Nullifier,
-    through: ChainAnchor,
+    through: ChainPoint,
 ) -> Result<SpendStatus, Error> {
     if through.height < candidate.height
         || wallet::fully_scanned_height(conn)?.is_none_or(|h| h < through.height)
     {
         return Ok(SpendStatus::Unknown);
     }
-    if wallet::get_block_hash(conn, through.height)? != Some(BlockHash(through.hash))
+    if wallet::get_block_hash(conn, through.height)? != Some(through.hash)
         || wallet::get_block_hash(conn, candidate.height)? != Some(candidate.block_hash)
     {
-        return Err(corrupt("swap recovery anchor changed"));
+        return Err(Error::SweepDeferred(super::SweepDeferral::UnknownAnchor));
     }
     let spent = conn
         .query_row(
@@ -194,7 +195,7 @@ impl<C: std::borrow::BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P,
         account: AccountUuid,
         key: KeyId,
         candidate: &PendingPayment,
-        through: ChainAnchor,
+        through: ChainPoint,
     ) -> Result<SpendStatus, Error> {
         self.transactionally(|db| {
             let (_, note) = authenticate(db.conn.0, &db.params, account, key, candidate)?;

@@ -8,7 +8,7 @@ use incrementalmerkletree::{Address, Position, Retention};
 use orchard::tree::{MerkleHashOrchard, MerklePath};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::BorrowMut;
-use zakura_swap_receiving::lifecycle::ChainAnchor;
+use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_client_backend::wallet::{WalletOrchardOutput, WalletTx};
 use zcash_note_encryption::ShieldedOutput as _;
 use zcash_protocol::{
@@ -44,8 +44,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         account: AccountUuid,
         key: KeyId,
         candidate: &PendingPayment,
-        through: ChainAnchor,
-        witness: Option<(ChainAnchor, &MerklePath)>,
+        through: ChainPoint,
+        witness: Option<(ChainPoint, &MerklePath)>,
     ) -> Result<PaymentApplication, Error> {
         self.transactionally(|db| {
             db.apply_pending_swap_payment(account, key, candidate, through, witness)
@@ -59,8 +59,8 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         account: AccountUuid,
         key: KeyId,
         candidate: &PendingPayment,
-        through: ChainAnchor,
-        witness: Option<(ChainAnchor, &MerklePath)>,
+        through: ChainPoint,
+        witness: Option<(ChainPoint, &MerklePath)>,
     ) -> Result<PaymentApplication, Error> {
         let conn = self.conn.0;
         if !self
@@ -123,8 +123,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         if let Some((anchor, _)) = witness
             && (anchor.height > through.height
                 || through.height - anchor.height > crate::PRUNING_DEPTH
-                || wallet::get_block_hash(conn, anchor.height)?
-                    != Some(zcash_primitives::block::BlockHash(anchor.hash)))
+                || wallet::get_block_hash(conn, anchor.height)? != Some(anchor.hash))
         {
             return Ok(PaymentApplication::AwaitingWitness);
         }

@@ -6,7 +6,7 @@ use zakura_swap_receiving::lifecycle::OperationStatus;
 fn finish_sweeps<CL, R>(
     db: &mut WalletDb<Connection, LocalNetwork, CL, R>,
     account: AccountUuid,
-    through: ChainAnchor,
+    through: ChainPoint,
 ) {
     for key in db.get_swap_receiving_keys(account).unwrap() {
         db.finish_sweep(account, key.key_id(), through).unwrap();
@@ -16,7 +16,7 @@ fn finish_sweeps<CL, R>(
 /// [`fixture`] retaining spend history, with its payment applied and the sweeps
 /// finished at its tip, including those of the lookahead the import extends.
 /// Release waits for the queued payment and then for that lookahead.
-fn swept() -> (State, RegisteredKey, ChainAnchor) {
+fn swept() -> (State, RegisteredKey, ChainPoint) {
     let (mut st, key, candidate, through, path) = fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
@@ -79,8 +79,8 @@ fn retention_completion_waits_for_candidates_and_extended_lookahead() {
         crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap(),
         Some(through.height + 1)
     );
-    let wrong = ChainAnchor {
-        hash: [99; 32],
+    let wrong = ChainPoint {
+        hash: BlockHash([99; 32]),
         ..through
     };
     assert!(
@@ -176,46 +176,6 @@ fn scanned_keys_never_hold_spend_evidence() {
     assert_eq!(
         crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
         Some(height + 1)
-    );
-}
-
-#[test]
-fn a_late_watch_keeps_spend_evidence_from_the_close() {
-    use zakura_swap_receiving::lifecycle::{CompletionPolicy, ReceiptExpectation};
-    let (mut st, _, through) = swept();
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    let refund = db
-        .recover_swap_receiving_key(account, KeyId::new(Purpose::Refund, 0), through.height)
-        .unwrap()
-        .key_id();
-    db.finish_sweep(account, refund, through).unwrap();
-    let failed = OperationStatus::Terminal(ReceiptExpectation::Unknown);
-    db.observe_swap_operation(account, refund, "deposit", failed, 0)
-        .unwrap();
-    let policy = CompletionPolicy::default();
-    let closed = unix_now(&test_clock()) + policy.limit_secs;
-    db.close_finished_swap_keys_at(account, closed, through.height)
-        .unwrap();
-    assert!(db.get_swap_scanning_keys().unwrap().is_empty());
-    assert!(
-        !db.finish_swap_nullifier_recovery_with(account, through, 1)
-            .unwrap()
-    );
-    assert_eq!(
-        crate::wallet::ironwood_nullifier_retention_height(&db.conn).unwrap(),
-        Some(through.height)
-    );
-    // Once the watch ends, release reaches the tip.
-    db.conn
-        .execute(
-            "UPDATE blocks SET time = ?2 WHERE height = ?1",
-            rusqlite::params![u32::from(through.height), closed + policy.late_watch_secs],
-        )
-        .unwrap();
-    assert!(
-        db.finish_swap_nullifier_recovery_with(account, through, 1)
-            .unwrap()
     );
 }
 

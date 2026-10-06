@@ -5,13 +5,7 @@ use zcash_primitives::transaction::TxId;
 /// Pays receive key 8 at the tip before registering it, so scanning misses the note,
 /// then watches the key from the next block and queues the payment. Also returns the
 /// tip and the payment's path there.
-pub(super) fn fixture() -> (
-    State,
-    RegisteredKey,
-    PendingPayment,
-    ChainAnchor,
-    MerklePath,
-) {
+pub(super) fn fixture() -> (State, RegisteredKey, PendingPayment, ChainPoint, MerklePath) {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let id = KeyId::new(Purpose::Receive, 8);
@@ -409,7 +403,7 @@ fn sweep_steps_queue_a_directory_lookup_and_apply_it_once() {
         deferred(db.swap_publication_anchor(through.height + 1, through)),
         SweepDeferral::UnknownAnchor
     );
-    let far = ChainAnchor {
+    let far = ChainPoint {
         height: through.height + MAX_PUBLICATION_LAG + 1,
         ..through
     };

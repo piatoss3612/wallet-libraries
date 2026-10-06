@@ -228,7 +228,7 @@ fn swap_payment_absence_requires_retained_contiguous_nullifiers() {
         }
     );
     let mut wrong = through;
-    wrong.hash[0] ^= 1;
+    wrong.hash.0[0] ^= 1;
     assert!(
         st.wallet_mut()
             .db_mut()

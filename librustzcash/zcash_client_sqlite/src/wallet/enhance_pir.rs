@@ -1220,24 +1220,6 @@ pub(crate) fn apply<P: Parameters>(
             return Ok(EnhancePirStoreResult::AlreadyResolved);
         }
     }
-    // A refund record's deposit address comes from its raw funding transaction
-    // (see `WalletDb::recover_swap_refund_memos`), so fetch it whatever the
-    // unauthenticated transparent flags say. Builds without swap support do this
-    // too, because a swap-enabled build may later open the same database.
-    let has_transparent = has_transparent
-        || match (memo_id, &incoming) {
-            (Some(note_id), Some(memo)) if memo.as_slice().starts_with(b"\xffZSWP") => tx
-                .query_row(
-                    "SELECT recipient_key_scope = :internal AND receiving_key_id IS NULL
-                     FROM ironwood_received_notes WHERE id = :id",
-                    named_params![
-                        ":internal": crate::wallet::KeyScope::INTERNAL.encode(),
-                        ":id": note_id,
-                    ],
-                    |row| row.get::<_, bool>(0),
-                )?,
-            _ => false,
-        };
     // Crucially, no routing mutation happens before the identity rechecks.
     if has_transparent || route == PRIVATE_DETAILS_UNSUPPORTED {
         transparent_ledger::ensure_policy_generation(tx, expected_generation)?;

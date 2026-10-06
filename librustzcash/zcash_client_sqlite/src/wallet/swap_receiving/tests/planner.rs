@@ -6,13 +6,13 @@ use zakura_swap_receiving::lifecycle::{CompletionPolicy, OperationStatus, Receip
 const NOW: i64 = 1_000;
 
 /// Scans `count` new empty blocks and returns the new tip.
-fn advance(st: &mut State, count: usize) -> ChainAnchor {
+fn advance(st: &mut State, count: usize) -> ChainPoint {
     st.generate_and_scan_empty_blocks(count);
     tip(st)
 }
 
 /// Prepares up to 64 of the test account's due sweeps.
-fn batch(st: &mut State, through: ChainAnchor, now: i64) -> DiscoveryBatch {
+fn batch(st: &mut State, through: ChainPoint, now: i64) -> DiscoveryBatch {
     let account = st.test_account().unwrap().id();
     st.wallet_mut()
         .db_mut()
@@ -21,7 +21,7 @@ fn batch(st: &mut State, through: ChainAnchor, now: i64) -> DiscoveryBatch {
 }
 
 /// Keys of the due sweeps, in selection order.
-fn due(st: &mut State, through: ChainAnchor, now: i64) -> Vec<KeyId> {
+fn due(st: &mut State, through: ChainPoint, now: i64) -> Vec<KeyId> {
     batch(st, through, now)
         .work
         .into_iter()
@@ -217,11 +217,11 @@ fn lookup_coverage_advances_only_with_canonical_anchors() {
         .key_id();
     let newer = advance(&mut st, 1);
     let db = st.wallet_mut().db_mut();
-    let forked = ChainAnchor {
-        hash: [9; 32],
+    let forked = ChainPoint {
+        hash: BlockHash([9; 32]),
         ..newer
     };
-    let unscanned = ChainAnchor {
+    let unscanned = ChainPoint {
         height: newer.height + 1,
         ..newer
     };
@@ -306,19 +306,20 @@ fn finish_requires_applied_candidates_and_a_canonical_anchor() {
         .unwrap(),
         PaymentApplication::Applied
     );
-    let forked = ChainAnchor {
-        hash: [9; 32],
+    let forked = ChainPoint {
+        hash: BlockHash([9; 32]),
         ..through
     };
-    let unscanned = ChainAnchor {
+    let unscanned = ChainPoint {
         height: through.height + 1,
         ..through
     };
+    // An anchor off the scanned chain defers the sweep rather than reporting corruption.
     for anchor in [forked, unscanned] {
-        assert!(
-            db.finish_swap_discovery_attempt(account, key, anchor)
-                .is_err()
-        );
+        assert!(matches!(
+            db.finish_swap_discovery_attempt(account, key, anchor),
+            Err(Error::SweepDeferred(SweepDeferral::UnknownAnchor))
+        ));
     }
     assert_eq!(due(&mut st, through, NOW), [key]);
     st.wallet_mut()
@@ -460,7 +461,7 @@ fn watched_key_finds_a_payout_after_its_sweep() {
 }
 
 #[test]
-fn issuing_a_closed_watch_key_sweeps_instead_of_rescanning() {
+fn issuing_a_key_after_its_watch_needs_no_rescan() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     let anchor = tip(&st);
@@ -502,8 +503,8 @@ fn issuing_a_closed_watch_key_sweeps_instead_of_rescanning() {
     assert_eq!(reservation.key.key_id(), key);
     assert_eq!(scanning_keys(&st), [key]);
     assert!(st.wallet().suggest_scan_ranges().unwrap().is_empty());
-    // A sweep covers the blocks scanned while the key was closed.
-    assert_eq!(due(&mut st, through, NOW), [key]);
+    // History after the watch is swept again only on request.
+    assert!(due(&mut st, through, NOW).is_empty());
 }
 
 #[test]
@@ -628,83 +629,6 @@ fn rewound_sweep_does_not_wait_out_its_last_attempt_lease() {
         .unwrap();
     st.truncate_to_height(kept.height);
     assert_eq!(due(&mut st, kept, NOW), [key]);
-}
-
-#[test]
-fn restored_refund_status_checks_try_unchecked_operations_first() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = KeyId::new(Purpose::Refund, 0);
-    let from = tip(&st).height;
-    st.wallet_mut()
-        .db_mut()
-        .recover_swap_receiving_key(account, key, from)
-        .unwrap();
-    let id = super::super::payments::key_ref(st.wallet().conn(), account, key).unwrap();
-    for operation in ["a", "b"] {
-        st.wallet_mut()
-            .db_mut()
-            .observe_swap_operation(account, key, operation, OperationStatus::Active, NOW)
-            .unwrap();
-        st.wallet()
-            .conn()
-            .execute(
-                "INSERT INTO ironwood_swap_refund_watches (receiving_key_id, operation_id)
-                 VALUES (?1, ?2)",
-                params![id, operation],
-            )
-            .unwrap();
-    }
-    let one = NonZeroU32::new(1).unwrap();
-    let mut take = |now| {
-        st.wallet_mut()
-            .db_mut()
-            .take_swap_refund_status_checks(account, now, one)
-            .unwrap()
-    };
-    assert_eq!(take(100), [(key, "a".to_owned())]);
-    // The first request's failure cannot prevent trying the next restored swap.
-    assert_eq!(take(101), [(key, "b".to_owned())]);
-    assert!(take(159).is_empty());
-    assert_eq!(take(160), [(key, "a".to_owned())]);
-}
-
-#[test]
-fn restored_refund_keeps_polling_after_an_inconclusive_status() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let key = KeyId::new(Purpose::Refund, 0);
-    let from = tip(&st).height;
-    st.wallet_mut()
-        .db_mut()
-        .recover_swap_receiving_key(account, key, from)
-        .unwrap();
-    let id = super::super::payments::key_ref(st.wallet().conn(), account, key).unwrap();
-    st.wallet()
-        .conn()
-        .execute(
-            "INSERT INTO ironwood_swap_refund_watches (receiving_key_id, operation_id)
-             VALUES (?1, 'deposit')",
-            [id],
-        )
-        .unwrap();
-    let one = NonZeroU32::new(1).unwrap();
-    let db = st.wallet_mut().db_mut();
-    let failed = OperationStatus::Terminal(ReceiptExpectation::Unknown);
-    db.observe_swap_operation(account, key, "deposit", failed, NOW)
-        .unwrap();
-    let due = db
-        .take_swap_refund_status_checks(account, NOW, one)
-        .unwrap();
-    assert_eq!(due, [(key, "deposit".to_owned())]);
-    let refunded = OperationStatus::Terminal(ReceiptExpectation::Positive(None));
-    db.observe_swap_operation(account, key, "deposit", refunded, NOW + 1)
-        .unwrap();
-    assert!(
-        db.take_swap_refund_status_checks(account, NOW + 60, one)
-            .unwrap()
-            .is_empty()
-    );
 }
 
 #[test]
@@ -842,4 +766,58 @@ fn retained_spend_history_covers_early_spends_in_large_batches() {
             (false, _) => assert_eq!(status, SpendStatus::Unknown),
         }
     }
+}
+
+#[test]
+fn recheck_sweeps_closed_keys_and_finds_a_later_refund() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let tip_height = tip(&st).height;
+    let db = st.wallet_mut().db_mut();
+    let key = db
+        .reserve_swap_receiving_key_from(account, Purpose::Refund, tip_height + 1)
+        .unwrap()
+        .key_id();
+    let finished = OperationStatus::Terminal(ReceiptExpectation::None);
+    db.observe_swap_operation(account, key, "swap", finished, NOW)
+        .unwrap();
+    assert_eq!(
+        db.close_finished_swap_keys_at(account, NOW, tip_height)
+            .unwrap(),
+        1
+    );
+    // A second refund arrives after the key closed, so scanning misses it.
+    let candidate = pay_candidate(&mut st, key);
+    let through = tip(&st);
+    assert!(unspent_keys(&st, through.height).is_empty());
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(db.recheck_swap_history(account).unwrap(), 1);
+    assert_eq!(due(&mut st, through, NOW), [key]);
+    let db = st.wallet_mut().db_mut();
+    db.queue_swap_lookup(account, key, through, std::slice::from_ref(&candidate))
+        .unwrap();
+    assert_eq!(
+        db.apply_pending_swap_payment(
+            account,
+            key,
+            &candidate,
+            through,
+            Some((through, &first_leaf_path()))
+        )
+        .unwrap(),
+        PaymentApplication::Applied
+    );
+    db.finish_swap_discovery_attempt(account, key, through)
+        .unwrap();
+    assert_eq!(unspent_keys(&st, through.height), [Some(key)]);
+    // The finished sweep reopens the key until it closes again, so no key is left to
+    // recheck.
+    assert_eq!(scanning_keys(&st), [key]);
+    assert_eq!(
+        st.wallet_mut()
+            .db_mut()
+            .recheck_swap_history(account)
+            .unwrap(),
+        0
+    );
 }

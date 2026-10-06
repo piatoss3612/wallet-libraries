@@ -84,27 +84,23 @@ An incoming source-chain refund expects nothing on Zcash. Unknown statuses
 leave the previous observation unchanged.
 
 `record_swap_observation` persists each observation immediately.
-`close_finished_swap_keys` stops trial decryption for a key once every operation
-on it has a conclusive terminal status (`FAILED` is not), mined receipts cover
-the expected amounts, and 24 hours have passed since the first terminal status.
-It also stops seven days after the latest quote deadline (or registration,
-without one), whatever the provider reports, or 30 days after that while the
-provider promises ZEC the mined notes do not cover. Incoming keys this wallet
-issued stay active until paid and their reservation ends. Nothing closes unless
-the wallet is scanned to the tip the caller confirmed, and closing uses the
-earlier of the caller's clock and that tip's block time, so a clock that runs
-fast cannot end scanning early. No provider response credits a note, and a
-closed key keeps its notes.
+`close_finished_swap_keys` stops trial decryption for a key as soon as every
+operation on it has a conclusive terminal status (`FAILED` is not) and its
+receipts cover the expected amounts with ZIP 315's untrusted confirmations, so a
+reorg cannot strand a receipt on a closed key. It also stops 30 days after the
+latest quote deadline (or registration, without one), whatever the provider
+reports. Incoming keys this wallet issued stay active until paid and their
+reservation ends. Nothing closes unless the wallet is scanned to the tip the
+caller confirmed, and closing uses the earlier of the caller's clock and that
+tip's block time, so a clock that runs fast cannot end scanning early. No
+provider response credits a note, and a closed key keeps its notes. A rare
+payment after a key closed, such as a second refund, is found by
+`recheck_swap_history`, which sweeps every closed key once, or by a seed restore.
 
-A refund key that closes with an inconclusive status keeps a provider check once
-a day for 30 days (`take_swap_refund_status_checks`), and the wallet keeps
-Ironwood spend evidence from the close meanwhile. If the provider then promises
-ZEC, the key is swept for the time it was closed and reopens, like a restored
-key, so a refund paid late is found without a seed restore.
-
-A recorded refund quote expects nothing until it is funded, so abandoned quotes
-do not hold a key open. A status for its deposit address, or its mined funding
-memo, makes the swap's outcome decide instead.
+A recorded refund quote expects nothing until it is funded, and its key keeps
+scanning for 24 hours after it was recorded in case it is funded, so abandoned
+quotes do not hold a key open for long. A status for its deposit address, or its
+mined funding memo, makes the swap's outcome decide instead.
 
 ## Derivation
 
@@ -138,9 +134,9 @@ index has no valid key, and derivation returns an error.
 | 7 | 8 | Index, little-endian |
 | 15 | 497 | Reserved: written as zero, ignored on decode |
 
-The memo does not store the deposit address. Swaps fund only address-only
-transparent deposits, so recovery reads it from the funding transaction's single
-P2PKH or P2SH output. Ignoring the reserved bytes keeps prerelease records, which
+The memo does not store the deposit address. A restored refund key needs none: it
+is swept once and then scans until 30 days after its funding block, with no
+provider lookups. Ignoring the reserved bytes keeps prerelease records, which
 appended the address there, decoding to their index. Incoming indices are
 recovered through lookahead, not this memo. The decoder distinguishes unrelated
 memos from unsupported versions or purposes. Recovery leaves a record it cannot
@@ -265,13 +261,11 @@ swap closes, and an incoming key never issued here for 24 hours after it was
 registered, catching a payout from a swap in flight at restore. During that
 watch, incoming issuance takes the highest free index in the recovery window
 rather than the lowest, since the lowest unpaid indices may be the old device's
-open swaps. Issuing a closed key again starts scanning at the tip and queues
-another sweep for the time it was closed; that sweep does not hold up other
-reservations. Reorgs below a sweep
-reopen it. Until restore sweeps finish, new incoming reservations wait.
+open swaps. Issuing a closed key again starts scanning at the tip.
+`recheck_swap_history` sweeps closed keys again on request. Reorgs below a sweep
+reopen it. Until incoming sweeps finish, new incoming reservations wait.
 
-Historical spend retention follows the earliest unfinished sweep, pending note, or
-closed refund key's late watch.
+Historical spend retention follows the earliest unfinished sweep or pending note.
 Missing spend evidence queues one coalesced replay of the public account recovery
 interval. A note before that interval stays explicitly blocked until the
 account's restore range is widened.

@@ -7,7 +7,7 @@ use super::{
 use crate::{AccountUuid, SqlTransaction, WalletDb, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::{Borrow, BorrowMut};
-use zakura_swap_receiving::lifecycle::ChainAnchor;
+use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
@@ -19,9 +19,9 @@ pub struct DiscoveryWork {
     /// Canonical address bytes already stored at registration.
     pub receiver: [u8; 43],
     /// Persisted, independently accepted target that retries must reach.
-    pub target: ChainAnchor,
+    pub target: ChainPoint,
     /// A completed lookup whose candidates are durably queued. Resume those first.
-    pub lookup: Option<ChainAnchor>,
+    pub lookup: Option<ChainPoint>,
 }
 /// Bounded work plus the entire job's due, uncached lookup count for transport choice.
 pub struct DiscoveryBatch {
@@ -32,18 +32,18 @@ pub struct DiscoveryBatch {
 }
 
 /// Returns `anchor` only while its block is still on the wallet's chain.
-fn canonical(conn: &Connection, anchor: Option<ChainAnchor>) -> Result<Option<ChainAnchor>, Error> {
+fn canonical(conn: &Connection, anchor: Option<ChainPoint>) -> Result<Option<ChainPoint>, Error> {
     Ok(match anchor {
-        Some(a) if wallet::get_block_hash(conn, a.height)? == Some(BlockHash(a.hash)) => Some(a),
+        Some(a) if wallet::get_block_hash(conn, a.height)? == Some(a.hash) => Some(a),
         _ => None,
     })
 }
 
 /// Builds an anchor from a stored height and hash pair.
-fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<ChainAnchor> {
-    height.zip(hash).map(|(height, hash)| ChainAnchor {
+fn anchor(height: Option<u32>, hash: Option<[u8; 32]>) -> Option<ChainPoint> {
+    height.zip(hash).map(|(height, hash)| ChainPoint {
         height: BlockHeight::from(height),
-        hash,
+        hash: BlockHash(hash),
     })
 }
 
@@ -53,7 +53,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         &self,
         account: AccountUuid,
         key: KeyId,
-    ) -> Result<Option<ChainAnchor>, Error> {
+    ) -> Result<Option<ChainPoint>, Error> {
         let conn = self.conn.borrow();
         let id = key_ref(conn, account, key)?;
         let lookup = conn
@@ -98,7 +98,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     pub fn prepare_swap_discovery_batch(
         &mut self,
         account: AccountUuid,
-        through: ChainAnchor,
+        through: ChainPoint,
         now: i64,
         limit: std::num::NonZeroU32,
     ) -> Result<DiscoveryBatch, Error> {
@@ -108,7 +108,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         self.transactionally(|db| {
             let (owner, _) = account_key(db.conn.0, &db.params, account)?;
             if canonical(db.conn.0, Some(through))?.is_none() {
-                return Err(corrupt("discovery target is not canonical"));
+                return Err(Error::SweepDeferred(super::SweepDeferral::UnknownAnchor));
             }
             // A finished sweep is offered again while a late lookup left candidates queued.
             let eligible = "FROM ironwood_swap_sweeps s
@@ -153,7 +153,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                         db.conn.0.execute(
                             "UPDATE ironwood_swap_sweeps SET target_height = ?2, target_hash = ?3
                              WHERE receiving_key_id = ?1",
-                            params![id, u32::from(through.height), through.hash],
+                            params![id, u32::from(through.height), through.hash.0],
                         )?;
                         through
                     }
@@ -184,7 +184,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        publication: ChainAnchor,
+        publication: ChainPoint,
         now: i64,
     ) -> Result<(), Error> {
         let reached = self.transactionally(|db| {
@@ -216,7 +216,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        anchor: ChainAnchor,
+        anchor: ChainPoint,
         payments: &[PendingPayment],
     ) -> Result<(), Error> {
         self.transactionally(|db| db.queue_swap_lookup(account, key, anchor, payments))
@@ -233,11 +233,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        anchor: ChainAnchor,
+        anchor: ChainPoint,
     ) -> Result<(), Error> {
         self.transactionally(|db| {
             let id = key_ref(db.conn.0, account, key)?;
-            let (pending, lookup): (bool, Option<ChainAnchor>) = db.conn.0.query_row(
+            let (pending, lookup): (bool, Option<ChainPoint>) = db.conn.0.query_row(
                 "SELECT EXISTS(SELECT 1 FROM ironwood_swap_payment_recovery
                         WHERE receiving_key_id = ?1),
                     lookup_height, lookup_hash
@@ -245,9 +245,13 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
                 [id],
                 |r| Ok((r.get(0)?, self::anchor(r.get(1)?, r.get(2)?))),
             )?;
+            if pending {
+                return Err(corrupt("sweep has unapplied candidates"));
+            }
+            // A reorg between the lookup and this call leaves the sweep to run again.
             let covered = canonical(db.conn.0, lookup)?.is_some_and(|l| l.height >= anchor.height);
-            if pending || !covered || canonical(db.conn.0, Some(anchor))?.is_none() {
-                return Err(corrupt("sweep is incomplete or its anchor changed"));
+            if !covered || canonical(db.conn.0, Some(anchor))?.is_none() {
+                return Err(Error::SweepDeferred(super::SweepDeferral::UnknownAnchor));
             }
             db.conn.0.execute(
                 "UPDATE ironwood_swap_sweeps SET done_height = ?2 WHERE receiving_key_id = ?1",
@@ -269,12 +273,12 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        anchor: ChainAnchor,
+        anchor: ChainPoint,
         payments: &[PendingPayment],
     ) -> Result<(), Error> {
         let id = key_ref(self.conn.0, account, key)?;
         if canonical(self.conn.0, Some(anchor))?.is_none() {
-            return Err(corrupt("lookup anchor changed"));
+            return Err(Error::SweepDeferred(super::SweepDeferral::UnknownAnchor));
         }
         for payment in payments {
             if payment.height > anchor.height {
@@ -285,7 +289,7 @@ impl<P: Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
         self.conn.0.execute(
             "UPDATE ironwood_swap_sweeps SET lookup_height = ?2, lookup_hash = ?3
              WHERE receiving_key_id = ?1 AND (lookup_height IS NULL OR lookup_height <= ?2)",
-            params![id, u32::from(anchor.height), anchor.hash],
+            params![id, u32::from(anchor.height), anchor.hash.0],
         )?;
         Ok(())
     }

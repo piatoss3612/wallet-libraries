@@ -196,10 +196,7 @@ fn send_with_change_memo(
 
 #[test]
 fn refund_funding_memo_recovers_from_seed_with_zero_change() {
-    use zakura_swap_receiving::{
-        RefundMemo,
-        lifecycle::{ProviderStatus, near_observation},
-    };
+    use zakura_swap_receiving::RefundMemo;
     let (mut st, first) = ironwood_funded_wallet();
     let network = *st.network();
     let account = st.test_account().cloned().unwrap();
@@ -297,35 +294,29 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .is_empty()
     );
 
-    // Restoration rebuilds provider polling without a local swap activity record.
-    let key = KeyId::new(Purpose::Refund, 7);
-    assert_eq!(
-        st.wallet_mut()
-            .db_mut()
-            .take_swap_refund_status_checks(restored, 1_000, std::num::NonZeroU32::new(8).unwrap())
-            .unwrap(),
-        vec![(key, deposit.to_string())]
-    );
-    let refunded = near_observation(
-        Purpose::Refund,
-        &ProviderStatus {
-            status: "REFUNDED",
-            refunded_amount: Some(Zatoshis::const_from_u64(50_000)),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    st.wallet_mut()
-        .db_mut()
-        .record_swap_observation(restored, key, &deposit.to_string(), refunded, 1_100)
+    // A restored refund key makes no provider lookups. Its completion limit counts
+    // from the funding block instead.
+    let (registered_at, operations): (i64, i64) = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT k.registered_at, (SELECT COUNT(*) FROM ironwood_swap_operations o
+                WHERE o.receiving_key_id = k.id)
+             FROM ironwood_receiving_keys k WHERE k.purpose = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .unwrap();
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .take_swap_refund_status_checks(restored, 2_000, std::num::NonZeroU32::new(8).unwrap())
-            .unwrap()
-            .is_empty()
-    );
+    let funded_at: i64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT time FROM blocks WHERE height = ?1",
+            [u32::from(mined)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!((registered_at, operations), (funded_at, 0));
 
     // Losing own-send evidence, or changing the authenticated scope, must make
     // the same memo ineligible. Restoring the evidence lets a later pass retry.
@@ -441,14 +432,6 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
             .unwrap(),
         records
     );
-    // Reprocessed memos cannot reopen the provider's terminal status.
-    assert!(
-        st.wallet_mut()
-            .db_mut()
-            .take_swap_refund_status_checks(restored, 3_000, std::num::NonZeroU32::new(8).unwrap())
-            .unwrap()
-            .is_empty()
-    );
 }
 
 #[test]
@@ -498,12 +481,6 @@ fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
     assert_eq!(records[0].index, key.index());
     assert!(db.recover_swap_refund_memos(account).unwrap().is_empty());
     assert!(!db.swap_history_pending(account, mined).unwrap());
-    // Only restored refunds are polled by the library.
-    assert!(
-        db.take_swap_refund_status_checks(account, 0, std::num::NonZeroU32::new(8).unwrap())
-            .unwrap()
-            .is_empty()
-    );
     let row = |conn: &Connection, deposit: &str| -> (i64, Option<i64>, u8) {
         conn.query_row(
             "SELECT observed_at, terminal_at, expectation FROM ironwood_swap_operations
@@ -532,13 +509,15 @@ fn funded_refund_quote_waits_for_its_outcome_and_abandoned_ones_do_not() {
     )
     .unwrap();
     assert_eq!(row(&db.conn, &funded), (finished, Some(finished), 1));
+    // The funded swap is over, but the abandoned quote could still be funded until
+    // a day after it was recorded.
     assert_eq!(
-        db.close_finished_swap_keys_at(account, finished + grace - 1, mined)
+        db.close_finished_swap_keys_at(account, now + grace - 1, mined)
             .unwrap(),
         0
     );
     assert_eq!(
-        db.close_finished_swap_keys_at(account, finished + grace, mined)
+        db.close_finished_swap_keys_at(account, now + grace, mined)
             .unwrap(),
         1
     );
@@ -571,56 +550,7 @@ fn reissued_refund_key_sweeps_history_before_its_scan_start() {
 }
 
 #[test]
-fn closed_refund_keys_keep_a_daily_status_check() {
-    use zakura_swap_receiving::{RefundMemo, lifecycle::CompletionPolicy};
-    let (mut st, _) = ironwood_funded_wallet();
-    let account = st.test_account().unwrap().id();
-    let network = *st.network();
-    let memo = MemoBytes::from_bytes(&RefundMemo::new(7).encode()).unwrap();
-    let deposit =
-        Address::Transparent(TransparentAddress::PublicKeyHash([7; 20])).to_zcash_address(&network);
-    let (_, _, mined) = send_with_change_memo(
-        &mut st,
-        vec![Payment::without_memo(
-            deposit.clone(),
-            Zatoshis::const_from_u64(100_000),
-        )],
-        &memo,
-    );
-    let swept = tip(&st);
-    let key = KeyId::new(Purpose::Refund, 7);
-    let db = st.wallet_mut().db_mut();
-    assert_eq!(db.recover_swap_refund_memos(account).unwrap().len(), 1);
-    db.finish_sweep(account, key, swept).unwrap();
-    // The provider never reports an outcome, so only the scanning limit closes the key.
-    let limit = unix_now(&test_clock()) + CompletionPolicy::default().limit_secs;
-    let batch = std::num::NonZeroU32::new(8).unwrap();
-    assert_eq!(
-        db.take_swap_refund_status_checks(account, limit, batch)
-            .unwrap(),
-        vec![(key, deposit.to_string())]
-    );
-    assert_eq!(
-        db.close_finished_swap_keys_at(account, limit, mined)
-            .unwrap(),
-        1
-    );
-    // The check scheduled while the key was open runs, and then one a day follows.
-    let due = vec![(key, deposit.to_string())];
-    let day = 24 * 60 * 60;
-    let mut take = |now| {
-        db.take_swap_refund_status_checks(account, now, batch)
-            .unwrap()
-    };
-    assert_eq!(take(limit + 60), due);
-    assert!(take(limit + 60 + day - 1).is_empty());
-    assert_eq!(take(limit + 60 + day), due);
-    // The late watch ends `late_watch_secs` after the key closed.
-    assert!(take(limit + CompletionPolicy::default().late_watch_secs).is_empty());
-}
-
-#[test]
-fn funding_without_one_transparent_output_restores_its_key_without_a_watch() {
+fn refund_memos_restore_keys_whatever_the_funding_outputs() {
     use zakura_swap_receiving::RefundMemo;
     let memo = MemoBytes::from_bytes(&RefundMemo::new(7).encode()).unwrap();
     let transparent = |byte| Address::Transparent(TransparentAddress::PublicKeyHash([byte; 20]));
@@ -653,31 +583,16 @@ fn funding_without_one_transparent_output_restores_its_key_without_a_watch() {
                 .unwrap()
                 .is_some()
         );
-        // Without a deposit address there is nothing to ask the provider about.
-        assert!(
-            db.take_swap_refund_status_checks(account, 0, std::num::NonZeroU32::new(8).unwrap())
-                .unwrap()
-                .is_empty()
-        );
         assert!(!db.swap_refund_memos_pending(account).unwrap());
     }
 
-    // A record whose raw transaction is not stored yet waits for it, without
-    // failing recovery, then recovers the exact address it paid.
+    // Only the funding device stores the raw transaction. Without it, the memo still
+    // restores its key, just without the deposit address.
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let network = *st.network();
     let deposit = transparent(7);
     let (_, txid, _) = send_with_change_memo(&mut st, vec![payment(&deposit, &network)], &memo);
-    let raw: Vec<u8> = st
-        .wallet()
-        .conn()
-        .query_row(
-            "SELECT raw FROM transactions WHERE txid=?1",
-            [txid.as_ref()],
-            |r| r.get(0),
-        )
-        .unwrap();
     st.wallet()
         .conn()
         .execute(
@@ -686,33 +601,18 @@ fn funding_without_one_transparent_output_restores_its_key_without_a_watch() {
         )
         .unwrap();
     let db = st.wallet_mut().db_mut();
-    assert!(db.recover_swap_refund_memos(account).unwrap().is_empty());
-    assert!(db.swap_refund_memos_pending(account).unwrap());
-    st.wallet()
-        .conn()
-        .execute(
-            "UPDATE transactions SET raw=?2 WHERE txid=?1",
-            rusqlite::params![txid.as_ref(), raw],
-        )
-        .unwrap();
-    let records = st
-        .wallet_mut()
-        .db_mut()
-        .recover_swap_refund_memos(account)
-        .unwrap();
+    let records = db.recover_swap_refund_memos(account).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].index, 7);
-    assert_eq!(
-        records[0].deposit_address,
-        Some(deposit.to_zcash_address(&network).to_string())
-    );
+    assert_eq!(records[0].deposit_address, None);
+    assert!(!db.swap_refund_memos_pending(account).unwrap());
 }
 
-/// Enhance PIR's transparent flags are unauthenticated. Whatever they claim, a
-/// privately retrieved refund record, even of an unsupported version, must wait
-/// for its raw funding transaction.
+/// A refund record retrieved over Enhance PIR restores its key from the memo alone.
+/// A funding transaction flagged as having transparent outputs takes the public path
+/// for its history first, as any such transaction does.
 #[test]
-fn refund_memo_over_pir_waits_for_raw_funding_transaction() {
+fn refund_memo_over_pir_restores_its_key_without_the_raw_transaction() {
     use zakura_swap_receiving::RefundMemo;
     use zcash_client_backend::data_api::enhance_pir::{
         EnhancePirRead, EnhancePirWork, EnhancePirWrite, EnhanceRecord, EnhanceRecordParts,
@@ -815,30 +715,28 @@ fn refund_memo_over_pir_waits_for_raw_funding_transaction() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(!memo_stored, "version={version} flagged={flagged}");
-        assert!(
-            st.wallet()
-                .db()
-                .transaction_enhancement_work()
-                .unwrap()
-                .iter()
-                .any(|w| matches!(w, TransactionEnhancementWork::Public(p) if p.txid() == txid)),
-            "version={version} flagged={flagged}"
-        );
-        assert!(
-            st.wallet_mut()
-                .db_mut()
-                .recover_swap_refund_memos(restored)
-                .unwrap()
-                .is_empty()
-        );
-
-        decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+        assert_eq!(memo_stored, !flagged, "version={version} flagged={flagged}");
+        if flagged {
+            assert!(
+                st.wallet()
+                    .db()
+                    .transaction_enhancement_work()
+                    .unwrap()
+                    .iter()
+                    .any(
+                        |w| matches!(w, TransactionEnhancementWork::Public(p) if p.txid() == txid)
+                    ),
+                "version={version}"
+            );
+            decrypt_and_store_transaction(&network, st.wallet_mut(), &tx, Some(mined)).unwrap();
+        }
         let db = st.wallet_mut().db_mut();
         let records = db.recover_swap_refund_memos(restored).unwrap();
         if version == 1 {
             assert_eq!(records.len(), 1);
-            assert_eq!(records[0].deposit_address, Some(deposit.to_string()));
+            // Only a public retrieval stores the raw transaction naming the deposit.
+            let deposit = flagged.then(|| deposit.to_string());
+            assert_eq!(records[0].deposit_address, deposit);
         } else {
             // A newer record cannot be read here. It may hold a refund index, so
             // refund issuance waits for an upgrade instead of failing sync.

@@ -13,7 +13,8 @@ use std::{
 
 use orchard::tree::{MerkleHashOrchard, MerklePath};
 use rusqlite::{Connection, OptionalExtension, params};
-use zakura_swap_receiving::{lifecycle::ChainAnchor, recovery::EncryptedNote};
+use zakura_swap_receiving::recovery::EncryptedNote;
+use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
@@ -76,8 +77,8 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     pub fn swap_publication_anchor(
         &self,
         height: BlockHeight,
-        through: ChainAnchor,
-    ) -> Result<ChainAnchor, Error> {
+        through: ChainPoint,
+    ) -> Result<ChainPoint, Error> {
         let unknown = Error::SweepDeferred(SweepDeferral::UnknownAnchor);
         if height > through.height {
             return Err(unknown);
@@ -86,10 +87,7 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         if u32::from(through.height) - u32::from(height) > MAX_PUBLICATION_LAG {
             return Err(Error::SweepDeferred(SweepDeferral::StalePublication));
         }
-        Ok(ChainAnchor {
-            height,
-            hash: hash.0,
-        })
+        Ok(ChainPoint { height, hash })
     }
 
     /// The commitment tree positions of `payments`, the directory's lookup for `key`,
@@ -182,7 +180,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        anchor: ChainAnchor,
+        anchor: ChainPoint,
         payments: &[DirectoryPayment],
         note_data: &BTreeMap<u64, [u8; 528]>,
     ) -> Result<(), Error> {
@@ -239,8 +237,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        through: ChainAnchor,
-        publication: ChainAnchor,
+        through: ChainPoint,
+        publication: ChainPoint,
         mut witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
     ) -> Result<PaymentApplication, Error> {
         for candidate in self.pending_swap_payments(account, key)? {

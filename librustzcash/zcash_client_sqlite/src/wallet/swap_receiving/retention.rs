@@ -5,8 +5,7 @@ use super::{
 use crate::{AccountUuid, SqlTransaction, WalletDb, util::Clock, wallet};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::borrow::BorrowMut;
-use zakura_swap_receiving::lifecycle::ChainAnchor;
-use zcash_primitives::block::BlockHash;
+use zcash_client_backend::data_api::transparent_ledger::ChainPoint;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
@@ -49,7 +48,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     pub fn finish_swap_nullifier_recovery(
         &mut self,
         account: AccountUuid,
-        through: ChainAnchor,
+        through: ChainPoint,
     ) -> Result<bool, Error> {
         self.finish_swap_nullifier_recovery_with(account, through, RECEIVE_LOOKAHEAD)
     }
@@ -58,7 +57,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
     pub(crate) fn finish_swap_nullifier_recovery_with(
         &mut self,
         account: AccountUuid,
-        through: ChainAnchor,
+        through: ChainPoint,
         lookahead: u32,
     ) -> Result<bool, Error> {
         if lookahead == 0 {
@@ -75,7 +74,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
             if !enabled
                 || wallet::fully_scanned_height(conn)? != Some(through.height)
                 || wallet::chain_tip_height(conn)? != Some(through.height)
-                || wallet::get_block_hash(conn, through.height)? != Some(BlockHash(through.hash))
+                || wallet::get_block_hash(conn, through.height)? != Some(through.hash)
             {
                 return Ok(false);
             }
@@ -98,14 +97,7 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                 return Ok(false);
             }
             // Pending sweeps keep evidence from their earliest possible payment, and a
-            // queued candidate from its height. Scanned keys never need it. A closed
-            // refund key's late watch keeps it from the close, so a refund that a later
-            // sweep finds can be checked for spends without a replay.
-            let time: i64 = conn.query_row(
-                "SELECT time FROM blocks WHERE height = ?1",
-                [u32::from(through.height)],
-                |r| r.get(0),
-            )?;
+            // queued candidate from its height. Scanned keys never need it.
             let pending: Option<u32> = conn.query_row(
                 "SELECT MIN(h) FROM (
                     SELECT k.scan_from AS h FROM ironwood_swap_sweeps s
@@ -113,15 +105,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R> WalletDb<C, P, CL, R
                         WHERE k.account_id = ?1 AND s.done_height IS NULL
                     UNION ALL SELECT p.height FROM ironwood_swap_payment_recovery p
                         JOIN ironwood_receiving_keys k ON k.id = p.receiving_key_id
-                        WHERE k.account_id = ?1
-                    UNION ALL SELECT w.retain_from FROM ironwood_swap_refund_watches w
-                        JOIN ironwood_receiving_keys k ON k.id = w.receiving_key_id
-                        JOIN ironwood_swap_operations s ON s.receiving_key_id = w.receiving_key_id
-                            AND s.operation_id = w.operation_id
-                        WHERE k.account_id = ?1 AND k.closed_at IS NOT NULL
-                          AND w.expires_at > ?2
-                          AND (s.terminal_at IS NULL OR s.expectation = 0))",
-                params![id.0, time],
+                        WHERE k.account_id = ?1)",
+                [id.0],
                 |r| r.get(0),
             )?;
             let next = pending.unwrap_or(u32::from(through.height).saturating_add(1));
