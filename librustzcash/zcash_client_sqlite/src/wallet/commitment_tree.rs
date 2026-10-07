@@ -1616,6 +1616,9 @@ fn generate_orchard_like_witnesses_at_historical_height(
     Ok(witnesses)
 }
 
+#[cfg(all(test, feature = "orchard"))]
+mod cached_witness_tests;
+
 #[cfg(test)]
 mod tests {
     use tempfile::NamedTempFile;
