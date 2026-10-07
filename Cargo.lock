@@ -2652,18 +2652,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30821f91f0fa8660edca547918dc59812893b497d07c1144f326f07fdd94aba9"
 dependencies = [
  "either",
+]
+
+[[package]]
+name = "incrementalmerkletree"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3b0c166f7f34e02988f84a7bed22be9707b1569acc6aeb3afaf34152d0e0400"
+dependencies = [
+ "either",
  "proptest",
- "rand 0.8.8",
- "rand_core 0.6.4",
+ "rand 0.10.3",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
 name = "incrementalmerkletree-testing"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad20fb6cf815e76ce9b9eca74f347740ab99059fe4b5e4a002403d0441a02983"
+checksum = "e9109f51a90d7533a645acef89934a07893e2516dd7d7c250459643c7150d10f"
 dependencies = [
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "proptest",
 ]
 
@@ -3424,7 +3433,7 @@ dependencies = [
  "halo2_poseidon",
  "halo2_proofs",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "lazy_static",
  "memuse",
  "nonempty",
@@ -4068,7 +4077,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4680,7 +4689,7 @@ dependencies = [
  "getset",
  "group 0.13.0",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "jubjub",
  "lazy_static",
  "memuse",
@@ -5002,10 +5011,22 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8147447aed7be4736e271825b8c3a4432efb7182e71363169b572371ddef452e"
 dependencies = [
+ "bitflags 2.13.2",
+ "either",
+ "incrementalmerkletree 0.8.2",
+ "tracing",
+]
+
+[[package]]
+name = "shardtree"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "211c5ae6ff1fda9efe2cd8b90737744b3b3989f98740319284946bf110b862ed"
+dependencies = [
  "assert_matches",
  "bitflags 2.13.2",
  "either",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "incrementalmerkletree-testing",
  "proptest",
  "tracing",
@@ -7724,8 +7745,7 @@ dependencies = [
 [[package]]
 name = "zakura-address"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b928582281258e7d64a2b3aa0d4711101945eccb3306c7ba99d8f6109a4102ad"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "bech32",
  "bs58",
@@ -7739,8 +7759,7 @@ dependencies = [
 [[package]]
 name = "zakura-bellman"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "298264794e0b205eaa968032405d19490fb0e2e3ffbf4bfe1fb846ddba134c41"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "bitvec",
  "blake2s_simd",
@@ -7756,8 +7775,7 @@ dependencies = [
 [[package]]
 name = "zakura-bls12-381"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2257196dff0c1a50a946b890657a8e1e75c6b2969b519252e107bd6380e31748"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "ff 0.14.0",
  "group 0.14.0",
@@ -7791,7 +7809,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "memuse",
  "nonempty",
  "percent-encoding",
@@ -7808,7 +7826,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "shardtree",
+ "shardtree 0.8.0",
  "subtle",
  "tempfile",
  "time",
@@ -7858,7 +7876,7 @@ dependencies = [
  "document-features",
  "group 0.14.0",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "incrementalmerkletree-testing",
  "maybe-rayon",
  "nonempty",
@@ -7875,7 +7893,7 @@ dependencies = [
  "secp256k1",
  "secrecy",
  "serde",
- "shardtree",
+ "shardtree 0.8.0",
  "static_assertions",
  "subtle",
  "tempfile",
@@ -7906,8 +7924,7 @@ dependencies = [
 [[package]]
 name = "zakura-halo2-gadgets"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f945c1d7b248ae2e1e325c7967bf6763064cd989c4bcfd576b1929f9cbab636"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "arrayvec",
  "ff 0.14.0",
@@ -7922,14 +7939,12 @@ dependencies = [
 [[package]]
 name = "zakura-halo2-legacy-pdqsort"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd937744427c64312f098771939c98247df1beb6fcb108de992201815824e7e0"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 
 [[package]]
 name = "zakura-halo2-poseidon"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f512f1970a7f69ad3e3390bd2a46bf53c471b96afcc2954fd6b889e738116926"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "bitvec",
  "ff 0.14.0",
@@ -7940,8 +7955,7 @@ dependencies = [
 [[package]]
 name = "zakura-halo2-proofs"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f66962d186c44189b1141645ca031ead78144f306b1f682481426afd6744113"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "blake2b_simd",
  "ff 0.14.0",
@@ -7957,8 +7971,7 @@ dependencies = [
 [[package]]
 name = "zakura-jubjub"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3c229473f6d22363febe2237f18ec4a59e6e446715fdb45ab3b29da87634708"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "bitvec",
  "ff 0.14.0",
@@ -7971,8 +7984,7 @@ dependencies = [
 [[package]]
 name = "zakura-keys"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ee2b10af793470d975d145b1002995bf9f58ba8862eea08841e3882f2c6c823"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "bech32",
  "bip0039",
@@ -8001,8 +8013,7 @@ dependencies = [
 [[package]]
 name = "zakura-orchard"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5eab764ffab91190fc0e90fb6f5973819b0ed66c577684e2d60d92295ddad93c"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "aes",
  "bitvec",
@@ -8013,7 +8024,7 @@ dependencies = [
  "getset",
  "group 0.14.0",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "maybe-rayon",
  "memuse",
  "nonempty",
@@ -8040,8 +8051,7 @@ dependencies = [
 [[package]]
 name = "zakura-pairing"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71750f2a9fb5b1f4951199a2e09578a5c030336c0b75bc64bd9b6ccdb275f4e2"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "group 0.14.0",
 ]
@@ -8049,8 +8059,7 @@ dependencies = [
 [[package]]
 name = "zakura-pasta-curves"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32245cb7516361b02b4188b5536d5a998b6be454cf229a2531fb36820a2c4995"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "blake2b_simd",
  "cc",
@@ -8072,7 +8081,7 @@ dependencies = [
  "ff 0.14.0",
  "getset",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "nonempty",
  "postcard",
  "rand 0.10.3",
@@ -8083,7 +8092,7 @@ dependencies = [
  "serde",
  "serde_with",
  "sha2 0.10.9",
- "shardtree",
+ "shardtree 0.8.0",
  "zakura-bls12-381",
  "zakura-jubjub",
  "zakura-orchard",
@@ -8107,7 +8116,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "inspiring 0.1.0-rc.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "ipir-sp 0.1.0-rc.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.8.8",
@@ -8186,8 +8195,7 @@ dependencies = [
 [[package]]
 name = "zakura-primitives"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0713ca2e55d75b9d130fc406eef5052d12908ae2a97235798eedd7c29983239e"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "blake2b_simd",
  "block-buffer 0.11.0-rc.3",
@@ -8197,7 +8205,7 @@ dependencies = [
  "equihash",
  "ff 0.14.0",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "memuse",
  "nonempty",
  "proptest",
@@ -8218,8 +8226,7 @@ dependencies = [
 [[package]]
 name = "zakura-proofs"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27442f6ab5fa67ba776b1d8a84b0ce46e48080fa4c7533138e625ae196e5d1be"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "blake2b_simd",
  "document-features",
@@ -8238,13 +8245,12 @@ dependencies = [
 [[package]]
 name = "zakura-protocol"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26fc0c39ba93a4d60df86a56f2e8aad23c36ee93da04b695876e8034826d6b29"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "corez",
  "document-features",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "incrementalmerkletree-testing",
  "memuse",
  "proptest",
@@ -8254,8 +8260,7 @@ dependencies = [
 [[package]]
 name = "zakura-reddsa"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23bcd68f1bde9127715d4b0583565dbeb08535560077b21586f1a65067ab0c58"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "blake2b_simd",
  "frost-rerandomized",
@@ -8272,8 +8277,7 @@ dependencies = [
 [[package]]
 name = "zakura-redjubjub"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62e92be6a1c5146de13ed36e21ed1f6c9badfa3094345b6ddf771284a983b7d5"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "rand_core 0.10.1",
  "thiserror 2.0.21",
@@ -8284,8 +8288,7 @@ dependencies = [
 [[package]]
 name = "zakura-sapling-crypto"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b0a9aac91fe3211ea9680251ed0baa4e910e537c159eeab29010aa758e27038"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "aes",
  "bitvec",
@@ -8298,7 +8301,7 @@ dependencies = [
  "getset",
  "group 0.14.0",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.9.0",
  "memuse",
  "once_cell",
  "proptest",
@@ -8319,8 +8322,7 @@ dependencies = [
 [[package]]
 name = "zakura-sinsemilla"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a67c1cae8ddd8a938da0b14b63dd9fc69b1a8f31ad76d6876813992f02829248"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "group 0.14.0",
  "once_cell",
@@ -8343,8 +8345,7 @@ dependencies = [
 [[package]]
 name = "zakura-transparent"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2baee5951db6299f6fb78f86b4c5aff21e110cfafa8caa8e596e25992ea2a2da"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "bip32",
  "bs58",
@@ -8400,8 +8401,7 @@ dependencies = [
 [[package]]
 name = "zakura-zip321"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7621db24f937f76b5c577f3c47a260883d417035535c3266b2c59d20575b12d6"
+source = "git+https://github.com/piatoss3612/common.git?rev=c1dee1a1de3e117b65288cbbc66aaf267fcc1013#c1dee1a1de3e117b65288cbbc66aaf267fcc1013"
 dependencies = [
  "base64 0.22.1",
  "nom",
@@ -8441,7 +8441,7 @@ dependencies = [
  "group 0.13.0",
  "hex",
  "hyper-util",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "memuse",
  "nonempty",
  "orchard",
@@ -8452,7 +8452,7 @@ dependencies = [
  "rayon",
  "sapling-crypto",
  "secrecy",
- "shardtree",
+ "shardtree 0.7.1",
  "subtle",
  "time",
  "tonic",
@@ -8484,7 +8484,7 @@ dependencies = [
  "document-features",
  "group 0.13.0",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "jubjub",
  "maybe-rayon",
  "nonempty",
@@ -8500,7 +8500,7 @@ dependencies = [
  "schemerz",
  "schemerz-rusqlite",
  "secrecy",
- "shardtree",
+ "shardtree 0.7.1",
  "static_assertions",
  "subtle",
  "time",
@@ -8579,12 +8579,12 @@ dependencies = [
  "blake2b_simd",
  "corez",
  "getset",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "libm",
  "orchard",
  "pczt",
  "rand_core 0.6.4",
- "shardtree",
+ "shardtree 0.7.1",
  "zcash_client_backend",
  "zcash_keys",
  "zcash_primitives",
@@ -8606,7 +8606,7 @@ dependencies = [
  "equihash",
  "ff 0.13.1",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "jubjub",
  "memuse",
  "nonempty",
