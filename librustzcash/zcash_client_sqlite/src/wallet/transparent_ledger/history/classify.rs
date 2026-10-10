@@ -57,9 +57,9 @@ fn has_other_outgoing_evidence(
 
 /// Whether current, qualified evidence from an active account records a transparent spend.
 /// Unlike `evidence::has_active_ledger_spend`, which decides involvement from any recorded
-/// spend of the one account, this requires qualified, unquarantined, placed evidence from any
+/// spend of the one account, this requires qualified, unsuspended, placed evidence from any
 /// active account.
-/// Candidate recovery and withdrawn or quarantined observations are not Activity evidence.
+/// Candidate recovery and withdrawn or suspended observations are not Activity evidence.
 /// An unresolved parent does not erase an otherwise established funding participant.
 #[cfg(feature = "transparent-inputs")]
 fn has_ledger_spend(conn: &rusqlite::Connection, txid: &TxId) -> Result<bool, SqliteClientError> {

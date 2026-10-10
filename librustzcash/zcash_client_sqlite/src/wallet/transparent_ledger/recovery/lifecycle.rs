@@ -143,7 +143,7 @@ pub(crate) fn forget_reattributed_script(
 /// would project it again. See `TransparentLedgerWrite::forget_transparent_ledger`.
 ///
 /// Requires `Public` on the handle and durably: public discovery rebuilds what this removes.
-/// Revision lineage, qualification, quarantine, candidate windows, and shared derivations stay:
+/// Revision lineage, qualification, recovery suspension, candidate windows, and shared derivations stay:
 /// they constrain what a later return to `PrivateRequired` may accept, and none of them is a
 /// wallet fact.
 #[cfg(feature = "transparent-inputs")]

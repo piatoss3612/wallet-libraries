@@ -768,7 +768,7 @@ fn a_declared_revision_never_reuses_a_pruned_exported_lineage() {
     adapter.store.commit_shard(facts).unwrap();
     let mut chain = StaticChain::from_map(&forged);
     chain.hashes.insert(end, terminal);
-    // The wallet would refuse it as an integrity failure and quarantine the
+    // The wallet would refuse it as an integrity failure and recovery suspension the
     // account, so the companion refuses it first.
     let batch = adapter
         .normalize(&watch(), forged.clone(), MORE, &chain)

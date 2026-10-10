@@ -694,7 +694,7 @@ impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// wallet operation commits in its own transaction.
     ///
     /// A caller composing operations whose durable failure effects must survive (such as the
-    /// quarantine an integrity rejection records) checks this first: inside a caller
+    /// recovery suspension an integrity rejection records) checks this first: inside a caller
     /// transaction, those effects commit only with it.
     pub fn is_autocommit(&self) -> bool {
         self.conn.borrow().is_autocommit()

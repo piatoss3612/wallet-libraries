@@ -281,8 +281,8 @@ pub struct CommitOutcome {
 
 /// Why a store refused a commit. None of a refused commit's facts are applied.
 ///
-/// An integrity rejection additionally quarantines, in the same transaction, the commit's
-/// source, its account, and every other account holding evidence from that source. Quarantined
+/// An integrity rejection additionally suspends, in the same transaction, the commit's
+/// source, its account, and every other account holding evidence from that source. Suspended
 /// sources and accounts accept no further commits and hold no private authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommitRejection {
@@ -299,10 +299,10 @@ pub enum CommitRejection {
 /// A commit the store will not accept whatever its content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefusedCommit {
-    /// The source is quarantined by an earlier integrity rejection.
-    SourceQuarantined,
-    /// The account is quarantined by an earlier integrity rejection.
-    AccountQuarantined,
+    /// The source is suspended by an earlier integrity rejection.
+    SourceRecoverySuspended,
+    /// The account is suspended by an earlier integrity rejection.
+    AccountRecoverySuspended,
     /// The account is active and the revision is not qualified to support its authority.
     UnqualifiedRevision,
 }

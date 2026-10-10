@@ -996,15 +996,15 @@ pub(super) const TABLE_TPIR_QUALIFIED_REVISIONS: &str = r#"
 CREATE TABLE tpir_qualified_revisions (
     revision_id INTEGER PRIMARY KEY REFERENCES tpir_revisions(id)
 )"#;
-/// Sources quarantined by an integrity rejection. Their commits are refused, and they can
-/// support no authority. Nothing clears a quarantine yet.
-pub(super) const TABLE_TPIR_QUARANTINED_SOURCES: &str = r#"
+/// Sources suspended by an integrity rejection. Their commits are refused, and they can
+/// support no authority. Nothing clears a recovery suspension yet.
+pub(super) const TABLE_TPIR_RECOVERY_SUSPENDED_SOURCES: &str = r#"
 CREATE TABLE tpir_quarantined_sources (
     source BLOB PRIMARY KEY
 )"#;
-/// Accounts quarantined by an integrity rejection involving their evidence. They accept no
+/// Accounts suspended by an integrity rejection involving their evidence. They accept no
 /// commits and hold no private authority.
-pub(super) const TABLE_TPIR_QUARANTINED_ACCOUNTS: &str = r#"
+pub(super) const TABLE_TPIR_RECOVERY_SUSPENDED_ACCOUNTS: &str = r#"
 CREATE TABLE tpir_quarantined_accounts (
     account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
 )"#;

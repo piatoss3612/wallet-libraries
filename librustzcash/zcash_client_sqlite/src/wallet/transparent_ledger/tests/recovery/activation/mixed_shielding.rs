@@ -861,7 +861,7 @@ fn coverage_loss_and_reorg_reevaluate_the_classification() {
     recover_memo(&mut case, None);
     assert_reconstructed_shielding(&case, shape);
 
-    // A quarantined source no longer covers the account or qualifies its metadata.
+    // A suspended source no longer covers the account or qualifies its metadata.
     conn(&case.st)
         .execute(
             "INSERT INTO tpir_quarantined_sources (source) VALUES (?1)",
@@ -871,7 +871,7 @@ fn coverage_loss_and_reorg_reevaluate_the_classification() {
     let entry = history(&case.st, case.account, case.txid);
     assert_eq!(entry.classification, HistoryClassification::Provisional);
     assert_eq!(entry.transaction_metadata, None);
-    super::super::lift_quarantine(&case.st);
+    super::super::clear_recovery_suspension(&case.st);
     assert_reconstructed_shielding(&case, shape);
 
     // A reorg unmines the transaction: no private work is dispatched for it, its recovered memo

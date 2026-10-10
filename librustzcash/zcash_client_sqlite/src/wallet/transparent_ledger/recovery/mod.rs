@@ -1,4 +1,4 @@
-//! Recovery storage: watched addresses, events, coverage, pending pages, quarantine,
+//! Recovery storage: watched addresses, events, coverage, pending pages, recovery suspension,
 //! qualification, and activation.
 //!
 //! A candidate account's writes touch only `tpir_*` recovery tables. They never change the LRZ
@@ -77,6 +77,8 @@ mod ownership;
 #[cfg(feature = "transparent-inputs")]
 mod recovery_addresses;
 #[cfg(feature = "transparent-inputs")]
+mod recovery_suspension;
+#[cfg(feature = "transparent-inputs")]
 mod revisions;
 
 #[cfg(feature = "transparent-inputs")]
@@ -107,11 +109,15 @@ pub(crate) use recovery_addresses::watch_set;
 #[cfg(feature = "transparent-inputs")]
 use super::atomically;
 #[cfg(feature = "transparent-inputs")]
-use commit::{account_lifecycle, account_quarantined};
+use commit::account_lifecycle;
 #[cfg(feature = "transparent-inputs")]
 use events::{CoverageSupport, apply_receive, apply_spend, open_page, record_range};
 #[cfg(feature = "transparent-inputs")]
 use recovery_addresses::{AccountRecoveryAddresses, WINDOW_LIMIT, WINDOW_SCOPES};
+#[cfg(feature = "transparent-inputs")]
+use recovery_suspension::{
+    account_recovery_is_suspended, source_recovery_is_suspended, suspend_recovery,
+};
 
 /// The output script an address is paid to.
 #[cfg(feature = "transparent-inputs")]

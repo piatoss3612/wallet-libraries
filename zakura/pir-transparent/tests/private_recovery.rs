@@ -1004,7 +1004,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     assert_eq!(f.dump(false), production);
 
     // Companion loss: a recreated companion derives the triples the wallet
-    // holds, so recovery heals without quarantine.
+    // holds, so recovery heals without recovery suspension.
     f.lose_companion();
     f.open();
     assert!(f.catalog().is_empty());
@@ -2368,7 +2368,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
 }
 
 #[test]
-fn an_integrity_rejection_quarantines_durably_without_acknowledgment() {
+fn an_integrity_rejection_records_recovery_suspension_for_durably_without_acknowledgment() {
     let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
     let birthday = H0 + 250;
     let mut f = Fixture::new(birthday, H0 + 649);
@@ -2407,11 +2407,11 @@ fn an_integrity_rejection_quarantines_durably_without_acknowledgment() {
         "{:?}",
         failure.error
     );
-    // The quarantine committed with its commit's own transaction.
+    // The recovery suspension committed with its commit's own transaction.
     assert!(f.st.wallet().db().is_autocommit());
     assert!(f.count("tpir_quarantined_sources") >= 1);
     assert_eq!(f.count("tpir_quarantined_accounts"), 1);
-    // A later batch is refused by the durable quarantine.
+    // A later batch is refused by the durable recovery suspension.
     let batch = f.recover().unwrap();
     let failure = f.settle(batch, Trust::Observed).unwrap_err();
     assert!(

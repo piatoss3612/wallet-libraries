@@ -91,7 +91,7 @@ pub(crate) enum CommitTrust {
 /// first when `trust` is [`CommitTrust::Qualified`].
 ///
 /// An integrity failure applies none of the commit's facts and no qualification, but
-/// quarantines, in the same transaction, the commit's source, its account, and every account
+/// suspends, in the same transaction, the commit's source, its account, and every account
 /// holding evidence from the source, and removes those accounts' pending pages.
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn apply_commit<P: consensus::Parameters>(
@@ -118,14 +118,14 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
             AccountRecoveryAddresses::load(conn, params, gap_limits, commit.context.account)?
                 .ok_or_else(|| stale(StaleCommit::AccountUnknown))?;
         let account_ref = recovery_addresses.account.internal_id();
-        if source_quarantined(conn, &commit.revision.source)? {
+        if source_recovery_is_suspended(conn, &commit.revision.source)? {
             return Err(reject(CommitRejection::Refused(
-                RefusedCommit::SourceQuarantined,
+                RefusedCommit::SourceRecoverySuspended,
             )));
         }
-        if account_quarantined(conn, account_ref)? {
+        if account_recovery_is_suspended(conn, account_ref)? {
             return Err(reject(CommitRejection::Refused(
-                RefusedCommit::AccountQuarantined,
+                RefusedCommit::AccountRecoverySuspended,
             )));
         }
         if account_lifecycle(conn, account_ref)? != commit.context.lifecycle {
@@ -162,7 +162,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
         }
 
         // The qualification and facts apply under a nested savepoint, so an integrity failure
-        // can discard them all, including any withdrawn evidence, while its quarantine commits.
+        // can discard them all, including any withdrawn evidence, while its recovery suspension commits.
         match atomically(conn, |conn| {
             if trust == CommitTrust::Qualified {
                 qualify_in(conn, &commit.revision)?;
@@ -172,7 +172,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
             Err(SqliteClientError::TransparentLedgerCommitRejected(
                 rejection @ CommitRejection::Integrity(_),
             )) => {
-                quarantine(conn, &commit.revision.source, account_ref)?;
+                suspend_recovery(conn, &commit.revision.source, account_ref)?;
                 Ok(Err(reject(rejection)))
             }
             result => result.map(Ok),
@@ -340,69 +340,6 @@ pub(super) fn account_lifecycle(
     } else {
         AccountLifecycle::Candidate
     })
-}
-
-/// Whether `source` is quarantined.
-#[cfg(feature = "transparent-inputs")]
-pub(super) fn source_quarantined(
-    conn: &rusqlite::Connection,
-    source: &[u8],
-) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM tpir_quarantined_sources WHERE source = :source)",
-        named_params![":source": source],
-        |row| row.get(0),
-    )?)
-}
-
-/// Whether `account_ref` is quarantined.
-#[cfg(feature = "transparent-inputs")]
-pub(super) fn account_quarantined(
-    conn: &rusqlite::Connection,
-    account_ref: AccountRef,
-) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (
-             SELECT 1 FROM tpir_quarantined_accounts WHERE account_id = :account_id
-         )",
-        named_params![":account_id": account_ref.0],
-        |row| row.get(0),
-    )?)
-}
-
-/// Quarantines `source`, `account_ref`, and every account holding coverage, pages, or observed
-/// events from `source`, and removes the quarantined accounts' pending pages.
-#[cfg(feature = "transparent-inputs")]
-fn quarantine(
-    conn: &rusqlite::Connection,
-    source: &[u8],
-    account_ref: AccountRef,
-) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "INSERT OR IGNORE INTO tpir_quarantined_sources (source) VALUES (:source)",
-        named_params![":source": source],
-    )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO tpir_quarantined_accounts (account_id)
-         SELECT :account_id
-         UNION SELECT account_id FROM tpir_coverage
-             WHERE revision_id IN (SELECT id FROM tpir_revisions WHERE source = :source)
-         UNION SELECT account_id FROM tpir_pending_pages
-             WHERE revision_id IN (SELECT id FROM tpir_revisions WHERE source = :source)
-         UNION SELECT e.account_id FROM tpir_receive_events e
-             JOIN tpir_receive_observations o ON o.receive_id = e.id
-             WHERE o.revision_id IN (SELECT id FROM tpir_revisions WHERE source = :source)
-         UNION SELECT e.account_id FROM tpir_spend_events e
-             JOIN tpir_spend_observations o ON o.spend_id = e.id
-             WHERE o.revision_id IN (SELECT id FROM tpir_revisions WHERE source = :source)",
-        named_params![":account_id": account_ref.0, ":source": source],
-    )?;
-    conn.execute(
-        "DELETE FROM tpir_pending_pages
-         WHERE account_id IN (SELECT account_id FROM tpir_quarantined_accounts)",
-        [],
-    )?;
-    super::super::require_reader_version(conn, super::super::ACTIVATION_READER_VERSION)
 }
 
 /// Authorizes a trusted revision transition, outside any commit: qualifies the exact identity

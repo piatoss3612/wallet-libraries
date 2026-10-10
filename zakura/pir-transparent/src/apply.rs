@@ -106,7 +106,7 @@ pub enum ApplyError {
     #[error("transparent PIR apply: the export receipt is stale")]
     StaleReceipt,
     /// The wallet connection is inside an explicit SQL transaction, whose rollback would
-    /// discard what a commit made durable, including quarantine. Nothing was applied.
+    /// discard what a commit made durable, including recovery suspension. Nothing was applied.
     #[error("transparent PIR apply: the wallet connection is inside a transaction")]
     OuterTransaction,
     /// The batch lists retired revisions and the trust is [`Trust::Observed`]. Nothing was
@@ -114,7 +114,7 @@ pub enum ApplyError {
     #[error("transparent PIR apply: retired revisions require trusted reconciliation")]
     Unreconciled,
     /// The wallet refused the commit at `index`. Commits before it stay applied. An
-    /// integrity rejection's quarantine is durable.
+    /// integrity rejection's recovery suspension is durable.
     #[error("transparent PIR apply: the wallet refused a commit ({})", rejection_name(.rejection))]
     Rejected {
         /// The refused commit's position in the batch.
@@ -164,7 +164,7 @@ pub enum ApplyAction {
     /// passing the account until a trusted pass can reconcile them.
     Reconcile,
     /// The account cannot progress now: the wallet refused a commit as contradicting
-    /// stored evidence (which quarantines it), malformed or refused, the acknowledgment
+    /// stored evidence (which suspends it), malformed or refused, the acknowledgment
     /// failed, or the batch was not this companion's latest ready pass.
     Skip,
     /// The handle or the durable policy does not permit this recovery: stop recovering.
@@ -237,7 +237,7 @@ impl TransparentHistoryRecovery {
     /// and a batch with [`RecoveryBatch::retired_revisions`] needs [`Trust::Trusted`].
     ///
     /// Each commit applies in its own wallet transaction, which commits before the next
-    /// starts, so an integrity rejection's quarantine is durable when it is reported. The
+    /// starts, so an integrity rejection's recovery suspension is durable when it is reported. The
     /// first refused or failed commit stops the batch; the companion is acknowledged only
     /// once every commit's transaction committed, and forgets exactly the retirements its
     /// pass recorded. An unacknowledged batch's revisions stay exported, so the next pass,
@@ -439,7 +439,9 @@ mod tests {
                 A::Skip,
             ),
             (
-                rejected(CommitRejection::Refused(RefusedCommit::AccountQuarantined)),
+                rejected(CommitRejection::Refused(
+                    RefusedCommit::AccountRecoverySuspended,
+                )),
                 A::Skip,
             ),
             (ApplyError::NotReady(BatchState::Pending), A::Skip),

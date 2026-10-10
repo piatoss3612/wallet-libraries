@@ -10,6 +10,10 @@ workspace.
 
 ## [Unreleased]
 
+- Name the durable stop after contradictory recovery evidence "recovery suspension".
+  Move its checks and writes into `recovery_suspension`. Stored SQLite table names
+  and suspension behavior are unchanged.
+
 - Rename the prototype ledger activation method to `activate_transparent_ledger`
   and `SqliteClientError::TransparentPromotionBlocked` to `TransparentActivationBlocked`.
   Recovery readiness checks and the atomic candidate-to-active transition are unchanged.

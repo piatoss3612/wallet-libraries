@@ -99,7 +99,7 @@ impl InputAuthority {
 /// Resolves which outputs may fund a transaction targeting `target`.
 ///
 /// Public authority follows [`check_transparent_authority`]. Under `PrivateRequired`, an
-/// account is eligible when it is active and not quarantined, its ledger has no blockers, and
+/// account is eligible when it is active and not suspended, its ledger has no blockers, and
 /// both its covered local target and the chain tip are `target - 1`: coverage through `H`
 /// supports a transaction targeting `H + 1`, with no freshness tolerance. The caller provides
 /// the read snapshot.

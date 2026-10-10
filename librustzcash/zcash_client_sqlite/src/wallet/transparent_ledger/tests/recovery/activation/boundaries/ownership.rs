@@ -312,7 +312,7 @@ fn imported_receiver_has_one_candidate_owner_in_either_commit_order() {
 }
 
 #[test]
-fn import_after_candidate_recovery_discards_conflicting_work_without_quarantine() {
+fn import_after_candidate_recovery_discards_conflicting_work_without_recovery_suspension() {
     let (mut st, accounts) = recovery_wallet_with(1);
     let (a, b) = (accounts[0], accounts[1]);
     let (address, _, key, edge) = future_receiver(&st, a);

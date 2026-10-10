@@ -450,7 +450,7 @@ fn private_recovery_works_again_after_forgetting() {
 }
 
 #[test]
-fn forgetting_keeps_quarantine() {
+fn forgetting_keeps_recovery_suspension() {
     let (mut st, account, _, _) = falsely_spent_wallet();
     conn(&st)
         .execute(
@@ -467,7 +467,7 @@ fn forgetting_keeps_quarantine() {
     set_policy(&mut st, Public);
     forget(&mut st).unwrap();
     assert_eq!(count(&st, "tpir_quarantined_sources"), 1);
-    assert_eq!(quarantined_accounts(&st), vec![account]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![account]);
 }
 
 #[test]

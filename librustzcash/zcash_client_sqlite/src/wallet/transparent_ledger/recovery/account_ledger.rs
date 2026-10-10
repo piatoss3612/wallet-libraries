@@ -1,4 +1,4 @@
-//! An account's ledger state as authority reads it: lifecycle, quarantine and recovery status,
+//! An account's ledger state as authority reads it: lifecycle, recovery suspension and recovery status,
 //! and the blockers that keep it from private authority or activation.
 
 use super::diagnostics::RecoveryStatus;
@@ -9,7 +9,7 @@ use super::*;
 pub(crate) struct AccountLedger {
     pub(crate) account_ref: AccountRef,
     pub(crate) lifecycle: AccountLifecycle,
-    pub(crate) quarantined: bool,
+    pub(crate) recovery_suspended: bool,
     pub(crate) status: RecoveryStatus,
 }
 
@@ -26,17 +26,17 @@ impl AccountLedger {
         Ok(AccountLedger {
             account_ref,
             lifecycle: account_lifecycle(conn, account_ref)?,
-            quarantined: account_quarantined(conn, account_ref)?,
+            recovery_suspended: account_recovery_is_suspended(conn, account_ref)?,
             status: recovery_status(conn, gap_limits, recovery_addresses)?,
         })
     }
 
     /// Whether the account holds private authority for a transaction targeting the block after
-    /// `tip`: it is active and not quarantined, and its ledger is complete through a local
+    /// `tip`: it is active and not suspended, and its ledger is complete through a local
     /// target that is the chain tip.
     pub(crate) fn authorizes_after(&self, tip: BlockHeight) -> bool {
         self.lifecycle == AccountLifecycle::Active
-            && !self.quarantined
+            && !self.recovery_suspended
             && self.status.blockers.is_empty()
             && self
                 .status
@@ -74,8 +74,8 @@ pub(crate) fn ledger_blockers(
     if candidate {
         blockers.push(RecoveryBlocker::NotActivated);
     }
-    if ledger.quarantined {
-        blockers.push(RecoveryBlocker::Quarantined);
+    if ledger.recovery_suspended {
+        blockers.push(RecoveryBlocker::RecoverySuspended);
     }
     blockers.extend(
         ledger

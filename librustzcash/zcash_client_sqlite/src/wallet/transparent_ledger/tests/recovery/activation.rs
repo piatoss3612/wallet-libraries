@@ -1,4 +1,4 @@
-//! Activation: quarantine, qualification, activation, projection, and input eligibility.
+//! Activation: recovery suspension, qualification, activation, projection, and input eligibility.
 
 use zcash_client_backend::data_api::{
     AccountPurpose,
@@ -46,7 +46,7 @@ fn recovery_wallet_with(extra: u8) -> (State, Vec<AccountUuid>) {
     (st, accounts)
 }
 
-/// Returns why a commit was rejected, leaving any quarantine in place.
+/// Returns why a commit was rejected, leaving any recovery suspension in place.
 fn rejection(result: Result<CommitOutcome, SqliteClientError>) -> CommitRejection {
     match result {
         Err(SqliteClientError::TransparentLedgerCommitRejected(rejection)) => rejection,
@@ -61,7 +61,7 @@ fn source(name: &[u8], lineage: u64) -> RecoveryRevision {
     }
 }
 
-fn quarantined_accounts(st: &State) -> Vec<AccountUuid> {
+fn accounts_with_suspended_recovery(st: &State) -> Vec<AccountUuid> {
     conn(st)
         .prepare(
             "SELECT a.uuid FROM tpir_quarantined_accounts q
@@ -100,7 +100,7 @@ fn recover_one(
 }
 
 #[test]
-fn integrity_failure_quarantines_the_source_and_every_affected_account() {
+fn integrity_failure_records_recovery_suspension_for_the_source_and_every_affected_account() {
     let (mut st, accounts) = recovery_wallet_with(2);
     let [first, second, third] = accounts[..] else {
         unreachable!()
@@ -138,9 +138,9 @@ fn integrity_failure_quarantines_the_source_and_every_affected_account() {
         CommitRejection::Integrity(IntegrityFailure::ReceivePlacement(received.outpoint))
     );
 
-    // No submitted fact is applied, but the quarantine is durable.
+    // No submitted fact is applied, but the recovery suspension is durable.
     assert_eq!(count(&st, "tpir_receive_events"), before);
-    assert_eq!(quarantined_accounts(&st), vec![first, second]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![first, second]);
     assert_eq!(count(&st, "tpir_quarantined_sources"), 1);
     assert_eq!(count(&st, "tpir_pending_pages"), 0);
     assert_eq!(reader_version(&st), 6);
@@ -151,31 +151,31 @@ fn integrity_failure_quarantines_the_source_and_every_affected_account() {
     c.revision = fixture;
     assert_eq!(
         rejection(apply(&mut st, c)),
-        CommitRejection::Refused(RefusedCommit::SourceQuarantined)
+        CommitRejection::Refused(RefusedCommit::SourceRecoverySuspended)
     );
     let ws = watch(&st, second);
     let mut c = commit(&ws);
     c.revision = source(b"other", 1);
     assert_eq!(
         rejection(apply(&mut st, c)),
-        CommitRejection::Refused(RefusedCommit::AccountQuarantined)
+        CommitRejection::Refused(RefusedCommit::AccountRecoverySuspended)
     );
     // An unrelated account and source are unaffected.
     recover_one(&mut st, third, source(b"other", 1), 4);
 
-    // Quarantine survives a rewind.
+    // Recovery suspension survives a rewind.
     let retained = watch(&st, first).target.unwrap().height - 5;
     st.truncate_to_height(retained);
-    assert_eq!(quarantined_accounts(&st), vec![first, second]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![first, second]);
 }
 
 #[test]
-fn a_failed_quarantine_write_aborts_the_commit() {
+fn a_failed_recovery_suspension_write_aborts_the_commit() {
     let (mut st, account) = recovery_wallet();
     let received = recover_one(&mut st, account, revision(1, true), 1);
     conn(&st)
         .execute_batch(
-            "CREATE TEMP TRIGGER fail_quarantine BEFORE INSERT ON tpir_quarantined_sources
+            "CREATE TEMP TRIGGER fail_recovery_suspension BEFORE INSERT ON tpir_quarantined_sources
              BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
         )
         .unwrap();
@@ -714,7 +714,7 @@ fn activation_is_blocked_until_every_condition_holds() {
     unchanged(&st, &before);
     qualify(&mut st, &fixture);
 
-    // A quarantined account.
+    // A suspended account.
     conn(&st)
         .execute(
             "INSERT INTO tpir_quarantined_accounts SELECT id FROM accounts",
@@ -723,9 +723,9 @@ fn activation_is_blocked_until_every_condition_holds() {
         .unwrap();
     assert_eq!(
         blocked(activate_recovered_ledger(&mut st, account)),
-        vec![RecoveryBlocker::Quarantined]
+        vec![RecoveryBlocker::RecoverySuspended]
     );
-    lift_quarantine(&st);
+    clear_recovery_suspension(&st);
 
     // The contiguously scanned chain is behind the known tip.
     let not_our_key = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
@@ -1196,11 +1196,11 @@ fn a_projection_conflict_is_an_integrity_failure() {
     );
     assert_eq!(production_dump(conn(&st)), before);
     assert_eq!(count(&st, "tpir_receive_events"), events);
-    assert_eq!(quarantined_accounts(&st), vec![account]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![account]);
     assert!(
         snapshot(&st, account)
             .blockers
-            .contains(&RecoveryBlocker::Quarantined)
+            .contains(&RecoveryBlocker::RecoverySuspended)
     );
 }
 
@@ -1236,7 +1236,7 @@ fn a_spend_conflicting_with_a_mined_wallet_spend_is_an_integrity_failure() {
         ))
     );
     assert_eq!(production_dump(conn(&st)), before);
-    assert_eq!(quarantined_accounts(&st), vec![account]);
+    assert_eq!(accounts_with_suspended_recovery(&st), vec![account]);
 }
 
 #[test]
@@ -1606,7 +1606,7 @@ mod gating {
             assert_eq!(selection.unwrap(), vec![unspent.outpoint.clone()]);
         }
 
-        // Quarantine revokes it.
+        // Recovery suspension revokes it.
         conn(&st)
             .execute(
                 "INSERT INTO tpir_quarantined_accounts SELECT id FROM accounts",

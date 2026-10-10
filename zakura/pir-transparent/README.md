@@ -258,7 +258,7 @@ previous-output lookup fallback.
    fresh watch set; a grown window needs another pass at the same target.
 
 Settlement writes each commit in its own wallet transaction. An outer SQL
-transaction is refused, so an integrity rejection's quarantine cannot be
+transaction is refused, so an integrity rejection's recovery suspension cannot be
 rolled back by a caller. `WriteGate::write` surrounds one wallet transaction
 at a time, plus the short read transaction used to fence final acknowledgment;
 it can interrupt between writes. Network retrieval takes place before this

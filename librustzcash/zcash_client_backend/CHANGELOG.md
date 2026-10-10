@@ -47,6 +47,9 @@ workspace.
   final while its payment and fee attribution are not.
 
 ### Changed
+- Rename prototype quarantine results to recovery suspension:
+  `RecoveryBlocker::RecoverySuspended` and
+  `RefusedCommit::{SourceRecoverySuspended, AccountRecoverySuspended}`.
 - Rename the prototype `TransparentLedgerWrite::promote_transparent_account` to
   `activate_transparent_ledger`, matching the candidate-to-active ledger transition.
 - Rename the prototype `TransparentWatchSet` to `TransparentAddressWatchSet`.

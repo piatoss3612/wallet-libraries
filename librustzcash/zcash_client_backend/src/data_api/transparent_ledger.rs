@@ -183,8 +183,8 @@ pub enum RecoveryBlocker {
     Recovery(CandidateBlocker),
     /// The account has not been activated to private authority.
     NotActivated,
-    /// An integrity failure quarantined the account or a source of its evidence.
-    Quarantined,
+    /// An integrity failure suspended the account or a source of its evidence.
+    RecoverySuspended,
     /// A revision that contributed the account's coverage or events is not qualified.
     UnqualifiedRevision,
     /// The wallet's own evidence, legacy public or local, disagrees with the complete candidate
@@ -335,9 +335,9 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     ///
     /// The durable policy must still be at the captured generation and must be
     /// `PrivateRequired`, as must the handle. The account must exist with the captured lifecycle
-    /// and without quarantine, the target and anchor must still be local blocks, and every
+    /// and without recovery suspension, the target and anchor must still be local blocks, and every
     /// address the commit names must still be watched by the account. Any failure applies none
-    /// of the commit's facts; an integrity failure also quarantines the source and the accounts
+    /// of the commit's facts; an integrity failure also suspends the source and the accounts
     /// holding its evidence.
     ///
     /// A candidate account's state is isolated: its commits never change balances, spend
@@ -356,7 +356,7 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// every check of [`apply_transparent_ledger_commit`], qualifies the exact revision,
     /// withdraws older provisional evidence of the same source across the wallet, and applies
     /// the commit's facts. Any failure changes nothing, except that an integrity failure
-    /// quarantines exactly as an ordinary commit does, without qualifying. Replaying a commit
+    /// suspends exactly as an ordinary commit does, without qualifying. Replaying a commit
     /// this method already applied changes nothing; resubmitting a commit applied only by
     /// [`apply_transparent_ledger_commit`] qualifies its revision and withdraws older provisional
     /// evidence as above.
@@ -373,7 +373,7 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// Atomically activates `account` to private transparent authority.
     ///
     /// Requires `PrivateRequired` both on the handle and durably. Activation rechecks, in one
-    /// transaction, that the account is not quarantined, that its ledger is complete through a
+    /// transaction, that the account is not suspended, that its ledger is complete through a
     /// local target equal to the chain tip, that every revision contributing its coverage or
     /// events is qualified, and that its legacy public evidence agrees with the ledger. It then
     /// adds the ledger's window addresses to the wallet, projects every recovered event into the
@@ -407,8 +407,8 @@ pub trait TransparentLedgerWrite: TransparentLedgerRead {
     /// - removes recovered events, coverage, pending pages, and source-bound transaction facts.
     ///
     /// Outputs, spends, and transactions supported by public discovery or local construction, and
-    /// all shielded state, are kept. Revision lineage, qualification, and quarantine are kept, so
-    /// returning to `PrivateRequired` cannot accept an older publication or a quarantined
+    /// all shielded state, are kept. Revision lineage, qualification, and recovery suspension are kept, so
+    /// returning to `PrivateRequired` cannot accept an older publication or a suspended
     /// source. Forgetting a wallet without ledger facts changes nothing.
     #[cfg(feature = "transparent-inputs")]
     fn forget_transparent_ledger(&mut self) -> Result<ForgottenTransparentLedger, Self::Error>;

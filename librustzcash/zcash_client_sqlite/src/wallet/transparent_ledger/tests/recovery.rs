@@ -88,8 +88,8 @@ fn apply(
 
 /// Applies `commit` and returns why it was rejected.
 ///
-/// An integrity rejection quarantines its source and account; this asserts that it did, then
-/// lifts the quarantine, so that one wallet can probe several contradictions in turn.
+/// An integrity rejection suspends its source and account; this asserts that it did, then
+/// lifts the recovery suspension, so that one wallet can probe several contradictions in turn.
 fn rejected(st: &mut State, commit: TransparentLedgerCommit<AccountUuid>) -> CommitRejection {
     let rejection = match apply(st, commit) {
         Err(SqliteClientError::TransparentLedgerCommitRejected(rejection)) => rejection,
@@ -98,13 +98,13 @@ fn rejected(st: &mut State, commit: TransparentLedgerCommit<AccountUuid>) -> Com
     if matches!(rejection, CommitRejection::Integrity(_)) {
         assert!(count(st, "tpir_quarantined_sources") > 0);
         assert!(count(st, "tpir_quarantined_accounts") > 0);
-        lift_quarantine(st);
+        clear_recovery_suspension(st);
     }
     rejection
 }
 
-/// Clears every quarantine, standing in for the verification that is not implemented yet.
-pub(super) fn lift_quarantine(st: &State) {
+/// Clears every recovery suspension, standing in for the verification that is not implemented yet.
+pub(super) fn clear_recovery_suspension(st: &State) {
     conn(st)
         .execute_batch(
             "DELETE FROM tpir_quarantined_sources; DELETE FROM tpir_quarantined_accounts;",

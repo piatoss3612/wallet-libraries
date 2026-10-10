@@ -129,7 +129,7 @@ pub struct TransactionHistoryDetails {
     /// data for which Enhance asserted transparent outputs, whose shielded effects are complete,
     /// whose whole fee is known, and in which the account has no transparent spend, no recorded
     /// sent output, and no co-funding wallet account or transparent input in its evidence.
-    /// Candidate ledgers and unqualified, quarantined or differently placed spend observations
+    /// Candidate ledgers and unqualified, suspended or differently placed spend observations
     /// do not veto the inference. Consumers may use the default for internal-output Activity
     /// grouping, but must not turn it into canonical sender or fee-payer attribution. It
     /// changes neither [`Self::aggregate_payment`], [`Self::payment_details`], [`Self::fee`],

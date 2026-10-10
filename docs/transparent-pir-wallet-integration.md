@@ -88,7 +88,7 @@ The library records which publication was accepted and saves its results
 together, replacing older provisional findings when appropriate. The API calls
 this qualification; accepting a source does not independently verify its index.
 Contradictory financial facts are rejected and the source and affected accounts
-are quarantined, meaning they cannot be used for private spending.
+are suspended, meaning they cannot be used for private spending.
 
 The recovery cache marks a batch handled only after every wallet write succeeds.
 Each write briefly takes the database lock; network requests do not. Following
@@ -116,7 +116,7 @@ Recovery adds evidence alongside these records:
 | Receive and spend events | A receive identifies a transaction and output index; a spend identifies its transaction/input and the previous output it consumes |
 | Revisions and observations | Which source and exact publication revision supplied each event, its replacement order, and mined placement |
 | Coverage and pending pages | Checked height intervals for watched addresses, accepted endpoints, and retrieval that must resume |
-| Activation, source trust, and quarantine | Whether recovered funds are active, which publications are accepted, and which sources/accounts cannot be used |
+| Activation, source trust, and recovery suspension | Whether recovered funds are active, which publications are accepted, and which sources/accounts cannot be used |
 | Output/spend origins | Whether an ordinary wallet record is supported by public observation, local construction, private recovery, or several of them |
 | Transaction metadata | Source-bound whole fee, complete transparent input count, and presence of shielded components |
 | Receipt work and display cache | `transparent_detail_work`, `transparent_tx_display`, and its output rows; stored separately from financial evidence |
@@ -219,7 +219,7 @@ Stops and restarts retain saved progress.
 An outage ends the run. If published data lags behind the chain, transparent
 spending waits for recovery to catch up. Repeated stalls or unexplained
 disagreements with saved wallet facts pause an account for an hour before retry;
-quarantine survives restart. Other ready accounts and eligible shielded-funded
+recovery suspension survives restart. Other ready accounts and eligible shielded-funded
 operations continue. Ledger hardware accounts pause transparent recovery
 because the account birthday cannot cover their earlier history.
 
@@ -506,8 +506,8 @@ rebuilds from its own observations. Independently supported records, shielded
 state, and reservations survive. Locked/referenced outputs may remain without
 counting value; unsupported transaction rows are removed.
 
-Source trust, publication ordering, and quarantine are retained: returning to
-private mode cannot accept an older publication or clear a quarantined source.
+Source trust, publication ordering, and recovery suspension are retained: returning to
+private mode cannot accept an older publication or clear a suspended source.
 A failed cache removal or forget is retried on public sync startup. Lowering
 policy and forgetting evidence are separate steps; failure of the cleanup does
 not make the already public policy private again.

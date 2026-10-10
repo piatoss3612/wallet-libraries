@@ -2159,11 +2159,11 @@ fn view_ownership_requires_current_qualified_evidence() {
         ),
         ("missing observation", "DELETE FROM tpir_spend_observations"),
         (
-            "quarantined account",
+            "account recovery suspended",
             "INSERT INTO tpir_quarantined_accounts SELECT account_id FROM tpir_active_accounts",
         ),
         (
-            "quarantined source",
+            "source recovery suspended",
             "INSERT INTO tpir_quarantined_sources SELECT DISTINCT source FROM tpir_revisions",
         ),
         (

@@ -563,7 +563,7 @@ fn active_contributor_veto_tracks_qualified_current_evidence() {
     assert_eq!(entry.inferred_outgoing, None);
     assert_only_activity_inferred(&entry);
 
-    // Quarantined source evidence no longer justifies overriding the default.
+    // Suspended source evidence no longer justifies overriding the default.
     conn(&case.st)
         .execute(
             "INSERT INTO tpir_quarantined_sources (source) VALUES (?1)",
@@ -571,14 +571,14 @@ fn active_contributor_veto_tracks_qualified_current_evidence() {
         )
         .unwrap();
     assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
-    lift_quarantine(&case.st);
+    clear_recovery_suspension(&case.st);
     assert_eq!(case.history().inferred_outgoing, None);
 
     conn(&case.st)
         .execute("INSERT INTO tpir_quarantined_accounts SELECT account_id FROM tpir_spend_events WHERE spending_txid = ?1", [case.tx.txid().as_ref()])
         .unwrap();
     assert_eq!(case.history().inferred_outgoing, Some(zat(SENT)));
-    lift_quarantine(&case.st);
+    clear_recovery_suspension(&case.st);
     assert_eq!(case.history().inferred_outgoing, None);
 
     conn(&case.st)

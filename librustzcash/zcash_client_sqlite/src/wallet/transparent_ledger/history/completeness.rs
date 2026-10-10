@@ -45,7 +45,7 @@ fn supported_pools() -> Vec<PoolType> {
 pub(super) enum TransparentDiscovery {
     /// Public discovery holds authority.
     Public,
-    /// Private authority applies. An active, unquarantined account's ledger covers every watched
+    /// Private authority applies. An active, unsuspended account's ledger covers every watched
     /// address through `covered_through`; otherwise nothing is covered.
     Private {
         covered_through: Option<BlockHeight>,
@@ -53,7 +53,7 @@ pub(super) enum TransparentDiscovery {
 }
 
 /// What the account's transparent evidence establishes under `mode`: public discovery, or the
-/// height its active, unquarantined ledger covers. The caller provides the read snapshot.
+/// height its active, unsuspended ledger covers. The caller provides the read snapshot.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn transparent_discovery<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
@@ -66,7 +66,8 @@ pub(super) fn transparent_discovery<P: consensus::Parameters>(
         return Ok(TransparentDiscovery::Public);
     }
     let ledger = account_ledger(conn, params, gap_limits, account)?;
-    let covered_through = (ledger.lifecycle == AccountLifecycle::Active && !ledger.quarantined)
+    let covered_through = (ledger.lifecycle == AccountLifecycle::Active
+        && !ledger.recovery_suspended)
         .then_some(ledger.status.covered_through)
         .flatten();
     Ok(TransparentDiscovery::Private { covered_through })

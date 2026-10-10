@@ -180,7 +180,7 @@ impl<'c> CatalogPass<'c> {
     /// another lineage or endpoint, a row of its source at its lineage with
     /// another digest or sealing, or a revision ever exported at its source
     /// and lineage, or under its identity, that differs from it: the wallet
-    /// would refuse it as an integrity failure and quarantine the account.
+    /// would refuse it as an integrity failure and recovery suspension the account.
     fn recorded(&mut self, entry: &Published) -> Result<RecordedRevision, RecoveryError> {
         let revision = &entry.revision;
         let contradicted: bool = self
