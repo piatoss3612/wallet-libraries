@@ -335,11 +335,11 @@ fn projection_spend_enqueues() {
 }
 
 #[test]
-fn projection_promotion_enqueues() {
+fn projection_activation_enqueues() {
     let (mut st, account, unspent, spent) = ready_wallet();
     // Candidate recovery queued nothing.
     assert_eq!(work_rows(&st), vec![]);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         work_rows(&st),
         vec![
@@ -374,7 +374,7 @@ fn raw_present_no_enqueue() {
     cover(&mut st, account, &fixture, vec![recovered.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         super::super::super::output_origins(conn(&st), &recovered.outpoint),
         vec![1, 2]
@@ -1196,7 +1196,7 @@ fn put_tx_data_clears_work() {
     cover(&mut st, account, &fixture, vec![recovered.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(reasons(&st, txid), Some(RECEIVE));
     // The payment is funded from the shielded pool, with the fee the wallet stored.
     let fee: u64 = conn(&st)
@@ -1460,10 +1460,10 @@ fn no_requeue_after_stored() {
     // The receive is reported again by the active ledger.
     cover(&mut st, account, &revision(1, true), vec![unspent.clone()]);
     assert_eq!(reasons(&st, txid), None);
-    // Leaving and re-entering PrivateRequired promotes, and so projects, the ledger again.
+    // Leaving and re-entering PrivateRequired activates, and so projects, the ledger again.
     set_policy(&mut st, Public);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(reasons(&st, txid), None);
     assert!(!listing(&st).contains(&txid));
     // Transactions without facts are still wanted.

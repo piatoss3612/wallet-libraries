@@ -3,7 +3,7 @@
 //! A recovery run captures a [`TransparentAddressWatchSet`], asks its source about the watched
 //! addresses, and submits what it learned as one [`TransparentLedgerCommit`] per account.
 //! A candidate account's state is isolated: it never changes balances, spend links, locks,
-//! address use, or transaction history. Promoting the account projects its recovered events
+//! address use, or transaction history. Activating the account projects its recovered events
 //! into the wallet, and an active account's later commits project in the same transaction.
 
 use transparent::{address::TransparentAddress, bundle::OutPoint, keys::TransparentKeyScope};
@@ -56,7 +56,7 @@ pub struct WatchedAddress {
 pub enum AccountLifecycle {
     /// Recovery is isolated from the wallet's projection.
     Candidate,
-    /// Promoted: commits also project into the wallet's outputs and spends.
+    /// Activated: commits also project into the wallet's outputs and spends.
     Active,
 }
 
@@ -322,7 +322,7 @@ pub enum StaleCommit {
     UnknownPage(Vec<u8>),
     /// The provisional revision was superseded by a newer revision of its source.
     SupersededRevision,
-    /// The account was promoted or demoted since the run started.
+    /// The account was activated or deactivated since the run started.
     LifecycleChanged,
 }
 

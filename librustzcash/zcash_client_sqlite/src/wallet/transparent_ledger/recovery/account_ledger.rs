@@ -1,5 +1,5 @@
 //! An account's ledger state as authority reads it: lifecycle, quarantine and recovery status,
-//! and the blockers that keep it from private authority or promotion.
+//! and the blockers that keep it from private authority or activation.
 
 use super::diagnostics::RecoveryStatus;
 use super::*;
@@ -15,18 +15,19 @@ pub(crate) struct AccountLedger {
 
 #[cfg(feature = "transparent-inputs")]
 impl AccountLedger {
-    /// Reads the ledger state of `watch`'s account. The caller provides the read snapshot.
-    pub(super) fn from_watch(
+    /// Reads ledger state for the account whose addresses require recovery.
+    /// The caller provides the read snapshot.
+    pub(super) fn from_recovery_addresses(
         conn: &rusqlite::Connection,
         gap_limits: &GapLimits,
-        watch: &Watch,
+        recovery_addresses: &AccountRecoveryAddresses,
     ) -> Result<Self, SqliteClientError> {
-        let account_ref = watch.account.internal_id();
+        let account_ref = recovery_addresses.account.internal_id();
         Ok(AccountLedger {
             account_ref,
             lifecycle: account_lifecycle(conn, account_ref)?,
             quarantined: account_quarantined(conn, account_ref)?,
-            status: recovery_status(conn, gap_limits, watch)?,
+            status: recovery_status(conn, gap_limits, recovery_addresses)?,
         })
     }
 
@@ -52,15 +53,15 @@ pub(crate) fn account_ledger<P: consensus::Parameters>(
     gap_limits: &GapLimits,
     account: AccountUuid,
 ) -> Result<AccountLedger, SqliteClientError> {
-    let watch =
-        Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
-    AccountLedger::from_watch(conn, gap_limits, &watch)
+    let recovery_addresses = AccountRecoveryAddresses::load(conn, params, gap_limits, account)?
+        .ok_or(SqliteClientError::AccountUnknown)?;
+    AccountLedger::from_recovery_addresses(conn, gap_limits, &recovery_addresses)
 }
 
-/// Why `ledger`'s account lacks private authority after `tip`, or cannot be promoted.
+/// Why `ledger`'s account lacks private authority after `tip`, or cannot be activated.
 ///
-/// Qualification and legacy agreement are promotion conditions, reported only for a candidate;
-/// an active account satisfied them when promoted, and its later commits require qualification.
+/// Qualification and legacy agreement are activation conditions, reported only for a candidate;
+/// an active account satisfied them when activated, and its later commits require qualification.
 /// Legacy agreement is judged only against a complete candidate ledger.
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn ledger_blockers(

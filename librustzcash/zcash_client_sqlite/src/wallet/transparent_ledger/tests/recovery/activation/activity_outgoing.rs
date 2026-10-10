@@ -206,14 +206,14 @@ fn restore(tx: Transaction, prepare: impl FnOnce(&mut State)) -> Restored {
 }
 
 /// Covers the account's transparent addresses privately, with `receives`, and qualifies and
-/// promotes it under `PrivateRequired` with private Ironwood enhancement.
+/// activates it under `PrivateRequired` with private Ironwood enhancement.
 fn recover_transparent(st: &mut State, receives: Vec<ReceiveEvent>) {
     let account = st.test_account().unwrap().id();
     let fixture = revision(1, true);
     cover(st, account, &fixture, receives);
     qualify(st, &fixture);
     set_policy(st, PrivateRequired);
-    promote(st, account).unwrap();
+    activate_recovered_ledger(st, account).unwrap();
     st.wallet_mut()
         .db_mut()
         .set_enhancement_mode(EnhancementMode::PrivateIronwood);
@@ -518,7 +518,7 @@ fn recover_contributor(case: &mut Restored, active: bool) -> RecoveryRevision {
     cover(&mut case.st, other, &initial, vec![]);
     qualify(&mut case.st, &initial);
     if active {
-        promote(&mut case.st, other).unwrap();
+        activate_recovered_ledger(&mut case.st, other).unwrap();
     }
     let observed = source(b"contributor-spend", 1);
     qualify(&mut case.st, &observed);

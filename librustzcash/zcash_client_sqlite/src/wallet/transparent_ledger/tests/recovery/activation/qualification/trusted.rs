@@ -125,7 +125,7 @@ fn trusted_commit(
 }
 
 /// A wallet under `PrivateRequired` whose account was recovered from trusted commits of the
-/// provisional revision `revision(1, false)`, with one unspent receive, and promoted.
+/// provisional revision `revision(1, false)`, with one unspent receive, and activated.
 fn trusted_wallet() -> (State, AccountUuid, ReceiveEvent) {
     let (mut st, account) = recovery_wallet();
     let ws = watch(&st, account);
@@ -136,7 +136,7 @@ fn trusted_wallet() -> (State, AccountUuid, ReceiveEvent) {
         &revision(1, false),
         vec![received.clone()],
     );
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         snapshot(&st, account).authority,
         TransparentAuthority::Private
@@ -200,8 +200,11 @@ fn a_trusted_commit_qualifies_and_promotes_without_the_test_hook() {
     let fixture = revision(1, false);
     let received = recover_one(&mut st, account, fixture.clone(), 1);
     set_policy(&mut st, PrivateRequired);
-    // Observed evidence alone cannot support promotion.
-    assert!(blocked(promote(&mut st, account)).contains(&RecoveryBlocker::UnqualifiedRevision));
+    // Observed evidence alone cannot support activation.
+    assert!(
+        blocked(activate_recovered_ledger(&mut st, account))
+            .contains(&RecoveryBlocker::UnqualifiedRevision)
+    );
     assert!(!is_qualified(&st, &fixture));
 
     cover_trusted(&mut st, account, &fixture, vec![]);
@@ -209,7 +212,7 @@ fn a_trusted_commit_qualifies_and_promotes_without_the_test_hook() {
     assert_eq!(count(&st, "tpir_qualified_revisions"), 1);
     assert_eq!(recovery(&st, account).blockers, vec![]);
 
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(lifecycle(&st, account), AccountLifecycle::Active);
     let s = snapshot(&st, account);
     assert_eq!(s.authority, TransparentAuthority::Private);
@@ -236,7 +239,7 @@ fn trusted_replacement_withdraws_the_predecessor_in_the_same_transaction() {
         ..receive(1, external(&ws), 40_000, below_target(&ws, 3))
     };
     cover_trusted(&mut st, account, &r1, vec![shared.clone()]);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     let output = output_id(&st, &shared.outpoint);
     let [coverage, pages, receives, spends, metadata] = rows_of(&st, &r1);
     assert!(coverage > 0 && receives > 0 && metadata > 0);

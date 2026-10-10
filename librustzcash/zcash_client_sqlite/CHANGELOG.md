@@ -10,6 +10,10 @@ workspace.
 
 ## [Unreleased]
 
+- Rename the prototype ledger activation method to `activate_transparent_ledger`
+  and `SqliteClientError::TransparentPromotionBlocked` to `TransparentActivationBlocked`.
+  Recovery readiness checks and the atomic candidate-to-active transition are unchanged.
+
 - `WalletDb` implements `TransparentLedgerWrite::forget_transparent_ledger`. Under `Public`
   on the handle and durably, it removes in one transaction every spend link, pending spend,
   output and transaction that only the transparent ledger supports, the ledger origin of rows

@@ -47,6 +47,8 @@ workspace.
   final while its payment and fee attribution are not.
 
 ### Changed
+- Rename the prototype `TransparentLedgerWrite::promote_transparent_account` to
+  `activate_transparent_ledger`, matching the candidate-to-active ledger transition.
 - Rename the prototype `TransparentWatchSet` to `TransparentAddressWatchSet`.
   Its account context, watched addresses, and pending pages are unchanged.
 - `TransactionHistoryDetails::inferred_outgoing` documents the Activity default that the account

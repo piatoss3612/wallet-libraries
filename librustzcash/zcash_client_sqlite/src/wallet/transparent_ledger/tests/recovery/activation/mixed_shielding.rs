@@ -70,7 +70,7 @@ struct Shielding {
     height: BlockHeight,
 }
 
-/// A promoted `PrivateRequired` account under `PrivateIronwood` enhancement whose two recovered
+/// A activated `PrivateRequired` account under `PrivateIronwood` enhancement whose two recovered
 /// transparent outputs fund `shape`'s shielding transaction: its Ironwood output to the account's
 /// internal address is compact-scanned, and private transparent recovery publishes both spends
 /// with `metadata`. Enhance PIR has not run yet.
@@ -109,7 +109,7 @@ fn padded_shielding(
     assert_eq!(recovery(&st, account).blockers, vec![]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     st.wallet_mut()
         .db_mut()
         .set_enhancement_mode(EnhancementMode::PrivateIronwood);
@@ -1009,7 +1009,7 @@ fn shape_only_recovery_obeys_public_authority_transitions() {
     );
     assert_eq!(queued(&case.st, case.tx_ref), 0);
     set_policy(&mut case.st, PrivateRequired);
-    promote(&mut case.st, case.account).unwrap();
+    activate_recovered_ledger(&mut case.st, case.account).unwrap();
     assert_eq!(private_queries(&case.st), vec![request]);
     assert_eq!(
         apply_records(&mut case.st, &[(request, response)]),

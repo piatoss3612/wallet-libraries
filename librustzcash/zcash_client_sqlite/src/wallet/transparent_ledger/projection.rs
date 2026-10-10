@@ -255,7 +255,7 @@ fn spend_origin(origins: &str) -> String {
 /// pending spends are removed. A ledger-only output stays with its historical origin to retain
 /// independently supported spend links and reservations; financial queries exclude it without
 /// a placed receive. Rows with another origin stay, less their ledger origin. This also maintains
-/// previously projected rows when the account has been demoted to a candidate.
+/// previously projected rows when the account has been deactivated to a candidate.
 pub(super) fn unproject_unobserved(conn: &rusqlite::Connection) -> Result<(), SqliteClientError> {
     let ledger_only = format!("{} AND NOT {}", spend_origin("= 2"), spend_origin("!= 2"));
     conn.execute(
@@ -328,7 +328,7 @@ pub(super) fn unproject_unobserved(conn: &rusqlite::Connection) -> Result<(), Sq
         |row| row.get(0),
     )?;
     if withdraws_receive {
-        // Trusted revision transitions can withdraw evidence of a previously demoted account.
+        // Trusted revision transitions can withdraw evidence of a previously deactivated account.
         // Fence the changed row semantics even when no activation state is written by this call.
         super::require_reader_version(conn, super::ACTIVATION_READER_VERSION)?;
     }

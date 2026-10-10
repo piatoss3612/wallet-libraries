@@ -31,7 +31,7 @@ fn provisional_wallet(with_spend: bool) -> (State, AccountUuid, ReceiveEvent, Re
         qualify(&mut st, &independent);
     }
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     let replacement = RecoveryRevision {
         sealed: false,
         ..source(b"receive-source", 2)
@@ -227,7 +227,7 @@ fn withdrawn_receive_is_not_public_value_and_does_not_block_reactivation() {
         .is_some()
     );
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     assert_eq!(
         snapshot(&st, account).authorized.unwrap().regular.total(),
         Zatoshis::ZERO

@@ -202,7 +202,7 @@ fn transition_policy(
     super::clear_pending_pages(conn)?;
     if current.mode == TransparentLedgerMode::PrivateRequired {
         // Private authority exists only under PrivateRequired. Returning to it requires
-        // promoting each account again, which revalidates its whole ledger.
+        // activating each account again, which revalidates its whole ledger.
         conn.execute("DELETE FROM tpir_active_accounts", [])?;
     }
     // Keep still-required retrieval obligations on the new generation. Leaving the old

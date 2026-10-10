@@ -66,7 +66,7 @@ fn coinbase_wallet() -> (State, AccountUuid, ReceiveEvent, RecoveryRevision) {
     cover(&mut st, account, &fixture, vec![coinbase.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
     (st, account, coinbase, fixture)
 }
 
@@ -128,7 +128,7 @@ fn maturity_boundary_governs_every_selector_and_final_storage() {
         assert_eq!(selection.unwrap(), vec![]);
     }
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
 
     scan_new_blocks(&mut st, 1);
     cover(&mut st, account, &fixture, vec![]);

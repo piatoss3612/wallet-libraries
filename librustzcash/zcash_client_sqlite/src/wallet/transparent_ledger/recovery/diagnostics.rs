@@ -20,15 +20,15 @@ pub(crate) struct RecoveryStatus {
     pub(crate) recovered_unverified: Option<Zatoshis>,
 }
 
-/// Returns `watch`'s account recovery progress at the local target. The caller provides the
-/// read snapshot.
+/// Returns recovery progress for the account at the local target.
+/// The caller provides the read snapshot.
 #[cfg(feature = "transparent-inputs")]
 pub(super) fn recovery_status(
     conn: &rusqlite::Connection,
     gap_limits: &GapLimits,
-    watch: &Watch,
+    recovery_addresses: &AccountRecoveryAddresses,
 ) -> Result<RecoveryStatus, SqliteClientError> {
-    let account_ref = watch.account.internal_id();
+    let account_ref = recovery_addresses.account.internal_id();
     let target = local_target(conn)?;
 
     let coverage::Coverage {
@@ -37,11 +37,15 @@ pub(super) fn recovery_status(
     } = coverage::read(conn, account_ref)?;
 
     // Continuous coverage from the required start, per watched address.
-    let required = u32::from(watch.required_from);
+    let required = u32::from(recovery_addresses.required_from);
     let mut covered_through: Option<u32> = target.map(|t| u32::from(t.height));
     // A target below the required start needs no coverage yet: the interval is empty.
     let needs_coverage = target.is_some_and(|t| u32::from(t.height) >= required);
-    for address in watch.addresses.keys().filter(|_| needs_coverage) {
+    for address in recovery_addresses
+        .addresses
+        .keys()
+        .filter(|_| needs_coverage)
+    {
         let reach = supported
             .get(&script_bytes(address))
             .and_then(|ranges| {
@@ -112,13 +116,13 @@ pub(super) fn recovery_status(
     }
 
     // A window reaching `WINDOW_LIMIT` covers the last non-hardened index, which the wallet's
-    // address table cannot hold: its ranges end exclusively at a child index. Promotion could
+    // address table cannot hold: its ranges end exclusively at a child index. Activation could
     // not make that address the wallet's own, so it is as underivable as a missing key.
-    let window_underivable = watch
+    let window_underivable = recovery_addresses
         .window_needs(conn, gap_limits)?
         .iter()
-        .zip(watch.derivable)
-        .zip(watch.candidate_end)
+        .zip(recovery_addresses.derivable)
+        .zip(recovery_addresses.candidate_end)
         .any(|((needed, derivable), end)| {
             (needed.is_some() && !derivable) || end == WINDOW_LIMIT || *needed == Some(WINDOW_LIMIT)
         });
@@ -149,7 +153,7 @@ pub(super) fn recovery_status(
         target,
         covered_through: covered_through.map(height),
         blockers,
-        watched_addresses: watch.addresses.len(),
+        watched_addresses: recovery_addresses.addresses.len(),
         pending_pages,
         unresolved_spends,
         recovered_unverified,
@@ -166,10 +170,10 @@ pub(crate) fn candidate_recovery<P: consensus::Parameters>(
     account: AccountUuid,
 ) -> Result<CandidateRecovery<AccountUuid>, SqliteClientError> {
     resolve_mode(conn, configured)?;
-    let watch =
-        Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
-    let account_ref = watch.account.internal_id();
-    let status = recovery_status(conn, gap_limits, &watch)?;
+    let recovery_addresses = AccountRecoveryAddresses::load(conn, params, gap_limits, account)?
+        .ok_or(SqliteClientError::AccountUnknown)?;
+    let account_ref = recovery_addresses.account.internal_id();
+    let status = recovery_status(conn, gap_limits, &recovery_addresses)?;
 
     let receives = placed_receives(conn, account_ref)?;
     let spends = placed_spends(conn, account_ref)?;

@@ -38,7 +38,7 @@ pub enum Trust {
     /// (`TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`), which also
     /// withdraws the older provisional evidence of its source and so reconciles the batch's
     /// retirements. The wallet requires `PrivateRequired` on the handle and durably.
-    /// Qualification grants no authority by itself: promotion and spending stay separate
+    /// Qualification grants no authority by itself: activation and spending stay separate
     /// wallet operations.
     Trusted,
 }
@@ -258,7 +258,7 @@ impl TransparentHistoryRecovery {
     ///
     /// No network request is made here; run it under the wallet's write serialization if the
     /// application has one, or use [`Self::apply_and_acknowledge_gated`] to hold it for one
-    /// write at a time. It never promotes an account or authorizes spending.
+    /// write at a time. It never activates an account or authorizes spending.
     pub fn apply_and_acknowledge<P: consensus::Parameters, CL, R>(
         &mut self,
         batch: RecoveryBatch<AccountUuid>,

@@ -584,7 +584,7 @@ mod handles {
         assert_eq!(s.completion, RecoveryCompletion::NotApplicable);
         assert!(s.blockers.is_empty());
 
-        // The account is not promoted, so private authority is unavailable: the public amount
+        // The account is not activated, so private authority is unavailable: the public amount
         // is shown as last-known legacy evidence only, with no verified anchor, never as an
         // authorized balance.
         set_mode(&mut st, PrivateRequired);

@@ -1868,7 +1868,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transacti
     any(test, feature = "test-dependencies")
 ))]
 impl<C: Borrow<rusqlite::Connection>, P, CL, R> WalletDb<C, P, CL, R> {
-    /// Qualifies `revision` so that it can support promotion and an active account's commits,
+    /// Qualifies `revision` so that it can support activation and an active account's commits,
     /// recording it first if it is new, exactly as a commit would.
     ///
     /// This is a test and development hook only. It qualifies outside any commit and under any
@@ -2194,8 +2194,8 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> Transpare
     }
 
     #[cfg(feature = "transparent-inputs")]
-    fn promote_transparent_account(&mut self, account: Self::AccountId) -> Result<(), Self::Error> {
-        wallet::transparent_ledger::promote(
+    fn activate_transparent_ledger(&mut self, account: Self::AccountId) -> Result<(), Self::Error> {
+        wallet::transparent_ledger::activate_recovered_ledger(
             self.conn.borrow(),
             &self.params,
             &self.gap_limits,

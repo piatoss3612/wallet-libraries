@@ -2,7 +2,7 @@
 //!
 //! Nothing here is stored. Completeness follows from the transaction row, the account's recorded
 //! outputs and spends, the scan queue, the account's ledger coverage, and queued follow-on work,
-//! so a rewind, promotion, account change, or later enhancement changes the result as soon as it
+//! so a rewind, activation, account change, or later enhancement changes the result as soon as it
 //! changes those facts.
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use {
     zcash_protocol::consensus::{self, BlockHeight},
 };
 
-/// Whether the handle may grant private authority: qualify a revision or promote an account.
+/// Whether the handle may grant private authority: qualify a revision or activate an account.
 ///
 /// That requires a handle explicitly configured `PrivateRequired` over a durable
 /// `PrivateRequired` policy. A weaker handle reads under the durable policy (see

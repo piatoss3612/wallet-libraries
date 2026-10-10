@@ -504,11 +504,11 @@ impl Fixture {
         panic!("recovery did not settle within eight passes");
     }
 
-    fn promote(&mut self) {
+    fn activate(&mut self) {
         self.st
             .wallet_mut()
             .db_mut()
-            .promote_transparent_account(self.account)
+            .activate_transparent_ledger(self.account)
             .unwrap();
     }
 
@@ -925,7 +925,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     );
     assert!(catalog.iter().all(|row| row.2));
 
-    // Trusted: the same publication qualifies every revision, and promotion
+    // Trusted: the same publication qualifies every revision, and activation
     // grants private authority over exactly r2.
     f.trust_service();
     let trusted = f.drive();
@@ -933,7 +933,7 @@ fn private_mode_lifecycle_against_an_in_process_shard_service() {
     let first_tail = tail_revision(&trusted.batch);
     assert_eq!(first_tail.lineage, 1);
     assert_eq!(f.count("tpir_qualified_revisions"), 3);
-    f.promote();
+    f.activate();
     assert_eq!(f.watch().lifecycle, AccountLifecycle::Active);
     assert_eq!(f.authority(), TransparentAuthority::Private);
     assert_eq!(f.spendable().unwrap(), vec![r2.clone()]);
@@ -1151,7 +1151,7 @@ fn young_wallet_rolls_back_below_its_birthday() {
     assert_eq!(rewound.batch.state, BatchState::Ready);
     assert_eq!(rewound.batch.progress.outcome, Outcome::Complete);
     assert_eq!(tail_revision(&rewound.batch).lineage, 4);
-    f.promote();
+    f.activate();
     assert_eq!(f.authority(), TransparentAuthority::Private);
     assert_eq!(f.spendable().unwrap(), vec![received]);
 
@@ -1188,7 +1188,7 @@ fn growing_tail_pages_queries_select_only_its_rows() {
     let pass = f.drive();
     assert_eq!(pass.batch.state, BatchState::Ready);
     assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
-    f.promote();
+    f.activate();
     let spendable: BTreeSet<OutPoint> = f.spendable().unwrap().into_iter().collect();
     let expected: BTreeSet<OutPoint> = (1..=receives).map(|n| outpoint(txid(n), 0)).collect();
     assert_eq!(spendable, expected);
@@ -1255,7 +1255,7 @@ fn after_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
     ]
 }
 
-/// A promoted account that recovered the publication before the re-cut under
+/// A activated account that recovered the publication before the re-cut under
 /// `PrivateRequired`: the fixture, the account's paid address, the map, the
 /// tail revision the wallet holds, and the outputs it can spend.
 fn recovered_before_recut() -> (
@@ -1267,7 +1267,7 @@ fn recovered_before_recut() -> (
 ) {
     let mut f = Fixture::new(H0 + 100, RECUT_TIP);
     f.set_policy(PrivateRequired);
-    // Its passes qualify their revisions, so the account can be promoted and a
+    // Its passes qualify their revisions, so the account can be activated and a
     // re-cut's retired tail is reconciled through the trusted operation.
     f.trust_service();
     let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
@@ -1276,7 +1276,7 @@ fn recovered_before_recut() -> (
     assert_eq!(first.batch.state, BatchState::Ready);
     assert_eq!(first.batch.progress.outcome, Outcome::Complete);
     let tail = tail_revision(&first.batch);
-    f.promote();
+    f.activate();
     assert_eq!(f.authority(), TransparentAuthority::Private);
     let mut received: Vec<OutPoint> = (1..=3).map(|tag| outpoint(txid(tag), 0)).collect();
     received.sort_by_key(|outpoint| (*outpoint.hash(), outpoint.n()));
@@ -1609,7 +1609,7 @@ fn private_details_end_to_end() {
         SEAL,
     );
     assert_eq!(f.drive().batch.state, BatchState::Ready);
-    f.promote();
+    f.activate();
     // Both receives are projected; spendability is unchanged by what follows.
     let spendable = f.spendable().unwrap();
     assert!(spendable.contains(&outpoint(r1, 0)), "{spendable:?}");
@@ -2149,7 +2149,7 @@ fn apply_and_acknowledge_keeps_the_committed_prefix_and_replays_idempotently() {
     let replayed = f.settle(batch, Trust::Trusted).unwrap();
     assert!(!replayed.stats.window_grew);
     assert_eq!(f.dump(true), settled);
-    // Nothing above promoted the account or granted authority.
+    // Nothing above activated the account or granted authority.
     assert_eq!(f.watch().lifecycle, AccountLifecycle::Candidate);
     assert_ne!(f.authority(), TransparentAuthority::Private);
 }

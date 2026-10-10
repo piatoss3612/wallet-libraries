@@ -71,16 +71,16 @@ pub enum SqliteClientError {
         /// The generation currently stored on the wallet.
         applied: u64,
     },
-    /// Recovery commits and promotion require a `PrivateRequired` policy, both durably applied
+    /// Recovery commits and activation require a `PrivateRequired` policy, both durably applied
     /// and configured on the handle.
     TransparentRecoveryNotEnabled,
     /// A candidate recovery commit was refused; none of its facts were applied.
     #[cfg(feature = "transparent-inputs")]
     TransparentLedgerCommitRejected(CommitRejection),
-    /// An account could not be promoted to private transparent authority for the listed
+    /// An account could not be activated to private transparent authority for the listed
     /// reasons; nothing was changed.
     #[cfg(feature = "transparent-inputs")]
-    TransparentPromotionBlocked(Vec<RecoveryBlocker>),
+    TransparentActivationBlocked(Vec<RecoveryBlocker>),
 
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
@@ -390,15 +390,15 @@ impl fmt::Display for SqliteClientError {
             ),
             SqliteClientError::TransparentRecoveryNotEnabled => write!(
                 f,
-                "Transparent recovery is not enabled for this operation: recovery commits and promotion need PrivateRequired, both durably and on the handle"
+                "Transparent recovery is not enabled for this operation: recovery commits and activation need PrivateRequired, both durably and on the handle"
             ),
             #[cfg(feature = "transparent-inputs")]
             SqliteClientError::TransparentLedgerCommitRejected(rejection) => {
                 write!(f, "Transparent ledger commit rejected: {rejection:?}")
             }
             #[cfg(feature = "transparent-inputs")]
-            SqliteClientError::TransparentPromotionBlocked(blockers) => {
-                write!(f, "Transparent ledger promotion blocked: {blockers:?}")
+            SqliteClientError::TransparentActivationBlocked(blockers) => {
+                write!(f, "Transparent ledger activation blocked: {blockers:?}")
             }
             SqliteClientError::CorruptedData(reason) => {
                 write!(f, "Data DB is corrupted: {reason}")

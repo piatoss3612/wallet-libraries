@@ -458,7 +458,7 @@ fn check_local_intent_survives_discovery(with_metadata: bool) {
         zat(200_000)
     );
 
-    // The private ledger then recovers the output as mined, and the account is promoted.
+    // The private ledger then recovers the output as mined, and the account is activated.
     let fixture = revision(1, true);
     let ws = watch(&st, account);
     let recovered = ReceiveEvent {
@@ -476,7 +476,7 @@ fn check_local_intent_survives_discovery(with_metadata: bool) {
     cover(&mut st, account, &fixture, vec![recovered.clone()]);
     qualify(&mut st, &fixture);
     set_policy(&mut st, PrivateRequired);
-    promote(&mut st, account).unwrap();
+    activate_recovered_ledger(&mut st, account).unwrap();
 
     // The local record is kept: only the placement changed.
     let discovered = history(&st, account, txid);

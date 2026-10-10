@@ -91,7 +91,7 @@ pub enum WithdrawnCause {
 /// Otherwise the caller applies [`RecoveryBatch::commits`] itself and
 /// acknowledges with [`TransparentHistoryRecovery::acknowledge_applied`], which refuses a
 /// batch listing retirements. Neither the batch nor a server withdrawal is
-/// authority to change local facts or promote an account.
+/// authority to change local facts or activate an account.
 pub struct RecoveryBatch<AccountId> {
     /// The commits in the order they apply; empty unless `state` is ready.
     pub(crate) commits: Vec<TransparentLedgerCommit<AccountId>>,

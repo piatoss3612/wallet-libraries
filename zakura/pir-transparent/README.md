@@ -348,7 +348,7 @@ python3 scripts/dev.py test --config transparent-pir-testing
 ```
 
 The [in-process recovery tests](tests/private_recovery.rs) use real PIR and
-record requests while exercising recovery, settlement, promotion, reorgs,
+record requests while exercising recovery, settlement, activation, reorgs,
 publication changes, and re-cuts. [Discovery tests](tests/private_discovery.rs)
 exercise temporary import probing. The child-module tests cover normalization,
 catalog continuity, replay, and lookup translation.

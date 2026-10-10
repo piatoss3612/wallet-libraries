@@ -48,7 +48,7 @@ flowchart TD
 
 The user's privacy setting selects public or private transparent discovery.
 Private recovery first saves its findings separately from usable wallet funds.
-This is the **candidate** stage. Once the account is ready, **promotion** makes
+This is the **candidate** stage. Once the account is ready, **activation** makes
 its recovered outputs and spends part of ordinary wallet state in one database
 transaction. Later recovery saves its findings and the resulting wallet changes
 together.
@@ -74,14 +74,14 @@ private queries are encoded and retrieved.
 
 The ledger APIs do not depend on wallet-pir's wire types. The adapter,
 `zakura-pir-transparent`, translates protocol records, leaving publisher trust
-and promotion to the caller. Vizor supplies routed HTTPS, including Tor when
+and activation to the caller. Vizor supplies routed HTTPS, including Tor when
 enabled; the adapter owns service routes and response interpretation.
 
 A recovery pass starts with the account's state, privacy setting, watched
 addresses, and the block it aims to reach. A `ChainPoint` identifies that block
 by height and hash from the wallet's scan. Before saving results, the wallet
 checks that this starting context still holds: deletion, a setting change,
-reorganization, or promotion can make an answer out of date.
+reorganization, or activation can make an answer out of date.
 
 Vizor trusts the configured recovery service to index the chain correctly.
 The library records which publication was accepted and saves its results
@@ -92,7 +92,7 @@ are quarantined, meaning they cannot be used for private spending.
 
 The recovery cache marks a batch handled only after every wallet write succeeds.
 Each write briefly takes the database lock; network requests do not. Following
-interruption, replay keeps saved results without duplicating them. Promotion
+interruption, replay keeps saved results without duplicating them. Activation
 checks readiness again when it saves the account's activation.
 
 Input queries, proposal consumption, and final transaction storage enforce
@@ -177,7 +177,7 @@ may not be found automatically.
 
 An account watches supported external, internal/change, ephemeral, and standalone
 receivers. Activity near a window's end expands it, with candidate expansion
-isolated until promotion. New addresses require their historical coverage;
+isolated until activation. New addresses require their historical coverage;
 recovery repeats until the window stabilizes or reaches a limit.
 
 ### Recovering transparent history privately
@@ -407,7 +407,7 @@ effects can be reconstructed without original intent or grouping.
 Birthday, account probes, and address windows still bound discovery. A
 pre-birthday output's later spend can remain unresolved and block authority;
 fully spent activity beyond supported gaps can remain undiscovered. A
-pre-birthday legacy output can also block promotion through a discrepancy.
+pre-birthday legacy output can also block activation through a discrepancy.
 
 ### Mixed pools and shared funding
 

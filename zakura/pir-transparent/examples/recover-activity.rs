@@ -427,7 +427,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "reader_version": reader,
         "pending_pages": after.pending_pages,
         "unresolved_spends": after.unresolved_spends,
-        "limitation": "Public scripts stand in for ownership; shielded scan is a controlled empty-block fixture. No account promotion or financial authority."
+        "limitation": "Public scripts stand in for ownership; shielded scan is a controlled empty-block fixture. No account activation or financial authority."
     });
     fs::write(
         directory.join("result.json"),

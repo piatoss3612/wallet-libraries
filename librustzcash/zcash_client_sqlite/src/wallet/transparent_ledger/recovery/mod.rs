@@ -1,10 +1,10 @@
 //! Recovery storage: watched addresses, events, coverage, pending pages, quarantine,
-//! qualification, and promotion.
+//! qualification, and activation.
 //!
 //! A candidate account's writes touch only `tpir_*` recovery tables. They never change the LRZ
 //! outputs, spends, locks, addresses, or transactions that balances, input selection,
 //! receiving-address allocation, and history read, and the ledger never reads those back as
-//! evidence. Promotion and an active account's commits also project events into those tables.
+//! evidence. Activation and an active account's commits also project events into those tables.
 //!
 //! Rewinds and policy transitions maintain recovery state in every build, because another
 //! build may have written it. A build refuses both when the wallet requires a newer reader.
@@ -67,17 +67,17 @@ mod coverage;
 mod diagnostics;
 #[cfg(feature = "transparent-inputs")]
 mod events;
+#[cfg(feature = "transparent-inputs")]
+mod ledger_activation;
 mod lifecycle;
 #[cfg(feature = "transparent-inputs")]
 mod metadata;
 #[cfg(feature = "transparent-inputs")]
 mod ownership;
 #[cfg(feature = "transparent-inputs")]
-mod promotion;
+mod recovery_addresses;
 #[cfg(feature = "transparent-inputs")]
 mod revisions;
-#[cfg(feature = "transparent-inputs")]
-mod watch;
 
 #[cfg(feature = "transparent-inputs")]
 use account_ledger::AccountLedger;
@@ -94,15 +94,15 @@ pub(crate) use commit::{CommitTrust, apply_commit};
 pub(crate) use diagnostics::candidate_recovery;
 #[cfg(feature = "transparent-inputs")]
 use diagnostics::{placed_receives, placed_spends, recovery_status};
+#[cfg(feature = "transparent-inputs")]
+pub(crate) use ledger_activation::activate_recovered_ledger;
 pub(crate) use lifecycle::{clear_pending_pages, truncate_recovery};
 #[cfg(feature = "transparent-inputs")]
 pub(crate) use lifecycle::{forget_ledger, forget_reattributed_script};
 #[cfg(all(feature = "transparent-inputs", feature = "transparent-key-import"))]
 pub(crate) use ownership::forget_other_candidates;
 #[cfg(feature = "transparent-inputs")]
-pub(crate) use promotion::promote;
-#[cfg(feature = "transparent-inputs")]
-pub(crate) use watch::watch_set;
+pub(crate) use recovery_addresses::watch_set;
 
 #[cfg(feature = "transparent-inputs")]
 use super::atomically;
@@ -111,7 +111,7 @@ use commit::{account_lifecycle, account_quarantined};
 #[cfg(feature = "transparent-inputs")]
 use events::{CoverageSupport, apply_receive, apply_spend, open_page, record_range};
 #[cfg(feature = "transparent-inputs")]
-use watch::{WINDOW_LIMIT, WINDOW_SCOPES, Watch};
+use recovery_addresses::{AccountRecoveryAddresses, WINDOW_LIMIT, WINDOW_SCOPES};
 
 /// The output script an address is paid to.
 #[cfg(feature = "transparent-inputs")]
@@ -199,7 +199,7 @@ mod tests {
     };
     use zcash_client_backend::data_api::transparent_ledger::WatchOrigin;
 
-    use super::watch::note_origin;
+    use super::recovery_addresses::note_origin;
 
     #[test]
     fn derivation_outranks_a_standalone_import() {

@@ -114,9 +114,10 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
         check_transparent_policy_generation(conn, commit.context.policy_generation)?;
 
         let stale = |reason| reject(CommitRejection::Stale(reason));
-        let watch = Watch::load(conn, params, gap_limits, commit.context.account)?
-            .ok_or_else(|| stale(StaleCommit::AccountUnknown))?;
-        let account_ref = watch.account.internal_id();
+        let recovery_addresses =
+            AccountRecoveryAddresses::load(conn, params, gap_limits, commit.context.account)?
+                .ok_or_else(|| stale(StaleCommit::AccountUnknown))?;
+        let account_ref = recovery_addresses.account.internal_id();
         if source_quarantined(conn, &commit.revision.source)? {
             return Err(reject(CommitRejection::Refused(
                 RefusedCommit::SourceQuarantined,
@@ -155,7 +156,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
                     .flat_map(|p| p.addresses.iter().copied()),
             );
         for address in named {
-            if !watch.addresses.contains_key(&address) {
+            if !recovery_addresses.addresses.contains_key(&address) {
                 return Err(stale(StaleCommit::AddressNotWatched(address)));
             }
         }
@@ -166,7 +167,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
             if trust == CommitTrust::Qualified {
                 qualify_in(conn, &commit.revision)?;
             }
-            apply_facts(conn, params, gap_limits, &watch, &commit)
+            apply_facts(conn, params, gap_limits, &recovery_addresses, &commit)
         }) {
             Err(SqliteClientError::TransparentLedgerCommitRejected(
                 rejection @ CommitRejection::Integrity(_),
@@ -186,11 +187,11 @@ fn apply_facts<P: consensus::Parameters>(
     conn: &rusqlite::Connection,
     params: &P,
     gap_limits: &GapLimits,
-    watch: &Watch,
+    recovery_addresses: &AccountRecoveryAddresses,
     commit: &TransparentLedgerCommit<AccountUuid>,
 ) -> Result<CommitOutcome, SqliteClientError> {
     let stale = |reason| reject(CommitRejection::Stale(reason));
-    let account_ref = watch.account.internal_id();
+    let account_ref = recovery_addresses.account.internal_id();
     let target = commit.context.target;
     let active = commit.context.lifecycle == AccountLifecycle::Active;
 
@@ -266,7 +267,7 @@ fn apply_facts<P: consensus::Parameters>(
     let window_grew = if active {
         // Read-time expansion may have found addresses beyond the wallet's gap generation.
         // Materialize that watch before projecting any receive at those addresses.
-        ownership::materialize_watch(conn, params, watch)?;
+        ownership::materialize_recovery_addresses(conn, params, recovery_addresses)?;
         // Events join the wallet's outputs and spends, where the wallet's own gap-limit
         // generation extends its address window.
         for receive in &commit.receives {
@@ -275,17 +276,18 @@ fn apply_facts<P: consensus::Parameters>(
         for spend in &commit.spends {
             projection::project_spend(conn, params, gap_limits, spend)?;
         }
-        let after = Watch::load(conn, params, gap_limits, commit.context.account)?
-            .ok_or(SqliteClientError::AccountUnknown)?;
-        after.production_end != watch.production_end
+        let after =
+            AccountRecoveryAddresses::load(conn, params, gap_limits, commit.context.account)?
+                .ok_or(SqliteClientError::AccountUnknown)?;
+        after.production_end != recovery_addresses.production_end
     } else {
         let mut window_grew = false;
-        for (slot, needed) in watch
+        for (slot, needed) in recovery_addresses
             .window_needs(conn, gap_limits)?
             .into_iter()
             .enumerate()
         {
-            if let Some(needed) = needed.filter(|_| watch.derivable[slot]) {
+            if let Some(needed) = needed.filter(|_| recovery_addresses.derivable[slot]) {
                 conn.execute(
                     "INSERT INTO tpir_candidate_windows (account_id, key_scope, end_index)
                      VALUES (:account_id, :key_scope, :end_index)
