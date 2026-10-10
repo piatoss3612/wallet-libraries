@@ -25,7 +25,7 @@ use transparent_wallet::{
 use crate::convert::address_script;
 use crate::error::{RecoveryError, ensure_valid, failure};
 use crate::progress::{Outcome, Progress};
-use crate::recovery::{
+use crate::transparent_history_recovery::{
     check_publication_limits, ensure_mainnet_publication, refuse_parent_filters, service_geometry,
 };
 

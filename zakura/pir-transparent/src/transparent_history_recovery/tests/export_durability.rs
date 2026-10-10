@@ -4,7 +4,7 @@ use super::*;
 fn normalized_events_preserve_attribution_and_local_shard_anchor_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("companion.sqlite");
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     let map = map();
     let entry = &map.shards[0];
     let watch = watch();
@@ -97,7 +97,7 @@ fn normalized_events_preserve_attribution_and_local_shard_anchor_after_reopen() 
     adapter.acknowledge_applied(&first).unwrap();
     assert!(adapter.acknowledge_applied(&first).is_err());
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     let again = adapter
         .normalize(&watch, map.clone(), MORE, &StaticChain::from_map(&map))
         .unwrap();
@@ -128,7 +128,7 @@ fn normalized_events_preserve_attribution_and_local_shard_anchor_after_reopen() 
     assert_eq!(changed.state, withdrawn);
     assert!(changed.commits.is_empty());
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     let after_restart = adapter
         .normalize(
             &watch,
@@ -157,7 +157,7 @@ fn possible_wallet_export_survives_crash_before_ack_and_withdrawal() {
     // not retrieved the successor, so nothing replaces what may be in the wallet.
     map.shards[1].revision = 1;
     map.shards[1].manifest_digest = "5a".repeat(32);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     withdraw_tail(&mut adapter, &map);
     let pending = pass(&mut adapter, &map);
     assert_eq!(pending.state, BatchState::Pending);
@@ -166,7 +166,7 @@ fn possible_wallet_export_survives_crash_before_ack_and_withdrawal() {
     assert_eq!(exported(&adapter), vec![(ARCHIVE, 1), (TAIL, 1)]);
     // The export intent survives a restart.
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     assert_eq!(pass(&mut adapter, &map).state, BatchState::Pending);
 
     // Once the successor is retrieved it replaces the possibly applied tail.
@@ -178,7 +178,7 @@ fn possible_wallet_export_survives_crash_before_ack_and_withdrawal() {
     assert_eq!(successor.lineage, possibly_applied.lineage + 1);
     // A crash before this acknowledgment replays the same batch.
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     let replayed = pass(&mut adapter, &map);
     assert_eq!(replayed.state, BatchState::Ready);
     assert_eq!(replayed.commits, ready.commits);
@@ -194,7 +194,7 @@ fn possible_wallet_export_survives_crash_before_ack_and_withdrawal() {
     ));
     // Rejection must preserve the notification even across another crash.
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     let replayed = pass(&mut adapter, &map);
     assert_eq!(replayed.retired_revisions(), &[possibly_applied]);
     assert!(adapter.acknowledge_reconciled(&batch).is_err());
@@ -258,7 +258,7 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
     let chain = StaticChain::from_map(&publication);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("companion.sqlite");
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     adapter
         .store
         .bind_set(&SetIdentity::of(&publication))
@@ -336,7 +336,7 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
     assert_eq!(before.covered_through, Some(target.height));
     // Crash after the wallet commits but before the companion acknowledges.
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     adapter
         .store
         .rollback_above(
@@ -418,7 +418,7 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
         before
     );
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     let replacement = adapter
         .normalize(&watch, publication.clone(), MORE, &chain)
         .unwrap();
@@ -468,7 +468,7 @@ fn empty_replacement_retains_notice_until_wallet_reconciliation_commits() {
     );
     adapter.acknowledge_reconciled(&replacement).unwrap();
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     let final_batch = adapter
         .normalize(&watch, publication, MORE, &chain)
         .unwrap();

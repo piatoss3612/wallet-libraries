@@ -180,7 +180,7 @@ impl<E: HttpExchange> TransparentPirHttp<E> {
     }
 
     /// The filter source and shard transport a pass hands
-    /// `ReferenceRecovery::recover`.
+    /// `TransparentHistoryRecovery::recover`.
     pub fn split(&mut self) -> (PirFilters<'_, E>, PirShards<'_, E>) {
         let http = &*self;
         (PirFilters { http }, PirShards { http })

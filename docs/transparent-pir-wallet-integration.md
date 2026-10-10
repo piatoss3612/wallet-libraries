@@ -67,7 +67,7 @@ private queries are encoded and retrieved.
 | Boundary | Responsibility | Principal interface |
 | --- | --- | --- |
 | Protocol client → recovery adapter | Retrieve script histories and publication information within finite bounds | wallet-pir's `FilterSource` and `ShardTransport` |
-| Vizor → recovery adapter | Supply account identity, origin, watched addresses, locally accepted chain, and routed transport | `RecoveryConfig`, `WalletChain`, `HttpExchange`, `recover` |
+| Vizor → recovery adapter | Supply account identity, origin, watched addresses, locally accepted chain, and routed transport | `TransparentHistoryRecoveryConfig`, `WalletChain`, `HttpExchange`, `recover` |
 | Adapter → wallet store | Apply normalized events, coverage, source revisions, and continuation work | `TransparentLedgerCommit`, `TransparentLedgerWrite` |
 | Wallet store → application | Read balance together with authority, coverage, and blockers; read account-specific history | `TransparentLedgerSnapshot`, `transaction_history_details` |
 | Receipt scheduler → wallet store | List due work, validate returned display facts, record failures, and read cached details | `TransparentDetailRead`, `TransparentDetailWrite` |

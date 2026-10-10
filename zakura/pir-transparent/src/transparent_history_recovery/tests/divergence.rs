@@ -51,7 +51,7 @@ fn a_publication_diverging_from_the_sync_is_pending_and_keeps_the_companion() {
         adapter
     };
     // Reading the tail's withdrawn revision makes the sync refresh to `then`.
-    let refreshing = |adapter: &mut ReferenceRecovery, then: &ShardMap| {
+    let refreshing = |adapter: &mut TransparentHistoryRecovery, then: &ShardMap| {
         let mut filters = Republishing {
             maps: [&first, then]
                 .map(|map| serde_json::to_vec(map).unwrap())

@@ -1,6 +1,9 @@
 //! Recovery passes for one wallet account: a bounded sync through the reference
 //! client into the companion's store, then normalization of what the store holds into a
 //! batch of candidate commits.
+//!
+//! The caller supplies a watch set of already-derived addresses. The same
+//! recovery pass retrieves history during wallet restoration and ongoing sync.
 
 mod commit_builder;
 mod normalize;
@@ -18,7 +21,7 @@ use transparent_filter::ShardMap;
 use transparent_wallet::transport::{FilterSource, ShardTransport};
 use transparent_wallet::{ChainView, SetIdentity, SyncError, WorkLimits};
 use transparent_wallet_store::SqliteStore;
-use zcash_client_backend::data_api::transparent_ledger::TransparentWatchSet;
+use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
 
 pub(crate) use preflight::{
     check_publication_limits, ensure_mainnet_publication, refuse_parent_filters, service_geometry,
@@ -42,8 +45,9 @@ pub const SCHEMA: &str = "transparent-shard-v11";
 /// Identity and finite resource bounds for one account's recovery passes.
 ///
 /// The caller supplies the transports for each pass; nothing here is dialed.
+/// Account keys and mnemonic derivation stay with the caller.
 #[derive(Clone, Debug)]
-pub struct RecoveryConfig {
+pub struct TransparentHistoryRecoveryConfig {
     /// Caller-chosen source identity, independent of a server's assertions.
     pub source: Vec<u8>,
     /// Stable wallet/account identity; use a different companion store per account.
@@ -65,12 +69,15 @@ pub struct RecoveryConfig {
 
 /// Durable reference retrieval and normalization for one wallet/account.
 ///
+/// Recover transparent history for addresses the caller has already derived,
+/// both during mnemonic restoration and during subsequent synchronization.
+///
 /// The companion store retains cache and page continuation. It is deliberately
 /// separate from wallet financial state, whose writer independently validates each
 /// normalized commit. No method here changes qualification, activation or spending.
-pub struct ReferenceRecovery {
+pub struct TransparentHistoryRecovery {
     /// The identity and bounds every pass of this companion uses.
-    config: RecoveryConfig,
+    config: TransparentHistoryRecoveryConfig,
     /// The companion binding every derived source includes.
     binding: [u8; 32],
     /// The reference client's store: scripts, coverage, events, page work and
@@ -83,7 +90,7 @@ pub struct ReferenceRecovery {
     outstanding_receipt: Option<[u8; 32]>,
 }
 
-impl ReferenceRecovery {
+impl TransparentHistoryRecovery {
     /// Open a compatible companion store and fence its account, origin and schema binding.
     ///
     /// A new companion is created in format `transparent-reference-companion-v3`.
@@ -92,7 +99,10 @@ impl ReferenceRecovery {
     /// facts again under v3 sources without retrieving them. One in the v1
     /// format, whose lineage was a local counter no recreated companion can
     /// reproduce, is refused with `Invalid("companion format v1; recreate")`.
-    pub fn open(path: impl AsRef<Path>, config: RecoveryConfig) -> Result<Self, RecoveryError> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        config: TransparentHistoryRecoveryConfig,
+    ) -> Result<Self, RecoveryError> {
         ensure_valid(
             !config.source.is_empty()
                 && config.source.len() <= 256
@@ -205,7 +215,7 @@ impl ReferenceRecovery {
     /// store holds is never held back.
     pub fn recover<A, C, F, T>(
         &mut self,
-        watch: &TransparentWatchSet<A>,
+        watch: &TransparentAddressWatchSet<A>,
         chain: &C,
         filters: &mut F,
         transport: &mut T,

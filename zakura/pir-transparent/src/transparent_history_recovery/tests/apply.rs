@@ -41,7 +41,8 @@ fn retired() -> RecoveryRevision {
 #[test]
 fn an_empty_ready_batch_is_acknowledged_and_spends_its_receipt() {
     let dir = tempfile::tempdir().unwrap();
-    let mut adapter = ReferenceRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
+    let mut adapter =
+        TransparentHistoryRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
     let mut st = wallet();
     let batch = adapter
         .issue_ready_batch::<AccountUuid>(vec![], vec![], MORE)
@@ -58,7 +59,8 @@ fn an_empty_ready_batch_is_acknowledged_and_spends_its_receipt() {
 #[test]
 fn unready_and_stale_batches_apply_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let mut adapter = ReferenceRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
+    let mut adapter =
+        TransparentHistoryRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
     let mut st = wallet();
     for state in [
         BatchState::Pending,
@@ -92,7 +94,8 @@ fn unready_and_stale_batches_apply_nothing() {
 #[test]
 fn a_surrounding_transaction_is_refused_before_anything_applies() {
     let dir = tempfile::tempdir().unwrap();
-    let mut adapter = ReferenceRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
+    let mut adapter =
+        TransparentHistoryRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
     let mut st = wallet();
     let batch = adapter
         .issue_ready_batch::<AccountUuid>(vec![], vec![retired()], MORE)
@@ -110,7 +113,8 @@ fn a_surrounding_transaction_is_refused_before_anything_applies() {
 #[test]
 fn observed_trust_refuses_retirements_before_applying() {
     let dir = tempfile::tempdir().unwrap();
-    let mut adapter = ReferenceRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
+    let mut adapter =
+        TransparentHistoryRecovery::open(dir.path().join("c.sqlite"), config()).unwrap();
     let mut st = wallet();
     let batch = adapter
         .issue_ready_batch::<AccountUuid>(vec![], vec![retired()], MORE)

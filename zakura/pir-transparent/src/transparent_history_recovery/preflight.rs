@@ -5,16 +5,16 @@ use std::collections::BTreeMap;
 use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap, wire::MAX_SUPERSEDED};
 use transparent_wallet::transport::{FilterSource, ShardTransport};
 use transparent_wallet::{Acceptance, Anchor, ChainView, ServiceGeometry, WalletStore};
-use zcash_client_backend::data_api::transparent_ledger::TransparentWatchSet;
+use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
 
-use super::{ReferenceRecovery, SCHEMA};
+use super::{SCHEMA, TransparentHistoryRecovery};
 use crate::convert::{address_script, height_u64};
 use crate::error::{RecoveryError, ensure_valid, failure};
 
 /// The watch set's target as the reference client names it, refusing a watch set
 /// without one or a target `chain` does not accept.
 pub(super) fn accepted_target<A: Copy>(
-    watch: &TransparentWatchSet<A>,
+    watch: &TransparentAddressWatchSet<A>,
     chain: &impl ChainView,
 ) -> Result<Anchor, RecoveryError> {
     let context = watch
@@ -49,12 +49,12 @@ pub(crate) fn ensure_mainnet_publication(map: &ShardMap) -> Result<(), RecoveryE
     )
 }
 
-impl ReferenceRecovery {
+impl TransparentHistoryRecovery {
     /// Refuses a watch set with more addresses than the script limit, a companion
     /// retaining more scripts than it, or a watch set naming an address twice.
     pub(super) fn check_watch_set<A>(
         &self,
-        watch: &TransparentWatchSet<A>,
+        watch: &TransparentAddressWatchSet<A>,
     ) -> Result<(), RecoveryError> {
         ensure_valid(
             watch.addresses.len() <= self.config.scripts
@@ -82,7 +82,7 @@ impl ReferenceRecovery {
 
 /// The lowest height a pass needs the wallet's chain for: the lowest required
 /// height in `watch`, capped at `target`, or 0 when nothing is watched.
-pub(super) fn watch_floor<A>(watch: &TransparentWatchSet<A>, target: u64) -> u64 {
+pub(super) fn watch_floor<A>(watch: &TransparentAddressWatchSet<A>, target: u64) -> u64 {
     watch
         .addresses
         .iter()

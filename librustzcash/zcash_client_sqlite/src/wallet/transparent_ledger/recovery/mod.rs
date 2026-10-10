@@ -40,8 +40,8 @@ use {
             CommitOutcome, CommitRejection, IntegrityFailure, InvalidCommit,
             MAX_RECOVERY_IDENTIFIER_LEN, PageRequest, PendingPage, PublicationAnchor, ReceiveEvent,
             RecoveryBlocker, RecoveryRevision, RefusedCommit, SpendEvent, StaleCommit,
-            TransparentLedgerCommit, TransparentLedgerMode, TransparentWatchSet, WatchOrigin,
-            WatchedAddress,
+            TransparentAddressWatchSet, TransparentLedgerCommit, TransparentLedgerMode,
+            WatchOrigin, WatchedAddress,
         },
     },
     zcash_keys::{

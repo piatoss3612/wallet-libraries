@@ -4,13 +4,13 @@
 use transparent_filter::ShardMap;
 use transparent_wallet::{Acceptance, ChainView, SetIdentity, WalletStore};
 
-use super::{ReferenceRecovery, SCHEMA};
+use super::{SCHEMA, TransparentHistoryRecovery};
 use crate::batch::{BatchState, RecoveryBatch, WithdrawnCause, behind_unread_batch, unready_batch};
 use crate::catalog;
 use crate::error::{RecoveryError, failure};
 use crate::progress::{Outcome, Progress};
 
-impl ReferenceRecovery {
+impl TransparentHistoryRecovery {
     /// The set check the sync would make when binding, made before it so that a
     /// changed publication restarts the store rather than stopping the sync.
     ///

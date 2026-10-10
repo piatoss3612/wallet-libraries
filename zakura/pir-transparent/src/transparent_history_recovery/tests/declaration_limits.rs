@@ -151,7 +151,7 @@ fn declarations_below_the_floor_count_against_a_separate_limit() {
     );
     let dir = tempfile::tempdir().unwrap();
     let mut adapter =
-        ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     adapter.check_limits(&at_limit, floor).unwrap();
     let mut filters = CountingFilters::serving(serde_json::to_vec(&over).unwrap());
     let mut shards = CountingShards::serving(SCHEMA);

@@ -4,7 +4,7 @@ use super::*;
 fn source_identity_binds_account_origin_and_schema() {
     let map = map();
     let dir = tempfile::tempdir().unwrap();
-    let sources = |name: &str, config: RecoveryConfig| -> Vec<Vec<u8>> {
+    let sources = |name: &str, config: TransparentHistoryRecoveryConfig| -> Vec<Vec<u8>> {
         let mut adapter = covering_as(&dir.path().join(name), config, &map);
         let batch = pass(&mut adapter, &map);
         assert_eq!(batch.state, BatchState::Ready);
@@ -18,7 +18,8 @@ fn source_identity_binds_account_origin_and_schema() {
     assert_eq!(base.len(), 2);
     assert_ne!(base[0], base[1]);
     // Reopening the companion derives the same sources.
-    let mut reopened = ReferenceRecovery::open(dir.path().join("base.sqlite"), config()).unwrap();
+    let mut reopened =
+        TransparentHistoryRecovery::open(dir.path().join("base.sqlite"), config()).unwrap();
     let again: Vec<_> = revisions(&pass(&mut reopened, &map))
         .into_iter()
         .map(|revision| revision.source)
@@ -147,7 +148,7 @@ fn a_recreated_companion_distinguishes_a_shifted_shard_boundary() {
 
         // Reopening unchanged data still reproduces the same identity.
         drop(recreated);
-        let mut reopened = ReferenceRecovery::open(&path, config()).unwrap();
+        let mut reopened = TransparentHistoryRecovery::open(&path, config()).unwrap();
         assert_eq!(revisions(&pass(&mut reopened, &recut))[1], next);
     }
 }

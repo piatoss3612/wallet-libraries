@@ -134,7 +134,7 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     // The retried pass, on the same companion reopened, gets past the check
     // and binds the store to the resealed set.
     let mut adapter =
-        ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     let mut filters = CountingFilters::serving(serde_json::to_vec(&resealed).unwrap());
     let mut shards = CountingShards::serving(SCHEMA);
     assert!(matches!(

@@ -1,6 +1,6 @@
 //! Private recovery end to end: a wallet recovers its transparent history from a
 //! transparent shard service running in process, over loopback HTTP and real
-//! PIR, through `ReferenceRecovery` and the wallet's trusted commit operation.
+//! PIR, through `TransparentHistoryRecovery` and the wallet's trusted commit operation.
 //!
 //! The service records every request it receives, so the tests also check what
 //! a private pass discloses: only the service's routes, no script of the
@@ -25,18 +25,18 @@ use transparent_filter::{Recut, ScriptBytes, SealParameters, ShardMap};
 use transparent_wallet::http::{HttpFilterSource, HttpOptions, HttpShardTransport};
 use zakura_pir_transparent::{
     ApplyAction, ApplyError, BatchState, Interrupted, Outcome, Progress, RecoveryBatch,
-    RecoveryConfig, RecoveryError, ReferenceRecovery, ShardTransport, Trust, WalletChain,
-    WithdrawnCause, WriteGate,
+    RecoveryError, ShardTransport, TransparentHistoryRecovery, TransparentHistoryRecoveryConfig,
+    Trust, WalletChain, WithdrawnCause, WriteGate,
 };
 use zcash_client_backend::data_api::{
     Account as _, CoinbaseFilter, InputSource as _, WalletRead as _,
     chain::ChainState,
     testing::{InitialChainState, TestBuilder, TestState},
     transparent_ledger::{
-        AccountLifecycle, CommitRejection, RecoveryRevision, StaleCommit, TransparentAuthority,
-        TransparentLedgerCommit,
+        AccountLifecycle, CommitRejection, RecoveryRevision, StaleCommit,
+        TransparentAddressWatchSet, TransparentAuthority, TransparentLedgerCommit,
         TransparentLedgerMode::{self, PrivateRequired},
-        TransparentLedgerRead as _, TransparentLedgerWrite as _, TransparentWatchSet, WatchOrigin,
+        TransparentLedgerRead as _, TransparentLedgerWrite as _, WatchOrigin,
     },
     wallet::{
         ConfirmationsPolicy, TargetHeight,
@@ -83,8 +83,8 @@ const UNDECLARED_REWRITE: BatchState = BatchState::Withdrawn(WithdrawnCause::Cha
 static HEAVY: Mutex<()> = Mutex::new(());
 
 /// Vizor's per-pass limits.
-fn config(account: AccountUuid) -> RecoveryConfig {
-    RecoveryConfig {
+fn config(account: AccountUuid) -> TransparentHistoryRecoveryConfig {
+    TransparentHistoryRecoveryConfig {
         source: b"fixture/transparent-pir/v1".to_vec(),
         account_binding: account.expose_uuid().as_bytes().to_vec(),
         origin: ORIGIN.into(),
@@ -228,7 +228,7 @@ struct Fixture {
     dir: tempfile::TempDir,
     publications: usize,
     url: Option<String>,
-    companion: Option<ReferenceRecovery>,
+    companion: Option<TransparentHistoryRecovery>,
     /// The public key hash of every address any watch set named.
     watched: BTreeSet<[u8; 20]>,
     /// Retired revisions acknowledged through trusted `apply_and_acknowledge`.
@@ -357,11 +357,12 @@ impl Fixture {
 
     fn open(&mut self) {
         self.companion = None;
-        self.companion =
-            Some(ReferenceRecovery::open(self.companion_path(), config(self.account)).unwrap());
+        self.companion = Some(
+            TransparentHistoryRecovery::open(self.companion_path(), config(self.account)).unwrap(),
+        );
     }
 
-    fn watch(&self) -> TransparentWatchSet<AccountUuid> {
+    fn watch(&self) -> TransparentAddressWatchSet<AccountUuid> {
         self.st
             .wallet()
             .db()

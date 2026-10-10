@@ -9,8 +9,8 @@ use transparent_filter::ShardMap;
 use transparent_wallet::{ChainView, SetIdentity, WalletStore};
 use transparent_wallet_store::SqliteStore;
 use zcash_client_backend::data_api::transparent_ledger::{
-    AddressRange, ChainPoint, PageRequest, ReceiveEvent, SpendEvent, TransparentLedgerCommit,
-    TransparentWatchSet, WatchedAddress,
+    AddressRange, ChainPoint, PageRequest, ReceiveEvent, SpendEvent, TransparentAddressWatchSet,
+    TransparentLedgerCommit, WatchedAddress,
 };
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
@@ -18,7 +18,7 @@ use zcash_protocol::{consensus::BlockHeight, value::Zatoshis};
 use super::commit_builder::{CommitBuilder, RevisionCommits, accepted_shard_anchor};
 use super::page_completion::{page_continuation_id, page_covered, stranded_page_completions};
 use super::preflight::watch_floor;
-use super::{ReferenceRecovery, SCHEMA};
+use super::{SCHEMA, TransparentHistoryRecovery};
 use crate::batch::{BatchState, RecoveryBatch, unready_batch};
 use crate::catalog::{self, CatalogPass, Published};
 use crate::convert::{
@@ -30,7 +30,7 @@ use crate::progress::Progress;
 /// The watch set's addresses, by the script a stored fact names.
 type WatchedByScript<'w> = BTreeMap<Vec<u8>, &'w WatchedAddress>;
 
-impl ReferenceRecovery {
+impl TransparentHistoryRecovery {
     /// One catalog transaction over `map`: classify its revisions, export the
     /// companion's facts as commits, and decide the batch's state.
     ///
@@ -48,7 +48,7 @@ impl ReferenceRecovery {
     /// transaction, before the batch is returned.
     pub(super) fn normalize<A: Copy>(
         &mut self,
-        watch: &TransparentWatchSet<A>,
+        watch: &TransparentAddressWatchSet<A>,
         map: ShardMap,
         progress: Progress,
         chain: &impl ChainView,
@@ -229,7 +229,7 @@ fn anchor_shards_in_window<'p>(
 
 /// Stored facts are looked up by the revision they were read under, without assuming
 /// the map still publishes it.
-fn watched_by_script<A>(watch: &TransparentWatchSet<A>) -> WatchedByScript<'_> {
+fn watched_by_script<A>(watch: &TransparentAddressWatchSet<A>) -> WatchedByScript<'_> {
     watch
         .addresses
         .iter()
@@ -389,7 +389,7 @@ fn open_unfinished_pages<A: Copy>(
 /// did not open again and that the commit's coverage spans. Completion needs
 /// coverage, not merely absence of pending work.
 fn complete_wallet_held_pages<A>(
-    watch: &TransparentWatchSet<A>,
+    watch: &TransparentAddressWatchSet<A>,
     opened_pages: &BTreeSet<Vec<u8>>,
     commits: &mut RevisionCommits<A>,
 ) {
@@ -412,7 +412,7 @@ fn complete_wallet_held_pages<A>(
 /// it again after a publication change, and the wallet refuses a page opened over its
 /// own coverage. A later pass exports it once its page work is done.
 fn hold_back_reopened_exports<A>(
-    watch: &TransparentWatchSet<A>,
+    watch: &TransparentAddressWatchSet<A>,
     pass: &CatalogPass<'_>,
     commits: &mut RevisionCommits<A>,
 ) -> Result<(), RecoveryError> {

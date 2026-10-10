@@ -4,7 +4,7 @@ use super::*;
 fn companion_binding_rejects_account_and_origin_changes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("companion.sqlite");
-    drop(ReferenceRecovery::open(&path, config()).unwrap());
+    drop(TransparentHistoryRecovery::open(&path, config()).unwrap());
     for which in 0..3 {
         let mut different = config();
         match which {
@@ -13,18 +13,18 @@ fn companion_binding_rejects_account_and_origin_changes() {
             _ => different.source = b"another-fixture-source".to_vec(),
         }
         assert!(matches!(
-            ReferenceRecovery::open(&path, different),
+            TransparentHistoryRecovery::open(&path, different),
             Err(RecoveryError::Invalid(_))
         ));
     }
-    ReferenceRecovery::open(&path, config()).unwrap();
+    TransparentHistoryRecovery::open(&path, config()).unwrap();
 }
 
 #[test]
 fn a_companion_bound_to_another_schema_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("companion.sqlite");
-    drop(ReferenceRecovery::open(&path, config()).unwrap());
+    drop(TransparentHistoryRecovery::open(&path, config()).unwrap());
     let config = config();
     let rebind = |schema: &str| {
         Connection::open(&path)
@@ -43,18 +43,18 @@ fn a_companion_bound_to_another_schema_is_refused() {
     };
     assert_eq!(rebind("transparent-shard-v10"), 1);
     assert!(matches!(
-        ReferenceRecovery::open(&path, config.clone()),
+        TransparentHistoryRecovery::open(&path, config.clone()),
         Err(RecoveryError::Invalid(_))
     ));
     assert_eq!(rebind(SCHEMA), 1);
-    ReferenceRecovery::open(&path, config).unwrap();
+    TransparentHistoryRecovery::open(&path, config).unwrap();
 }
 
 #[test]
 fn missing_or_unaccepted_targets_and_oversized_watch_sets_fail_before_retrieval() {
     let dir = tempfile::tempdir().unwrap();
     let mut adapter =
-        ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     let map = map();
     let unknown = StaticChain::default();
     let accepted = StaticChain::from_map(&map);
@@ -87,7 +87,7 @@ fn missing_or_unaccepted_targets_and_oversized_watch_sets_fail_before_retrieval(
     // Scripts the companion already retains count against the same limit.
     let dir = tempfile::tempdir().unwrap();
     let mut crowded =
-        ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     crowded.store.bind_set(&SetIdentity::of(&map)).unwrap();
     crowded
         .store
@@ -120,7 +120,7 @@ fn missing_or_unaccepted_targets_and_oversized_watch_sets_fail_before_retrieval(
 fn parent_filter_sources_are_refused_before_retrieval() {
     let dir = tempfile::tempdir().unwrap();
     let mut adapter =
-        ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     let mut filters = CountingFilters {
         parents: true,
         ..Default::default()
@@ -143,7 +143,7 @@ fn parent_filter_sources_are_refused_before_retrieval() {
 fn a_service_with_another_schema_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let mut adapter =
-        ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     let mut filters = CountingFilters::default();
     let mut shards = CountingShards::serving("transparent-shard-v10");
     assert!(matches!(

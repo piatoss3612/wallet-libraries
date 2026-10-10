@@ -7,7 +7,7 @@ use zcash_client_backend::data_api::transparent_ledger::{
     RecoveryRevision, TransparentLedgerCommit,
 };
 
-use super::ReferenceRecovery;
+use super::TransparentHistoryRecovery;
 use crate::batch::{BatchState, RecoveryBatch};
 use crate::catalog;
 use crate::error::{RecoveryError, ensure_valid, failure};
@@ -37,7 +37,7 @@ fn receipt_token<A>(
     hash.finalize().into()
 }
 
-impl ReferenceRecovery {
+impl TransparentHistoryRecovery {
     /// A ready batch, whose receipt the next acknowledgment must present.
     pub(super) fn issue_ready_batch<A>(
         &mut self,

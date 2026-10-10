@@ -19,12 +19,12 @@ mod error;
 mod http;
 #[cfg(feature = "wallet")]
 mod progress;
-#[cfg(feature = "wallet")]
-mod recovery;
 #[cfg(all(test, feature = "wallet"))]
 mod test_support;
 #[cfg(feature = "testing")]
 pub mod testing;
+#[cfg(feature = "wallet")]
+mod transparent_history_recovery;
 #[cfg(feature = "wallet")]
 mod txid;
 #[cfg(feature = "sqlite")]
@@ -51,7 +51,9 @@ pub use http::{
 #[cfg(feature = "wallet")]
 pub use progress::{Outcome, Progress, Retry};
 #[cfg(feature = "wallet")]
-pub use recovery::{RecoveryConfig, ReferenceRecovery, SCHEMA};
+pub use transparent_history_recovery::{
+    SCHEMA, TransparentHistoryRecovery, TransparentHistoryRecoveryConfig,
+};
 #[cfg(feature = "wallet")]
 pub use transparent_txid_client::{
     Address as EntryAddress, AddressKind, DisplayEntry, EntryOutput, Placement, ProfileCache,

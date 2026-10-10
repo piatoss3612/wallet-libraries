@@ -92,7 +92,7 @@ fn exported_rows_are_classified_by_the_first_matching_rule() {
     let first = pass(&mut adapter, &cut);
     assert_eq!(first.state, BatchState::Ready);
     adapter.acknowledge_applied(&first).unwrap();
-    let settled = |adapter: &mut ReferenceRecovery, map: &ShardMap| {
+    let settled = |adapter: &mut TransparentHistoryRecovery, map: &ShardMap| {
         let set = SetIdentity::of_schema(map, SCHEMA);
         let published: Vec<_> = map
             .shards
@@ -220,7 +220,7 @@ fn a_version_one_companion_is_refused() {
     .unwrap();
     let refused = |path: &Path| {
         matches!(
-            ReferenceRecovery::open(path, config.clone()),
+            TransparentHistoryRecovery::open(path, config.clone()),
             Err(RecoveryError::Invalid(message)) if message == "companion format v1; recreate"
         )
     };
@@ -236,7 +236,7 @@ fn a_version_one_companion_is_refused() {
     assert!(refused(&path));
     // A recreated companion opens, records its format, and reopens.
     let fresh = dir.path().join("recreated.sqlite");
-    drop(ReferenceRecovery::open(&fresh, config.clone()).unwrap());
+    drop(TransparentHistoryRecovery::open(&fresh, config.clone()).unwrap());
     let format: String = Connection::open(&fresh)
         .unwrap()
         .query_row(
@@ -246,5 +246,5 @@ fn a_version_one_companion_is_refused() {
         )
         .unwrap();
     assert_eq!(format, "transparent-reference-companion-v3");
-    ReferenceRecovery::open(&fresh, config).unwrap();
+    TransparentHistoryRecovery::open(&fresh, config).unwrap();
 }

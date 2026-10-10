@@ -234,7 +234,8 @@ fn a_successor_must_rise_above_its_declared_revision() {
         superseded: vec![again],
     });
     let fresh = tempfile::tempdir().unwrap();
-    let mut fresh = ReferenceRecovery::open(fresh.path().join("fresh.sqlite"), config()).unwrap();
+    let mut fresh =
+        TransparentHistoryRecovery::open(fresh.path().join("fresh.sqlite"), config()).unwrap();
     for (map, cause) in [
         (&level, WithdrawnCause::Equivocation),
         (&lower, WithdrawnCause::Regression),
@@ -559,7 +560,7 @@ fn a_version_two_companion_is_rebuilt_keeping_its_store() {
     // Another account's companion is still refused, and changes nothing.
     let mut other = config();
     other.account_binding = vec![2];
-    assert!(ReferenceRecovery::open(&path, other).is_err());
+    assert!(TransparentHistoryRecovery::open(&path, other).is_err());
     let format = |conn: &Connection| -> String {
         conn.query_row(
             "SELECT value FROM pir_bridge_binding WHERE key='format'",
@@ -571,7 +572,7 @@ fn a_version_two_companion_is_rebuilt_keeping_its_store() {
     assert_eq!(format(&v2), "transparent-reference-companion-v2");
 
     // Opening rebuilds the catalog in place, empty, and keeps the store.
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     assert_eq!(format(&v2), "transparent-reference-companion-v3");
     assert_eq!(cataloged(&adapter), 0);
     assert_eq!(catalog::recut_epoch(&adapter.catalog).unwrap(), 0);
@@ -637,7 +638,7 @@ fn a_page_under_a_declared_revision_with_saved_events_completes_once() {
         })
         .unwrap();
     withdraw_tail(&mut adapter, &before);
-    let read = |adapter: &mut ReferenceRecovery, entry: &ShardMapEntry| {
+    let read = |adapter: &mut TransparentHistoryRecovery, entry: &ShardMapEntry| {
         let end = (entry.end_height, entry.terminal_block_hash.as_str());
         adapter
             .store
@@ -915,7 +916,7 @@ fn a_forged_epoch_never_holds_an_honest_map_back() {
 
     // The honest map, served afterwards, rewrites nothing the store holds,
     // so it syncs and is ready.
-    let recovered = |adapter: &mut ReferenceRecovery, map: &ShardMap| {
+    let recovered = |adapter: &mut TransparentHistoryRecovery, map: &ShardMap| {
         let mut filters = CountingFilters::serving(serde_json::to_vec(map).unwrap());
         let mut shards = CountingShards::serving(SCHEMA);
         let batch = adapter

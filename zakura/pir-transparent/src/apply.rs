@@ -1,13 +1,13 @@
 //! Applying a ready batch to a SQLite wallet and acknowledging it, with feature `sqlite`.
 //!
-//! [`ReferenceRecovery::apply_and_acknowledge`] consumes the batch, so its commits cannot be
+//! [`TransparentHistoryRecovery::apply_and_acknowledge`] consumes the batch, so its commits cannot be
 //! edited or dropped before its retirements are acknowledged. Each commit applies in its own
 //! wallet transaction, exactly as the wallet's commit operations do on their own; the
 //! companion is acknowledged afterwards, in its own database. Nothing makes the two databases
 //! atomic: a failure or crash between them leaves the batch unacknowledged, and the next pass
 //! exports the same revisions again, whose replay changes nothing the wallet already holds.
 //!
-//! [`ReferenceRecovery::apply_and_acknowledge_gated`] runs each of those wallet writes
+//! [`TransparentHistoryRecovery::apply_and_acknowledge_gated`] runs each of those wallet writes
 //! through a [`WriteGate`], so an application that serializes its wallet writes holds its
 //! serialization for one write at a time, not the whole batch, and can stop the batch
 //! between writes.
@@ -23,7 +23,7 @@ use crate::batch::{BatchState, RecoveryBatch};
 use crate::catalog;
 use crate::error::RecoveryError;
 use crate::progress::Progress;
-use crate::recovery::ReferenceRecovery;
+use crate::transparent_history_recovery::TransparentHistoryRecovery;
 
 /// How the wallet treats the revisions of the commits it applies. The caller decides; the
 /// adapter never infers trust from the publication, the batch, or the wallet's policy.
@@ -66,7 +66,7 @@ pub struct Applied {
     pub retired: usize,
 }
 
-/// Runs the wallet writes of [`ReferenceRecovery::apply_and_acknowledge_gated`] one at a
+/// Runs the wallet writes of [`TransparentHistoryRecovery::apply_and_acknowledge_gated`] one at a
 /// time: each commit's wallet transaction, then the acknowledgment's short immediate read
 /// transaction.
 ///
@@ -83,7 +83,7 @@ pub trait WriteGate {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Interrupted;
 
-/// The [`WriteGate`] of [`ReferenceRecovery::apply_and_acknowledge`]: every write runs.
+/// The [`WriteGate`] of [`TransparentHistoryRecovery::apply_and_acknowledge`]: every write runs.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Ungated;
 
@@ -228,7 +228,7 @@ impl From<rusqlite::Error> for ApplyError {
     }
 }
 
-impl ReferenceRecovery {
+impl TransparentHistoryRecovery {
     /// Applies a ready batch's commits to `wallet` in order, then acknowledges the batch.
     ///
     /// The batch is consumed: whatever the outcome, the next acknowledgment needs a new pass.
@@ -339,7 +339,7 @@ pub(crate) fn check_policy_generation(
 
 /// Applies a ready batch's commits to `wallet` in order, each in its own wallet
 /// transaction run through `gate`, after the checks
-/// [`ReferenceRecovery::apply_and_acknowledge`] makes of any batch; `start` runs once they
+/// [`TransparentHistoryRecovery::apply_and_acknowledge`] makes of any batch; `start` runs once they
 /// pass, before the first commit. Returns what applied, the batch's retirements and the
 /// policy generation its commits were built under.
 pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(

@@ -6,7 +6,7 @@ use super::*;
 /// Coverage of `part` of `ws` through its target, from `revision`.
 fn cover_part(
     st: &mut State,
-    ws: &TransparentWatchSet<AccountUuid>,
+    ws: &TransparentAddressWatchSet<AccountUuid>,
     part: &[zcash_client_backend::data_api::transparent_ledger::WatchedAddress],
     revision: &RecoveryRevision,
 ) -> Result<CommitOutcome, SqliteClientError> {

@@ -1,6 +1,6 @@
 //! Candidate recovery: watched addresses, normalized events, coverage, and resumable pages.
 //!
-//! A recovery run captures a [`TransparentWatchSet`], asks its source about the watched
+//! A recovery run captures a [`TransparentAddressWatchSet`], asks its source about the watched
 //! addresses, and submits what it learned as one [`TransparentLedgerCommit`] per account.
 //! A candidate account's state is isolated: it never changes balances, spend links, locks,
 //! address use, or transaction history. Promoting the account projects its recovered events
@@ -77,7 +77,7 @@ pub struct TransparentRecoveryContext<AccountId> {
 
 /// One account's watched addresses, with the context a recovery run captures.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransparentWatchSet<AccountId> {
+pub struct TransparentAddressWatchSet<AccountId> {
     /// The account the watched addresses belong to.
     pub account: AccountId,
     /// The account's lifecycle at the time of the read.
@@ -94,7 +94,7 @@ pub struct TransparentWatchSet<AccountId> {
     pub pending_pages: Vec<PendingPage>,
 }
 
-impl<AccountId: Copy> TransparentWatchSet<AccountId> {
+impl<AccountId: Copy> TransparentAddressWatchSet<AccountId> {
     /// The context to recover under, or `None` while no local target exists.
     pub fn context(&self) -> Option<TransparentRecoveryContext<AccountId>> {
         self.target.map(|target| TransparentRecoveryContext {

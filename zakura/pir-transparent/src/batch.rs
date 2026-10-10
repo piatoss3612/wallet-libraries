@@ -7,7 +7,7 @@ use zcash_client_backend::data_api::transparent_ledger::{
 
 use crate::progress::{Outcome, Progress, Retry};
 #[cfg(doc)]
-use crate::{RecoveryError, ReferenceRecovery};
+use crate::{RecoveryError, TransparentHistoryRecovery};
 
 /// Whether a pass's commits may reach the wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,7 +22,7 @@ pub enum BatchState {
     /// through the trusted operation. The predecessors are the batch's
     /// [`RecoveryBatch::retired_revisions`](crate::RecoveryBatch::retired_revisions),
     /// and such a batch is acknowledged only by applying its commits through
-    /// the trusted operation with `ReferenceRecovery::apply_and_acknowledge`
+    /// the trusted operation with `TransparentHistoryRecovery::apply_and_acknowledge`
     /// (feature `sqlite`).
     Ready,
     /// The publication or this companion's retrieval is behind what the
@@ -85,11 +85,11 @@ pub enum WithdrawnCause {
 ///
 /// The batch is opaque: its commits can be read, never edited. A
 /// [`BatchState::Ready`] batch is settled in one of two ways. With feature
-/// `sqlite`, [`ReferenceRecovery::apply_and_acknowledge`] consumes it, applies
+/// `sqlite`, [`TransparentHistoryRecovery::apply_and_acknowledge`] consumes it, applies
 /// every commit to a SQLite wallet and acknowledges it, reconciling its
 /// [`RecoveryBatch::retired_revisions`] when the caller trusts the commits.
 /// Otherwise the caller applies [`RecoveryBatch::commits`] itself and
-/// acknowledges with [`ReferenceRecovery::acknowledge_applied`], which refuses a
+/// acknowledges with [`TransparentHistoryRecovery::acknowledge_applied`], which refuses a
 /// batch listing retirements. Neither the batch nor a server withdrawal is
 /// authority to change local facts or promote an account.
 pub struct RecoveryBatch<AccountId> {
@@ -150,8 +150,8 @@ impl<A> RecoveryBatch<A> {
     /// operation, `TransparentLedgerWrite::qualify_and_apply_transparent_ledger_commit`,
     /// which qualifies each successor and withdraws its source's older
     /// provisional evidence in the same wallet transaction. Only
-    /// [`ReferenceRecovery::apply_and_acknowledge`] with trusted commits
-    /// acknowledges such a batch; [`ReferenceRecovery::acknowledge_applied`]
+    /// [`TransparentHistoryRecovery::apply_and_acknowledge`] with trusted commits
+    /// acknowledges such a batch; [`TransparentHistoryRecovery::acknowledge_applied`]
     /// refuses it. The trusted operation qualifies whatever it is given, so a
     /// caller that does not trust the batch's origin cannot use it and never
     /// acknowledges a batch with retirements.

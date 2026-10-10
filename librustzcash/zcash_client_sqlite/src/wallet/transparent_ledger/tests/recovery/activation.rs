@@ -462,7 +462,7 @@ fn blocked(result: Result<(), SqliteClientError>) -> Vec<RecoveryBlocker> {
 }
 
 /// The watched external address with the highest derived index.
-fn last_external(ws: &TransparentWatchSet<AccountUuid>) -> (TransparentAddress, u32) {
+fn last_external(ws: &TransparentAddressWatchSet<AccountUuid>) -> (TransparentAddress, u32) {
     ws.addresses
         .iter()
         .filter_map(|w| match w.origin {

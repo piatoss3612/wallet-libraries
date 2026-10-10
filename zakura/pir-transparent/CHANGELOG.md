@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Rename the account recovery module to `transparent_history_recovery`,
+  `ReferenceRecovery` to `TransparentHistoryRecovery`, and `RecoveryConfig` to
+  `TransparentHistoryRecoveryConfig`. Callers still supply already-derived
+  addresses through a watch set; mnemonic derivation remains outside this crate.
+
 ### Added
 
 - `discover_active_addresses`, `Discovery` and `DiscoveryLimits`: import-time

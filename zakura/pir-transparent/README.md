@@ -21,7 +21,7 @@ private; callers use the types and traits re-exported by the crate.
 | Module | What it abstracts | Boundary it presents |
 | --- | --- | --- |
 | [`catalog`](src/catalog.rs) | Publication identity and the durable history of revisions seen or exported | Determines whether publication evidence can be handed to the wallet consistently |
-| [`recovery`](src/recovery.rs) | One account's bounded retrieval and conversion into wallet evidence | `ReferenceRecovery::recover` returns an opaque `RecoveryBatch` |
+| [`transparent_history_recovery`](src/transparent_history_recovery.rs) | One account's bounded retrieval and conversion into wallet evidence | `TransparentHistoryRecovery::recover` returns an opaque `RecoveryBatch` |
 | [`txid`](src/txid.rs) | Private display lookup for an already known transaction | `TxidDisplayService` returns lookup results; `display_facts` converts found entries to wallet display facts |
 | [`apply`](src/apply.rs) | Ordered SQLite wallet writes followed by companion acknowledgment | Explicit `Trust`, optional `WriteGate`, and a result describing the committed work |
 | [`companion`](src/companion.rs) | Account cache files and their exclusive ownership | `CompanionDir` opens, retains, and removes companions under operating-system locks |
@@ -31,7 +31,7 @@ private; callers use the types and traits re-exported by the crate.
 
 ```mermaid
 flowchart TD
-    C["catalog: publication and export history"] -->|consistency checks| R["recovery: bounded account pass"]
+    C["catalog: publication and export history"] -->|consistency checks| R["transparent_history_recovery: bounded account pass"]
     R --> B[RecoveryBatch]
     B --> A["apply: explicit trust and wallet writes"]
     A --> W[Wallet database]
@@ -67,17 +67,20 @@ trust or permission to spend. A withdrawal does not itself remove wallet facts.
 | [`exports`](src/catalog/exports.rs) | Acknowledge resolved exports and prune catalog rows that are no longer needed |
 | [`store_tables`](src/catalog/store_tables.rs) | Reset or prune the reference client's tables without discarding the catalog's continuity history |
 
-### `recovery`: a bounded account pass
+### `transparent_history_recovery`: a bounded account pass
 
 Recovery runs a bounded pass for an account's watch set and accepted chain. It
 hides reference client setup, continuation, publication checks, event conversion,
-and batch construction behind `ReferenceRecovery`.
+and batch construction behind `TransparentHistoryRecovery`.
 
-The caller supplies a `TransparentWatchSet`, a `ChainView`, and the two
+Address derivation stays with the caller. The API accepts a watch set and
+recovers its history during both wallet restoration and ongoing synchronization.
+
+The caller supplies a `TransparentAddressWatchSet`, a `ChainView`, and the two
 transport interfaces, `FilterSource` and `ShardTransport`. The watch set carries
 owned addresses, required history heights, pending work, and the wallet context
-under which results will be applied. `RecoveryConfig` supplies stable bindings
-and finite script, shard, event-export, query, and private-byte bounds.
+under which results will be applied. `TransparentHistoryRecoveryConfig` supplies
+stable bindings and finite script, shard, event-export, query, and private-byte bounds.
 
 `recover` retrieves through the reference client into the companion, then
 normalizes stored receives, spends, coverage, and page work into
@@ -87,13 +90,13 @@ holds no wallet write lock and does not activate accounts.
 
 | Private child module | Responsibility |
 | --- | --- |
-| [`preflight`](src/recovery/preflight.rs) | Validate the watch set and publication bounds, network, schema, and supported filter mode before further retrieval |
-| [`sync_inputs`](src/recovery/sync_inputs.rs) | Adapt watched scripts, the accepted chain, the history floor, the sync target, and the map retained from retrieval |
-| [`publication_gate`](src/recovery/publication_gate.rs) | Handle changed publication identity, lagging publications, and refused sealed-history rewrites |
-| [`normalize`](src/recovery/normalize.rs) | Turn stored facts into a batch within a catalog transaction and decide whether it can reach the wallet |
-| [`commit_builder`](src/recovery/commit_builder.rs) | Group facts under their original revision identities and build anchored wallet commits |
-| [`page_completion`](src/recovery/page_completion.rs) | Translate unfinished pages and complete wallet page obligations when coverage spans them |
-| [`receipt`](src/recovery/receipt.rs) | Bind acknowledgment to the latest issued ready batch |
+| [`preflight`](src/transparent_history_recovery/preflight.rs) | Validate the watch set and publication bounds, network, schema, and supported filter mode before further retrieval |
+| [`sync_inputs`](src/transparent_history_recovery/sync_inputs.rs) | Adapt watched scripts, the accepted chain, the history floor, the sync target, and the map retained from retrieval |
+| [`publication_gate`](src/transparent_history_recovery/publication_gate.rs) | Handle changed publication identity, lagging publications, and refused sealed-history rewrites |
+| [`normalize`](src/transparent_history_recovery/normalize.rs) | Turn stored facts into a batch within a catalog transaction and decide whether it can reach the wallet |
+| [`commit_builder`](src/transparent_history_recovery/commit_builder.rs) | Group facts under their original revision identities and build anchored wallet commits |
+| [`page_completion`](src/transparent_history_recovery/page_completion.rs) | Translate unfinished pages and complete wallet page obligations when coverage spans them |
+| [`receipt`](src/transparent_history_recovery/receipt.rs) | Bind acknowledgment to the latest issued ready batch |
 
 ### `txid`: reusable display lookup and translation
 
@@ -132,7 +135,7 @@ permission to use the recovered funds.
 | Wallet database | Wallet-libraries; durable | Account ownership, accepted chain, policy generation, candidate evidence, qualification, activation, balances, and display work/cache |
 | Companion reference store | Reference client, managed by this adapter; durable per account/service | Retrieved events, script coverage, unfinished pages, filters, setups, and publication binding |
 | Companion catalog | `catalog`; durable in the same companion file | Publication identities, revisions observed/exported, and acknowledgment bookkeeping |
-| `TransparentWatchSet` | Wallet reader; snapshot for a pass | The account's addresses and history requirements, target, and context needed to reject stale results |
+| `TransparentAddressWatchSet` | Wallet reader; snapshot for a pass | The account's addresses and history requirements, target, and context needed to reject stale results |
 | `RecoveryBatch` | Adapter; one pass's immutable result | Ordered commits, state, progress, retired revisions, and an opaque acknowledgment receipt |
 | `TxidDisplayService` | Application; process-local per origin | Reusable protocol client and lookup caches, separate from account companions |
 | `TransparentDisplayFacts` | Translated result, then wallet display cache | Receipt information and provenance, without balance or spending authority |
@@ -140,12 +143,12 @@ permission to use the recovered funds.
 
 ### Companion identity and catalog tables
 
-A companion is bound to `RecoveryConfig::source`, `account_binding`, `origin`,
+A companion is bound to `TransparentHistoryRecoveryConfig::source`, `account_binding`, `origin`,
 and `SCHEMA`. The origin is an identity label, not a URL the adapter dials;
 the supplied transports must actually reach that origin. Use one companion per
 account and binding. `CompanionDir` names files by account and origin/schema and
 holds a cross-process lock until the returned `Companion` drops. Direct
-`ReferenceRecovery::open` does not supply that directory-level lock management.
+`TransparentHistoryRecovery::open` does not supply that directory-level lock management.
 
 The companion's catalog stores:
 

@@ -293,7 +293,7 @@ pub trait TransparentLedgerRead: WalletRead {
     fn transparent_watch_set(
         &self,
         account: Self::AccountId,
-    ) -> Result<TransparentWatchSet<Self::AccountId>, Self::Error>;
+    ) -> Result<TransparentAddressWatchSet<Self::AccountId>, Self::Error>;
 
     /// Returns development diagnostics for `account`'s candidate ledger, from one read.
     ///

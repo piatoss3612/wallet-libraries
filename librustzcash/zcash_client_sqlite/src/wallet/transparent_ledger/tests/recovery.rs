@@ -9,9 +9,10 @@ use zcash_client_backend::data_api::{
     transparent_ledger::{
         AddressRange, CandidateBlocker, CandidateRecovery, CommitOutcome, CommitRejection,
         IntegrityFailure, InvalidCommit, PageRequest, PublicationAnchor, ReceiveEvent,
-        RecoveryRevision, SpendEvent, StaleCommit, TransparentLedgerCommit,
+        RecoveryRevision, SpendEvent, StaleCommit, TransparentAddressWatchSet,
+        TransparentLedgerCommit,
         TransparentLedgerMode::{self, PrivateRequired, Public},
-        TransparentLedgerRead as _, TransparentLedgerWrite as _, TransparentWatchSet, WatchOrigin,
+        TransparentLedgerRead as _, TransparentLedgerWrite as _, WatchOrigin,
     },
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
@@ -65,7 +66,7 @@ fn publicly<T>(st: &mut State, write: impl FnOnce(&mut State) -> T) -> T {
     result
 }
 
-fn watch(st: &State, account: AccountUuid) -> TransparentWatchSet<AccountUuid> {
+fn watch(st: &State, account: AccountUuid) -> TransparentAddressWatchSet<AccountUuid> {
     st.wallet().db().transparent_watch_set(account).unwrap()
 }
 
@@ -125,7 +126,7 @@ fn revision(lineage: u64, sealed: bool) -> RecoveryRevision {
 }
 
 /// An empty commit for the watch set's context, anchored at its target.
-fn commit(ws: &TransparentWatchSet<AccountUuid>) -> TransparentLedgerCommit<AccountUuid> {
+fn commit(ws: &TransparentAddressWatchSet<AccountUuid>) -> TransparentLedgerCommit<AccountUuid> {
     TransparentLedgerCommit {
         context: ws.context().unwrap(),
         revision: revision(1, true),
@@ -140,7 +141,7 @@ fn commit(ws: &TransparentWatchSet<AccountUuid>) -> TransparentLedgerCommit<Acco
 }
 
 /// Coverage of every watched address from its required start through the target.
-fn full_coverage(ws: &TransparentWatchSet<AccountUuid>) -> Vec<AddressRange> {
+fn full_coverage(ws: &TransparentAddressWatchSet<AccountUuid>) -> Vec<AddressRange> {
     ws.addresses
         .iter()
         .map(|watched| AddressRange {
@@ -151,7 +152,7 @@ fn full_coverage(ws: &TransparentWatchSet<AccountUuid>) -> Vec<AddressRange> {
         .collect()
 }
 
-fn external(ws: &TransparentWatchSet<AccountUuid>) -> TransparentAddress {
+fn external(ws: &TransparentAddressWatchSet<AccountUuid>) -> TransparentAddress {
     ws.addresses
         .iter()
         .find(|w| {
@@ -164,7 +165,7 @@ fn external(ws: &TransparentWatchSet<AccountUuid>) -> TransparentAddress {
         .address
 }
 
-fn below_target(ws: &TransparentWatchSet<AccountUuid>, depth: u32) -> BlockHeight {
+fn below_target(ws: &TransparentAddressWatchSet<AccountUuid>, depth: u32) -> BlockHeight {
     ws.target.unwrap().height - depth
 }
 

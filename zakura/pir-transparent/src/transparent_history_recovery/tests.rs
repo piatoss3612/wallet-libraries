@@ -34,8 +34,8 @@ const MORE: Progress = Progress {
     outcome: Outcome::More,
 };
 
-fn config() -> RecoveryConfig {
-    RecoveryConfig {
+fn config() -> TransparentHistoryRecoveryConfig {
+    TransparentHistoryRecoveryConfig {
         source: b"explicit-fixture-source".to_vec(),
         account_binding: vec![1],
         origin: "http://127.0.0.1:1".into(),
@@ -51,10 +51,10 @@ fn map() -> ShardMap {
     serde_json::from_slice(MAP).unwrap()
 }
 
-fn watch() -> TransparentWatchSet<u32> {
+fn watch() -> TransparentAddressWatchSet<u32> {
     let map = map();
     let last = map.shards.last().unwrap();
-    TransparentWatchSet {
+    TransparentAddressWatchSet {
         account: 1,
         lifecycle: AccountLifecycle::Candidate,
         policy_generation: 0,
@@ -90,9 +90,13 @@ fn report(completion: Completion) -> SyncReport {
 }
 
 /// A companion bound to the fixture map that retains `script` from `required_from`.
-fn seeded(dir: &tempfile::TempDir, script: &[u8], required_from: u64) -> ReferenceRecovery {
+fn seeded(
+    dir: &tempfile::TempDir,
+    script: &[u8],
+    required_from: u64,
+) -> TransparentHistoryRecovery {
     let mut adapter =
-        ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     adapter.store.bind_set(&SetIdentity::of(&map())).unwrap();
     adapter
         .store
@@ -138,15 +142,19 @@ fn covered(
 
 /// A companion at `path` opened under `config` and bound to `map`, covering
 /// the watched script on every shard under the revision `map` publishes.
-fn covering_as(path: &Path, config: RecoveryConfig, map: &ShardMap) -> ReferenceRecovery {
-    let mut adapter = ReferenceRecovery::open(path, config).unwrap();
+fn covering_as(
+    path: &Path,
+    config: TransparentHistoryRecoveryConfig,
+    map: &ShardMap,
+) -> TransparentHistoryRecovery {
+    let mut adapter = TransparentHistoryRecovery::open(path, config).unwrap();
     cover(&mut adapter, map);
     adapter
 }
 
 /// Binds the companion's store to `map` and covers the watched script on
 /// every shard under the revision `map` publishes, as a sync would.
-fn cover(adapter: &mut ReferenceRecovery, map: &ShardMap) {
+fn cover(adapter: &mut TransparentHistoryRecovery, map: &ShardMap) {
     let script = address_script(watch().addresses[0].address);
     adapter.store.bind_set(&SetIdentity::of(map)).unwrap();
     adapter
@@ -168,7 +176,7 @@ fn cover(adapter: &mut ReferenceRecovery, map: &ShardMap) {
 
 /// Starts a pass from `map`, which must stop at the set check: before any
 /// filter or private request, with the store reset.
-fn publication_change(adapter: &mut ReferenceRecovery, map: &ShardMap) {
+fn publication_change(adapter: &mut TransparentHistoryRecovery, map: &ShardMap) {
     let mut filters = CountingFilters::serving(serde_json::to_vec(map).unwrap());
     let mut shards = CountingShards::serving(SCHEMA);
     assert!(matches!(
@@ -186,7 +194,7 @@ fn publication_change(adapter: &mut ReferenceRecovery, map: &ShardMap) {
 
 /// `(table, rows)` for every table of the companion's store, the catalog's
 /// excluded, by name.
-fn store_rows(adapter: &ReferenceRecovery) -> Vec<(String, u64)> {
+fn store_rows(adapter: &TransparentHistoryRecovery) -> Vec<(String, u64)> {
     let mut statement = adapter
         .catalog
         .prepare(
@@ -211,12 +219,12 @@ fn store_rows(adapter: &ReferenceRecovery) -> Vec<(String, u64)> {
         .collect()
 }
 
-fn covering(path: &Path, map: &ShardMap) -> ReferenceRecovery {
+fn covering(path: &Path, map: &ShardMap) -> TransparentHistoryRecovery {
     covering_as(path, config(), map)
 }
 
 /// Normalizes the fixture watch set against `map`, accepted as the chain.
-fn pass(adapter: &mut ReferenceRecovery, map: &ShardMap) -> RecoveryBatch<u32> {
+fn pass(adapter: &mut TransparentHistoryRecovery, map: &ShardMap) -> RecoveryBatch<u32> {
     adapter
         .normalize(&watch(), map.clone(), MORE, &StaticChain::from_map(map))
         .unwrap()
@@ -232,7 +240,7 @@ fn republished(map: &ShardMap, index: usize, revision: u32, digest: String) -> S
 
 /// Rolls the companion's tail facts back, as a sync does when the tail it
 /// covered is replaced.
-fn withdraw_tail(adapter: &mut ReferenceRecovery, map: &ShardMap) {
+fn withdraw_tail(adapter: &mut TransparentHistoryRecovery, map: &ShardMap) {
     let tail = map.shards.last().unwrap();
     adapter
         .store
@@ -247,7 +255,7 @@ fn withdraw_tail(adapter: &mut ReferenceRecovery, map: &ShardMap) {
 }
 
 /// Replaces the companion's tail facts with coverage under `map`'s tail.
-fn retrieve_tail(adapter: &mut ReferenceRecovery, map: &ShardMap) {
+fn retrieve_tail(adapter: &mut TransparentHistoryRecovery, map: &ShardMap) {
     withdraw_tail(adapter, map);
     let tail = map.shards.last().unwrap();
     let script = address_script(watch().addresses[0].address);
@@ -264,7 +272,7 @@ const ARCHIVE: u64 = 3_499_739;
 const TAIL: u64 = 3_500_239;
 
 /// `(start_height, lineage)` of every catalog row recorded as exported.
-fn exported(adapter: &ReferenceRecovery) -> Vec<(u64, u64)> {
+fn exported(adapter: &TransparentHistoryRecovery) -> Vec<(u64, u64)> {
     let mut statement = adapter
         .catalog
         .prepare(
@@ -281,7 +289,7 @@ fn exported(adapter: &ReferenceRecovery) -> Vec<(u64, u64)> {
 
 /// Every catalog row as `(source, start_height, lineage, exported, current)`,
 /// so a test can tell that a call recorded nothing.
-fn catalog_rows(adapter: &ReferenceRecovery) -> Vec<(Vec<u8>, u64, u64, bool, bool)> {
+fn catalog_rows(adapter: &TransparentHistoryRecovery) -> Vec<(Vec<u8>, u64, u64, bool, bool)> {
     let mut statement = adapter
         .catalog
         .prepare(
@@ -304,7 +312,7 @@ fn catalog_rows(adapter: &ReferenceRecovery) -> Vec<(Vec<u8>, u64, u64, bool, bo
         .unwrap()
 }
 
-fn cataloged(adapter: &ReferenceRecovery) -> u64 {
+fn cataloged(adapter: &TransparentHistoryRecovery) -> u64 {
     adapter
         .catalog
         .query_row("SELECT COUNT(*) FROM pir_bridge_catalog", [], |r| r.get(0))
@@ -454,9 +462,9 @@ fn recut_pair() -> (ShardMap, ShardMap) {
 }
 
 /// The fixture watch set, targeting the end of `map`.
-fn watching(map: &ShardMap) -> TransparentWatchSet<u32> {
+fn watching(map: &ShardMap) -> TransparentAddressWatchSet<u32> {
     let last = map.shards.last().unwrap();
-    TransparentWatchSet {
+    TransparentAddressWatchSet {
         target: Some(ChainPoint {
             height: block_height(last.end_height).unwrap(),
             hash: block_hash_from_display(&last.terminal_block_hash).unwrap(),
@@ -482,7 +490,7 @@ fn recut_companion(
     path: &Path,
     before: &ShardMap,
     after: &ShardMap,
-) -> (ReferenceRecovery, RecoveryBatch<u32>) {
+) -> (TransparentHistoryRecovery, RecoveryBatch<u32>) {
     let (watch, chain) = (watching(after), accepting(&[before, after]));
     let mut adapter = covering(path, before);
     let first = adapter
@@ -496,8 +504,8 @@ fn recut_companion(
 }
 
 fn recut_pass(
-    adapter: &mut ReferenceRecovery,
-    watch: &TransparentWatchSet<u32>,
+    adapter: &mut TransparentHistoryRecovery,
+    watch: &TransparentAddressWatchSet<u32>,
     map: &ShardMap,
     chain: &StaticChain,
 ) -> RecoveryBatch<u32> {

@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 use crate::error::RecoveryError;
-use crate::recovery::{RecoveryConfig, ReferenceRecovery, SCHEMA};
+use crate::transparent_history_recovery::{
+    SCHEMA, TransparentHistoryRecovery, TransparentHistoryRecoveryConfig,
+};
 
 /// SQLite files a companion may leave, after its base name.
 const FILES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
@@ -41,20 +43,20 @@ pub struct CompanionDir {
 
 /// An open companion and the lock it holds until dropped.
 pub struct Companion {
-    recovery: ReferenceRecovery,
+    recovery: TransparentHistoryRecovery,
     _lock: File,
 }
 
 impl Deref for Companion {
-    type Target = ReferenceRecovery;
+    type Target = TransparentHistoryRecovery;
 
-    fn deref(&self) -> &ReferenceRecovery {
+    fn deref(&self) -> &TransparentHistoryRecovery {
         &self.recovery
     }
 }
 
 impl DerefMut for Companion {
-    fn deref_mut(&mut self) -> &mut ReferenceRecovery {
+    fn deref_mut(&mut self) -> &mut TransparentHistoryRecovery {
         &mut self.recovery
     }
 }
@@ -71,7 +73,7 @@ pub enum OpenError {
     /// The directory or the lock file could not be used.
     #[error("companion: {0}")]
     Io(#[from] io::Error),
-    /// The adapter refused the companion; see [`ReferenceRecovery::open`].
+    /// The adapter refused the companion; see [`TransparentHistoryRecovery::open`].
     #[error(transparent)]
     Recovery(#[from] RecoveryError),
 }
@@ -108,7 +110,7 @@ impl CompanionDir {
     pub fn open(
         &self,
         account: &str,
-        config: RecoveryConfig,
+        config: TransparentHistoryRecoveryConfig,
         accounts: impl FnOnce() -> io::Result<BTreeSet<String>>,
         keep_waiting: &dyn Fn() -> bool,
     ) -> Result<Companion, OpenError> {
@@ -131,7 +133,7 @@ impl CompanionDir {
         }
         let lock = lock(&path, keep_waiting)?.ok_or(OpenError::Busy)?;
         Ok(Companion {
-            recovery: ReferenceRecovery::open(&path, config)?,
+            recovery: TransparentHistoryRecovery::open(&path, config)?,
             _lock: lock,
         })
     }
@@ -358,8 +360,8 @@ mod tests {
     const ORIGIN: &str = "https://transparent-pir.example";
     const OTHER: &str = "https://elsewhere.example";
 
-    fn config(account: &str, origin: &str) -> RecoveryConfig {
-        RecoveryConfig {
+    fn config(account: &str, origin: &str) -> TransparentHistoryRecoveryConfig {
+        TransparentHistoryRecoveryConfig {
             source: b"test".to_vec(),
             account_binding: account.as_bytes().to_vec(),
             origin: origin.to_owned(),

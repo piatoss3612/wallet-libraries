@@ -7,9 +7,9 @@ use transparent_wallet::transport::{BoxError, FilterSource};
 use transparent_wallet::{
     Acceptance, Anchor, ChainView, ScriptEntry, ScriptOrigin, StaticScripts, WalletStore,
 };
-use zcash_client_backend::data_api::transparent_ledger::TransparentWatchSet;
+use zcash_client_backend::data_api::transparent_ledger::TransparentAddressWatchSet;
 
-use super::ReferenceRecovery;
+use super::TransparentHistoryRecovery;
 use crate::convert::{address_script, height_u64};
 use crate::error::{RecoveryError, failure};
 
@@ -197,7 +197,7 @@ pub(super) fn sync_target(
 
 /// The watch set's scripts as the reference client plans them, each from its
 /// address's required height.
-pub(super) fn watched_scripts<A>(watch: &TransparentWatchSet<A>) -> StaticScripts {
+pub(super) fn watched_scripts<A>(watch: &TransparentAddressWatchSet<A>) -> StaticScripts {
     StaticScripts(
         watch
             .addresses
@@ -211,7 +211,7 @@ pub(super) fn watched_scripts<A>(watch: &TransparentWatchSet<A>) -> StaticScript
     )
 }
 
-impl ReferenceRecovery {
+impl TransparentHistoryRecovery {
     /// The anchor this pass syncs to, given the anchor the companion's store holds and
     /// the highest height of an event it retains. See [`sync_target`].
     pub(super) fn store_sync_target(

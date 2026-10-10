@@ -120,7 +120,7 @@ fn pending_and_withdrawn_batches_list_nothing_and_refuse_both_acknowledgments() 
     let mut adapter = covering(&dir.path().join("companion.sqlite"), &base);
     let first = pass(&mut adapter, &base);
     adapter.acknowledge_applied(&first).unwrap();
-    let refused = |adapter: &mut ReferenceRecovery, batch: &RecoveryBatch<u32>| {
+    let refused = |adapter: &mut TransparentHistoryRecovery, batch: &RecoveryBatch<u32>| {
         assert!(batch.commits.is_empty());
         assert!(batch.retired_revisions().is_empty());
         let recorded = catalog_rows(adapter);
@@ -175,7 +175,7 @@ fn retired_revisions_survive_until_reconciled_and_replay_identically() {
     // notifications and receipt, and records nothing new.
     let replayed = pass(&mut adapter, &map);
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     let reopened = pass(&mut adapter, &map);
     for batch in [&replayed, &reopened] {
         assert_eq!(batch.state, BatchState::Ready);
@@ -246,7 +246,7 @@ fn a_publication_change_forgets_retirements_of_sources_it_drops() {
     // resealed. The reset forgets the listed retirement unacknowledged: no
     // successor under the dropped source can resolve it.
     drop(adapter);
-    let mut adapter = ReferenceRecovery::open(&path, config()).unwrap();
+    let mut adapter = TransparentHistoryRecovery::open(&path, config()).unwrap();
     let resealed = resealing(&next, 1);
     publication_change(&mut adapter, &resealed);
     assert_eq!(exported(&adapter), vec![(ARCHIVE, 1)]);

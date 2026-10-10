@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use transparent::address::TransparentAddress;
 use transparent_wallet::{Acceptance, ChainView};
 use zcash_client_backend::data_api::transparent_ledger::{
-    AddressRange, ChainPoint, PageRequest, TransparentLedgerCommit, TransparentRecoveryContext,
-    TransparentWatchSet,
+    AddressRange, ChainPoint, PageRequest, TransparentAddressWatchSet, TransparentLedgerCommit,
+    TransparentRecoveryContext,
 };
 use zcash_protocol::consensus::BlockHeight;
 
@@ -91,7 +91,7 @@ where
 /// page is completed twice. A named source's provisional revisions are left to
 /// their successor, whose qualification withdraws them.
 pub(super) fn stranded_page_completions<A: Copy>(
-    watch: &TransparentWatchSet<A>,
+    watch: &TransparentAddressWatchSet<A>,
     context: TransparentRecoveryContext<A>,
     published: &[Published],
     declared: &[Published],

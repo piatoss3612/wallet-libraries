@@ -366,11 +366,11 @@ pub(crate) fn watch_set<P: consensus::Parameters>(
     gap_limits: &GapLimits,
     configured: Option<TransparentLedgerMode>,
     account: AccountUuid,
-) -> Result<TransparentWatchSet<AccountUuid>, SqliteClientError> {
+) -> Result<TransparentAddressWatchSet<AccountUuid>, SqliteClientError> {
     resolve_mode(conn, configured)?;
     let watch =
         Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
-    Ok(TransparentWatchSet {
+    Ok(TransparentAddressWatchSet {
         account,
         lifecycle: account_lifecycle(conn, watch.account.internal_id())?,
         policy_generation: capture_policy_generation(conn)?,

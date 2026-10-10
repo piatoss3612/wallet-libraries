@@ -196,7 +196,7 @@ fn a_reset_store_that_stops_before_binding_is_pending() {
     let mut chain = StaticChain::from_map(&resealed);
     chain.hashes.insert(t + 10, target.hash.to_string());
     chain.hashes.insert(t, "aa".repeat(32));
-    let behind = |adapter: &mut ReferenceRecovery| {
+    let behind = |adapter: &mut TransparentHistoryRecovery| {
         let mut filters = CountingFilters::serving(serde_json::to_vec(&resealed).unwrap());
         let mut shards = CountingShards::serving(SCHEMA);
         let batch = adapter
@@ -211,7 +211,8 @@ fn a_reset_store_that_stops_before_binding_is_pending() {
 
     // A fresh companion has exported nothing, so nothing can disagree.
     let dir = tempfile::tempdir().unwrap();
-    let mut fresh = ReferenceRecovery::open(dir.path().join("fresh.sqlite"), config()).unwrap();
+    let mut fresh =
+        TransparentHistoryRecovery::open(dir.path().join("fresh.sqlite"), config()).unwrap();
     assert_eq!(behind(&mut fresh).state, BatchState::Ready);
 
     // A reset companion still holds exported revisions the pass never

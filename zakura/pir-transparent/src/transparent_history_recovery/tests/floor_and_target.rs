@@ -128,7 +128,7 @@ fn a_pass_watching_nothing_sends_no_request() {
     };
     let dir = tempfile::tempdir().unwrap();
     let mut adapter =
-        ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+        TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     let mut filters = CountingFilters::default();
     let mut shards = CountingShards::serving(SCHEMA);
     let batch = adapter
@@ -256,7 +256,8 @@ fn a_pass_behind_the_publication_syncs_to_its_accepted_end() {
 
     // A wallet born above the publication's end has nothing to clamp to.
     let dir = tempfile::tempdir().unwrap();
-    let mut young = ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+    let mut young =
+        TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
     let mut born = watch.clone();
     born.addresses[0].required_from = block_height(t + 1).unwrap();
     let mut filters = CountingFilters::default();
@@ -392,7 +393,8 @@ fn a_map_for_another_network_or_genesis_is_refused_before_retrieval() {
     for served in [testnet, forked] {
         let dir = tempfile::tempdir().unwrap();
         let mut adapter =
-            ReferenceRecovery::open(dir.path().join("companion.sqlite"), config()).unwrap();
+            TransparentHistoryRecovery::open(dir.path().join("companion.sqlite"), config())
+                .unwrap();
         let mut filters = CountingFilters::serving(serde_json::to_vec(&served).unwrap());
         let mut shards = CountingShards::serving(SCHEMA);
         assert!(matches!(
