@@ -36,6 +36,13 @@ pub(super) struct Watch {
 
 #[cfg(feature = "transparent-inputs")]
 impl Watch {
+    /// Loads the addresses `account_uuid` must have recovered; `None` for an unknown account.
+    ///
+    /// The watch holds every address the wallet's address table assigns the account, its
+    /// legacy external address, and the candidate window's addresses beyond them. The window
+    /// is extended, without writing, until the account's mined candidate activity needs no
+    /// further gap. Addresses another account owns in production stay in the window that
+    /// drives gap expansion but are left out of the watch.
     pub(super) fn load<P: consensus::Parameters>(
         conn: &rusqlite::Connection,
         params: &P,
@@ -365,7 +372,7 @@ pub(crate) fn watch_set<P: consensus::Parameters>(
         Watch::load(conn, params, gap_limits, account)?.ok_or(SqliteClientError::AccountUnknown)?;
     Ok(TransparentWatchSet {
         account,
-        lifecycle: lifecycle(conn, watch.account.internal_id())?,
+        lifecycle: account_lifecycle(conn, watch.account.internal_id())?,
         policy_generation: capture_policy_generation(conn)?,
         target: local_target(conn)?,
         addresses: watch.watched_addresses(),

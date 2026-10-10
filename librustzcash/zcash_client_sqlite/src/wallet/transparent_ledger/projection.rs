@@ -32,7 +32,7 @@ fn integrity(failure: IntegrityFailure) -> SqliteClientError {
 /// Refuses placing `txid` at `mined` when the wallet holds it at another height, or disagrees on
 /// whether it is a coinbase transaction. `coinbase` is `None` for a spending transaction, which
 /// cannot be a coinbase.
-fn check_transaction(
+fn check_against_wallet_transaction(
     conn: &rusqlite::Connection,
     txid: &TxId,
     mined: BlockHeight,
@@ -69,7 +69,7 @@ pub(super) fn project_receive<P: consensus::Parameters>(
 ) -> Result<(), SqliteClientError> {
     let outpoint = &receive.outpoint;
     let txid = *outpoint.txid();
-    check_transaction(conn, &txid, receive.mined_height, Some(receive.coinbase))?;
+    check_against_wallet_transaction(conn, &txid, receive.mined_height, Some(receive.coinbase))?;
 
     let script = transparent::address::Script::from(receive.address.script());
     let value = i64::try_from(u64::from(receive.value)).expect("Zatoshis fit in i64");
@@ -148,7 +148,7 @@ pub(super) fn project_spend<P: consensus::Parameters>(
     gap_limits: &GapLimits,
     spend: &SpendEvent,
 ) -> Result<(), SqliteClientError> {
-    check_transaction(conn, &spend.spending_txid, spend.mined_height, None)?;
+    check_against_wallet_transaction(conn, &spend.spending_txid, spend.mined_height, None)?;
     // Stored bytes of the spending transaction must spend the prevout at the reported input.
     if let Some((_, tx)) = crate::wallet::get_transaction(conn, params, spend.spending_txid)? {
         let spent = tx
@@ -235,7 +235,8 @@ const UNOBSERVED_SPEND: &str =
     "NOT EXISTS (SELECT 1 FROM tpir_spend_observations ob WHERE ob.spend_id = e.id)";
 
 /// A SQL condition that the spend of `e.prevout_*` by transaction `st` has an origin
-/// in `{origins}`.
+/// in `{origins}`. `recovery::lifecycle::forget_ledger` states the same ledger-only test over
+/// its own aliases (`ledger_only_spend`).
 fn spend_origin(origins: &str) -> String {
     format!(
         "EXISTS (
@@ -313,6 +314,7 @@ pub(super) fn unproject_unobserved(conn: &rusqlite::Connection) -> Result<(), Sq
      ) AND EXISTS (
          SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin = 2
      )";
+    // Narrower than `forget_ledger`'s ledger-only output: only one whose receive is unobserved.
     let ledger_only_output = format!(
         "{unobserved_receive} AND NOT EXISTS (
              SELECT 1 FROM tpir_output_origins oo WHERE oo.output_id = o.id AND oo.origin != 2

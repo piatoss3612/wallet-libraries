@@ -1,34 +1,5 @@
 use super::*;
 
-/// Runs `f` atomically: in a new immediate transaction, or under a savepoint inside the
-/// caller's transaction. Nothing `f` wrote survives its failure, including a failure to
-/// commit or release.
-#[cfg(feature = "transparent-inputs")]
-pub(super) fn atomically<T>(
-    conn: &rusqlite::Connection,
-    f: impl FnOnce(&rusqlite::Connection) -> Result<T, SqliteClientError>,
-) -> Result<T, SqliteClientError> {
-    if conn.is_autocommit() {
-        // The guard rolls back when dropped, including after a failed commit.
-        let tx =
-            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-        let value = f(&tx)?;
-        tx.commit()?;
-        return Ok(value);
-    }
-    conn.execute_batch("SAVEPOINT tpir_commit")?;
-    let result = f(conn).and_then(|value| {
-        conn.execute_batch("RELEASE tpir_commit")?;
-        Ok(value)
-    });
-    if result.is_err() {
-        // Undo everything since the savepoint and remove it, even when releasing it failed. If
-        // this cleanup fails too, the error still aborts the caller's enclosing transaction.
-        let _ = conn.execute_batch("ROLLBACK TO tpir_commit; RELEASE tpir_commit");
-    }
-    result
-}
-
 /// Checks everything about a commit that needs no stored state.
 #[cfg(feature = "transparent-inputs")]
 fn check_well_formed(commit: &TransparentLedgerCommit<AccountUuid>) -> Result<(), InvalidCommit> {
@@ -140,7 +111,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
         if !grants_private_authority(conn, configured)? {
             return Err(SqliteClientError::TransparentRecoveryNotEnabled);
         }
-        ensure_policy_generation(conn, commit.context.policy_generation)?;
+        check_transparent_policy_generation(conn, commit.context.policy_generation)?;
 
         let stale = |reason| reject(CommitRejection::Stale(reason));
         let watch = Watch::load(conn, params, gap_limits, commit.context.account)?
@@ -156,7 +127,7 @@ pub(crate) fn apply_commit<P: consensus::Parameters>(
                 RefusedCommit::AccountQuarantined,
             )));
         }
-        if lifecycle(conn, account_ref)? != commit.context.lifecycle {
+        if account_lifecycle(conn, account_ref)? != commit.context.lifecycle {
             return Err(stale(StaleCommit::LifecycleChanged));
         }
 
@@ -272,10 +243,24 @@ fn apply_facts<P: consensus::Parameters>(
     }
 
     for range in &commit.coverage {
-        record_range(conn, account_ref, revision_id, &commit.anchor, range, true)?;
+        record_range(
+            conn,
+            account_ref,
+            revision_id,
+            &commit.anchor,
+            range,
+            CoverageSupport::Supported,
+        )?;
     }
     for range in &commit.unsupported {
-        record_range(conn, account_ref, revision_id, &commit.anchor, range, false)?;
+        record_range(
+            conn,
+            account_ref,
+            revision_id,
+            &commit.anchor,
+            range,
+            CoverageSupport::Unsupported,
+        )?;
     }
 
     let window_grew = if active {
@@ -339,7 +324,7 @@ fn is_qualified(conn: &rusqlite::Connection, revision_id: i64) -> Result<bool, S
 
 /// Returns `account_ref`'s lifecycle.
 #[cfg(feature = "transparent-inputs")]
-pub(super) fn lifecycle(
+pub(super) fn account_lifecycle(
     conn: &rusqlite::Connection,
     account_ref: AccountRef,
 ) -> Result<AccountLifecycle, SqliteClientError> {
