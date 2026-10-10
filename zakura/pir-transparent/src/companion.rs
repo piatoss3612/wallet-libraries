@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::recovery::{RecoveryConfig, RecoveryError, ReferenceRecovery, SCHEMA};
+use crate::error::RecoveryError;
+use crate::recovery::{RecoveryConfig, ReferenceRecovery, SCHEMA};
 
 /// SQLite files a companion may leave, after its base name.
 const FILES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
@@ -76,10 +77,12 @@ pub enum OpenError {
 }
 
 impl CompanionDir {
+    /// The companions kept in the directory `path`, which need not exist yet.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
+    /// The directory.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -205,6 +208,7 @@ impl CompanionDir {
         Ok(found)
     }
 
+    /// [`Self::companions`], or none while the directory does not exist.
     fn companions_or_none(&self) -> io::Result<BTreeSet<(String, PathBuf)>> {
         match self.companions() {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BTreeSet::new()),
@@ -223,6 +227,8 @@ fn tag(origin: &str) -> String {
     hex::encode(&digest[..TAG / 2])
 }
 
+/// Whether `account` can name a companion file: 1 to 64 ASCII letters, digits,
+/// `-` or `_`.
 fn valid_account(account: &str) -> bool {
     (1..=64).contains(&account.len())
         && account

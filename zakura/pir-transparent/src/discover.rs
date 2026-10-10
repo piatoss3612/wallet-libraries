@@ -15,16 +15,18 @@
 use std::collections::BTreeSet;
 
 use transparent::address::TransparentAddress;
-use transparent_filter::{MAINNET_GENESIS_DISPLAY, NETWORK, ShardMap};
+use transparent_filter::ShardMap;
 use transparent_wallet::transport::{FilterSource, ShardTransport};
 use transparent_wallet::{
     Acceptance, Anchor, ChainView, Completion, IncompleteReason, MemoryStore, ScriptEntry,
     ScriptOrigin, StaticChain, StaticScripts, SyncError, WalletStore, WorkLimits,
 };
 
+use crate::convert::address_script;
+use crate::error::{RecoveryError, ensure_valid, failure};
+use crate::progress::{Outcome, Progress};
 use crate::recovery::{
-    Outcome, Progress, RecoveryError, address_script, check_publication_limits, failure, progress,
-    require, service_geometry,
+    check_publication_limits, ensure_mainnet_publication, refuse_parent_filters, service_geometry,
 };
 
 /// Finite bounds for one discovery.
@@ -92,7 +94,7 @@ pub fn discover_active_addresses<F: FilterSource, T: ShardTransport>(
     filters: &mut F,
     transport: &mut T,
 ) -> Result<Discovery, RecoveryError> {
-    require(
+    ensure_valid(
         !addresses.is_empty() && addresses.len() <= limits.scripts,
         "candidate count outside the script limit",
     )?;
@@ -100,30 +102,23 @@ pub fn discover_active_addresses<F: FilterSource, T: ShardTransport>(
         .iter()
         .map(|address| address_script(*address))
         .collect();
-    require(
+    ensure_valid(
         scripts.iter().collect::<BTreeSet<_>>().len() == scripts.len(),
         "duplicate candidate address",
     )?;
-    require(
+    ensure_valid(
         limits.shards > 0 && limits.queries > 0 && limits.private_bytes > 0,
         "discovery bounds must be positive",
     )?;
-    // The parent experiment's selective child requests leak coarse activity.
-    require(
-        !filters.uses_parents(),
-        "parent filter sources are not supported",
-    )?;
+    refuse_parent_filters(filters)?;
     let (raw_map, map_bytes) = filters.shard_map().map_err(failure)?;
     let map: ShardMap = serde_json::from_slice(&raw_map).map_err(failure)?;
     map.check_shape().map_err(failure)?;
     check_publication_limits(&map, floor, limits.shards)?;
-    require(
-        map.network == NETWORK && map.genesis_hash == MAINNET_GENESIS_DISPLAY,
-        "publication is not for Zcash mainnet",
-    )?;
+    ensure_mainnet_publication(&map)?;
     // The sync plans each script from the map's start when that is above its
     // required height, which would skip history between the two unseen.
-    require(
+    ensure_valid(
         map.start_height <= floor,
         "publication starts above the discovery floor",
     )?;
@@ -199,7 +194,7 @@ pub fn discover_active_addresses<F: FilterSource, T: ShardTransport>(
             covered_through: report.covered_through,
             outcome: Outcome::Complete,
         },
-        _ => progress(&report, false),
+        _ => Progress::from_sync_report(&report, false),
     };
     let range = floor..=target.height;
     let events = store.events().map_err(failure)?;

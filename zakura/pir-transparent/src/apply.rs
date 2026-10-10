@@ -14,13 +14,16 @@
 
 use rusqlite::Connection;
 use zcash_client_backend::data_api::transparent_ledger::{
-    CommitRejection, RecoveryRevision, TransparentLedgerRead as _, TransparentLedgerWrite as _,
+    CommitRejection, RecoveryRevision, TransparentLedgerRead, TransparentLedgerWrite as _,
 };
 use zcash_client_sqlite::{AccountUuid, WalletDb, error::SqliteClientError};
 use zcash_protocol::consensus;
 
-use crate::catalog::{self, BatchState};
-use crate::recovery::{Progress, RecoveryBatch, RecoveryError, ReferenceRecovery};
+use crate::batch::{BatchState, RecoveryBatch};
+use crate::catalog;
+use crate::error::RecoveryError;
+use crate::progress::Progress;
+use crate::recovery::ReferenceRecovery;
 
 /// How the wallet treats the revisions of the commits it applies. The caller decides; the
 /// adapter never infers trust from the publication, the batch, or the wallet's policy.
@@ -55,6 +58,7 @@ pub struct ApplyStats {
 /// A batch the wallet applied whole and the companion acknowledged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Applied {
+    /// What the wallet applied: every commit of the batch.
     pub stats: ApplyStats,
     /// The batch's pass progress.
     pub progress: Progress,
@@ -113,7 +117,9 @@ pub enum ApplyError {
     /// integrity rejection's quarantine is durable.
     #[error("transparent PIR apply: the wallet refused a commit ({})", rejection_name(.rejection))]
     Rejected {
+        /// The refused commit's position in the batch.
         index: usize,
+        /// Why the wallet refused it.
         rejection: CommitRejection,
     },
     /// The wallet's policy generation changed after the pass read its watch set.
@@ -202,6 +208,8 @@ fn rejection_name(rejection: &CommitRejection) -> &'static str {
 }
 
 impl ApplyError {
+    /// The failure of the wallet operation on the commit at `index`: a commit
+    /// rejection, a changed policy, a disabled recovery, or any other wallet error.
     pub(crate) fn from_wallet(index: usize, error: SqliteClientError) -> Self {
         match error {
             SqliteClientError::TransparentLedgerCommitRejected(rejection) => {
@@ -274,42 +282,59 @@ impl ReferenceRecovery {
         gate: &mut impl WriteGate,
     ) -> Result<Applied, ApplyFailure> {
         let progress = batch.progress();
-        let failure = |error, stats| ApplyFailure {
+        let apply_failure = |error, stats| ApplyFailure {
             error,
             stats,
             progress,
         };
-        if batch.state() == BatchState::Ready && !self.is_pending_export(&batch) {
-            return Err(failure(ApplyError::StaleReceipt, ApplyStats::default()));
+        if batch.state() == BatchState::Ready && !self.is_outstanding_receipt(&batch) {
+            return Err(apply_failure(
+                ApplyError::StaleReceipt,
+                ApplyStats::default(),
+            ));
         }
         // Once the commits start, the receipt is spent: a failed batch is replayed by a
         // new pass.
         let (stats, replaced, expected_generation) =
-            apply_commits(batch, wallet, trust, gate, || self.clear_pending_export())?;
+            apply_commits(batch, wallet, trust, gate, || {
+                self.spend_outstanding_receipt()
+            })?;
         let acknowledgment = catalog::acknowledgment_transaction(&mut self.catalog)
-            .map_err(|error| failure(ApplyError::Acknowledge(error), stats))?;
+            .map_err(|error| apply_failure(ApplyError::Acknowledge(error), stats))?;
         gate.write(|| {
             wallet.with_immediate_read_transaction(|snapshot| {
-                if let Some(expected) = expected_generation {
-                    snapshot
-                        .check_transparent_policy_generation(expected)
-                        .map_err(|error| ApplyError::from_wallet(stats.applied, error))?;
-                }
+                check_policy_generation(snapshot, expected_generation, stats.applied)?;
                 catalog::acknowledge_in_transaction(&acknowledgment, &replaced)
                     .map_err(ApplyError::Acknowledge)?;
                 acknowledgment
                     .commit()
-                    .map_err(|error| ApplyError::Acknowledge(crate::recovery::failure(error)))
+                    .map_err(|error| ApplyError::Acknowledge(crate::error::failure(error)))
             })
         })
-        .map_err(|Interrupted| failure(ApplyError::Interrupted, stats))?
-        .map_err(|error| failure(error, stats))?;
+        .map_err(|Interrupted| apply_failure(ApplyError::Interrupted, stats))?
+        .map_err(|error| apply_failure(error, stats))?;
         Ok(Applied {
             stats,
             progress,
             retired: replaced.len(),
         })
     }
+}
+
+/// Refuses a wallet whose transparent policy generation is no longer
+/// `expected_generation`, the one a batch's commits were built under, after `applied`
+/// of them applied. A batch without commits has no generation to check.
+pub(crate) fn check_policy_generation(
+    snapshot: &impl TransparentLedgerRead<Error = SqliteClientError>,
+    expected_generation: Option<u64>,
+    applied: usize,
+) -> Result<(), ApplyError> {
+    if let Some(expected) = expected_generation {
+        snapshot
+            .check_transparent_policy_generation(expected)
+            .map_err(|error| ApplyError::from_wallet(applied, error))?;
+    }
+    Ok(())
 }
 
 /// Applies a ready batch's commits to `wallet` in order, each in its own wallet
@@ -326,23 +351,23 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
 ) -> Result<(ApplyStats, Vec<RecoveryRevision>, Option<u64>), ApplyFailure> {
     let progress = batch.progress();
     let mut stats = ApplyStats::default();
-    let failure = |error, stats| ApplyFailure {
+    let apply_failure = |error, stats| ApplyFailure {
         error,
         stats,
         progress,
     };
     if batch.state() != BatchState::Ready {
-        return Err(failure(ApplyError::NotReady(batch.state()), stats));
+        return Err(apply_failure(ApplyError::NotReady(batch.state()), stats));
     }
     if !wallet.is_autocommit() {
-        return Err(failure(ApplyError::OuterTransaction, stats));
+        return Err(apply_failure(ApplyError::OuterTransaction, stats));
     }
     let (commits, replaced) = batch.into_parts();
     let expected_generation = commits
         .first()
         .map(|commit| commit.context.policy_generation);
     if trust == Trust::Observed && !replaced.is_empty() {
-        return Err(failure(ApplyError::Unreconciled, stats));
+        return Err(apply_failure(ApplyError::Unreconciled, stats));
     }
     start();
     for (index, commit) in commits.into_iter().enumerate() {
@@ -351,7 +376,7 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
                 Trust::Observed => wallet.apply_transparent_ledger_commit(commit),
                 Trust::Trusted => wallet.qualify_and_apply_transparent_ledger_commit(commit),
             })
-            .map_err(|Interrupted| failure(ApplyError::Interrupted, stats))?;
+            .map_err(|Interrupted| apply_failure(ApplyError::Interrupted, stats))?;
         match applied {
             Ok(outcome) => {
                 stats.applied += 1;
@@ -359,7 +384,7 @@ pub(crate) fn apply_commits<P: consensus::Parameters, CL, R>(
                 stats.window_grew |= outcome.window_grew;
             }
             Err(error) => {
-                return Err(failure(ApplyError::from_wallet(index, error), stats));
+                return Err(apply_failure(ApplyError::from_wallet(index, error), stats));
             }
         }
     }
@@ -420,7 +445,7 @@ mod tests {
             (ApplyError::NotReady(BatchState::Pending), A::Skip),
             (ApplyError::StaleReceipt, A::Skip),
             (
-                ApplyError::Acknowledge(crate::recovery::failure("companion")),
+                ApplyError::Acknowledge(crate::error::failure("companion")),
                 A::Skip,
             ),
             (ApplyError::NotEnabled, A::NotEnabled),
