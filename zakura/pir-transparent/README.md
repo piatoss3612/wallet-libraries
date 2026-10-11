@@ -251,6 +251,7 @@ let mut plan = PassPlan::new(wallet.transparent_watch_set(account)?, PassLimits:
 let mut step = plan.first();
 while let Step::Pass | Step::Refresh | Step::Wait(_) = step {
     if let Step::Wait(wait) = step { sleep(wait) } // within the caller's budget
+    if should_stop() { break } // the library never reports the caller's cancellation
     let chain = WalletChain::new(&*wallet, plan.watch().target.unwrap());
     let report = companion.pass(plan.watch(), &chain, &exchange, limit, &should_stop)?;
     let settled = companion.settle_latest(wallet, trust, &mut gate);
@@ -290,27 +291,39 @@ while let Step::Pass | Step::Refresh | Step::Wait(_) = step {
 6. `PassPlan::next` decides the next step from the report, the settlement, and
    the watch set re-read after settling. It makes no request and reads no clock.
 
+`first` is `Done(None)` when the watch set has no target, and `Pass` otherwise.
+After each pass, `next` applies the first row that matches, in this order:
+
 | Pass and settlement | `Step` |
 | --- | --- |
-| The watch set has no target | `Done(None)` |
 | `Withdrawn(cause)` | `Hold(HoldCause::Withdrawn(cause))`: a timer would read the same contradiction |
-| `ApplyAction::Refresh` (a stale commit) | `Refresh`, uncounted, with the fresh watch set; `Skip` after `stale_refreshes` (3) |
+| `ApplyAction::Refresh` (a stale commit) | `Skip` after `stale_refreshes` (3); otherwise `Done(None)` when the fresh watch set has no target, else `Refresh`, uncounted, with it |
 | `ApplyAction::Reconcile` | `Hold(HoldCause::Unreconciled)`: only trusted settlement resolves the retirements |
-| `ApplyAction::Skip`, or a ready batch nobody settled | `Skip` |
+| `ApplyAction::Skip` | `Skip` |
 | `ApplyAction::Interrupted` | `Skip`: the gate stopped the account's settlement; the caller checks its own cancellation before the next pass |
 | `ApplyAction::NotEnabled` | `Stop(StopCause::NotEnabled)` |
 | `ApplyAction::PolicyChanged` | `Stop(StopCause::PolicyChanged)`: no further private pass under the policy the run captured; the next run captures it again |
 | `ApplyAction::Fail` | `Fail`: report the `ApplyFailure` |
+| A ready batch nobody settled | `Skip` |
+| The fresh watch set has no target | `Done(None)`; the pass counts |
 | `passes` (8) counted passes | `Done(Some(retry))` |
 | `Retry::More` | `Pass`: the companion resumes |
 | `Retry::After(wait)` | `Wait(wait)` |
 | `Retry::Complete` or `Stalled` | `Pass` for new work (a grown window or changed addresses), else `Done(Some(retry))` |
 
+A `PassError` never reaches the plan. `Outage` ends the run: the service failed
+every account alike. `Invalid`, `Failure` and `PublicationChanged` end the
+account's passes for this run, and the next run passes it again: `Invalid` also
+covers refusals that clear once the wallet's chain catches up, such as a target
+it no longer accepts or a missing shard anchor. Cancellation is the caller's:
+neither `pass` nor the plan reports it, so check it before every pass, including
+the next account's.
+
 The caller keeps what is policy: its time budgets and the cap on waits, how
 long a hold lasts, the trust it states, its write gate and threads, cancellation
-of requests in flight, and activation after `Done`. `take_latest`,
-`apply_and_acknowledge` and `acknowledge_applied` remain for callers that bring
-their own wallet writer.
+of requests in flight, and activation after `Done`. `take_latest` hands the
+held batch to a caller that reads or discards it; only settlement acknowledges
+a batch, so without `sqlite` the next pass exports it again.
 
 Settlement writes each commit in its own wallet transaction. An outer SQL
 transaction is refused, so an integrity rejection's recovery suspension cannot be
@@ -326,10 +339,7 @@ unacknowledged batch in the companion. `ApplyFailure::stats` reports that prefix
 The next pass re-exports the work; replay preserves already applied facts.
 Only the latest issued ready batch's receipt can be acknowledged.
 
-A custom wallet writer can apply `batch.commits()` and then call
-`acknowledge_applied` when there are no retirements. A batch with retirements
-requires the trusted SQLite settlement helper; manual acknowledgment refuses it.
-`PassPlan` holds an untrusted caller's account (`HoldCause::Unreconciled`) at
+A batch with retirements requires trusted settlement. `PassPlan` holds an untrusted caller's account (`HoldCause::Unreconciled`) at
 the first such batch instead of repeatedly accumulating successors it cannot
 reconcile.
 

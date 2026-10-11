@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Removed
+
+- `TransparentHistoryRecovery::apply_and_acknowledge`: settle the held batch
+  with `settle_latest`, or a taken one with `apply_and_acknowledge_gated` and
+  `Ungated`. `acknowledge_applied` is no longer public: a batch is acknowledged
+  only through SQLite settlement, and one read or discarded without it is
+  exported again by the next pass. Neither had a wallet caller.
+
 ### Changed
 
 - `PassPlan::next` skips the account (`Step::Skip`) after a settlement the
@@ -21,6 +29,17 @@
   to an hour) instead of staying first in every listing and taking every run.
   `DetailAnswer::Cancelled` stays for a caller that is exiting and writes
   nothing.
+- A display lookup that failed with `TxidError::Cancelled` is an attempt,
+  deferred as `Unavailable` like `DetailAnswer::TimedOut` (`deferral` returns
+  it too), instead of writing nothing: the lookup cannot say why it was
+  cancelled, and a caller forwarding a budget cancellation unchanged would
+  otherwise leave the lookup due and first in every run. Only an explicit
+  `DetailAnswer::Cancelled` writes nothing.
+- `DetailWrite::Defer` carries the listing's `expected_generation`, and
+  applying it fails with the wallet's stale-policy error after a policy
+  change, as a store does. A run that started under private queries therefore
+  ends at its first write after they are turned off, instead of deferring
+  every remaining lookup.
 
 - Rename the account recovery module to `transparent_history_recovery`,
   `ReferenceRecovery` to `TransparentHistoryRecovery`, and `RecoveryConfig` to
