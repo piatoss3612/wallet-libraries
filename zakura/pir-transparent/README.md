@@ -360,6 +360,12 @@ applicable filter and privately confirms matches. False positives alone never
 report a candidate as active. A receive or spend at or above the floor counts,
 including a spend of an output received earlier.
 
+A pass its private budget stops after confirming a candidate is followed by one
+over the candidates not yet confirmed, from the same map and with the filters
+already downloaded, so a heavily used address cannot spend the whole budget on
+its own history. The limits bound each pass, and there are at most as many
+passes as candidates. `More` means a pass stopped with nothing new confirmed.
+
 There is no wallet, durable companion, catalog, or independent wallet chain in
 this operation. The publication supplies its own chain view because discovery
 only proposes accounts. The caller imports those accounts and recovers them
@@ -425,7 +431,7 @@ included every event or reported every value honestly.
 | No features (default) | Recovery and display APIs are disabled |
 | `wallet` | Recovery, catalog-backed companions, discovery, transports, and display lookup/translation |
 | `sqlite` | Includes `wallet`; adds SQLite settlement, explicit trust, and write gates |
-| `testing` | Includes `wallet`; supplies synthetic batches and a txid publication for application tests; keep out of production builds |
+| `testing` | Includes `wallet`; supplies synthetic batches, a txid publication and a real shard service in process (`testing::service`, with the wallet-pir crates it publishes with re-exported) for application tests; keep out of production builds |
 
 Run the relevant development configuration from the repository root:
 
@@ -434,6 +440,9 @@ python3 scripts/dev.py test --config transparent-pir
 python3 scripts/dev.py test --config transparent-pir-sqlite
 python3 scripts/dev.py test --config transparent-pir-testing
 ```
+
+The in-process end-to-end tests use `testing::service`, so they need the
+`testing` feature.
 
 The [in-process recovery tests](tests/private_recovery.rs) use real PIR and
 record requests while exercising recovery, settlement, activation, reorgs,
