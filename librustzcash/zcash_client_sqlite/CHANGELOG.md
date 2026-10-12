@@ -10,6 +10,17 @@ workspace.
 
 ## [Unreleased]
 
+- `WalletDb::rewind_to_chain_state`, and with it adding or importing an account, no longer
+  fails with `CorruptedData` ("the … note commitment tree retains checkpoints both above and
+  below height H, but none at that height to truncate to") when accounts are added one after
+  another with no scan in between, or after a reorg truncation. The pruning floor is measured
+  from the wallet's view of the chain tip, as documented, rather than from `MAX(blocks.height)`,
+  so successive rewinds with no scan in between share one floor instead of each reaching up to
+  99 blocks deeper. Because pools prune their oldest checkpoints independently, the rewind also
+  skips a checkpoint height that a pool straddles while retaining only anchors below it; a pool
+  missing a checkpoint inside its own window is still reported as corrupted. There is no schema
+  change.
+
 - An input known only from a recovered receive that a chain rewind left unplaced is no longer
   refused as `Withdrawn` while its account's recovery catches up. The input check, direct
   lookup and final storage report `AuthorityRefusal::Pending` for that account, and admit the
