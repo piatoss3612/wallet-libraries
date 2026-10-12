@@ -65,14 +65,14 @@ const H0: u64 = 3_428_143;
 const ORIGIN: &str = "https://fixture.test";
 
 /// Every route the service serves a wallet, with its method: queries are the
-/// only uploads.
-const ROUTES: &str = r"^(GET /v1/(filters/shards(/[0-9]+/filter)?|shards/init|shards/[0-9]+/revisions/[0-9a-f]{64}/(manifest|setup/(directory|pages)/[0-9]+))|POST /v1/shards/[0-9]+/revisions/[0-9a-f]{64}/query/(directory|pages))$";
+/// only uploads. Page tables are named per page shard, `pages-<j>`.
+const ROUTES: &str = r"^(GET /v1/(filters/shards(/[0-9]+/filter)?|shards/init|shards/[0-9]+/revisions/[0-9a-f]{64}/(manifest|setup/(directory|pages-(0|[1-9][0-9]?))/[0-9]+))|POST /v1/shards/[0-9]+/revisions/[0-9a-f]{64}/query/(directory|pages-(0|[1-9][0-9]?)))$";
 
 /// The shard a request's path names: its filter, manifest, tables or queries.
 const SHARD: &str = r"^/v1/(filters/)?shards/([0-9]+)/";
 
-/// A pages query's shard and revision.
-const PAGES_QUERY: &str = r"^/v1/shards/([0-9]+)/revisions/([0-9a-f]{64})/query/pages$";
+/// A pages query's revision and page shard.
+const PAGES_QUERY: &str = r"^/v1/shards/[0-9]+/revisions/([0-9a-f]{64})/query/pages-([0-9]+)$";
 
 /// What a pass over a map that rewrites sealed history the companion's store
 /// holds, without declaring a re-cut, returns: wallet-pir refuses it before
@@ -180,6 +180,7 @@ fn sealed(start: u64, end: u64, events: Vec<(ScriptBytes, TransparentEvent)>) ->
         sealed: true,
         revision: 0,
         supersedes: String::new(),
+        page_span: 0,
         events,
     }
 }
@@ -193,6 +194,7 @@ fn tail(end: u64, revision: u32, events: Vec<(ScriptBytes, TransparentEvent)>) -
         sealed: false,
         revision,
         supersedes: String::new(),
+        page_span: 0,
         events,
     }
 }
@@ -793,15 +795,30 @@ impl Fixture {
         (dithered, nearest)
     }
 
-    /// The body length of a 44-bit pages query to one shard revision: the
-    /// 8-byte binding, then a selection over the rows its manifest fixes.
-    fn pages_query_len(&self, shard_id: u64, revision: &str) -> usize {
-        let url = self.url.as_deref().expect("a served publication");
-        let mut transport = HttpShardTransport::new(url, &HttpOptions::default()).unwrap();
-        let (raw, _) = transport.manifest(shard_id, revision).unwrap();
+    /// The body length of a 44-bit query to page shard `child` of one shard
+    /// revision, the 8-byte binding then a selection over the rows its
+    /// manifest fixes for that page shard, and whether those rows are fewer
+    /// than a whole segment. Read from the published manifest, which stays on
+    /// disk after a later publication stops serving the revision.
+    fn pages_query_len(&self, revision: &str, child: u32) -> (usize, bool) {
+        let raw = (1..=self.publications)
+            .map(|n| {
+                self.dir
+                    .path()
+                    .join(format!("publication-{n}"))
+                    .join(revision)
+                    .join("manifest.json")
+            })
+            .find_map(|path| std::fs::read(path).ok())
+            .expect("a published revision");
         let manifest: transparent_shard::manifest::ShardManifest =
             serde_json::from_slice(&raw).unwrap();
-        8 + transparent_native::request_len_bits(manifest.pages_query_rows() as usize, 44)
+        let child = manifest.child(child).expect("a declared page shard");
+        let rows = child.query_rows();
+        (
+            8 + transparent_native::request_len_bits(rows as usize, 44),
+            rows < child.page_segments[0].rows,
+        )
     }
 
     /// Asserts that every request the service received used one of its routes
@@ -858,13 +875,10 @@ impl Fixture {
         for request in requests.iter().filter(|request| request.method == "POST") {
             match pages.captures(&request.path) {
                 Some(captures) => {
-                    assert_eq!(
-                        request.body.len(),
-                        self.pages_query_len(captures[1].parse().unwrap(), &captures[2]),
-                        "a pages query to {}",
-                        request.path
-                    );
-                    prefixes += usize::from(!dithered.contains(&request.body.len()));
+                    let (len, prefix) =
+                        self.pages_query_len(&captures[1], captures[2].parse().unwrap());
+                    assert_eq!(request.body.len(), len, "a pages query to {}", request.path);
+                    prefixes += usize::from(prefix);
                 }
                 None => assert!(
                     dithered.contains(&request.body.len()),
@@ -1367,6 +1381,239 @@ fn growing_tail_pages_queries_select_only_its_rows() {
     assert!(f.assert_private(&[0, 1, 2]) > 0);
 }
 
+/// The decoupled tests' page shards: ten blocks each from the tail's start, so a
+/// grown tail keeps its earlier page shards byte for byte.
+const PAGE_SPAN: u64 = 10;
+
+/// The decoupled tests' publication: three sealed shards below the birthday and a
+/// tail from `H0 + 600` through `tail_end` at `revision`, in page shards of
+/// [`PAGE_SPAN`] blocks, holding `a0`'s history at the offsets in `offsets` from
+/// `H0 + 600` through `tail_end`. Each is a receive of 10,000 times its position,
+/// from one, except that the fifth event spends the first receive.
+///
+/// The two newest events stay in the directory; each older one is pushed into
+/// the page shard open when the event two places after it arrives:
+///
+/// | Block | Arrives | Pushed out | Into |
+/// |---|---|---|---|
+/// | +3 | e3 | e1 | pages-0 |
+/// | +11 | e4 | e2 | pages-1 |
+/// | +12 | e5 | e3 | pages-1 |
+/// | +21 | e6 | e4 | pages-2 |
+fn decoupled(a0: TransparentAddress, tail_end: u64, revision: u32) -> Vec<ShardSpec> {
+    // Unrelated activity over the first revision's blocks alone, so a grown
+    // tail changes none of its earlier blocks.
+    let mut events = noise(H0 + 600, H0 + 619, 3);
+    for (n, offset) in DECOUPLED_OFFSETS.iter().enumerate() {
+        let (n, at) = (n as u64 + 1, H0 + 600 + offset);
+        if at > tail_end {
+            break;
+        }
+        let event = if n == 5 {
+            spend(at, txid(n), (txid(1), 0))
+        } else {
+            receive(at, txid(n), 0, 10_000 * n)
+        };
+        events.push((script(a0), event));
+    }
+    vec![
+        sealed(H0, H0 + 199, noise(H0, H0 + 199, 0)),
+        sealed(H0 + 200, H0 + 399, noise(H0 + 200, H0 + 399, 1)),
+        sealed(H0 + 400, H0 + 599, noise(H0 + 400, H0 + 599, 2)),
+        ShardSpec {
+            page_span: PAGE_SPAN,
+            ..tail(tail_end, revision, events)
+        },
+    ]
+}
+
+/// Offsets from `H0 + 600` of `a0`'s events in [`decoupled`].
+const DECOUPLED_OFFSETS: [u64; 6] = [1, 2, 3, 11, 12, 21];
+
+impl Fixture {
+    /// Pages queries the service received from the `from`th request on, by the
+    /// page shard each addressed.
+    fn pages_queries(&self, from: usize) -> Vec<u32> {
+        let pages = Regex::new(PAGES_QUERY).unwrap();
+        self.server.requests()[from..]
+            .iter()
+            .filter(|request| request.method == "POST")
+            .filter_map(|request| {
+                pages
+                    .captures(&request.path)
+                    .map(|captures| captures[2].parse().unwrap())
+            })
+            .collect()
+    }
+
+    /// Rows in the companion's run cache.
+    fn cached_runs(&self) -> i64 {
+        self.companion_db()
+            .query_row("SELECT COUNT(*) FROM run_cache", [], |row| row.get(0))
+            .unwrap()
+    }
+}
+
+/// A history pushed into two page shards of the tail comes back exactly: the
+/// walk reads the newest run, in the open page shard, then the older run in the
+/// sealed one it points to, and caches that sealed run. Once the tail grows, the
+/// catch-up reads the runs that changed and stops at the cached run, where a fresh
+/// wallet walks the whole chain; both settle the same spendable outputs.
+#[test]
+fn a_history_across_page_shards_recovers_and_catch_up_stops_at_the_cached_run() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let birthday = H0 + 600;
+    let (first_end, grown_end) = (H0 + 619, H0 + 629);
+    let mut f = Fixture::new(birthday, first_end);
+    f.trust_service();
+    let a0 = f.derived(TransparentKeyScope::EXTERNAL, 0);
+    let map = f.publish(&decoupled(a0, first_end, 0), SEAL);
+    // pages-0 sealed over +0..=+9, pages-1 open over +10..=+19.
+    assert_eq!(map.shards[3].page_segments, 2, "two page shards");
+
+    let pass = f.drive();
+    assert_eq!(pass.batch.state, BatchState::Ready);
+    assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
+    f.activate();
+    // Runs pages-1 [e2, e3] and pages-0 [e1]; e4 and e5 inline, e5 spending e1.
+    let expected: Vec<OutPoint> = {
+        let mut outpoints: Vec<OutPoint> = [2, 3, 4].map(|n| outpoint(txid(n), 0)).to_vec();
+        outpoints.sort_by_key(|outpoint| (*outpoint.hash(), outpoint.n()));
+        outpoints
+    };
+    assert_eq!(f.spendable().unwrap(), expected);
+    assert_eq!(
+        f.pages_queries(0),
+        vec![1, 0],
+        "the head run, then the older one"
+    );
+    // Only the run in the sealed page shard is final, so only it is cached.
+    assert_eq!(f.cached_runs(), 1);
+    f.assert_private(&[0, 1, 2]);
+
+    // The tail grows: pages-1 seals, pages-2 opens, and e6 pushes e4 into it.
+    f.scan_to(grown_end);
+    let seen = f.server.requests().len();
+    f.publish(&decoupled(a0, grown_end, 1), SEAL);
+    let pass = f.drive();
+    assert_eq!(pass.batch.state, BatchState::Ready);
+    assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
+    let expected: Vec<OutPoint> = {
+        let mut outpoints: Vec<OutPoint> = [2, 3, 4, 6].map(|n| outpoint(txid(n), 0)).to_vec();
+        outpoints.sort_by_key(|outpoint| (*outpoint.hash(), outpoint.n()));
+        outpoints
+    };
+    assert_eq!(f.spendable().unwrap(), expected);
+    // pages-2's head and pages-1's run, now sealed; pages-0's is cached.
+    assert_eq!(
+        f.pages_queries(seen),
+        vec![2, 1],
+        "the walk stops at the cached run"
+    );
+    assert_eq!(f.cached_runs(), 2);
+    f.assert_private(&[0, 1, 2]);
+
+    // A fresh wallet on the same chain pays for every run.
+    let mut fresh = Fixture::new(birthday, grown_end);
+    fresh.trust_service();
+    let a0 = fresh.derived(TransparentKeyScope::EXTERNAL, 0);
+    fresh.publish(&decoupled(a0, grown_end, 1), SEAL);
+    let pass = fresh.drive();
+    assert_eq!(pass.batch.state, BatchState::Ready);
+    assert_eq!(pass.batch.progress.outcome, Outcome::Complete);
+    fresh.activate();
+    assert_eq!(fresh.spendable().unwrap(), expected);
+    assert_eq!(fresh.pages_queries(0), vec![2, 1, 0]);
+    fresh.assert_private(&[0, 1, 2]);
+}
+
+/// A real page lookup respects small query and byte budgets and resumes from
+/// SQLite after every pass, including midway through a run with many fragments.
+#[test]
+fn small_page_budgets_recover_a_long_history_across_restarts() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    for (queries, private_bytes) in [(1, 96 << 20), (256, 1)] {
+        let birthday = H0 + 600;
+        let mut f = Fixture::new(birthday, H0 + 619);
+        f.trust_service();
+        let address = f.derived(TransparentKeyScope::EXTERNAL, 0);
+        let mut shards = decoupled(address, H0 + 619, 0);
+        shards[3]
+            .events
+            .retain(|(owner, _)| *owner != script(address));
+        shards[3].events.extend((0..200).map(|index| {
+            (
+                script(address),
+                receive(birthday + 1, txid(500), index, 10_000),
+            )
+        }));
+        f.publish(&shards, SEAL);
+        // First retrieve only the directory, leaving an uncached page walk.
+        f.companion = None;
+        let mut bounded = config(f.account);
+        bounded.queries = 1;
+        let account = f.account_name();
+        f.companion = Some(
+            f.companions()
+                .open(
+                    &account,
+                    bounded,
+                    || Ok(BTreeSet::from([account.clone()])),
+                    &|| false,
+                )
+                .unwrap(),
+        );
+        f.pass().unwrap();
+        let mut complete = false;
+        let mut saved_fragments = false;
+        for _ in 0..40 {
+            f.companion = None;
+            let mut bounded = config(f.account);
+            bounded.queries = queries;
+            bounded.private_bytes = private_bytes;
+            f.companion = Some(
+                f.companions()
+                    .open(
+                        &account,
+                        bounded,
+                        || Ok(BTreeSet::from([account.clone()])),
+                        &|| false,
+                    )
+                    .unwrap(),
+            );
+            let seen = f.server.requests().len();
+            let pass = f.pass().unwrap();
+            assert!(
+                f.pages_queries(seen).len() <= 1,
+                "a one-query or one-byte pass dispatched more than one page query"
+            );
+            saved_fragments |= f
+                .companion_db()
+                .query_row(
+                    "SELECT COUNT(*) FROM pending_work WHERE length(fragments) > 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                > 0;
+            if pass.batch.progress.outcome == Outcome::Complete {
+                complete = true;
+                break;
+            }
+        }
+        assert!(saved_fragments, "a partial run was saved across a restart");
+        assert!(
+            complete,
+            "small-budget passes finish rather than repeat the head"
+        );
+        f.activate();
+        let mut expected: Vec<_> = (0..200).map(|index| outpoint(txid(500), index)).collect();
+        expected.sort_by_key(|outpoint| (*outpoint.hash(), outpoint.n()));
+        assert_eq!(f.spendable().unwrap(), expected);
+        f.assert_private(&[0, 1, 2]);
+    }
+}
+
 /// The last height the re-cut tests publish, and the wallet's tip.
 const RECUT_TIP: u64 = H0 + 549;
 
@@ -1393,6 +1640,7 @@ fn before_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             sealed: false,
             revision: 0,
             supersedes: String::new(),
+            page_span: 0,
             events: noise(H0 + 500, RECUT_TIP, 4),
         },
     ]
@@ -1418,6 +1666,7 @@ fn after_recut(a0: TransparentAddress) -> Vec<ShardSpec> {
             sealed: true,
             revision: 0,
             supersedes: String::new(),
+            page_span: 0,
             events: [s1.events, s2.events].concat(),
         },
         ShardSpec { revision: 1, ..s3 },
@@ -2485,6 +2734,7 @@ fn stale_middle_retirement_batch_preserves_reconciliation_across_reopen() {
         sealed: false,
         revision: 0,
         supersedes: String::new(),
+        page_span: 0,
         events: noise(H0 + 1000, target, 5),
     });
     f.publish(&shards, SEAL);
