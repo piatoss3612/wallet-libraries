@@ -12,14 +12,18 @@
 
 ### Changed
 
+- Page retrieval saves checked partial runs across restarts and enforces query
+  and byte limits between requests. The reference store uses fresh format 6;
+  older prototype companion stores must be recreated.
+
 - Transparent PIR shard schema v12, decoupled page shards (wallet-pir
-  `fb90519b`). `SCHEMA` is `transparent-shard-v12`: each shard is a directory
+  `a65634b4`). `SCHEMA` is `transparent-shard-v12`: each shard is a directory
   shard with up to 32 page shards of its own, queried as `pages-<j>` tables, and
   an address's older events form a chain of runs across them that the reference
   client walks newest first. The geometries are `decoupled-2k-8k` (recent) and
   `decoupled-32k-32k` (archive). Companion file names commit to the schema, so a
   v12 build opens new companions and never reads a v11 one; the reference store
-  is schema 5, which refuses older files instead of migrating them. Its pending
+  is schema 6, which refuses older files instead of migrating them. Its pending
   page work is now a chain-walk cursor with the events it carries, and its new
   `run_cache` table keeps verified run histories by page shard identity: a store
   rollback and cache pruning keep it, so a tip catch-up stops at the first run it
