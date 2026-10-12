@@ -6364,7 +6364,7 @@ mod tests {
     use super::{
         KeyScope, ShieldedPool, TxQueryType, TxRef, account_birthday,
         flag_previously_received_change, min_shared_checkpoint_height, queue_tx_retrieval,
-        select_truncation_height,
+        rewind_truncation_height, select_truncation_height,
     };
 
     use incrementalmerkletree::frontier::Frontier;
@@ -6482,6 +6482,73 @@ mod tests {
         assert_eq!(
             select_truncation_height(&tx, BlockHeight::from_u32(10)).unwrap(),
             BlockHeight::from_u32(9),
+        );
+    }
+
+    /// The rewind counterpart of `truncation_height_rejects_straddling_ironwood_checkpoints`.
+    /// A scan batch whose last block carries only an Ironwood output leaves Sapling and Orchard
+    /// with one more old checkpoint (198) than Ironwood, whose oldest ordinary checkpoint is 199
+    /// while it still retains an anchor (80) further down. The lowest checkpoint any pool
+    /// retains at or above the floor is then straddled by Ironwood's checkpoints with only an
+    /// anchor below, so the rewind truncates at the next one, which every pool retains.
+    #[test]
+    fn rewind_truncation_height_skips_heights_a_pool_straddles() {
+        let mut conn = connection_with_checkpoint_tables();
+        conn.execute_batch(
+            "INSERT INTO sapling_tree_checkpoints (checkpoint_id) VALUES (80), (198), (199), (200);
+             INSERT INTO orchard_tree_checkpoints (checkpoint_id) VALUES (80), (198), (199), (200);
+             INSERT INTO ironwood_tree_checkpoints (checkpoint_id) VALUES (80), (199), (200);
+             CREATE TABLE sapling_tree_retained_checkpoints (checkpoint_id INTEGER PRIMARY KEY);
+             CREATE TABLE orchard_tree_retained_checkpoints (checkpoint_id INTEGER PRIMARY KEY);
+             CREATE TABLE ironwood_tree_retained_checkpoints (checkpoint_id INTEGER PRIMARY KEY);
+             INSERT INTO sapling_tree_retained_checkpoints (checkpoint_id) VALUES (80);
+             INSERT INTO orchard_tree_retained_checkpoints (checkpoint_id) VALUES (80);
+             INSERT INTO ironwood_tree_retained_checkpoints (checkpoint_id) VALUES (80);",
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let pools = [
+            crate::SAPLING_TABLES_PREFIX,
+            crate::ORCHARD_TABLES_PREFIX,
+            crate::IRONWOOD_TABLES_PREFIX,
+        ];
+        let rescan_floor = BlockHeight::from_u32(9);
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(101), rescan_floor)
+                .unwrap(),
+            Some(BlockHeight::from_u32(199)),
+        );
+        // A floor at a height every pool retains selects that height, and a floor below the
+        // anchor selects the anchor, which every pool retains.
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(199), rescan_floor)
+                .unwrap(),
+            Some(BlockHeight::from_u32(199)),
+        );
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(10), rescan_floor).unwrap(),
+            Some(BlockHeight::from_u32(80)),
+        );
+        // No pool retains a checkpoint at or above the floor.
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(201), rescan_floor)
+                .unwrap(),
+            None,
+        );
+
+        // A pool that also retains an ordinary checkpoint below a height it straddles is
+        // missing a checkpoint inside its own window. That height is returned rather than
+        // skipped, so that the truncation reports the pool as corrupted.
+        tx.execute(
+            "INSERT INTO ironwood_tree_checkpoints (checkpoint_id) VALUES (150)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            rewind_truncation_height(&tx, &pools, BlockHeight::from_u32(101), rescan_floor)
+                .unwrap(),
+            Some(BlockHeight::from_u32(198)),
         );
     }
 
@@ -8218,3 +8285,6 @@ mod tests {
 
 #[cfg(test)]
 mod request_lifecycle_tests;
+
+#[cfg(test)]
+mod rewind_floor_tests;
