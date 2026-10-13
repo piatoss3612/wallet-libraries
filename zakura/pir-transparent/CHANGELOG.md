@@ -4,9 +4,10 @@
 
 ### Changed
 
-- Depend on wallet-pir's `transparent-v0.1.0-rc.1` tag (crate versions
-  `=0.1.0-rc.1`) instead of a bare revision. The tagged code matches the
-  previous pin.
+- Depend on the transparent PIR crates from crates.io (`=0.1.0-rc.3`, tagged
+  `transparent-v0.1.0-rc.3` in wallet-pir) instead of a git revision.
+- Txid lookups read the 4,096-row display tables the `/v2/txid` service now
+  publishes; earlier clients refuse them. History recovery is unchanged.
 
 ## [0.0.1-rc0] - PLANNED
 
