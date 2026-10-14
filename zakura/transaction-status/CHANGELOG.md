@@ -2,7 +2,14 @@
 
 ## [Unreleased]
 
-## [0.0.1-rc1] - PLANNED
+## [0.0.1-rc2] - 2026-10-14
+
+### Changed
+
+- Update the wallet backend dependency to `0.1.0-rc9`. Status routing and
+  observation behavior are unchanged.
+
+## [0.0.1-rc1] - 2026-10-13
 
 ### Packaging
 

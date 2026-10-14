@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.0.1-rc0] - 2026-10-14
+
 ### Added
 
 - Add one-time IVK derivation (`KeyId::derive`): each key keeps the
