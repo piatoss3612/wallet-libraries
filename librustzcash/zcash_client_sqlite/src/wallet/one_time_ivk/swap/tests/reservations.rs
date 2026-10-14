@@ -414,6 +414,25 @@ fn lost_requests_are_reused_only_once_a_seen_set_shows_them_unseen() {
     }
 }
 
+/// A started reservation stays reserved while its conclusive status is stale, and its key
+/// keeps scanning when keys close, so a fresh status can still find it scanned empty and
+/// reclaim it. A key closed while reserved would hold its address forever.
+#[test]
+fn a_reserved_key_stays_open_until_a_fresh_status_reclaims_it() {
+    let mut st = fixture();
+    let account = st.test_account().unwrap().id();
+    let r = prepare(&mut st, NOW);
+    quote(&mut st, &r, "refunded", true);
+    report(&mut st, "refunded", NO_RECEIPT, false, NOW + 61);
+    let height = tip(&st).height;
+    let db = st.wallet_mut().db_mut();
+    assert_eq!(close_at(db, account, EXPIRED, height), 0);
+    assert!(reserved(&st, &r));
+    assert!(active_from(&st, r.key_id()).is_some());
+    report(&mut st, "refunded", NO_RECEIPT, false, EXPIRED);
+    assert!(!reserved(&st, &r));
+}
+
 /// A started reservation needs a fresh conclusive status: a funded swap's is a refund,
 /// and an older status arriving late does not replace a newer one, though its deposit
 /// evidence sticks, so a later fresh unfunded status cannot reclaim the address.
@@ -688,6 +707,25 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
     assert!(!reserved(&st, &draft));
     let issued = prepare_seen(&mut st, EXPIRED, COVERING, &[]);
     assert_eq!(issued.key_id().index(), RECEIVE_GAP_LIMIT + 3);
+}
+
+/// A payment moves the recovery bound only once it has the untrusted confirmations, so a
+/// reorg that drops it cannot leave an issued address past the bound. Here quotes with
+/// unknown outcomes hold every other address in the window.
+#[test]
+fn only_a_confirmed_payment_moves_the_bound() {
+    let mut st = fixture();
+    let first = prepare(&mut st, NOW);
+    begin(&mut st, &first, "lost").unwrap().unwrap();
+    pay(&mut st, first.full_viewing_key(), 100_000);
+    for i in 1..RECEIVE_GAP_LIMIT {
+        let r = prepare(&mut st, NOW);
+        begin(&mut st, &r, &format!("lost-{i}")).unwrap().unwrap();
+    }
+    let limited = refusal(try_prepare(&mut st, NOW, None));
+    assert_eq!(limited, Some(ReservationPolicy::Limit));
+    confirm(&mut st);
+    assert_eq!(prepare(&mut st, NOW).key_id().index(), RECEIVE_GAP_LIMIT);
 }
 
 /// A rewind removes a payment but not its used marker, and the provider saw every

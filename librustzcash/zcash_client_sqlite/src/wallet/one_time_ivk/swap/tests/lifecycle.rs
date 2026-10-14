@@ -91,7 +91,8 @@ fn observations_are_monotonic_and_a_seen_deposit_sticks() {
 }
 
 /// Conflicting observations requested in the same second leave the same row whichever
-/// arrives last: an expected receipt is never replaced by no receipt or a smaller amount,
+/// arrives last: an expected receipt, even of an unreported amount, is never replaced by
+/// no receipt or a smaller amount,
 /// nor an inconclusive end by no receipt, so a stale answer cannot settle the key before
 /// its receipt arrives.
 #[test]
@@ -114,6 +115,11 @@ fn equal_time_observations_never_lower_the_expected_receipt() {
             (100, 2, Some(70_000), false),
         ),
         (
+            Terminal(Positive(None)),
+            Terminal(NoReceipt),
+            (100, 2, None, false),
+        ),
+        (
             Terminal(Unknown),
             Terminal(NoReceipt),
             (100, 3, None, false),
@@ -133,10 +139,15 @@ fn equal_time_observations_never_lower_the_expected_receipt() {
 }
 
 /// A refund key whose deposit this wallet did not fund starts once the provider reports
-/// a refund owed, unless a newer status, answered first, reports none.
+/// a refund owed or an inconclusive end, unless a newer status, answered first, reports
+/// none.
 #[test]
 fn a_refund_owed_starts_an_unfunded_refund_key() {
-    for settled_first in [false, true] {
+    for (owed, settled_first) in [
+        (Terminal(Positive(None)), false),
+        (Terminal(Positive(None)), true),
+        (Terminal(Unknown), false),
+    ] {
         let mut st = scanned_wallet();
         let account = st.test_account().unwrap().id();
         let from = next_height(&st);
@@ -155,9 +166,9 @@ fn a_refund_owed_starts_an_unfunded_refund_key() {
         if settled_first {
             assert!(record(db, Terminal(NoReceipt), 300));
         }
-        assert!(record(db, Terminal(Positive(None)), 200));
+        assert!(record(db, owed, 200));
         let expected = if settled_first { vec![] } else { vec![key] };
-        assert_eq!(scanning_keys(&st), expected, "{settled_first}");
+        assert_eq!(scanning_keys(&st), expected, "{owed:?} {settled_first}");
     }
 }
 
