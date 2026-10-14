@@ -35,6 +35,10 @@ workspace.
   change to the ordinary account key; `data_api::error::Error::OneTimeKeyNotDerivable` reports
   a note whose key derives no viewing key. With `sync`, `sync::run` now requires its store to
   implement `OneTimeIvkWrite` (through `sync::SyncWallet`) and scans with the one-time keys.
+  `GreedyInputSelector` with `NoteSelection::PreferConsolidation` skips a one-time-key
+  consolidation candidate that would change the transaction's shape, so later candidates can
+  still take spare input slots, and asks for twice as many Ironwood candidates to leave room
+  for them.
 - `ll::wallet::{put_blocks_with_nullifier_retention, put_blocks_rows_with_nullifier_retention}`
   (with `orchard`): `put_blocks` and `put_blocks_rows` with a height from which Ironwood
   nullifiers stay tracked, for a store that finds Ironwood notes after scanning past them.
