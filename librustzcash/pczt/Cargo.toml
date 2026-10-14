@@ -55,6 +55,9 @@ getset.workspace = true
 document-features = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Unit-test fixtures construct addresses even without the integration-test roles.
+orchard = { workspace = true, features = ["zip32-addresses"] }
+sapling = { workspace = true, features = ["zip32-addresses"] }
 hex.workspace = true
 incrementalmerkletree.workspace = true
 rand_chacha_10 = { package = "rand_chacha", version = "0.10" }

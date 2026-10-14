@@ -39,10 +39,12 @@ use zcash_note_encryption::try_note_decryption;
 #[allow(non_upper_case_globals)]
 const OsRng: UnwrapErr<SysRng> = UnwrapErr(SysRng);
 use zcash_primitives::transaction::{
+    TxVersion,
     builder::{BuildConfig, Builder, BundlePadding, DeferredPcztBuilder, PcztResult},
     fees::zip317,
     sighash::SignableInput,
     sighash_v5::v5_signature_hash,
+    sighash_v6::v6_signature_hash,
     txid::TxIdDigester,
 };
 use zcash_proofs::prover::LocalTxProver;
@@ -54,25 +56,47 @@ use zcash_protocol::{
 use zcash_script::script::{self, Evaluable};
 
 static ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
-static POST_NU6_3_ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
 
 fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
     ORCHARD_PROVING_KEY.get_or_init(|| {
-        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2)
+        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3)
+            .expect("the current Orchard circuit supports proving")
     })
 }
 
-fn post_nu6_3_orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
-    POST_NU6_3_ORCHARD_PROVING_KEY.get_or_init(|| {
-        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::PostNu6_3)
-    })
+// A historical received note can be reconstructed and spent by the current
+// circuit without constructing a historical bundle or proving key.
+fn historical_orchard_note(
+    recipient: orchard::Address,
+    value: orchard::value::NoteValue,
+) -> orchard::Note {
+    let rho = orchard::note::Rho::from_bytes(&[0; 32]).unwrap();
+    let rseed = orchard::note::RandomSeed::from_bytes([42; 32], &rho).unwrap();
+    orchard::Note::from_parts(recipient, value, rho, rseed, orchard::note::NoteVersion::V2).unwrap()
+}
+
+fn unsigned_orchard_spend_indices(pczt: &Pczt) -> Vec<usize> {
+    pczt.orchard()
+        .actions()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, action)| action.spend().spend_auth_sig().is_none().then_some(index))
+        .collect()
 }
 
 fn check_round_trip(pczt: &Pczt) {
-    // The v1 and v2 encodings both remain available explicitly.
-    v1::Pczt::try_from(pczt.clone())
-        .expect("v1 encoding succeeds")
-        .serialize();
+    // Legacy transactions remain representable in v1; current transactions
+    // must reject that encoding instead of dropping their v6 fields.
+    if *pczt.global().tx_version() == zcash_protocol::constants::V6_TX_VERSION {
+        assert!(matches!(
+            v1::Pczt::try_from(pczt.clone()),
+            Err(pczt::EncodingError::UnsupportedTxVersion)
+        ));
+    } else {
+        v1::Pczt::try_from(pczt.clone())
+            .expect("v1 encoding succeeds")
+            .serialize();
+    }
     v2::Pczt::try_from(pczt.clone())
         .expect("v2 encoding succeeds")
         .serialize();
@@ -124,8 +148,8 @@ fn assert_external_orchard_signature_round_trip(
 }
 
 #[test]
-fn transparent_to_orchard() {
-    let params = pre_nu6_3_test_network();
+fn transparent_to_ironwood() {
+    let params = nu6_3_test_network();
     let rng = OsRng;
 
     // Create a transparent account to send funds from.
@@ -139,8 +163,7 @@ fn transparent_to_orchard() {
     let transparent_sk = transparent_account_sk
         .derive_external_secret_key(address_index)
         .unwrap();
-    let secp = secp256k1::Secp256k1::signing_only();
-    let transparent_pubkey = transparent_sk.public_key(&secp);
+    let transparent_pubkey = transparent_sk.public_key();
     let p2pkh_addr = TransparentAddress::from_pubkey(&transparent_pubkey);
 
     // Create an Orchard account to receive funds.
@@ -162,8 +185,8 @@ fn transparent_to_orchard() {
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: None,
-            orchard_anchor: Some(orchard::Anchor::empty_tree()),
-            ironwood_anchor: None,
+            orchard_anchor: None,
+            ironwood_anchor: Some(orchard::Anchor::empty_tree()),
             orchard_padding: BundlePadding::DEFAULT,
             ironwood_padding: BundlePadding::DEFAULT,
         },
@@ -172,7 +195,7 @@ fn transparent_to_orchard() {
         .add_transparent_p2pkh_input(transparent_pubkey, utxo, coin.clone())
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_ironwood_output::<zip317::FeeRule>(
             Some(orchard_ovk),
             recipient,
             Zatoshis::const_from_u64(100_000),
@@ -180,7 +203,7 @@ fn transparent_to_orchard() {
         )
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_ironwood_output::<zip317::FeeRule>(
             Some(orchard_fvk.to_ovk(zip32::Scope::Internal)),
             orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal),
             Zatoshis::const_from_u64(885_000),
@@ -196,15 +219,15 @@ fn transparent_to_orchard() {
     check_round_trip(&pczt);
 
     let memo_redacted = Redactor::new(pczt.clone())
-        .redact_orchard_with(|mut orchard| {
+        .redact_ironwood_with(|mut orchard| {
             orchard.redact_actions(|mut actions| {
                 actions.replace_enc_ciphertext_with_decrypted_memo_plaintext(
-                    orchard::note::NoteVersion::V2,
+                    orchard::note::NoteVersion::V3,
                 );
             });
         })
         .finish();
-    assert!(memo_redacted.orchard().actions().iter().all(|action| {
+    assert!(memo_redacted.ironwood().actions().iter().all(|action| {
         matches!(
             action.output().enc_ciphertext(),
             pczt::orchard::EncCiphertext::MemoPlaintext(_)
@@ -212,7 +235,7 @@ fn transparent_to_orchard() {
     }));
 
     let memo_resolved = IoFinalizer::new(memo_redacted).finalize_io().unwrap();
-    assert!(memo_resolved.orchard().actions().iter().all(|action| {
+    assert!(memo_resolved.ironwood().actions().iter().all(|action| {
         matches!(
             action.output().enc_ciphertext(),
             pczt::orchard::EncCiphertext::Encrypted(_)
@@ -226,7 +249,7 @@ fn transparent_to_orchard() {
 
     // Create proofs.
     let pczt = Prover::new(pczt)
-        .create_orchard_proof(orchard_proving_key())
+        .create_ironwood_proof(orchard_proving_key())
         .unwrap()
         .finish();
     check_round_trip(&pczt);
@@ -254,9 +277,16 @@ fn transparent_to_orchard() {
     let bundle = tx.transparent_bundle().unwrap();
     assert_eq!(bundle.vin.len(), 1);
     let txin = bundle.vin.first().unwrap();
+    // Preserve the effects-only prevout context while selecting the transaction's
+    // signature digest, including the empty Ironwood commitment in v6.
+    let signature_hash = match tx_effects.version() {
+        TxVersion::V5 => v5_signature_hash,
+        TxVersion::V6 => v6_signature_hash,
+        _ => unreachable!("this fixture builds only v5 or v6 transactions"),
+    };
     let sighasher = |script_code: &script::Code, hash_type: &zcash_script::signature::HashType| {
         Some(
-            v5_signature_hash(
+            signature_hash(
                 &tx_effects,
                 &SignableInput::Transparent(
                     ::transparent::sighash::SignableInput::from_parts(
@@ -311,8 +341,8 @@ fn transparent_to_orchard() {
 }
 
 #[test]
-fn transparent_p2sh_multisig_to_orchard() {
-    let params = pre_nu6_3_test_network();
+fn transparent_p2sh_multisig_to_ironwood() {
+    let params = nu6_3_test_network();
     let rng = OsRng;
 
     // Construct a 2-of-3 ZIP 48 P2SH account.
@@ -354,8 +384,8 @@ fn transparent_p2sh_multisig_to_orchard() {
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: None,
-            orchard_anchor: Some(orchard::Anchor::empty_tree()),
-            ironwood_anchor: None,
+            orchard_anchor: None,
+            ironwood_anchor: Some(orchard::Anchor::empty_tree()),
             orchard_padding: BundlePadding::DEFAULT,
             ironwood_padding: BundlePadding::DEFAULT,
         },
@@ -364,7 +394,7 @@ fn transparent_p2sh_multisig_to_orchard() {
         .add_transparent_p2sh_input(redeem_script, utxo, coin.clone())
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_ironwood_output::<zip317::FeeRule>(
             Some(orchard_ovk),
             recipient,
             Zatoshis::const_from_u64(100_000),
@@ -372,7 +402,7 @@ fn transparent_p2sh_multisig_to_orchard() {
         )
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_ironwood_output::<zip317::FeeRule>(
             Some(orchard_fvk.to_ovk(zip32::Scope::Internal)),
             orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal),
             Zatoshis::const_from_u64(880_000),
@@ -393,7 +423,7 @@ fn transparent_p2sh_multisig_to_orchard() {
 
     // Create proofs.
     let pczt = Prover::new(pczt)
-        .create_orchard_proof(orchard_proving_key())
+        .create_ironwood_proof(orchard_proving_key())
         .unwrap()
         .finish();
     check_round_trip(&pczt);
@@ -435,9 +465,16 @@ fn transparent_p2sh_multisig_to_orchard() {
     let bundle = tx.transparent_bundle().unwrap();
     assert_eq!(bundle.vin.len(), 1);
     let txin = bundle.vin.first().unwrap();
+    // Preserve the effects-only prevout context while selecting the transaction's
+    // signature digest, including the empty Ironwood commitment in v6.
+    let signature_hash = match tx_effects.version() {
+        TxVersion::V5 => v5_signature_hash,
+        TxVersion::V6 => v6_signature_hash,
+        _ => unreachable!("this fixture builds only v5 or v6 transactions"),
+    };
     let sighasher = |script_code: &script::Code, hash_type: &zcash_script::signature::HashType| {
         Some(
-            v5_signature_hash(
+            signature_hash(
                 &tx_effects,
                 &SignableInput::Transparent(
                     ::transparent::sighash::SignableInput::from_parts(
@@ -492,7 +529,7 @@ fn transparent_p2sh_multisig_to_orchard() {
 }
 
 #[test]
-fn sapling_to_orchard() {
+fn sapling_to_ironwood() {
     let mut rng = OsRng;
 
     // Create a Sapling account to send funds from.
@@ -561,12 +598,12 @@ fn sapling_to_orchard() {
 
     // Build the Orchard bundle we'll be using.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: Some(anchor),
-            orchard_anchor: Some(orchard::Anchor::empty_tree()),
-            ironwood_anchor: None,
+            orchard_anchor: None,
+            ironwood_anchor: Some(orchard::Anchor::empty_tree()),
             orchard_padding: BundlePadding::DEFAULT,
             ironwood_padding: BundlePadding::DEFAULT,
         },
@@ -575,7 +612,7 @@ fn sapling_to_orchard() {
         .add_sapling_spend::<zip317::FeeRule>(sapling_dfvk.fvk().clone(), note, merkle_path)
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_ironwood_output::<zip317::FeeRule>(
             Some(sapling_dfvk.to_ovk(zip32::Scope::External).0.into()),
             recipient,
             Zatoshis::const_from_u64(100_000),
@@ -629,11 +666,11 @@ fn sapling_to_orchard() {
     check_round_trip(&pczt_with_sapling_proofs);
 
     // Create Orchard proof.
-    let pczt_with_orchard_proof = Prover::new(pczt.clone())
-        .create_orchard_proof(orchard_proving_key())
+    let pczt_with_ironwood_proof = Prover::new(pczt.clone())
+        .create_ironwood_proof(orchard_proving_key())
         .unwrap()
         .finish();
-    check_round_trip(&pczt_with_orchard_proof);
+    check_round_trip(&pczt_with_ironwood_proof);
 
     // Pass the PCZT to be signed through a serialization cycle to ensure we don't lose
     // any information. This emulates passing it to another device.
@@ -654,7 +691,7 @@ fn sapling_to_orchard() {
     // Combine the three PCZTs into one.
     let pczt = Combiner::new(vec![
         pczt_with_sapling_proofs,
-        pczt_with_orchard_proof,
+        pczt_with_ironwood_proof,
         pczt_with_sapling_signatures,
     ])
     .combine()
@@ -673,38 +710,16 @@ fn sapling_to_orchard() {
 
 #[test]
 fn orchard_to_orchard() {
-    let mut rng = OsRng;
-
     // Create an Orchard account to receive funds.
     let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
     let orchard_ask = orchard::keys::SpendAuthorizingKey::from(&orchard_sk);
     let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
-    let orchard_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::External);
     let orchard_ovk = orchard_fvk.to_ovk(orchard::keys::Scope::External);
     let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
 
     // Pretend we already received a note.
     let value = orchard::value::NoteValue::from_raw(1_000_000);
-    let note = {
-        let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::builder::BundleType::DEFAULT,
-            orchard::bundle::BundleVersion::orchard_v2(),
-            orchard::bundle::BundleVersion::orchard_v2().default_flags(),
-            orchard::Anchor::empty_tree(),
-        )
-        .unwrap();
-        orchard_builder
-            .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
-            .unwrap();
-        let (bundle, meta) = orchard_builder.build::<i64>(&mut rng).unwrap().unwrap();
-        let action = bundle
-            .actions()
-            .get(meta.output_action_index(0).unwrap())
-            .unwrap();
-        let domain = orchard::note_encryption::OrchardDomain::for_action(action);
-        let (note, _, _) = try_note_decryption(&domain, &orchard_ivk.prepare(), action).unwrap();
-        note
-    };
+    let note = historical_orchard_note(recipient, value);
 
     // Use the tree with a single leaf.
     let (anchor, merkle_path) = {
@@ -726,7 +741,7 @@ fn orchard_to_orchard() {
 
     // Build the Orchard bundle we'll be using.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: None,
@@ -740,7 +755,8 @@ fn orchard_to_orchard() {
         .add_orchard_spend::<zip317::FeeRule>(orchard_fvk.clone(), note, merkle_path)
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_orchard_change_output::<zip317::FeeRule>(
+            orchard_fvk.clone(),
             Some(orchard_ovk),
             recipient,
             Zatoshis::const_from_u64(100_000),
@@ -748,10 +764,11 @@ fn orchard_to_orchard() {
         )
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_orchard_change_output::<zip317::FeeRule>(
+            orchard_fvk.clone(),
             Some(orchard_fvk.to_ovk(zip32::Scope::Internal)),
             orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal),
-            Zatoshis::const_from_u64(890_000),
+            Zatoshis::const_from_u64(885_000),
             MemoBytes::empty(),
         )
         .unwrap();
@@ -781,8 +798,12 @@ fn orchard_to_orchard() {
     // Apply signatures.
     let index = orchard_meta.spend_action_index(0).unwrap();
     let pczt_without_signatures = pczt.clone();
+    let unsigned_indices = unsigned_orchard_spend_indices(&pczt);
     let mut signer = Signer::new(pczt).unwrap();
-    signer.sign_orchard(index, &orchard_ask).unwrap();
+    // Retained change adds wallet-controlled zero-valued spends as well.
+    for index in unsigned_indices {
+        signer.sign_orchard(index, &orchard_ask).unwrap();
+    }
     let signed_pczt = signer.finish();
     check_round_trip(&signed_pczt);
 
@@ -889,38 +910,16 @@ fn assert_valid_spend_auth_sig(rk: &[u8; 32], sighash: [u8; 32], sig: [u8; 64]) 
 
 #[test]
 fn orchard_low_level_signer_uses_preverified_signing_parse() {
-    let mut rng = OsRng;
-
     // Create an Orchard account to send funds from.
     let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
     let orchard_ask = orchard::keys::SpendAuthorizingKey::from(&orchard_sk);
     let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
-    let orchard_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::External);
     let orchard_ovk = orchard_fvk.to_ovk(orchard::keys::Scope::External);
     let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
 
     // Pretend we already received a note.
     let value = orchard::value::NoteValue::from_raw(1_000_000);
-    let note = {
-        let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::builder::BundleType::DEFAULT,
-            orchard::bundle::BundleVersion::orchard_v2(),
-            orchard::bundle::BundleVersion::orchard_v2().default_flags(),
-            orchard::Anchor::empty_tree(),
-        )
-        .unwrap();
-        orchard_builder
-            .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
-            .unwrap();
-        let (bundle, meta) = orchard_builder.build::<i64>(&mut rng).unwrap().unwrap();
-        let action = bundle
-            .actions()
-            .get(meta.output_action_index(0).unwrap())
-            .unwrap();
-        let domain = orchard::note_encryption::OrchardDomain::for_action(action);
-        let (note, _, _) = try_note_decryption(&domain, &orchard_ivk.prepare(), action).unwrap();
-        note
-    };
+    let note = historical_orchard_note(recipient, value);
 
     // Use the tree with a single leaf.
     let (anchor, merkle_path) = {
@@ -942,7 +941,7 @@ fn orchard_low_level_signer_uses_preverified_signing_parse() {
 
     // Build the Orchard bundle we'll be using.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: None,
@@ -956,7 +955,8 @@ fn orchard_low_level_signer_uses_preverified_signing_parse() {
         .add_orchard_spend::<zip317::FeeRule>(orchard_fvk.clone(), note, merkle_path)
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_orchard_change_output::<zip317::FeeRule>(
+            orchard_fvk.clone(),
             Some(orchard_ovk),
             recipient,
             Zatoshis::const_from_u64(100_000),
@@ -964,10 +964,11 @@ fn orchard_low_level_signer_uses_preverified_signing_parse() {
         )
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_orchard_change_output::<zip317::FeeRule>(
+            orchard_fvk.clone(),
             Some(orchard_fvk.to_ovk(zip32::Scope::Internal)),
             orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal),
-            Zatoshis::const_from_u64(890_000),
+            Zatoshis::const_from_u64(885_000),
             MemoBytes::empty(),
         )
         .unwrap();
@@ -1021,6 +1022,14 @@ fn orchard_low_level_signer_uses_preverified_signing_parse() {
             bundle.actions_mut()[index]
                 .sign(sighash, &orchard_ask, ChaCha20Rng::from_seed(seed))
                 .expect("signing succeeds");
+            // Change actions also contain spends controlled by this wallet.
+            for (other_index, action) in bundle.actions_mut().iter_mut().enumerate() {
+                if other_index != index && action.spend().spend_auth_sig().is_none() {
+                    action
+                        .sign(sighash, &orchard_ask, OsRng)
+                        .expect("change spend signing succeeds");
+                }
+            }
             Ok(())
         })
         .unwrap()
@@ -1113,8 +1122,7 @@ fn pczt_with_anchor(pool: ShieldedPool) -> Pczt {
     let transparent_sk = transparent_account_sk
         .derive_external_secret_key(address_index)
         .unwrap();
-    let secp = secp256k1::Secp256k1::signing_only();
-    let transparent_pubkey = transparent_sk.public_key(&secp);
+    let transparent_pubkey = transparent_sk.public_key();
 
     let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
     let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
@@ -1430,7 +1438,7 @@ fn wallet_can_set_sapling_witness_after_signing() {
 
     // Build the Sapling transaction that a wallet will sign before proof creation.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: Some(anchor),
@@ -1572,38 +1580,14 @@ fn redacted_orchard_anchor_round_trips_v2() {
 
 #[test]
 fn redacted_orchard_anchor_can_be_restored_after_signing() {
-    let mut rng = OsRng;
-
     let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
     let orchard_ask = orchard::keys::SpendAuthorizingKey::from(&orchard_sk);
     let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
-    let orchard_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::External);
     let orchard_ovk = orchard_fvk.to_ovk(orchard::keys::Scope::External);
     let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
 
     let value = orchard::value::NoteValue::from_raw(1_000_000);
-    let note = {
-        let orchard_bundle_version = orchard::bundle::BundleVersion::orchard_v2();
-        let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::builder::BundleType::DEFAULT,
-            orchard_bundle_version,
-            orchard_bundle_version.default_flags(),
-            orchard::Anchor::empty_tree(),
-        )
-        .unwrap();
-        orchard_builder
-            .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
-            .unwrap();
-        let (bundle, meta) = orchard_builder.build::<i64>(&mut rng).unwrap().unwrap();
-        let action = bundle
-            .actions()
-            .get(meta.output_action_index(0).unwrap())
-            .unwrap();
-        let domain = orchard::note_encryption::OrchardDomain::for_action(action);
-        let (note, _, _) = try_note_decryption(&domain, &orchard_ivk.prepare(), action).unwrap();
-        assert_eq!(note.version(), orchard::note::NoteVersion::V2);
-        note
-    };
+    let note = historical_orchard_note(recipient, value);
 
     let (anchor, merkle_path): (orchard::Anchor, orchard::tree::MerklePath) = {
         let cmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
@@ -1672,7 +1656,7 @@ fn redacted_orchard_anchor_can_be_restored_after_signing() {
     assert!(redacted.orchard().anchor().is_none());
     assert!(
         Prover::new(redacted.clone())
-            .create_orchard_proof(post_nu6_3_orchard_proving_key())
+            .create_orchard_proof(orchard_proving_key())
             .is_err()
     );
 
@@ -1701,9 +1685,9 @@ fn redacted_orchard_anchor_can_be_restored_after_signing() {
     );
 
     let proved = Prover::new(updated)
-        .create_orchard_proof(post_nu6_3_orchard_proving_key())
+        .create_orchard_proof(orchard_proving_key())
         .unwrap()
-        .create_ironwood_proof(post_nu6_3_orchard_proving_key())
+        .create_ironwood_proof(orchard_proving_key())
         .unwrap()
         .finish();
     check_v2_round_trip(&proved);
@@ -1719,38 +1703,16 @@ fn redacted_orchard_anchor_can_be_restored_after_signing() {
 
 #[test]
 fn wallet_can_set_orchard_witness_after_signing() {
-    let mut rng = OsRng;
-
     // Create an Orchard account to spend from and send back to.
     let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
     let orchard_ask = orchard::keys::SpendAuthorizingKey::from(&orchard_sk);
     let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
-    let orchard_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::External);
     let orchard_ovk = orchard_fvk.to_ovk(orchard::keys::Scope::External);
     let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
 
     // Pretend we already received an Orchard note.
     let value = orchard::value::NoteValue::from_raw(1_000_000);
-    let note = {
-        let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::builder::BundleType::DEFAULT,
-            orchard::bundle::BundleVersion::orchard_v2(),
-            orchard::bundle::BundleVersion::orchard_v2().default_flags(),
-            orchard::Anchor::empty_tree(),
-        )
-        .unwrap();
-        orchard_builder
-            .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
-            .unwrap();
-        let (bundle, meta) = orchard_builder.build::<i64>(&mut rng).unwrap().unwrap();
-        let action = bundle
-            .actions()
-            .get(meta.output_action_index(0).unwrap())
-            .unwrap();
-        let domain = orchard::note_encryption::OrchardDomain::for_action(action);
-        let (note, _, _) = try_note_decryption(&domain, &orchard_ivk.prepare(), action).unwrap();
-        note
-    };
+    let note = historical_orchard_note(recipient, value);
 
     // Use the Orchard tree with a single leaf.
     let (anchor, merkle_path): (orchard::Anchor, orchard::tree::MerklePath) = {
@@ -1775,7 +1737,7 @@ fn wallet_can_set_orchard_witness_after_signing() {
 
     // Build the Orchard transaction that a wallet will sign before proof creation.
     let mut builder = Builder::new(
-        pre_nu6_3_test_network(),
+        nu6_3_test_network(),
         10_000_000.into(),
         BuildConfig::Standard {
             sapling_anchor: None,
@@ -1789,7 +1751,8 @@ fn wallet_can_set_orchard_witness_after_signing() {
         .add_orchard_spend::<zip317::FeeRule>(orchard_fvk.clone(), note, merkle_path)
         .unwrap();
     builder
-        .add_orchard_output::<zip317::FeeRule>(
+        .add_orchard_change_output::<zip317::FeeRule>(
+            orchard_fvk.clone(),
             Some(orchard_ovk),
             recipient,
             Zatoshis::const_from_u64(990_000),
@@ -1823,9 +1786,13 @@ fn wallet_can_set_orchard_witness_after_signing() {
             .is_err()
     );
 
+    let unsigned_indices = unsigned_orchard_spend_indices(&redacted);
     let mut signer = Signer::new(redacted.clone()).unwrap();
     let sighash = signer.shielded_sighash();
-    signer.sign_orchard(index, &orchard_ask).unwrap();
+    // Retained change adds wallet-controlled zero-valued spends as well.
+    for index in unsigned_indices {
+        signer.sign_orchard(index, &orchard_ask).unwrap();
+    }
     let signed = signer.finish();
     let invalid_index = signed.orchard().actions().len();
     assert!(matches!(
@@ -1992,7 +1959,7 @@ fn wallet_can_set_ironwood_witness_after_signing() {
         .finish();
     assert!(
         Prover::new(redacted.clone())
-            .create_ironwood_proof(post_nu6_3_orchard_proving_key())
+            .create_ironwood_proof(orchard_proving_key())
             .is_err()
     );
 
@@ -2024,7 +1991,7 @@ fn wallet_can_set_ironwood_witness_after_signing() {
     );
 
     let proved = Prover::new(updated)
-        .create_ironwood_proof(post_nu6_3_orchard_proving_key())
+        .create_ironwood_proof(orchard_proving_key())
         .unwrap()
         .finish();
     assert!(matches!(
@@ -2353,38 +2320,15 @@ fn redacted_anchor_is_not_resolved() {
 
 #[test]
 fn builder_can_defer_anchors_until_proving() {
-    let mut rng = OsRng;
-
     let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
     let orchard_ask = orchard::keys::SpendAuthorizingKey::from(&orchard_sk);
     let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
-    let orchard_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::External);
     let orchard_ovk = orchard_fvk.to_ovk(orchard::keys::Scope::External);
     let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
 
     // Pretend we already received an Orchard note.
     let value = orchard::value::NoteValue::from_raw(1_000_000);
-    let note = {
-        let orchard_bundle_version = orchard::bundle::BundleVersion::orchard_v2();
-        let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::builder::BundleType::DEFAULT,
-            orchard_bundle_version,
-            orchard_bundle_version.default_flags(),
-            orchard::Anchor::empty_tree(),
-        )
-        .unwrap();
-        orchard_builder
-            .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
-            .unwrap();
-        let (bundle, meta) = orchard_builder.build::<i64>(&mut rng).unwrap().unwrap();
-        let action = bundle
-            .actions()
-            .get(meta.output_action_index(0).unwrap())
-            .unwrap();
-        let domain = orchard::note_encryption::OrchardDomain::for_action(action);
-        let (note, _, _) = try_note_decryption(&domain, &orchard_ivk.prepare(), action).unwrap();
-        note
-    };
+    let note = historical_orchard_note(recipient, value);
 
     // The REAL tree state, available only at "proving time": the builder below never sees
     // it, and neither does the signer.
@@ -2459,7 +2403,7 @@ fn builder_can_defer_anchors_until_proving() {
     // Proving without the real anchor fails: the deferral cannot be silently ignored.
     assert!(
         Prover::new(signed.clone())
-            .create_orchard_proof(post_nu6_3_orchard_proving_key())
+            .create_orchard_proof(orchard_proving_key())
             .is_err()
     );
 
@@ -2490,9 +2434,9 @@ fn builder_can_defer_anchors_until_proving() {
     );
 
     let proved = Prover::new(updated)
-        .create_orchard_proof(post_nu6_3_orchard_proving_key())
+        .create_orchard_proof(orchard_proving_key())
         .unwrap()
-        .create_ironwood_proof(post_nu6_3_orchard_proving_key())
+        .create_ironwood_proof(orchard_proving_key())
         .unwrap()
         .finish();
     check_v2_round_trip(&proved);

@@ -330,6 +330,62 @@ where
         .collect()
 }
 
+// These fixtures spend current transactions. Orchard inputs may pay an
+// Ironwood receiver while retaining Orchard change; inspect both output pools.
+fn decrypted_send_outputs_count<T: ShieldedPoolTester, A>(
+    tx: &DecryptedTransaction<Transaction, A>,
+) -> usize {
+    let count = T::decrypted_pool_outputs_count(tx);
+    #[cfg(feature = "orchard")]
+    if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+        return count + tx.ironwood_outputs().len();
+    }
+    count
+}
+
+fn with_decrypted_send_memos<T: ShieldedPoolTester, A>(
+    tx: &DecryptedTransaction<Transaction, A>,
+    mut f: impl FnMut(&MemoBytes),
+) {
+    T::with_decrypted_pool_memos(tx, &mut f);
+    #[cfg(feature = "orchard")]
+    if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+        for output in tx.ironwood_outputs() {
+            f(output.memo());
+        }
+    }
+}
+
+fn sent_note_ids<T: ShieldedPoolTester, DbT: WalletTest>(
+    wallet: &DbT,
+    txid: &zcash_protocol::TxId,
+) -> Vec<NoteId> {
+    let ids = wallet
+        .get_sent_note_ids(txid, T::SHIELDED_PROTOCOL)
+        .unwrap();
+    #[cfg(feature = "orchard")]
+    if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+        return ids
+            .into_iter()
+            .chain(
+                wallet
+                    .get_sent_note_ids(txid, ShieldedPool::Ironwood)
+                    .unwrap(),
+            )
+            .collect();
+    }
+    ids
+}
+
+// A padded Orchard spend and a padded Ironwood payment each cost two actions.
+fn shielded_send_fee<T: ShieldedPoolTester>() -> Zatoshis {
+    if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+        Zatoshis::const_from_u64(20_000)
+    } else {
+        MINIMUM_FEE
+    }
+}
+
 /// Tests sending funds within the given shielded pool in a single transaction.
 ///
 /// The test:
@@ -391,11 +447,11 @@ pub fn send_single_step_proposed_transfer<T: ShieldedPoolTester>(
         .into_iter()
         .collect();
     let d_tx = decrypt_transaction(st.network(), None, Some(h), &tx, &ufvks);
-    assert_eq!(T::decrypted_pool_outputs_count(&d_tx), 2);
+    assert_eq!(decrypted_send_outputs_count::<T, _>(&d_tx), 2);
 
     let mut found_tx_change_memo = false;
     let mut found_tx_empty_memo = false;
-    T::with_decrypted_pool_memos(&d_tx, |memo| {
+    with_decrypted_send_memos::<T, _>(&d_tx, |memo| {
         if Memo::try_from(memo).unwrap() == change_memo {
             found_tx_change_memo = true
         }
@@ -407,10 +463,7 @@ pub fn send_single_step_proposed_transfer<T: ShieldedPoolTester>(
     assert!(found_tx_empty_memo);
 
     // Verify that the stored sent notes match what we're expecting
-    let sent_note_ids = st
-        .wallet()
-        .get_sent_note_ids(&sent_tx_id, T::SHIELDED_PROTOCOL)
-        .unwrap();
+    let sent_note_ids = sent_note_ids::<T, _>(st.wallet(), &sent_tx_id);
     assert_eq!(sent_note_ids.len(), 2);
 
     // The sent memo should be the empty memo for the sent output, and the
@@ -455,7 +508,10 @@ pub fn send_single_step_proposed_transfer<T: ShieldedPoolTester>(
     {
         let tx_1 = &tx_history[1];
         assert_eq!(tx_1.total_spent(), Zatoshis::const_from_u64(60000));
-        assert_eq!(tx_1.total_received(), Zatoshis::const_from_u64(40000));
+        assert_eq!(
+            tx_1.total_received(),
+            (Zatoshis::const_from_u64(50_000) - shielded_send_fee::<T>()).unwrap()
+        );
     }
 
     let network = *st.network();
@@ -818,11 +874,11 @@ pub fn spend_max_spendable_single_step_proposed_transfer<T: ShieldedPoolTester>(
         .into_iter()
         .collect();
     let d_tx = decrypt_transaction(st.network(), None, Some(h), &tx, &ufvks);
-    assert_eq!(T::decrypted_pool_outputs_count(&d_tx), 1);
+    assert_eq!(decrypted_send_outputs_count::<T, _>(&d_tx), 1);
 
     let mut found_send_max_memo = false;
     let mut found_tx_empty_memo = false;
-    T::with_decrypted_pool_memos(&d_tx, |memo| {
+    with_decrypted_send_memos::<T, _>(&d_tx, |memo| {
         if Memo::try_from(memo).unwrap() == send_max_memo {
             found_send_max_memo = true
         }
@@ -834,10 +890,7 @@ pub fn spend_max_spendable_single_step_proposed_transfer<T: ShieldedPoolTester>(
     assert!(!found_tx_empty_memo); // there's no empty memo in this case
 
     // Verify that the stored sent notes match what we're expecting
-    let sent_note_ids = st
-        .wallet()
-        .get_sent_note_ids(&sent_tx_id, T::SHIELDED_PROTOCOL)
-        .unwrap();
+    let sent_note_ids = sent_note_ids::<T, _>(st.wallet(), &sent_tx_id);
     assert_eq!(sent_note_ids.len(), 1);
 
     // The sent memo should the specified memo for the sent output
@@ -949,11 +1002,11 @@ pub fn spend_everything_single_step_proposed_transfer<T: ShieldedPoolTester>(
         .into_iter()
         .collect();
     let d_tx = decrypt_transaction(st.network(), None, Some(h), &tx, &ufvks);
-    assert_eq!(T::decrypted_pool_outputs_count(&d_tx), 1);
+    assert_eq!(decrypted_send_outputs_count::<T, _>(&d_tx), 1);
 
     let mut found_send_max_memo = false;
     let mut found_tx_empty_memo = false;
-    T::with_decrypted_pool_memos(&d_tx, |memo| {
+    with_decrypted_send_memos::<T, _>(&d_tx, |memo| {
         if Memo::try_from(memo).unwrap() == send_max_memo {
             found_send_max_memo = true
         }
@@ -965,10 +1018,7 @@ pub fn spend_everything_single_step_proposed_transfer<T: ShieldedPoolTester>(
     assert!(!found_tx_empty_memo); // there's no empty memo in this case
 
     // Verify that the stored sent notes match what we're expecting
-    let sent_note_ids = st
-        .wallet()
-        .get_sent_note_ids(&sent_tx_id, T::SHIELDED_PROTOCOL)
-        .unwrap();
+    let sent_note_ids = sent_note_ids::<T, _>(st.wallet(), &sent_tx_id);
     assert_eq!(sent_note_ids.len(), 1);
 
     // The sent memo should the specified memo for the sent output
@@ -1218,7 +1268,13 @@ pub fn send_max_spends_inputs_across_pools<P0: ShieldedPoolTester, P1: ShieldedP
     // The proposed transaction spends one note in each pool and pays a single shielded
     // output; under ZIP 317, each of the two shielded bundles is padded to two logical
     // actions.
-    let expected_fee = (MARGINAL_FEE * 4u64).unwrap();
+    let expected_fee = (MARGINAL_FEE
+        * if P1::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+            6u64
+        } else {
+            4u64
+        })
+    .unwrap();
     let expected_payment = (total - expected_fee).unwrap();
 
     let addy = to.to_zcash_address(st.network());
@@ -1239,7 +1295,14 @@ pub fn send_max_spends_inputs_across_pools<P0: ShieldedPoolTester, P1: ShieldedP
     assert_eq!(steps[0].balance().proposed_change(), []);
     assert_eq!(
         steps[0].payment_pools(),
-        &BTreeMap::from([(0, PoolType::Shielded(P1::SHIELDED_PROTOCOL))])
+        &BTreeMap::from([(
+            0,
+            PoolType::Shielded(if P1::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+                ShieldedPool::Ironwood
+            } else {
+                P1::SHIELDED_PROTOCOL
+            })
+        )])
     );
     assert_matches!(
         steps[0].transaction_request().payments().get(&0),
@@ -1578,11 +1641,11 @@ pub fn send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present<
         .into_iter()
         .collect();
     let d_tx = decrypt_transaction(st.network(), None, Some(h), &tx, &ufvks);
-    assert_eq!(T::decrypted_pool_outputs_count(&d_tx), 1);
+    assert_eq!(decrypted_send_outputs_count::<T, _>(&d_tx), 1);
 
     let mut found_send_max_memo = false;
     let mut found_tx_empty_memo = false;
-    T::with_decrypted_pool_memos(&d_tx, |memo| {
+    with_decrypted_send_memos::<T, _>(&d_tx, |memo| {
         if Memo::try_from(memo).unwrap() == send_max_memo {
             found_send_max_memo = true
         }
@@ -1594,10 +1657,7 @@ pub fn send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present<
     assert!(!found_tx_empty_memo); // there's no empty memo in this case
 
     // Verify that the stored sent notes match what we're expecting
-    let sent_note_ids = st
-        .wallet()
-        .get_sent_note_ids(&sent_tx_id, T::SHIELDED_PROTOCOL)
-        .unwrap();
+    let sent_note_ids = sent_note_ids::<T, _>(st.wallet(), &sent_tx_id);
     assert_eq!(sent_note_ids.len(), 1);
 
     // The sent memo should the specified memo for the sent output
@@ -2171,11 +2231,11 @@ pub fn send_with_multiple_change_outputs<T: ShieldedPoolTester>(
         .into_iter()
         .collect();
     let d_tx = decrypt_transaction(st.network(), None, Some(h), &tx, &ufvks);
-    assert_eq!(T::decrypted_pool_outputs_count(&d_tx), 3);
+    assert_eq!(decrypted_send_outputs_count::<T, _>(&d_tx), 3);
 
     let mut found_tx_change_memo = false;
     let mut found_tx_empty_memo = false;
-    T::with_decrypted_pool_memos(&d_tx, |memo| {
+    with_decrypted_send_memos::<T, _>(&d_tx, |memo| {
         if Memo::try_from(memo).unwrap() == change_memo {
             found_tx_change_memo = true
         }
@@ -2187,10 +2247,7 @@ pub fn send_with_multiple_change_outputs<T: ShieldedPoolTester>(
     assert!(found_tx_empty_memo);
 
     // Verify that the stored sent notes match what we're expecting
-    let sent_note_ids = st
-        .wallet()
-        .get_sent_note_ids(&sent_tx_id, T::SHIELDED_PROTOCOL)
-        .unwrap();
+    let sent_note_ids = sent_note_ids::<T, _>(st.wallet(), &sent_tx_id);
     assert_eq!(sent_note_ids.len(), 3);
 
     // The sent memo should be the empty memo for the sent output, and each
@@ -2228,8 +2285,15 @@ pub fn send_with_multiple_change_outputs<T: ShieldedPoolTester>(
     {
         let tx_1 = &tx_history[1];
         assert_eq!(tx_1.total_spent(), Zatoshis::const_from_u64(650_0000));
-        assert_eq!(tx_1.total_received(), Zatoshis::const_from_u64(548_5000));
-        assert_eq!(tx_1.fee_paid(), Some(Zatoshis::const_from_u64(15000)));
+        assert_eq!(
+            tx_1.total_received(),
+            (value - Zatoshis::const_from_u64(1_000_000) - shielded_send_fee::<T>() - MARGINAL_FEE)
+                .unwrap()
+        );
+        assert_eq!(
+            tx_1.fee_paid(),
+            Some((shielded_send_fee::<T>() + MARGINAL_FEE).unwrap())
+        );
     }
 
     let network = *st.network();
@@ -2304,7 +2368,9 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
     let value = Zatoshis::const_from_u64(100000);
     let transfer_amount = Zatoshis::const_from_u64(50000);
 
-    let run_test = |st: &mut TestState<_, Dsf::DataStore, _>, expected_index, prior_balance| {
+    let run_test = |st: &mut TestState<_, Dsf::DataStore, _>,
+                    expected_index,
+                    prior_balance: Zatoshis| {
         // Add funds to the wallet.
         add_funds(st, value);
         let initial_balance: Option<Zatoshis> = prior_balance + value;
@@ -2313,7 +2379,16 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
             initial_balance.unwrap()
         );
 
-        let expected_step0_fee = (zip317::MARGINAL_FEE * 3u64).unwrap();
+        // The second transfer spends the retained change note and the new note.
+        // Current Orchard also pairs retained change with a wallet-controlled
+        // zero-valued spend, adding an action when both real notes are spent.
+        let logical_actions =
+            if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard && prior_balance.is_positive() {
+                4u64
+            } else {
+                3u64
+            };
+        let expected_step0_fee = (zip317::MARGINAL_FEE * logical_actions).unwrap();
         let expected_step1_fee = zip317::MINIMUM_FEE;
         let expected_ephemeral = (transfer_amount + expected_step1_fee).unwrap();
         let expected_step0_change =
@@ -2413,13 +2488,39 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
 
         assert!(expected_step0_change < expected_ephemeral);
         assert_eq!(confirmed_sent.len(), 2);
-        assert_eq!(confirmed_sent[0].len(), 2);
-        assert_eq!(confirmed_sent[0][0].value, expected_step0_change);
+        // Spending the previously retained Orchard change saves its synthetic
+        // zero-valued internal output as well. Fresh external inputs do not add
+        // another sent change record.
+        let expected_zero_outputs = usize::from(
+            T::SHIELDED_PROTOCOL == ShieldedPool::Orchard && prior_balance.is_positive(),
+        );
+        let zero_outputs: Vec<_> = confirmed_sent[0]
+            .iter()
+            .filter(|output| output.value.is_zero())
+            .collect();
+        assert_eq!(zero_outputs.len(), expected_zero_outputs);
+        assert!(
+            zero_outputs
+                .iter()
+                .all(|output| output.external_recipient.is_none())
+        );
+        assert_eq!(confirmed_sent[0].len(), expected_zero_outputs + 2);
+        let change = confirmed_sent[0]
+            .iter()
+            .find(|output| output.value.is_positive() && output.external_recipient.is_none())
+            .unwrap();
+        assert_eq!(change.value, expected_step0_change);
+        // The test query joins the transaction's ephemeral receiver onto every
+        // sent row, so identify its payment by the external recipient instead.
         let OutputOfSentTx {
             value: ephemeral_v,
             external_recipient: to_addr,
             ephemeral_address,
-        } = confirmed_sent[0][1].clone();
+        } = confirmed_sent[0]
+            .iter()
+            .find(|output| output.external_recipient.is_some())
+            .unwrap()
+            .clone();
         assert_eq!(ephemeral_v, expected_ephemeral);
         assert!(to_addr.is_some());
         assert_eq!(
@@ -2627,7 +2728,7 @@ pub fn spend_all_funds_single_step_proposed_transfer<T: ShieldedPoolTester>(
     let value = Zatoshis::const_from_u64(60000);
     let (h, _, _) = st.add_a_single_note_checking_balance(value);
 
-    let spend_amount = Zatoshis::const_from_u64(50000);
+    let spend_amount = (value - shielded_send_fee::<T>()).unwrap();
     let to_extsk = T::sk(&[0xf5; 32]);
     let to: Address = T::sk_default_address(&to_extsk);
     let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
@@ -2670,11 +2771,11 @@ pub fn spend_all_funds_single_step_proposed_transfer<T: ShieldedPoolTester>(
         .into_iter()
         .collect();
     let d_tx = decrypt_transaction(st.network(), None, Some(h), &tx, &ufvks);
-    assert_eq!(T::decrypted_pool_outputs_count(&d_tx), 2);
+    assert_eq!(decrypted_send_outputs_count::<T, _>(&d_tx), 2);
 
     let mut found_tx_change_memo = false;
     let mut found_tx_empty_memo = false;
-    T::with_decrypted_pool_memos(&d_tx, |memo| {
+    with_decrypted_send_memos::<T, _>(&d_tx, |memo| {
         if Memo::try_from(memo).unwrap() == change_memo {
             found_tx_change_memo = true
         }
@@ -2686,10 +2787,7 @@ pub fn spend_all_funds_single_step_proposed_transfer<T: ShieldedPoolTester>(
     assert!(found_tx_empty_memo);
 
     // Verify that the stored sent notes match what we're expecting
-    let sent_note_ids = st
-        .wallet()
-        .get_sent_note_ids(&sent_tx_id, T::SHIELDED_PROTOCOL)
-        .unwrap();
+    let sent_note_ids = sent_note_ids::<T, _>(st.wallet(), &sent_tx_id);
     assert_eq!(sent_note_ids.len(), 2);
 
     // The sent memo should be the empty memo for the sent output, and the
@@ -3115,7 +3213,7 @@ pub fn spend_fails_on_unverified_notes<T: ShieldedPoolTester>(
             false,
         ),
         Zatoshis::const_from_u64(50000),
-        Zatoshis::const_from_u64(80000),
+        (Zatoshis::const_from_u64(70000) + shielded_send_fee::<T>()).unwrap(),
     );
 
     // Mine blocks SAPLING_ACTIVATION_HEIGHT + 2 to 9 until just before the second
@@ -3134,7 +3232,7 @@ pub fn spend_fails_on_unverified_notes<T: ShieldedPoolTester>(
         Zatoshis::const_from_u64(70000),
         ConfirmationsPolicy::default(),
         Zatoshis::const_from_u64(50000),
-        Zatoshis::const_from_u64(80000),
+        (Zatoshis::const_from_u64(70000) + shielded_send_fee::<T>()).unwrap(),
     );
 
     // Mine block 11 so that the second note becomes verified
@@ -3180,11 +3278,19 @@ pub fn spend_fails_on_unverified_notes<T: ShieldedPoolTester>(
     let (h, _) = st.generate_next_block_including(txid);
     st.scan_cached_blocks(h, 1);
 
-    // TODO: send to an account so that we can check its balance.
+    // The Orchard spend pays two padded bundles and absorbs its 10,000-zatoshi
+    // change as dust; Sapling retains its change after paying the minimum fee.
     assert_eq!(
         st.get_total_balance(account_id),
-        ((value * 11u64).unwrap() - (amount_sent + Zatoshis::from_u64(10000).unwrap()).unwrap())
-            .unwrap()
+        ((value * 11u64).unwrap()
+            - (amount_sent
+                + if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+                    Zatoshis::const_from_u64(30_000)
+                } else {
+                    MINIMUM_FEE
+                })
+            .unwrap())
+        .unwrap()
     );
 }
 
@@ -3402,7 +3508,7 @@ where
         )
         .unwrap()[0];
 
-    let bal_1 = (value - (bal_2 + MINIMUM_FEE).unwrap()).unwrap();
+    let bal_1 = (value - (bal_2 + shielded_send_fee::<T>()).unwrap()).unwrap();
     assert_eq!(st.get_total_balance(account1), bal_1);
 
     let (h, _) = st.generate_next_block_including(txid1);
@@ -3670,7 +3776,15 @@ pub fn external_address_change_spends_detected_in_restore_from_seed<T: ShieldedP
         )
         .unwrap()[0];
 
-    let amount_left = (value - (amount_sent + MINIMUM_FEE + MARGINAL_FEE).unwrap()).unwrap();
+    let amount_left = (value
+        - (amount_sent
+            + if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+                shielded_send_fee::<T>()
+            } else {
+                (MINIMUM_FEE + MARGINAL_FEE).unwrap()
+            })
+        .unwrap())
+    .unwrap();
     let pending_change = (amount_left - amount_legacy_change).unwrap();
 
     // The "legacy change" is not counted by get_pending_change().
@@ -4733,7 +4847,11 @@ pub fn pool_crossing_required<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
     // Since this is a cross-pool transfer, change will be sent to the preferred pool.
     assert_eq!(
         change_output.output_pool(),
-        PoolType::Shielded(std::cmp::max(ShieldedPool::Sapling, ShieldedPool::Orchard))
+        PoolType::Shielded(if P1::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+            ShieldedPool::Ironwood
+        } else {
+            ShieldedPool::Orchard
+        })
     );
     assert_eq!(change_output.value(), expected_change);
 
@@ -4805,9 +4923,9 @@ pub fn fully_funded_fully_private<P0: ShieldedPoolTester, P1: ShieldedPoolTester
     assert_eq!(proposal0.steps().len(), 1);
     let step0 = &proposal0.steps().head;
 
-    // We expect 2 logical actions, since either pool can pay the full balance required
-    // and note selection should choose the fully-private path.
-    let expected_fee = Zatoshis::const_from_u64(10000);
+    // Sapling needs one padded bundle. An Orchard input now pays an Ironwood
+    // receiver, so both padded bundles contribute to the fee.
+    let expected_fee = shielded_send_fee::<P1>();
     assert_eq!(step0.balance().fee_required(), expected_fee);
 
     let expected_change = (note_value - transfer_amount - expected_fee).unwrap();
@@ -4994,7 +5112,7 @@ pub fn multi_pool_checkpoint<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
         .unwrap();
     st.generate_next_block_including(*res.first());
 
-    let expected_fee = Zatoshis::const_from_u64(10000);
+    let expected_fee = shielded_send_fee::<P0>();
     let expected_change = (note_value - transfer_amount - expected_fee).unwrap();
     assert_eq!(
         st.get_total_balance(acct_id),
@@ -5044,9 +5162,11 @@ pub fn multi_pool_checkpoint<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
         usize::try_from(u32::from(max_height) - u32::from(next_to_scan) + 1).unwrap(),
     );
 
+    // The mixed payment uses Sapling, Orchard and Ironwood bundles, each padded
+    // to two logical actions, in addition to the first transaction's fee.
     let expected_final = (initial_balance + note_value
         - (transfer_amount * 3u64).unwrap()
-        - (expected_fee * 3u64).unwrap())
+        - (expected_fee + Zatoshis::const_from_u64(30_000)).unwrap())
     .unwrap();
     assert_eq!(st.get_total_balance(acct_id), expected_final);
 
@@ -7040,11 +7160,7 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     // Add proof generation keys to Sapling spends.
     let pczt_updated = P0::add_proof_generation_keys(pczt_created, account.usk()).unwrap();
 
-    // Create proofs, using the circuit that governs the Orchard pool under the
-    // consensus branch the PCZT was created for. (The test network's most recent
-    // upgrade is NU5, so this is currently the historical pre-NU6.2 circuit;
-    // modernizing the test network fixture is part of the broader Ironwood test
-    // coverage work.)
+    // Create proofs with the current circuit selected by the PCZT's consensus branch.
     let sapling_prover = LocalTxProver::bundled();
     let orchard_pk = zcash_primitives::transaction::builder::cached_orchard_proving_key(
         zcash_primitives::transaction::components::orchard::bundle_version_for_branch(
@@ -7053,7 +7169,8 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
         )
         .expect("the PCZT's consensus branch supports the Orchard pool")
         .circuit_version(),
-    );
+    )
+    .expect("the test transaction uses a circuit that supports proving");
     let pczt_proven = Prover::new(pczt_updated)
         .create_orchard_proof(orchard_pk)
         .unwrap()
@@ -7448,7 +7565,14 @@ pub fn prefer_consolidation_allows_more_than_five_funding_notes<T: ShieldedPoolT
     selected.sort_unstable();
     assert_eq!(
         selected,
-        [90_000, 100_000, 150_000, 200_000, 250_000, 300_000].map(Zatoshis::const_from_u64),
+        if T::SHIELDED_PROTOCOL == ShieldedPool::Orchard {
+            vec![10_000, 90_000, 100_000, 150_000, 200_000, 250_000, 300_000]
+        } else {
+            vec![90_000, 100_000, 150_000, 200_000, 250_000, 300_000]
+        }
+        .into_iter()
+        .map(Zatoshis::const_from_u64)
+        .collect::<Vec<_>>(),
     );
 }
 
@@ -7578,9 +7702,9 @@ pub fn prefer_consolidation_does_not_grow_sapling_spends(
     );
 }
 
-/// Pre-NU6.3 Orchard can replace a dummy spend side without growing the action count.
+/// An Ironwood payment creates no Orchard output slots for free consolidation inputs.
 #[cfg(feature = "orchard")]
-pub fn prefer_consolidation_fills_existing_orchard_actions(
+pub fn consolidation_does_not_add_orchard_inputs_to_fill_ironwood_actions(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
@@ -7597,13 +7721,7 @@ pub fn prefer_consolidation_fills_existing_orchard_actions(
         NoteSelection::PreferConsolidation,
     );
     selected.sort_unstable();
-    assert_eq!(
-        selected,
-        [
-            Zatoshis::const_from_u64(10_000),
-            Zatoshis::const_from_u64(2_000_000),
-        ],
-    );
+    assert_eq!(selected, [Zatoshis::const_from_u64(2_000_000)],);
 }
 
 #[cfg(feature = "pczt")]
@@ -9085,7 +9203,8 @@ where
         )
         .expect("the PCZT's consensus branch supports the Orchard pool")
         .circuit_version(),
-    );
+    )
+    .expect("the test transaction uses a circuit that supports proving");
     let proven = Prover::new(authorized)
         .create_orchard_proof(orchard_pk)
         .unwrap()
@@ -9444,7 +9563,7 @@ where
 
     let account_id = st.get_account().id();
     let network = *st.network();
-    // The test network's most recent upgrade is NU5, so version 5 is a valid explicit request.
+    // The current test network supports an explicit version 6 request.
     let proposal = propose_transfer::<_, _, _, _, Infallible>(
         st.wallet_mut(),
         &network,
@@ -9455,19 +9574,19 @@ where
         ConfirmationsPolicy::MIN,
         &SpendPolicy::default(),
         None,
-        Some(TxVersion::V5),
+        Some(TxVersion::V6),
     )
     .expect("proposal construction succeeds");
 
     // The requested version is recorded on the proposal.
-    assert_eq!(proposal.proposed_version(), Some(TxVersion::V5));
+    assert_eq!(proposal.proposed_version(), Some(TxVersion::V6));
 
     // ... and is preserved across a round-trip through the proposal's serialized (proto) form.
     let proto = crate::proto::proposal::Proposal::from_standard_proposal(&proposal);
     let decoded = proto
         .try_into_standard_proposal(&network, st.wallet())
         .expect("the serialized proposal decodes");
-    assert_eq!(decoded.proposed_version(), Some(TxVersion::V5));
+    assert_eq!(decoded.proposed_version(), Some(TxVersion::V6));
 
     // A proposal serialized without the field (as an older serializer produced) decodes with no
     // requested version.
