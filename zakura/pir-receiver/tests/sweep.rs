@@ -22,7 +22,9 @@ use receiver_pir::{MIN_ROWS, server::Server};
 use receiver_pir_server::{Publication, Publications, router_with_publications};
 use tower::ServiceExt as _;
 use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
-use zakura_pir_receiver::{DirectoryError, Error, Swept, Transport, WriteLock, fetch_seen, sweep};
+use zakura_pir_receiver::{
+    DirectoryError, Error, Swept, Transport, WriteLock, begin_early_restore, fetch_seen, sweep,
+};
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _, WalletWrite as _,
     chain::BlockSource as _,
@@ -1049,4 +1051,127 @@ async fn a_waiting_payment_takes_the_next_attempts_answer() {
     settle(&mut r.st, through, &b).await;
     assert_eq!(balance(&r.st), 0);
     assert_eq!(lookups(&b), 0, "{:?}", b.requests());
+}
+
+/// Pays incoming key `index` in a new block left unscanned, as the chain's Ironwood leaf
+/// at `position`, and returns the payment as the directory lists it.
+fn pay_unscanned(st: &mut State, index: u64, position: u64) -> Record {
+    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
+    let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
+    let (height, _, _) = st.generate_next_block(
+        &IronwoodFvk(fvk),
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(VALUE),
+    );
+    let block = cached(st, height);
+    let tx = &block.vtx[0];
+    let compact = &tx.ironwood_actions[0];
+    Record {
+        receiver: receiver(st, index),
+        page: 0,
+        total: 1,
+        payment: Payment {
+            height: u32::from(height),
+            block_hash: block.hash().0,
+            txid: *tx.txid().as_ref(),
+            tx_index: u32::try_from(tx.index).unwrap() + 1,
+            action_index: 0,
+            position,
+            action_nullifier: compact.nullifier.as_slice().try_into().unwrap(),
+            cmx: compact.cmx.as_slice().try_into().unwrap(),
+            ephemeral_key: compact.ephemeral_key.as_slice().try_into().unwrap(),
+            ciphertext_prefix: compact.ciphertext.as_slice().try_into().unwrap(),
+        },
+    }
+}
+
+/// The cached block at `height`.
+fn cached(
+    st: &State,
+    height: BlockHeight,
+) -> zcash_client_backend::proto::compact_formats::CompactBlock {
+    let mut block = None;
+    st.cache()
+        .with_blocks::<_, ()>(Some(height), Some(1), |cb| {
+            block = Some(cb);
+            Ok(())
+        })
+        .unwrap();
+    block.unwrap()
+}
+
+/// An early restore registers the account's keys from the publication's filters before
+/// the scan, then looks up only the paid ones while it runs: a payment whose block the
+/// scan already passed is inserted with its witness, and one ahead of it is found by the
+/// scan in its block. Every payment is credited by the end of the scan, with no sweep
+/// left, and the directory serves a manifest, the filters, one PIR session and a lookup
+/// per paid key.
+#[tokio::test]
+async fn an_early_restore_credits_payments_as_the_scan_covers_them() {
+    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    let account = st.test_account().unwrap().id();
+    let first = pay_unscanned(&mut st, 3, 0);
+    let second = pay_unscanned(&mut st, 40, 1);
+    let (last, _) = st.generate_empty_block();
+    let end = ChainPoint {
+        height: last,
+        hash: cached(&st, last).hash(),
+    };
+    let records = [first.clone(), second.clone()];
+    let commitments = [first.payment.cmx, second.payment.cmx];
+    let directory = Directory::new(publish(&records, &commitments, end, &provider(&[])));
+    let network = *st.network();
+    let db = st.wallet_mut().db_mut();
+    let lock = Labels::default();
+    let early = begin_early_restore(
+        db, &network, account, GENESIS, ORIGIN, &directory, &lock, NOW,
+    )
+    .await
+    .unwrap()
+    .expect("nothing is scanned yet");
+    assert_eq!(early.paid(), 2);
+    // The scan passes the first payment before the lookups come in.
+    let paid_at = BlockHeight::from(first.payment.height);
+    st.scan_cached_blocks_with_one_time_ivks(paid_at, 1);
+    assert_eq!(balance(&st), 0);
+    let db = st.wallet_mut().db_mut();
+    let looked_up = early.look_up(db, account, &lock).await.unwrap();
+    assert_eq!(looked_up.recorded, 2);
+    assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
+    st.scan_cached_blocks_with_one_time_ivks(paid_at + 1, 2);
+    assert_eq!(balance(&st), 2 * VALUE);
+    let through = tip(&st);
+    assert_eq!(through, end);
+    assert!(!pending(&st, through));
+    assert!(scanning(&st).is_empty());
+    assert_eq!(lookups(&directory), 2, "{:?}", directory.requests());
+    assert_eq!(
+        lock.0.take(),
+        [
+            "one_time_early_restore.begin",
+            "one_time_early_restore.lookup",
+            "one_time_early_restore.lookup"
+        ]
+    );
+    // A sweep run afterwards has nothing to do and asks nothing.
+    let before = directory.requests().len();
+    run_clean(&mut st, through, &directory, NOW).await;
+    assert_eq!(directory.requests().len(), before);
+}
+
+/// Once the scan has stored any of the account's history, an early restore does not
+/// begin and asks the directory nothing.
+#[tokio::test]
+async fn an_early_restore_needs_unscanned_history() {
+    let mut r = restored(&[0]);
+    let directory = serve(&r.records, r.through);
+    let network = *r.st.network();
+    let db = r.st.wallet_mut().db_mut();
+    let early = begin_early_restore(
+        db, &network, r.account, GENESIS, ORIGIN, &directory, &NoLock, NOW,
+    )
+    .await
+    .unwrap();
+    assert!(early.is_none());
+    assert!(directory.requests().is_empty());
 }

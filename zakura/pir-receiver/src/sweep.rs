@@ -23,9 +23,9 @@ use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 use crate::{DirectoryError, Transport, seen::seen_sets};
 
 /// A wallet's account identifier.
-type AccountId<W> = <W as WalletRead>::AccountId;
+pub(crate) type AccountId<W> = <W as WalletRead>::AccountId;
 /// A wallet's error type.
-type AccountError<W> = <W as WalletRead>::Error;
+pub(crate) type AccountError<W> = <W as WalletRead>::Error;
 
 /// Due sweeps prepared per run.
 const BATCH: NonZeroU32 = NonZeroU32::new(64).unwrap();
@@ -395,7 +395,7 @@ impl<'a, T: Transport> Directory<'a, T> {
 }
 
 /// Whether a provider's recent set can rule a receiver out at `now` (see [`sweep`]).
-fn covers_restore_watch(set: &FilterSet, now: i64) -> bool {
+pub(crate) fn covers_restore_watch(set: &FilterSet, now: i64) -> bool {
     let window = set.window_secs.and_then(|w| i64::try_from(w).ok());
     match (window, set.since_unix, set.until_unix) {
         (Some(window), Some(since), Some(until)) => {
@@ -466,7 +466,7 @@ where
 }
 
 /// A directory payment as the wallet takes it.
-fn directory_payment(payment: receiver_directory::Payment) -> DirectoryPayment {
+pub(crate) fn directory_payment(payment: receiver_directory::Payment) -> DirectoryPayment {
     DirectoryPayment {
         height: payment.height,
         block_hash: payment.block_hash,
