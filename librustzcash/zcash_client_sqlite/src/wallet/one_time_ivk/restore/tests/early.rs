@@ -339,6 +339,81 @@ fn a_late_hint_becomes_a_payment_to_insert() {
     assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), false));
 }
 
+/// Adds a second account from the test seed with the test account's birthday, which
+/// rewinds the wallet to the block before it.
+fn add_account_at_birthday(st: &mut State) {
+    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+    let birthday = st.test_account().unwrap().birthday().clone();
+    let db = st.wallet_mut().db_mut();
+    db.create_account("added", &seed, &birthday, None).unwrap();
+}
+
+/// Adding an account while another account's early restore waits for its anchor keeps
+/// that restore: a payment queued for insertion becomes a hint again, keys done at the
+/// anchor stay done, and the rescan finds the payment and accepts the publication.
+#[test]
+fn adding_an_account_keeps_an_early_restore_in_progress() {
+    let (mut st, candidate, paid, last) = unscanned_restore();
+    let account = st.test_account().unwrap().id();
+    let end = end_at(&st, last);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_early_restore(account, end, &filtered(8))
+            .unwrap()
+    );
+    // The scan passes the payment before its lookup comes in, short of the anchor.
+    st.scan_cached_blocks_with_one_time_ivks(paid, 2);
+    let siblings = siblings_at(&st, candidate.position, last);
+    let answer = [directory_answer(&candidate)];
+    let db = st.wallet_mut().db_mut();
+    db.record_one_time_early_lookup(account, receive(8), &answer, |_, _| Some(siblings))
+        .unwrap();
+    assert_eq!(queued(&st), [(u32::from(paid), false)]);
+
+    add_account_at_birthday(&mut st);
+    assert_eq!(restore_state(&st), 0);
+    assert_eq!(queued(&st), [(u32::from(paid), true)]);
+    assert_eq!(sweep_row(&st, receive(0)), (Some(u32::from(last)), true));
+    assert_eq!(keys_for(&st, paid..paid + 1), [receive(8)]);
+
+    st.scan_cached_blocks_with_one_time_ivks(paid, 3);
+    assert_eq!(restore_state(&st), 1);
+    assert_eq!(unspent_keys(&st, last), [Some(receive(8))]);
+    assert!(queued(&st).is_empty());
+    assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), false));
+    assert!(closed(&st, receive(8)) && closed(&st, receive(0)));
+    let db = st.wallet().db();
+    assert!(!db.one_time_history_pending(account, last).unwrap());
+}
+
+/// A key whose hint already found its note, closed without scanning, would not find it
+/// again after a rewind un-mines it, so that key alone falls back to a restore sweep.
+#[test]
+fn a_rewind_hands_a_found_payment_to_a_sweep() {
+    let (mut st, candidate, paid, last) = unscanned_restore();
+    let account = st.test_account().unwrap().id();
+    let end = end_at(&st, last);
+    let answer = [directory_answer(&candidate)];
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_early_restore(account, end, &filtered(8))
+            .unwrap()
+    );
+    db.record_one_time_early_lookup(account, receive(8), &answer, |_, _| None)
+        .unwrap();
+    st.scan_cached_blocks_with_one_time_ivks(paid, 1);
+    assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), true));
+
+    add_account_at_birthday(&mut st);
+    assert_eq!(sweep_row(&st, receive(8)), (None, false));
+    assert_eq!(sweep_row(&st, receive(0)), (Some(u32::from(last)), true));
+    st.scan_cached_blocks_with_one_time_ivks(paid, 3);
+    assert_eq!(restore_state(&st), 1);
+    assert!(closed(&st, receive(0)));
+    let db = st.wallet().db();
+    assert!(db.one_time_history_pending(account, last).unwrap());
+}
+
 /// An account added to a wallet that already scanned its history restores early too.
 /// Adding it requeues every block from its birthday, so a block the wallet keeps a row
 /// for still counts as unscanned for it, and its payment there is found by a hint.

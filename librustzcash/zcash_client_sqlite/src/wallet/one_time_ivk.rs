@@ -481,6 +481,10 @@ pub(crate) fn rescan_missed_keys(
 /// confirmations closing requires (see `WalletDb::close_finished_one_time_keys`), and
 /// closes again once that receipt is confirmed again; a key a sweep closed without
 /// scanning has nothing to rescan.
+///
+/// An early restore's provisional keys keep their state, which the scan still verifies
+/// (see `restore::early`): their queued payments above `height` become scan hints. Only
+/// a provisional key whose note the rewind un-mines falls back to a sweep.
 pub(crate) fn truncate_to_height(
     conn: &rusqlite::Transaction<'_>,
     height: BlockHeight,
@@ -502,11 +506,37 @@ pub(crate) fn truncate_to_height(
              WHERE t.mined_height > ?1)",
         [confirmed_below],
     )?;
+    // Closed without scanning, such a key would not find its note again.
+    let unmined_note = "SELECT s.one_time_key_id FROM ironwood_one_time_sweeps s
+         WHERE s.provisional = 1 AND EXISTS(SELECT 1 FROM ironwood_received_notes n
+             JOIN transactions t ON t.id_tx = n.transaction_id
+             WHERE n.one_time_key_id = s.one_time_key_id AND t.mined_height > ?1)";
+    conn.execute(
+        &format!(
+            "DELETE FROM ironwood_one_time_payment_recovery
+             WHERE one_time_key_id IN ({unmined_note})"
+        ),
+        [u32::from(height)],
+    )?;
+    conn.execute(
+        &format!(
+            "UPDATE ironwood_one_time_sweeps SET done_height = NULL, lookup_height = NULL,
+                 lookup_hash = NULL, next_attempt_at = 0, provisional = 0
+             WHERE one_time_key_id IN ({unmined_note})"
+        ),
+        [u32::from(height)],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_one_time_payment_recovery SET scan_hint = 1
+         WHERE height > ?1 AND one_time_key_id IN (
+             SELECT one_time_key_id FROM ironwood_one_time_sweeps WHERE provisional = 1)",
+        [u32::from(height)],
+    )?;
     conn.execute(
         "UPDATE ironwood_one_time_sweeps SET done_height = NULL, next_attempt_at = 0,
             lookup_height = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_height END,
             lookup_hash = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_hash END
-         WHERE done_height > ?1 OR lookup_height > ?1",
+         WHERE (done_height > ?1 OR lookup_height > ?1) AND provisional = 0",
         [u32::from(height)],
     )?;
     conn.execute(
@@ -514,7 +544,9 @@ pub(crate) fn truncate_to_height(
         [u32::from(height)],
     )?;
     conn.execute(
-        "DELETE FROM ironwood_one_time_payment_recovery WHERE height > ?1",
+        "DELETE FROM ironwood_one_time_payment_recovery WHERE height > ?1
+           AND one_time_key_id NOT IN (
+               SELECT one_time_key_id FROM ironwood_one_time_sweeps WHERE provisional = 1)",
         [u32::from(height)],
     )?;
     Ok(())
