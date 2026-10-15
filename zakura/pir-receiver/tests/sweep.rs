@@ -23,7 +23,8 @@ use receiver_pir_server::{Publication, Publications, router_with_publications};
 use tower::ServiceExt as _;
 use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
 use zakura_pir_receiver::{
-    DirectoryError, Error, Swept, Transport, WriteLock, begin_early_restore, fetch_seen, sweep,
+    DirectoryError, EarlyRestore, Error, FIRST_WINDOW, GAP, MAX_KEYS, Swept, Transport, WriteLock,
+    begin_early_restore, fetch_seen, sweep,
 };
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _, WalletWrite as _,
@@ -107,11 +108,20 @@ fn tip(st: &State) -> ChainPoint {
     }
 }
 
+/// The test account's Orchard key, which its one-time keys derive from.
+fn parent(st: &State) -> FullViewingKey {
+    FullViewingKey::from(st.test_account().unwrap().usk().orchard())
+}
+
+/// The receiver of one-time key `key` under the Orchard key `parent`.
+fn key_receiver(parent: &FullViewingKey, key: KeyId) -> Receiver {
+    let fvk = key.derive(parent).unwrap();
+    Receiver::from_bytes(fvk.address_at(0u32, Scope::External).to_raw_address_bytes()).unwrap()
+}
+
 /// The receiver of the test account's incoming one-time key `index`.
 fn receiver(st: &State, index: u64) -> Receiver {
-    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
-    let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
-    Receiver::from_bytes(fvk.address_at(0u32, Scope::External).to_raw_address_bytes()).unwrap()
+    key_receiver(&parent(st), KeyId::new(Purpose::Receive, index))
 }
 
 /// Pays incoming one-time key `index` in a new scanned block. Scanning cannot find it: a
@@ -869,6 +879,8 @@ enum Fault {
     Queries,
     /// The witness snapshot is malformed, so no session opens.
     Witnesses,
+    /// Queries after the first fail at the transport.
+    LaterQueries,
 }
 
 /// A directory with `fault`.
@@ -891,8 +903,14 @@ impl Transport for Faulty {
         body: Vec<u8>,
         limit: usize,
     ) -> Result<Vec<u8>, DirectoryError> {
-        if matches!(self.fault, Fault::Queries) {
-            return Err(DirectoryError::Revision);
+        match self.fault {
+            Fault::Queries => return Err(DirectoryError::Revision),
+            Fault::LaterQueries
+                if url.ends_with("/v1/receiver/query") && lookups(&self.directory) > 0 =>
+            {
+                return Err(DirectoryError::Transport("down".into()));
+            }
+            _ => {}
         }
         self.directory.post(url, body, limit).await
     }
@@ -1056,8 +1074,14 @@ async fn a_waiting_payment_takes_the_next_attempts_answer() {
 /// Pays incoming key `index` in a new block left unscanned, as the chain's Ironwood leaf
 /// at `position`, and returns the payment as the directory lists it.
 fn pay_unscanned(st: &mut State, index: u64, position: u64) -> Record {
-    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
-    let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
+    let parent = parent(st);
+    pay_unscanned_to(st, &parent, index, position)
+}
+
+/// [`pay_unscanned`] for incoming key `index` under the Orchard key `parent`.
+fn pay_unscanned_to(st: &mut State, parent: &FullViewingKey, index: u64, position: u64) -> Record {
+    let key = KeyId::new(Purpose::Receive, index);
+    let fvk = key.derive(parent).unwrap();
     let (height, _, _) = st.generate_next_block(
         &IronwoodFvk(fvk),
         AddressType::DefaultExternal,
@@ -1067,7 +1091,7 @@ fn pay_unscanned(st: &mut State, index: u64, position: u64) -> Record {
     let tx = &block.vtx[0];
     let compact = &tx.ironwood_actions[0];
     Record {
-        receiver: receiver(st, index),
+        receiver: key_receiver(parent, key),
         page: 0,
         total: 1,
         payment: Payment {
@@ -1174,4 +1198,270 @@ async fn an_early_restore_needs_unscanned_history() {
     .unwrap();
     assert!(early.is_none());
     assert!(directory.requests().is_empty());
+}
+
+/// Mines an empty block left unscanned and returns it as a publication's end.
+fn unscanned_end(st: &mut State) -> ChainPoint {
+    let (height, _) = st.generate_empty_block();
+    ChainPoint {
+        height,
+        hash: cached(st, height).hash(),
+    }
+}
+
+/// Begins `account`'s early restore against the publication `directory` serves, at
+/// [`NOW`], if the wallet allows one.
+async fn begin<T: Transport>(
+    st: &mut State,
+    account: AccountUuid,
+    directory: T,
+) -> Option<EarlyRestore<'static, T>> {
+    let network = *st.network();
+    let db = st.wallet_mut().db_mut();
+    begin_early_restore(
+        db, &network, account, GENESIS, ORIGIN, directory, &NoLock, NOW,
+    )
+    .await
+    .unwrap()
+}
+
+/// The first column of `sql`'s rows in the wallet's database.
+fn column<T: rusqlite::types::FromSql>(st: &State, sql: &str) -> Vec<T> {
+    let conn = st.wallet().conn();
+    let mut statement = conn.prepare(sql).unwrap();
+    let rows = statement.query_map([], |r| r.get(0)).unwrap();
+    rows.collect::<Result<_, _>>().unwrap()
+}
+
+/// The indices of the wallet's registered one-time keys for `purpose`, in order.
+fn registered(st: &State, purpose: Purpose) -> Vec<u64> {
+    let code = u8::from(purpose == Purpose::Receive);
+    let sql = format!(
+        "SELECT key_index FROM ironwood_one_time_keys WHERE purpose = {code} ORDER BY key_index"
+    );
+    let indices = column::<Vec<u8>>(st, &sql).into_iter();
+    indices
+        .map(|bytes| u64::from_be_bytes(bytes.try_into().unwrap()))
+        .collect()
+}
+
+/// Two accounts restore early in one sync against one publication. Each is credited its
+/// own payment once, both restores accept the publication with nothing left to sweep,
+/// and the directory serves one lookup per paid key. A third account, whose history the
+/// scan has already reached, does not begin and asks the directory nothing.
+#[tokio::test]
+async fn two_accounts_restore_early_in_one_sync() {
+    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    let a = st.test_account().unwrap().id();
+    let (b, usk) = st.create_account_from_test_seed("b");
+    let (c, _) = st.create_account_from_test_seed("c");
+    restore(&mut st, b);
+    restore(&mut st, c);
+    let first = pay_unscanned(&mut st, 3, 0);
+    let second = pay_unscanned_to(&mut st, &FullViewingKey::from(usk.orchard()), 5, 1);
+    let end = unscanned_end(&mut st);
+    let directory = serve(&[first.clone(), second], end);
+    let early_a = begin(&mut st, a, &directory).await.unwrap();
+    let early_b = begin(&mut st, b, &directory).await.unwrap();
+    assert_eq!((early_a.paid(), early_b.paid()), (1, 1));
+    let start = |st: &State| st.wallet().db().one_time_early_restore_start(c).unwrap();
+    assert!(start(&st).is_some());
+
+    // The first batch passes the first payment before the lookups come in.
+    let paid_at = BlockHeight::from(first.payment.height);
+    st.scan_cached_blocks_with_one_time_ivks(paid_at, 1);
+    assert_eq!(start(&st), None);
+    let down = Down::default();
+    assert!(begin(&mut st, c, &down).await.is_none());
+    assert_eq!(*down.0.lock().unwrap(), 0);
+    for (early, account) in [(early_a, a), (early_b, b)] {
+        let db = st.wallet_mut().db_mut();
+        let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
+        assert_eq!(looked_up.recorded, 1);
+        assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
+    }
+    st.scan_cached_blocks_with_one_time_ivks(paid_at + 1, 2);
+    let through = tip(&st);
+    assert_eq!(through, end);
+    for account in [a, b] {
+        assert_eq!(st.get_total_balance(account).into_u64(), VALUE);
+        let db = st.wallet().db();
+        assert!(!db.one_time_history_pending(account, end.height).unwrap());
+    }
+    let sql = "SELECT state FROM ironwood_one_time_restores ORDER BY account_id";
+    assert_eq!(column::<u8>(&st, sql), [1, 1]);
+    assert_eq!(lookups(&directory), 2, "{:?}", directory.requests());
+}
+
+/// Pays incoming keys 2, 7 and 11 in unscanned blocks, then restores early through a
+/// directory whose lookups fail at the transport after the first, scans through the
+/// publication's end, and settles restore sweeps. A lookup that fails at the transport
+/// stops the early lookups, listing that key and every later one as failed. The scan
+/// credits the one payment recorded, and the sweeps find the rest, so each payment is
+/// credited once. Returns the wallet and its tip.
+async fn restore_past_a_failed_early_lookup() -> (State, ChainPoint) {
+    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    let account = st.test_account().unwrap().id();
+    let mut records = Vec::new();
+    for (position, index) in (0..).zip([2, 7, 11]) {
+        records.push(pay_unscanned(&mut st, index, position));
+    }
+    let end = unscanned_end(&mut st);
+    let directory = Faulty {
+        directory: serve(&records, end),
+        fault: Fault::LaterQueries,
+    };
+    let early = begin(&mut st, account, &directory).await.unwrap();
+    assert_eq!(early.paid(), 3);
+    let db = st.wallet_mut().db_mut();
+    let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
+    assert_eq!(looked_up.recorded, 1);
+    let failed: Vec<_> = looked_up.failed.iter().map(|(k, _)| k.index()).collect();
+    assert_eq!(failed, [7, 11]);
+    let transport = |e: &_| matches!(e, Error::Directory(DirectoryError::Transport(_)));
+    assert_matches!(looked_up.failed[..], [(_, e), (_, Error::Unavailable(_))] if transport(e));
+
+    let from = BlockHeight::from(records[0].payment.height);
+    st.scan_cached_blocks_with_one_time_ivks(from, 4);
+    let through = tip(&st);
+    assert_eq!(through, end);
+    assert_eq!(balance(&st), VALUE);
+    assert!(pending(&st, through));
+    settle(&mut st, through, &directory.directory).await;
+    assert_eq!(balance(&st), 3 * VALUE);
+    // The recorded key is not looked up again.
+    let lookups = lookups(&directory.directory);
+    assert_eq!(lookups, 3, "{:?}", directory.directory.requests());
+    (st, through)
+}
+
+/// Keys whose early lookups failed are left to restore sweeps, which find their
+/// payments (see [`restore_past_a_failed_early_lookup`]).
+#[tokio::test]
+async fn keys_after_an_early_lookup_transport_failure_are_left_to_sweeps() {
+    restore_past_a_failed_early_lookup().await;
+}
+
+/// A rewind below a finished sweep's anchor reopens the sweep, as for a key the early
+/// restore finished, including a key a sweep finished after its early lookup failed.
+#[tokio::test]
+async fn a_rewind_reopens_sweeps_that_followed_a_failed_early_lookup() {
+    let (mut st, through) = restore_past_a_failed_early_lookup().await;
+    let account = st.test_account().unwrap().id();
+    let wallet = st.wallet_mut();
+    wallet.truncate_to_height(through.height - 1).unwrap();
+    let rewound = tip(&st);
+    let db = st.wallet_mut().db_mut();
+    let limit = NonZeroU32::new(1_000).unwrap();
+    let due = db.prepare_one_time_sweeps(account, rewound, NOW, limit);
+    let due = due.unwrap().unwrap();
+    let due: Vec<_> = due.iter().map(|w| w.key.index()).collect();
+    assert!(due.contains(&2), "{due:?}");
+    assert!(due.contains(&7) && due.contains(&11), "{due:?}");
+}
+
+/// An early restore checks the first [`FIRST_WINDOW`] incoming keys, then keeps going
+/// until [`GAP`] keys in a row are neither seen nor paid, and registers every incoming
+/// key it checked. Here keys 99 and 159 were seen and 129 was paid, so keys 0 to 189 are
+/// registered and only 129 is looked up.
+#[tokio::test]
+async fn an_early_restore_looks_ahead_past_each_used_incoming_key() {
+    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    let account = st.test_account().unwrap().id();
+    let used = [0, 1, 2].map(|i| FIRST_WINDOW - 1 + i * GAP);
+    let paid = pay_unscanned(&mut st, used[1], 0);
+    let end = unscanned_end(&mut st);
+    let seen = [receiver(&st, used[0]), receiver(&st, used[2])];
+    let commitments = [paid.payment.cmx];
+    let records = std::slice::from_ref(&paid);
+    let directory = Directory::new(publish(records, &commitments, end, &provider(&seen)));
+    let early = begin(&mut st, account, &directory).await.unwrap();
+    assert_eq!(early.paid(), 1);
+    let expected: Vec<_> = (0..=used[2] + GAP).collect();
+    assert_eq!(registered(&st, Purpose::Receive), expected);
+    assert!(registered(&st, Purpose::Refund).is_empty());
+}
+
+/// An early restore registers a refund key only when a seen set or the paid filter holds
+/// it, and registering one keeps issuance from reusing its index. Refund key 7, which a
+/// provider saw, is registered and the next refund issued is 8. Refund key 3, in no
+/// filter, is not registered.
+#[tokio::test]
+async fn an_early_restore_registers_only_used_refund_keys() {
+    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    let account = st.test_account().unwrap().id();
+    let end = unscanned_end(&mut st);
+    let refund = |index| key_receiver(&parent(&st), KeyId::new(Purpose::Refund, index));
+    let directory = Directory::new(publish(&[], &[], end, &provider(&[refund(7)])));
+    let early = begin(&mut st, account, &directory).await.unwrap();
+    assert_eq!(early.paid(), 0);
+    assert_eq!(registered(&st, Purpose::Refund), [7]);
+
+    st.scan_cached_blocks_with_one_time_ivks(end.height, 1);
+    let db = st.wallet_mut().db_mut();
+    let issued = db.reserve_refund_key(account, end.height, None);
+    assert_eq!(
+        issued.unwrap().unwrap().key_id(),
+        KeyId::new(Purpose::Refund, 8)
+    );
+}
+
+/// An early restore checks at most [`MAX_KEYS`] keys in a purpose, even while used keys
+/// keep moving its lookahead. A payment beyond them is not looked up early, and restore
+/// sweeps after the scan find it.
+#[tokio::test]
+async fn an_early_restore_checks_at_most_max_keys() {
+    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    let account = st.test_account().unwrap().id();
+    let paid = pay_unscanned(&mut st, MAX_KEYS + 50, 0);
+    let end = unscanned_end(&mut st);
+    // A key seen every 25, within the gap, keeps the lookahead moving through the payment.
+    let seen: Vec<_> = (0..MAX_KEYS + 50)
+        .step_by(25)
+        .map(|index| receiver(&st, index))
+        .collect();
+    let commitments = [paid.payment.cmx];
+    let records = std::slice::from_ref(&paid);
+    let directory = Directory::new(publish(records, &commitments, end, &provider(&seen)));
+    let early = begin(&mut st, account, &directory).await.unwrap();
+    let expected: Vec<_> = (0..MAX_KEYS).collect();
+    assert_eq!(registered(&st, Purpose::Receive), expected);
+    // The paid filter matches about one in 1,533 receivers it does not hold, so a few of
+    // the checked keys are looked up and found unpaid.
+    let false_matches = early.paid();
+    let db = st.wallet_mut().db_mut();
+    let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
+    assert_eq!(looked_up.recorded, false_matches);
+    assert_eq!(lookups(&directory), false_matches);
+
+    let from = BlockHeight::from(paid.payment.height);
+    st.scan_cached_blocks_with_one_time_ivks(from, 2);
+    assert_eq!(balance(&st), 0);
+    settle(&mut st, end, &directory).await;
+    assert_eq!(balance(&st), VALUE);
+}
+
+/// Without a current recent set from every provider, an early restore treats every key it
+/// registers as recent, so each scans from the block after the publication's end. With
+/// one from every provider, no key outside the recent sets scans.
+#[tokio::test]
+async fn without_every_recent_set_every_early_restored_key_scans_after_the_end() {
+    for complete in [true, false] {
+        let mut st = ironwood_wallet_in(TestDbFactory::default());
+        let account = st.test_account().unwrap().id();
+        let end = unscanned_end(&mut st);
+        // A seen refund key, so both purposes are registered.
+        let refund = key_receiver(&parent(&st), KeyId::new(Purpose::Refund, 0));
+        let sets = provider(&[refund]);
+        let sets = if complete { &sets[..] } else { &sets[1..] };
+        let directory = Directory::new(publish(&[], &[], end, sets));
+        begin(&mut st, account, &directory).await.unwrap();
+        let active = column::<Option<u32>>(&st, "SELECT active_from FROM ironwood_one_time_keys");
+        assert_eq!(active.len() as u64, FIRST_WINDOW + 1);
+        let expected = (!complete).then(|| u32::from(end.height) + 1);
+        assert!(
+            active.iter().all(|a| *a == expected),
+            "{complete}: {active:?}"
+        );
+    }
 }
