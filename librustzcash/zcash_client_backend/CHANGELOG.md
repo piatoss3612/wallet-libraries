@@ -18,6 +18,13 @@ workspace.
   not retained, and none of the range's heights is retained. This is the case
   for history scanned after the chain tip. The trees end in the same state, and
   the update no longer adds and then prunes a checkpoint for every block.
+- Without those checkpoints, `put_blocks` also leaves out of the tree update
+  each shard that lies wholly inside the range, holds no wallet note, and is
+  already stored as its root alone, as `put_*_subtree_roots` stores a completed
+  shard. Inserting such a shard would collapse it back to that root, so the
+  trees end in the same state without hashing its note commitments. The
+  computed root is then not checked against the stored one for these shards,
+  as it is not for shards the wallet has not scanned.
 
 ## [0.1.0-rc8] - PLANNED
 
