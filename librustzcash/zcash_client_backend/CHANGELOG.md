@@ -10,6 +10,15 @@ workspace.
 
 ## [Unreleased]
 
+### Changed
+
+- `data_api::ll::wallet::put_blocks` inserts a range's note commitments without
+  block checkpoints when every pool's tree would prune those checkpoints in the
+  same call: the tree already holds `max_checkpoints` newer checkpoints that are
+  not retained, and none of the range's heights is retained. This is the case
+  for history scanned after the chain tip. The trees end in the same state, and
+  the update no longer adds and then prunes a checkpoint for every block.
+
 ## [0.1.0-rc8] - PLANNED
 
 Breaking release for explicit transparent disclosure policy, private recovery,

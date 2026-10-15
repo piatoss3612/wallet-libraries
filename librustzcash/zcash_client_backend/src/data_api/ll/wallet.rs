@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, hash::Hash, ops::Range};
+use std::{
+    collections::BTreeMap,
+    hash::Hash,
+    ops::{Range, RangeInclusive},
+};
 #[cfg(feature = "orchard")]
 use {
     crate::data_api::ORCHARD_SHARD_HEIGHT, shardtree::store::Checkpoint, std::collections::BTreeSet,
@@ -659,6 +663,19 @@ where
     // We will have a start position and a last scanned height in all cases where
     // `blocks` is non-empty.
     if let Some(last_scanned_height) = last_scanned_height {
+        // A history range scanned after the chain tip adds checkpoints that `insert_tree` prunes
+        // again before it returns, because the trees already hold `max_checkpoints` newer ones.
+        // Inserting their leaves without checkpoint retention leaves the trees in the same state
+        // and spares the update from adding and then pruning them.
+        let batch_heights = (from_state.block_height() + 1)..=last_scanned_height;
+        if checkpoints_pruned_on_insert_in_all_pools(wallet_db, anchor_retention, &batch_heights)? {
+            drop_checkpoint_retention(&mut sapling_commitments);
+            #[cfg(feature = "orchard")]
+            drop_checkpoint_retention(&mut orchard_commitments);
+            #[cfg(feature = "orchard")]
+            drop_checkpoint_retention(&mut ironwood_commitments);
+        }
+
         // Create subtrees from the note commitments in parallel.
         const CHUNK_SIZE: usize = 1024;
         let sapling_subtrees = build_subtrees::<_, SAPLING_SHARD_HEIGHT>(
@@ -1642,6 +1659,91 @@ where
     Ok(())
 }
 
+/// Whether every pool's tree would prune checkpoints at `heights` as soon as [`update_tree`]
+/// inserted them; see [`checkpoints_pruned_on_insert`]. Anchor retention keeps the checkpoints it
+/// retains, so a range containing one of its heights never qualifies.
+fn checkpoints_pruned_on_insert_in_all_pools<DbT, SE, TE>(
+    wallet_db: &mut DbT,
+    anchor_retention: Option<&AnchorRetention>,
+    heights: &RangeInclusive<BlockHeight>,
+) -> Result<bool, PutBlocksError<SE, TE>>
+where
+    DbT: WalletCommitmentTrees<Error = TE>,
+{
+    if anchor_retention
+        .is_some_and(|retention| !retention.retained_in_range(heights.clone()).is_empty())
+    {
+        return Ok(false);
+    }
+    if !wallet_db.with_sapling_tree_mut(|tree| {
+        checkpoints_pruned_on_insert(tree, heights).map_err(PutBlocksError::ShardTree)
+    })? {
+        return Ok(false);
+    }
+    #[cfg(feature = "orchard")]
+    {
+        if !wallet_db.with_orchard_tree_mut(|tree| {
+            checkpoints_pruned_on_insert(tree, heights).map_err(PutBlocksError::ShardTree)
+        })? {
+            return Ok(false);
+        }
+        if wallet_db.with_ironwood_tree_mut(|tree| {
+            checkpoints_pruned_on_insert(tree, heights).map_err(PutBlocksError::ShardTree)
+        })? == Some(false)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether [`ShardTree::insert_tree`] would prune checkpoints at `heights` as soon as it added
+/// them: none of `heights` is retained, and the tree already holds `max_checkpoints` unretained
+/// checkpoints above them, which pruning keeps in preference to older ones.
+fn checkpoints_pruned_on_insert<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
+    tree: &ShardTree<S, DEPTH, SHARD_HEIGHT>,
+    heights: &RangeInclusive<BlockHeight>,
+) -> Result<bool, ShardTreeError<S::Error>>
+where
+    S: ShardStore<CheckpointId = BlockHeight>,
+    S::H: Clone + PartialEq + Hashable,
+{
+    let store = tree.store();
+    let retained = store
+        .retained_checkpoints()
+        .map_err(ShardTreeError::Storage)?;
+    if retained.range(heights.clone()).next().is_some() {
+        return Ok(false);
+    }
+    let checkpoint_count = store.checkpoint_count().map_err(ShardTreeError::Storage)?;
+    if checkpoint_count < tree.max_checkpoints() {
+        return Ok(false);
+    }
+    let mut newer = 0;
+    store
+        .for_each_checkpoint(checkpoint_count, |id, _| {
+            if id > heights.end() && !retained.contains(id) {
+                newer += 1;
+            }
+            Ok(())
+        })
+        .map_err(ShardTreeError::Storage)?;
+    Ok(newer >= tree.max_checkpoints())
+}
+
+/// Replaces `Checkpoint` retention with the retention the leaf has once its checkpoint is removed.
+fn drop_checkpoint_retention<H>(commitments: &mut [Option<(H, Retention<BlockHeight>)>]) {
+    for (_, retention) in commitments.iter_mut().flatten() {
+        if let Retention::Checkpoint { marking, .. } = retention {
+            *retention = match marking {
+                Marking::Marked => Retention::Marked,
+                Marking::Reference => Retention::Reference,
+                Marking::None => Retention::Ephemeral,
+            };
+        }
+    }
+}
+
 /// Given the checkpoint heights present in each of the three shielded pools' note commitment
 /// trees, in the order (Sapling, Orchard, Ironwood), returns for each pool the set of checkpoint
 /// heights it must ensure so that every pool ends up checkpointed at every height that is
@@ -2053,5 +2155,184 @@ mod tests {
             batch_ensure_heights(&sapling, &orchard, &ironwood, None, h(1)..=h(1_000)),
             cross_pool_ensure_heights(&sapling, &orchard, &ironwood)
         );
+    }
+
+    mod pruned_checkpoints {
+        use incrementalmerkletree::{Address, Level, Marking, Position, Retention};
+        use shardtree::{
+            ShardTree,
+            store::{ShardStore, memory::MemoryShardStore},
+        };
+        use zcash_protocol::consensus::BlockHeight;
+
+        use super::super::{
+            build_subtrees, checkpoints_pruned_on_insert, drop_checkpoint_retention,
+        };
+
+        const MAX_CHECKPOINTS: usize = 3;
+
+        type Tree = ShardTree<MemoryShardStore<String, BlockHeight>, 6, 3>;
+        type Commitments = Vec<Option<(String, Retention<BlockHeight>)>>;
+
+        fn h(height: u32) -> BlockHeight {
+            BlockHeight::from_u32(height)
+        }
+
+        /// Leaves at positions `from..to`, two to a block: the block holding position `p` is at
+        /// height `first_height + p / 2`, checkpointed at its second leaf. The leaf at `marked`
+        /// is the wallet's note.
+        fn leaves(from: u64, to: u64, first_height: u32, marked: Option<u64>) -> Commitments {
+            (from..to)
+                .map(|pos| {
+                    let is_marked = marked == Some(pos);
+                    let retention = if pos % 2 == 1 {
+                        Retention::Checkpoint {
+                            id: h(first_height + ((pos - from) / 2) as u32),
+                            marking: if is_marked {
+                                Marking::Marked
+                            } else {
+                                Marking::None
+                            },
+                        }
+                    } else if is_marked {
+                        Retention::Marked
+                    } else {
+                        Retention::Ephemeral
+                    };
+                    Some((((b'a' + (pos % 26) as u8) as char).to_string(), retention))
+                })
+                .collect()
+        }
+
+        fn insert(tree: &mut Tree, from: u64, mut commitments: Commitments) {
+            for (subtree, checkpoints) in
+                build_subtrees::<_, 3>(Position::from(from), &mut commitments, 4)
+            {
+                tree.insert_tree(subtree, checkpoints).unwrap();
+            }
+        }
+
+        /// A tree whose positions 32..48 (heights 100..=107) were scanned first, as a chain
+        /// tip range is before history.
+        fn tip_first() -> Tree {
+            let mut tree = Tree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+            insert(&mut tree, 32, leaves(32, 48, 100, None));
+            tree
+        }
+
+        fn checkpoints(tree: &Tree) -> Vec<(BlockHeight, Option<Position>)> {
+            let mut out = vec![];
+            tree.store()
+                .for_each_checkpoint(usize::MAX, |id, checkpoint| {
+                    out.push((*id, checkpoint.position()));
+                    Ok(())
+                })
+                .unwrap();
+            out
+        }
+
+        #[test]
+        fn history_without_checkpoints_leaves_the_same_tree() {
+            let history = || leaves(0, 32, 10, Some(5));
+            let heights = h(10)..=h(25);
+
+            let mut with_checkpoints = tip_first();
+            insert(&mut with_checkpoints, 0, history());
+
+            let mut without = tip_first();
+            assert!(checkpoints_pruned_on_insert(&without, &heights).unwrap());
+            let mut downgraded = history();
+            drop_checkpoint_retention(&mut downgraded);
+            insert(&mut without, 0, downgraded);
+
+            assert_eq!(checkpoints(&without), checkpoints(&with_checkpoints));
+            for index in 0..6 {
+                let addr = Address::from_parts(Level::from(3), index);
+                assert_eq!(
+                    without.store().get_shard(addr).unwrap(),
+                    with_checkpoints.store().get_shard(addr).unwrap(),
+                    "shard {index}",
+                );
+            }
+            assert_eq!(
+                without.root_at_checkpoint_depth(Some(0)).unwrap(),
+                with_checkpoints.root_at_checkpoint_depth(Some(0)).unwrap(),
+            );
+            assert_eq!(
+                without
+                    .witness_at_checkpoint_depth(Position::from(5), 0)
+                    .unwrap(),
+                with_checkpoints
+                    .witness_at_checkpoint_depth(Position::from(5), 0)
+                    .unwrap(),
+            );
+        }
+
+        #[test]
+        fn checkpoints_kept_by_pruning_are_not_dropped() {
+            let heights = h(10)..=h(25);
+
+            // Too few newer checkpoints: the history ones would survive pruning.
+            let mut few = Tree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+            insert(&mut few, 32, leaves(32, 36, 100, None));
+            assert!(!checkpoints_pruned_on_insert(&few, &heights).unwrap());
+
+            // A retained height in the range must get its checkpoint.
+            let mut retained_in_range = tip_first();
+            retained_in_range.ensure_retained(h(15)).unwrap();
+            assert!(!checkpoints_pruned_on_insert(&retained_in_range, &heights).unwrap());
+
+            // Retained checkpoints sit outside the budget, so they do not count as newer.
+            let mut retained_above = Tree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+            insert(&mut retained_above, 32, leaves(32, 38, 100, None));
+            retained_above.ensure_retained(h(100)).unwrap();
+            assert!(!checkpoints_pruned_on_insert(&retained_above, &heights).unwrap());
+
+            // A range above the newest checkpoints is the chain tip, not history.
+            assert!(!checkpoints_pruned_on_insert(&tip_first(), &(h(200)..=h(210))).unwrap());
+        }
+
+        #[test]
+        fn dropping_checkpoint_retention_keeps_marks() {
+            let mut commitments: Commitments = vec![
+                Some(("a".into(), Retention::Ephemeral)),
+                Some((
+                    "b".into(),
+                    Retention::Checkpoint {
+                        id: h(1),
+                        marking: Marking::None,
+                    },
+                )),
+                Some((
+                    "c".into(),
+                    Retention::Checkpoint {
+                        id: h(2),
+                        marking: Marking::Marked,
+                    },
+                )),
+                Some((
+                    "d".into(),
+                    Retention::Checkpoint {
+                        id: h(3),
+                        marking: Marking::Reference,
+                    },
+                )),
+                Some(("e".into(), Retention::Marked)),
+            ];
+            drop_checkpoint_retention(&mut commitments);
+            assert_eq!(
+                commitments
+                    .into_iter()
+                    .map(|c| c.unwrap().1)
+                    .collect::<Vec<_>>(),
+                vec![
+                    Retention::Ephemeral,
+                    Retention::Ephemeral,
+                    Retention::Marked,
+                    Retention::Reference,
+                    Retention::Marked,
+                ],
+            );
+        }
     }
 }
