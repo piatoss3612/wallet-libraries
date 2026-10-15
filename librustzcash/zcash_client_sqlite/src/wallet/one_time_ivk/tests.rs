@@ -283,11 +283,19 @@ pub(super) fn apply_payment(
     (anchor, path): (ChainPoint, &MerklePath),
 ) -> Result<PaymentApplication, SqliteClientError> {
     use store::restore::apply::apply_payment as apply;
-    let (mode, anchored) = (db.transparent_ledger_mode, (anchor, path));
-    let session = db.enhance_pir_session.clone();
-    tx(db, |c, p| {
+    let anchored = (anchor, path);
+    db.transactionally(|db| {
         apply(
-            c, p, mode, &session, account, key, candidate, through, anchored,
+            db.conn.0,
+            &db.transparent_pir_session,
+            db.params,
+            db.transparent_ledger_mode,
+            &db.enhance_pir_session,
+            account,
+            key,
+            candidate,
+            through,
+            anchored,
         )
     })
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))
