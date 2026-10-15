@@ -26,8 +26,9 @@ and this library adheres to Rust's notion of
   one-time restore sweeps: each reruns only if the rescan stores a different block where it
   finished. A key a sweep closed scans again from its first payment above the rewind until that
   payment is confirmed again, instead of waiting for a rerun sweep.
-- `finish_one_time_nullifier_recovery` releases retained spend evidence at most 10,000 blocks
-  per call, so its prune stays short; later calls continue.
+- `finish_one_time_nullifier_recovery` releases at most 50,000 retained Ironwood nullifiers
+  per call, so its prune stays short; later calls continue. Pruning checks only transaction
+  locators below the retention floor.
 
 ## [0.1.0-rc9] - 2026-10-14
 

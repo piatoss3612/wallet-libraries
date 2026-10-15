@@ -6199,11 +6199,14 @@ pub(crate) fn prune_nullifier_map(
         ],
     )?;
     // Locators are shared by pools. Keep one only while some retained nullifier needs it.
+    // Every retained Ironwood nullifier is at or above `ironwood_floor`, so only locators
+    // below it are checked; one there that only held other pools' nullifiers goes once
+    // the floor passes it.
     conn.execute(
         "DELETE FROM tx_locator_map WHERE block_height < ?1 AND NOT EXISTS (
             SELECT 1 FROM nullifier_map n WHERE n.block_height=tx_locator_map.block_height
             AND n.tx_index=tx_locator_map.tx_index)",
-        [u32::from(block_height)],
+        [u32::from(ironwood_floor)],
     )?;
     conn.execute(
         "DELETE FROM ironwood_nullifier_scan_blocks WHERE height < ?1",

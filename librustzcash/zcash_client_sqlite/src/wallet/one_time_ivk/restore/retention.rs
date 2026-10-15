@@ -1,22 +1,26 @@
 //! Temporary spend evidence for notes that a restore sweep finds after ordinary scanning.
 use std::ops::Range;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::{scanning::ScanPriority, transparent_ledger::ChainPoint};
-use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
+use zcash_protocol::{
+    PoolType,
+    consensus::{BlockHeight, NetworkUpgrade, Parameters},
+};
 
 use super::recovery;
 use crate::wallet::one_time_ivk::{account_key, corrupt, queue_rescan, restore_start};
 use crate::{AccountUuid, error::SqliteClientError, wallet, wallet::scanning::priority_code};
 
-/// The most blocks of retained evidence one release frees. Freeing more at once makes the
+/// The most retained Ironwood nullifiers one release frees. Freeing more at once makes the
 /// prune, in the release and in the next scan batch, hold the wallet's write lock for
-/// seconds; later releases continue where this one stopped.
+/// seconds; later releases continue where this one stopped. Counted in nullifiers rather
+/// than blocks, because Ironwood actions per block vary by an order of magnitude.
 #[cfg(not(test))]
-const RELEASE_STEP: u32 = 10_000;
+const RELEASE_NULLIFIERS: u32 = 50_000;
 /// Small enough for test chains to need several releases.
 #[cfg(test)]
-pub(in crate::wallet::one_time_ivk) const RELEASE_STEP: u32 = 50;
+pub(in crate::wallet::one_time_ivk) const RELEASE_NULLIFIERS: u32 = 4;
 
 /// Retains `account`'s Ironwood spend evidence from its birthday, or Ironwood
 /// activation if later, until [`finish_nullifier_recovery`] releases it.
@@ -87,8 +91,23 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
         [id.0],
         |r| r.get(0),
     )?;
+    // Rows below a height start are at most `RELEASE_NULLIFIERS`, and a release always
+    // passes at least one block.
     let next = if next > floor {
-        next.min(floor.saturating_add(RELEASE_STEP))
+        let bound: Option<u32> = conn
+            .query_row(
+                "SELECT block_height FROM nullifier_map
+                 WHERE block_height >= ?1 AND spend_pool = ?2
+                 ORDER BY block_height LIMIT 1 OFFSET ?3",
+                params![
+                    floor,
+                    wallet::encoding::pool_code(PoolType::IRONWOOD),
+                    RELEASE_NULLIFIERS
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        bound.map_or(next, |bound| next.min(bound.max(floor + 1)))
     } else {
         next
     };

@@ -1,6 +1,6 @@
 use super::apply::{fixture, fixture_in};
 use super::*;
-use crate::wallet::one_time_ivk::restore::retention::RELEASE_STEP;
+use crate::wallet::one_time_ivk::restore::retention::RELEASE_NULLIFIERS;
 use rusqlite::params;
 use zakura_one_time_ivk::swap::OperationStatus;
 
@@ -67,9 +67,8 @@ fn suggests_scanning(st: &State, height: BlockHeight) -> bool {
 }
 
 /// Completion ignores a pending provider outcome and releases above its chain point, which
-/// survives a reopen and must be canonical. Later completions release the next large batch
-/// at most `RELEASE_STEP` blocks at a time, down to the pruning depth, keeping the
-/// restored note.
+/// survives a reopen and must be canonical. Later completions retain the next large batch
+/// only to the pruning depth, keeping the restored note.
 #[test]
 fn completed_recovery_survives_reopen_and_retains_the_next_large_batch() {
     let (mut st, key, original) = swept();
@@ -96,15 +95,56 @@ fn completed_recovery_survives_reopen_and_retains_the_next_large_batch() {
     let above = |db: &Db| value::<u32>(&db.conn, sql, [u32::from(original.height)]);
     let db = st.wallet_mut().db_mut();
     assert_eq!(above(db), 201);
-    assert!(!finish(db, account, through));
-    assert_eq!(above(db), 201 - RELEASE_STEP);
-    let mut releases = 1;
-    while !finish(db, account, through) {
-        releases += 1;
-    }
-    assert_eq!(releases + 1, 202u32.div_ceil(RELEASE_STEP));
+    // Empty blocks hold no nullifiers, so one release frees them all.
+    assert!(finish(db, account, through));
     assert_eq!(above(db), crate::PRUNING_DEPTH + 1);
     assert_eq!(notes(&st, through.height).len(), 1);
+}
+
+/// A release frees at most `RELEASE_NULLIFIERS` retained Ironwood nullifiers, so a large
+/// backlog takes several releases, each pruning a bounded batch, until release reaches the
+/// tip.
+#[test]
+fn a_release_frees_a_bounded_batch_of_nullifiers() {
+    let (mut st, _, original) = swept();
+    let account = st.test_account().unwrap().id();
+    assert!(finish(st.wallet_mut().db_mut(), account, original));
+    let foreign = IronwoodFvk(FullViewingKey::from(
+        &orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap(),
+    ));
+    let amount = Zatoshis::const_from_u64(10_000);
+    for _ in 0..12 {
+        st.generate_next_block(&foreign, AddressType::DefaultExternal, amount);
+    }
+    for _ in 0..crate::PRUNING_DEPTH + 1 {
+        st.generate_empty_block();
+    }
+    let blocks = 12 + crate::PRUNING_DEPTH as usize + 1;
+    st.scan_cached_blocks_with_one_time_ivks(original.height + 1, blocks);
+    let through = tip(&st);
+    let sql = "SELECT COUNT(*) FROM nullifier_map WHERE spend_pool = ?1 AND block_height > ?2";
+    let pool = crate::wallet::encoding::pool_code(zcash_protocol::PoolType::IRONWOOD);
+    let retained = |db: &Db| value::<u32>(&db.conn, sql, params![pool, u32::from(original.height)]);
+    let db = st.wallet_mut().db_mut();
+    let mut left = retained(db);
+    assert!(left > 2 * RELEASE_NULLIFIERS, "{left} nullifiers retained");
+    let mut releases = 0;
+    loop {
+        releases += 1;
+        let done = finish(db, account, through);
+        let now = retained(db);
+        assert!(
+            left - now <= RELEASE_NULLIFIERS,
+            "freed {} at once",
+            left - now
+        );
+        left = now;
+        if done {
+            break;
+        }
+    }
+    assert!(releases > 2);
+    assert_eq!(retained_from(db), Some(through.height + 1));
 }
 
 /// Unfinished sweeps and queued candidates hold spend evidence: from the candidate's
