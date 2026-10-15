@@ -3,10 +3,7 @@ use std::ops::Range;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::{scanning::ScanPriority, transparent_ledger::ChainPoint};
-use zcash_protocol::{
-    PoolType,
-    consensus::{BlockHeight, NetworkUpgrade, Parameters},
-};
+use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use super::recovery;
 use crate::wallet::one_time_ivk::{account_key, corrupt, queue_rescan, restore_start};
@@ -91,19 +88,15 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
         [id.0],
         |r| r.get(0),
     )?;
-    // Rows below a height start are at most `RELEASE_NULLIFIERS`, and a release always
-    // passes at least one block.
+    // At most `RELEASE_NULLIFIERS` rows of any pool lie below the bound, which the
+    // locator index answers without reading rows; below the pruning height they are all
+    // Ironwood. A release always passes at least one block.
     let next = if next > floor {
         let bound: Option<u32> = conn
             .query_row(
-                "SELECT block_height FROM nullifier_map
-                 WHERE block_height >= ?1 AND spend_pool = ?2
-                 ORDER BY block_height LIMIT 1 OFFSET ?3",
-                params![
-                    floor,
-                    wallet::encoding::pool_code(PoolType::IRONWOOD),
-                    RELEASE_NULLIFIERS
-                ],
+                "SELECT block_height FROM nullifier_map WHERE block_height >= ?1
+                 ORDER BY block_height LIMIT 1 OFFSET ?2",
+                params![floor, RELEASE_NULLIFIERS],
                 |r| r.get(0),
             )
             .optional()?;
