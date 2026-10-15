@@ -20,6 +20,15 @@ and this library adheres to Rust's notion of
 - `wallet::init::migrations::ids::ONE_TIME_IVK_EARLY_RESTORE`, an additive migration for early
   restores.
 
+### Changed
+
+- A rewind on the same chain, such as adding an account with an older birthday, keeps finished
+  one-time restore sweeps: each reruns only if the rescan stores a different block where it
+  finished. A key a sweep closed scans again from its first payment above the rewind until that
+  payment is confirmed again, instead of waiting for a rerun sweep.
+- `finish_one_time_nullifier_recovery` releases retained spend evidence at most 10,000 blocks
+  per call, so its prune stays short; later calls continue.
+
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added

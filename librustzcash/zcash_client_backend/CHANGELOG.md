@@ -17,6 +17,11 @@ and this library adheres to Rust's notion of
   keys for one scan batch, and `chain::scan_cached_blocks_with_one_time_ivks` now uses it.
   Its default is `get_one_time_scanning_keys`, and `one_time_early_restore_start`'s is `None`.
 
+### Changed
+
+- `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery` may release only part of the
+  retained evidence per call; it returns true once release reaches the tip.
+
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added
