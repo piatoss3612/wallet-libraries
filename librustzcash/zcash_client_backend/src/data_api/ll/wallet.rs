@@ -14,8 +14,12 @@ use rayon::{
 };
 use tracing::{debug, info, trace, warn};
 
-use incrementalmerkletree::{Hashable, Marking, Position, Retention, frontier::Frontier};
-use shardtree::{LocatedPrunableTree, ShardTree, error::ShardTreeError, store::ShardStore};
+use incrementalmerkletree::{
+    Address, Hashable, Level, Marking, Position, Retention, frontier::Frontier,
+};
+use shardtree::{
+    LocatedPrunableTree, RetentionFlags, ShardTree, error::ShardTreeError, store::ShardStore,
+};
 use transparent::{address::TransparentAddress, bundle::OutPoint};
 use zcash_keys::{address::Receiver, encoding::AddressCodec as _};
 use zcash_primitives::transaction::Transaction;
@@ -775,7 +779,9 @@ where
         // Inserting their leaves without checkpoint retention leaves the trees in the same state
         // and spares the update from adding and then pruning them.
         let batch_heights = (from_state.block_height() + 1)..=last_scanned_height;
-        if checkpoints_pruned_on_insert_in_all_pools(wallet_db, anchor_retention, &batch_heights)? {
+        let checkpoints_dropped =
+            checkpoints_pruned_on_insert_in_all_pools(wallet_db, anchor_retention, &batch_heights)?;
+        if checkpoints_dropped {
             drop_checkpoint_retention(&mut sapling_commitments);
             #[cfg(feature = "orchard")]
             drop_checkpoint_retention(&mut orchard_commitments);
@@ -783,28 +789,69 @@ where
             drop_checkpoint_retention(&mut ironwood_commitments);
         }
 
+        // Without checkpoints, a shard that lies wholly inside the range and holds no wallet note
+        // collapses to its root once inserted. When the tree already stores the shard as that root
+        // alone, as `put_*_subtree_roots` stores a completed shard, its commitments are left out
+        // of the subtrees below, which spares hashing them.
+        let sapling_start = Position::from(from_state.final_sapling_tree().tree_size());
+        let sapling_stored = if checkpoints_dropped {
+            wallet_db.with_sapling_tree_mut(|tree| {
+                leave_out_shards_stored_as_root(tree, sapling_start, &sapling_commitments)
+                    .map_err(PutBlocksError::ShardTree)
+            })?
+        } else {
+            vec![]
+        };
+        #[cfg(feature = "orchard")]
+        let orchard_start = Position::from(from_state.final_orchard_tree().tree_size());
+        #[cfg(feature = "orchard")]
+        let orchard_stored = if checkpoints_dropped {
+            wallet_db.with_orchard_tree_mut(|tree| {
+                leave_out_shards_stored_as_root(tree, orchard_start, &orchard_commitments)
+                    .map_err(PutBlocksError::ShardTree)
+            })?
+        } else {
+            vec![]
+        };
+        #[cfg(feature = "orchard")]
+        let ironwood_start = Position::from(from_state.final_ironwood_tree().tree_size());
+        #[cfg(feature = "orchard")]
+        let ironwood_stored = if checkpoints_dropped {
+            wallet_db
+                .with_ironwood_tree_mut(|tree| {
+                    leave_out_shards_stored_as_root(tree, ironwood_start, &ironwood_commitments)
+                        .map_err(PutBlocksError::ShardTree)
+                })?
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
         // Create subtrees from the note commitments in parallel.
         const CHUNK_SIZE: usize = 1024;
-        let sapling_subtrees = build_subtrees::<_, SAPLING_SHARD_HEIGHT>(
-            Position::from(from_state.final_sapling_tree().tree_size()),
+        let sapling_subtrees = build_subtrees_except::<_, SAPLING_SHARD_HEIGHT>(
+            sapling_start,
             &mut sapling_commitments,
             CHUNK_SIZE,
+            &sapling_stored,
         );
 
         #[cfg(feature = "orchard")]
-        let orchard_subtrees = build_subtrees::<_, ORCHARD_SHARD_HEIGHT>(
-            Position::from(from_state.final_orchard_tree().tree_size()),
+        let orchard_subtrees = build_subtrees_except::<_, ORCHARD_SHARD_HEIGHT>(
+            orchard_start,
             &mut orchard_commitments,
             CHUNK_SIZE,
+            &orchard_stored,
         );
 
         // The Ironwood note commitment tree is Orchard-shaped and so uses the Orchard shard
         // height, but is a distinct pool with its own tree.
         #[cfg(feature = "orchard")]
-        let ironwood_subtrees = build_subtrees::<_, ORCHARD_SHARD_HEIGHT>(
-            Position::from(from_state.final_ironwood_tree().tree_size()),
+        let ironwood_subtrees = build_subtrees_except::<_, ORCHARD_SHARD_HEIGHT>(
+            ironwood_start,
             &mut ironwood_commitments,
             CHUNK_SIZE,
+            &ironwood_stored,
         );
 
         // Ensure that we have the same set of checkpoints across all trees. Each tree must gain a
@@ -1838,6 +1885,113 @@ where
     Ok(newer >= tree.max_checkpoints())
 }
 
+/// Finds the shards that [`shards_stored_as_root`] allows to be left out of inserting
+/// `commitments`, writes each back to the store unchanged, and returns their indices.
+///
+/// Inserting such a shard would write it as the same single leaf, and a store may record that
+/// write; the SQLite store, for one, keeps a separate root hash only for a shard whose root is a
+/// parent node. Writing the shard back leaves the store as inserting it would have.
+fn leave_out_shards_stored_as_root<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
+    tree: &mut ShardTree<S, DEPTH, SHARD_HEIGHT>,
+    start: Position,
+    commitments: &[Option<(S::H, Retention<BlockHeight>)>],
+) -> Result<Vec<u64>, ShardTreeError<S::Error>>
+where
+    S: ShardStore<CheckpointId = BlockHeight>,
+    S::H: Clone + PartialEq + Hashable,
+{
+    let shards = shards_stored_as_root(tree, start, commitments)?;
+    let mut indices = Vec::with_capacity(shards.len());
+    for shard in shards {
+        indices.push(shard.root_addr().index());
+        tree.store_mut()
+            .put_shard(shard)
+            .map_err(ShardTreeError::Storage)?;
+    }
+    Ok(indices)
+}
+
+/// The shards that lie wholly inside `commitments`, which start at `start`, hold only `Ephemeral`
+/// leaves, and are stored in `tree` as a single ephemeral leaf: their root alone.
+///
+/// Inserting such a shard's commitments would compute its root, check it against the stored one,
+/// and leave the shard collapsed to that root again, so the shard can be left out of the insertion.
+/// Leaving it out also leaves out that check, which is the same trust a wallet places in a
+/// downloaded subtree root for a shard it has not scanned.
+fn shards_stored_as_root<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
+    tree: &ShardTree<S, DEPTH, SHARD_HEIGHT>,
+    start: Position,
+    commitments: &[Option<(S::H, Retention<BlockHeight>)>],
+) -> Result<Vec<LocatedPrunableTree<S::H>>, ShardTreeError<S::Error>>
+where
+    S: ShardStore<CheckpointId = BlockHeight>,
+    S::H: Clone + PartialEq + Hashable,
+{
+    let shard_size = 1u64 << SHARD_HEIGHT;
+    let start = u64::from(start);
+    let end = start + commitments.len() as u64;
+    let mut stored = vec![];
+    for index in start.div_ceil(shard_size)..end / shard_size {
+        let first = usize::try_from(index * shard_size - start).expect("within commitments");
+        let leaves = &commitments[first..first + shard_size as usize];
+        if !leaves
+            .iter()
+            .all(|leaf| matches!(leaf, Some((_, Retention::Ephemeral))))
+        {
+            continue;
+        }
+        let shard = tree
+            .store()
+            .get_shard(Address::from_parts(Level::from(SHARD_HEIGHT), index))
+            .map_err(ShardTreeError::Storage)?;
+        if let Some(shard) = shard.filter(|shard| {
+            matches!(
+                (**shard.root()).leaf_value(),
+                Some((_, flags)) if *flags == RetentionFlags::EPHEMERAL
+            )
+        }) {
+            stored.push(shard);
+        }
+    }
+    Ok(stored)
+}
+
+/// [`build_subtrees`] for the commitments outside the shards in `left_out`: ascending indices of
+/// shards that lie wholly inside `commitments`, which start at `start`.
+fn build_subtrees_except<H, const SHARD_HEIGHT: u8>(
+    start: Position,
+    commitments: &mut [Option<(H, Retention<BlockHeight>)>],
+    chunk_size: usize,
+    left_out: &[u64],
+) -> Vec<(LocatedPrunableTree<H>, BTreeMap<BlockHeight, Position>)>
+where
+    H: Clone + PartialEq + Hashable + Send + Sync,
+{
+    let shard_size = 1u64 << SHARD_HEIGHT;
+    let start = u64::from(start);
+    let end = start + commitments.len() as u64;
+    let mut segments = vec![];
+    let mut from = start;
+    for index in left_out {
+        segments.push(from..index * shard_size);
+        from = (index + 1) * shard_size;
+    }
+    segments.push(from..end);
+    segments
+        .into_iter()
+        .filter(|segment| !segment.is_empty())
+        .flat_map(|segment| {
+            let first = usize::try_from(segment.start - start).expect("within commitments");
+            let last = usize::try_from(segment.end - start).expect("within commitments");
+            build_subtrees::<H, SHARD_HEIGHT>(
+                Position::from(segment.start),
+                &mut commitments[first..last],
+                chunk_size,
+            )
+        })
+        .collect()
+}
+
 /// Replaces `Checkpoint` retention with the retention the leaf has once its checkpoint is removed.
 fn drop_checkpoint_retention<H>(commitments: &mut [Option<(H, Retention<BlockHeight>)>]) {
     for (_, retention) in commitments.iter_mut().flatten() {
@@ -2267,13 +2421,14 @@ mod tests {
     mod pruned_checkpoints {
         use incrementalmerkletree::{Address, Level, Marking, Position, Retention};
         use shardtree::{
-            ShardTree,
+            LocatedTree, PrunableTree, RetentionFlags, ShardTree,
             store::{ShardStore, memory::MemoryShardStore},
         };
         use zcash_protocol::consensus::BlockHeight;
 
         use super::super::{
-            build_subtrees, checkpoints_pruned_on_insert, drop_checkpoint_retention,
+            build_subtrees, build_subtrees_except, checkpoints_pruned_on_insert,
+            drop_checkpoint_retention, leave_out_shards_stored_as_root, shards_stored_as_root,
         };
 
         const MAX_CHECKPOINTS: usize = 3;
@@ -2372,6 +2527,119 @@ mod tests {
                 with_checkpoints
                     .witness_at_checkpoint_depth(Position::from(5), 0)
                     .unwrap(),
+            );
+        }
+
+        /// Stores each of `shards` as its root alone, as downloaded subtree roots are stored,
+        /// taking the roots from a tree holding the leaves at positions `0..32`.
+        fn store_roots(tree: &mut Tree, shards: core::ops::Range<u64>) {
+            let mut reference = Tree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+            let mut all = leaves(0, 32, 10, None);
+            drop_checkpoint_retention(&mut all);
+            insert(&mut reference, 0, all);
+            for index in shards {
+                let addr = Address::from_parts(Level::from(3), index);
+                let root = reference
+                    .store()
+                    .get_shard(addr)
+                    .unwrap()
+                    .unwrap()
+                    .root_hash(Position::from((index + 1) * 8))
+                    .unwrap();
+                tree.store_mut()
+                    .put_shard(
+                        LocatedTree::from_parts(
+                            addr,
+                            PrunableTree::leaf((root, RetentionFlags::EPHEMERAL)),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+        }
+
+        #[test]
+        fn note_free_shards_stored_as_roots_are_left_out() {
+            // History positions 2..32: shard 0 is partial, shard 1 holds the wallet's note at
+            // position 13, shards 2 and 3 hold no note.
+            let history = || leaves(2, 32, 10, Some(13));
+            let heights = h(10)..=h(24);
+
+            let mut full = tip_first();
+            store_roots(&mut full, 0..4);
+            insert(&mut full, 2, history());
+
+            let mut skipping = tip_first();
+            store_roots(&mut skipping, 0..4);
+            assert!(checkpoints_pruned_on_insert(&skipping, &heights).unwrap());
+            let mut downgraded = history();
+            drop_checkpoint_retention(&mut downgraded);
+            let stored =
+                leave_out_shards_stored_as_root(&mut skipping, Position::from(2), &downgraded)
+                    .unwrap();
+            assert_eq!(stored, vec![2, 3]);
+            for (subtree, checkpoints) in
+                build_subtrees_except::<_, 3>(Position::from(2), &mut downgraded, 4, &stored)
+            {
+                skipping.insert_tree(subtree, checkpoints).unwrap();
+            }
+
+            assert_eq!(checkpoints(&skipping), checkpoints(&full));
+            for index in 0..6 {
+                let addr = Address::from_parts(Level::from(3), index);
+                assert_eq!(
+                    skipping.store().get_shard(addr).unwrap(),
+                    full.store().get_shard(addr).unwrap(),
+                    "shard {index}",
+                );
+            }
+            assert_eq!(
+                skipping.root_at_checkpoint_depth(Some(0)).unwrap(),
+                full.root_at_checkpoint_depth(Some(0)).unwrap(),
+            );
+            assert_eq!(
+                skipping
+                    .witness_at_checkpoint_depth(Position::from(13), 0)
+                    .unwrap(),
+                full.witness_at_checkpoint_depth(Position::from(13), 0)
+                    .unwrap(),
+            );
+        }
+
+        #[test]
+        fn shards_not_stored_as_roots_are_built() {
+            let mut commitments = leaves(0, 32, 10, None);
+            drop_checkpoint_retention(&mut commitments);
+
+            // No downloaded roots: every shard is built.
+            let tree = tip_first();
+            assert!(
+                shards_stored_as_root(&tree, Position::from(0), &commitments)
+                    .unwrap()
+                    .is_empty()
+            );
+
+            // A shard holding a leaf to keep is built even when its root is stored.
+            let mut tree = tip_first();
+            store_roots(&mut tree, 0..4);
+            let mut with_checkpoint = commitments.clone();
+            with_checkpoint[9].as_mut().unwrap().1 = Retention::Checkpoint {
+                id: h(14),
+                marking: Marking::None,
+            };
+            assert_eq!(
+                shards_stored_as_root(&tree, Position::from(0), &with_checkpoint)
+                    .unwrap()
+                    .iter()
+                    .map(|shard| shard.root_addr().index())
+                    .collect::<Vec<_>>(),
+                vec![0, 2, 3],
+            );
+
+            // Leaving nothing out builds what build_subtrees builds.
+            assert_eq!(
+                build_subtrees_except::<_, 3>(Position::from(0), &mut commitments.clone(), 4, &[]),
+                build_subtrees::<_, 3>(Position::from(0), &mut commitments, 4),
             );
         }
 
