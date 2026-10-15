@@ -54,6 +54,7 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
                 &candidate,
                 through,
                 (publication, &path),
+                Gate::FullyScanned,
             )
         })?;
         match applied {
@@ -67,12 +68,27 @@ pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
 }
 
 /// The inclusion path at `position`, if every sibling is a valid hash.
-fn merkle_path(position: u32, siblings: [[u8; 32]; 32]) -> Option<MerklePath> {
+pub(in crate::wallet::one_time_ivk) fn merkle_path(
+    position: u32,
+    siblings: [[u8; 32]; 32],
+) -> Option<MerklePath> {
     let hashes = siblings
         .iter()
         .map(|bytes| Option::from(MerkleHashOrchard::from_bytes(bytes)))
         .collect::<Option<Vec<_>>>()?;
     Some(MerklePath::from_parts(position, hashes.try_into().ok()?))
+}
+
+/// Which scan coverage [`apply_payment`] requires before it applies a payment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::wallet::one_time_ivk) enum Gate {
+    /// A restore sweep's: `through` is the wallet's fully scanned chain tip, and missing
+    /// spend evidence queues a replay of the payment's history.
+    FullyScanned,
+    /// An early restore's (see `early`): `through` is the highest block the scan stored,
+    /// and the payment waits until every block from its own on carries spend evidence.
+    /// It never queues a replay, since the scan reaches those blocks anyway.
+    Covered,
 }
 
 /// Applies queued `candidate` with its inclusion path at an anchor on the wallet's chain,
@@ -90,6 +106,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     candidate: &PendingPayment,
     through: ChainPoint,
     (anchor, path): (ChainPoint, &MerklePath),
+    gate: Gate,
 ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
     if !pending_payments(conn, account, key)?
         .iter()
@@ -123,8 +140,9 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         dequeue()?;
         return Ok(Ok(PaymentApplication::Applied));
     }
-    if wallet::fully_scanned_height(conn)? != Some(through.height)
-        || wallet::chain_tip_height(conn)? != Some(through.height)
+    if gate == Gate::FullyScanned
+        && (wallet::fully_scanned_height(conn)? != Some(through.height)
+            || wallet::chain_tip_height(conn)? != Some(through.height))
     {
         return Ok(Ok(PaymentApplication::AwaitingScan));
     }
@@ -247,7 +265,10 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     if conflict || contradicted {
         return reject(conn, key_ref);
     }
-    let spent = match spend_status(conn, candidate, recovered.nullifier(), through)? {
+    let spent = match spend_status(conn, candidate, recovered.nullifier(), through, gate)? {
+        Ok(SpendStatus::Unknown) if gate == Gate::Covered => {
+            return Ok(Ok(PaymentApplication::AwaitingSpendHistory));
+        }
         Ok(SpendStatus::Unknown) => {
             // Authenticate inclusion before a directory answer can trigger a replay.
             queue_spend_history(conn, params, account, candidate.height, through.height)?;

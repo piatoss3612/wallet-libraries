@@ -167,6 +167,25 @@ pub(crate) fn scanning_keys<P: Parameters>(
     })
 }
 
+/// Implements `OneTimeIvkRead::get_one_time_scanning_keys_for_range`: the open keys
+/// active before `range` ends, and keys with an early-restore payment inside it (see
+/// `restore::early`). A key is tried only on the batches it may have a payment in.
+pub(crate) fn scanning_keys_for_range<P: Parameters>(
+    conn: &Connection,
+    params: &P,
+    range: Range<BlockHeight>,
+) -> Result<Vec<OneTimeScanningKey<AccountUuid>>, SqliteClientError> {
+    keys_by_account(conn, params, |account| {
+        let predicate = "(k.active_from IS NOT NULL AND k.closed_at IS NULL
+                AND k.active_from < ?2)
+            OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                WHERE p.one_time_key_id = k.id AND p.scan_hint = 1
+                  AND p.height >= ?3 AND p.height < ?2)";
+        let bindings = rusqlite::params![account.0, u32::from(range.end), u32::from(range.start)];
+        keys_where(conn, params, account, predicate, bindings)
+    })
+}
+
 /// The scanning keys `keys` returns for each account with an Orchard viewing key.
 fn keys_by_account<P: Parameters>(
     conn: &Connection,

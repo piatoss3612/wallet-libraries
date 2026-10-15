@@ -238,7 +238,13 @@ pub(super) fn spend_status(
 ) -> Result<SpendStatus, SweepDeferral> {
     tx(db, |c, p| {
         let (_, note) = store::restore::payments::authenticate(c, p, account, key, candidate)?;
-        store::restore::payments::spend_status(c, candidate, note.nullifier(), through)
+        store::restore::payments::spend_status(
+            c,
+            candidate,
+            note.nullifier(),
+            through,
+            store::restore::apply::Gate::FullyScanned,
+        )
     })
     .unwrap()
 }
@@ -287,7 +293,16 @@ pub(super) fn apply_payment(
     let session = db.enhance_pir_session.clone();
     tx(db, |c, p| {
         apply(
-            c, p, mode, &session, account, key, candidate, through, anchored,
+            c,
+            p,
+            mode,
+            &session,
+            account,
+            key,
+            candidate,
+            through,
+            anchored,
+            store::restore::apply::Gate::FullyScanned,
         )
     })
     .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))

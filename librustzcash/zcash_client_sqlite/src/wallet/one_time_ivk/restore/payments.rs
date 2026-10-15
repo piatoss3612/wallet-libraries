@@ -90,15 +90,19 @@ fn payment(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingPayment> {
 }
 
 /// Checks retained nullifiers through `through` for `nullifier`, authenticated
-/// `candidate`'s, without accepting a service's claim of absence.
+/// `candidate`'s, without accepting a service's claim of absence, under `gate`'s scan
+/// requirement.
 pub(in crate::wallet::one_time_ivk) fn spend_status(
     conn: &Connection,
     candidate: &PendingPayment,
     nullifier: &orchard::note::Nullifier,
     through: ChainPoint,
+    gate: super::apply::Gate,
 ) -> Result<Result<SpendStatus, SweepDeferral>, SqliteClientError> {
+    // An early restore relies on the coverage count below alone (see `apply::Gate`).
     if through.height < candidate.height
-        || wallet::fully_scanned_height(conn)?.is_none_or(|h| h < through.height)
+        || (gate == super::apply::Gate::FullyScanned
+            && wallet::fully_scanned_height(conn)?.is_none_or(|h| h < through.height))
     {
         return Ok(Ok(SpendStatus::Unknown));
     }

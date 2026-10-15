@@ -3,6 +3,7 @@
 //! Ironwood spend evidence they need, and the paid-filter backstop for closed keys.
 
 pub(super) mod apply;
+pub(crate) mod early;
 pub(super) mod payments;
 pub(super) mod planner;
 pub(super) mod recovery;
