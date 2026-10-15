@@ -159,9 +159,11 @@ pub(crate) fn begin_sweep_attempt(
         |r| r.get(0),
     )?;
     let delay = (60i64 << attempt.min(10)).min(43200);
+    // The sweep takes over a key whose early restore lookup never came, as
+    // `early::fall_back` hands one over, so a later rewind reopens it like any sweep.
     conn.execute(
         "UPDATE ironwood_one_time_sweeps
-         SET attempts = MIN(attempts + 1, 30), next_attempt_at = ?2
+         SET attempts = MIN(attempts + 1, 30), next_attempt_at = ?2, provisional = 0
          WHERE one_time_key_id = ?1",
         params![id, now.saturating_add(delay)],
     )?;
