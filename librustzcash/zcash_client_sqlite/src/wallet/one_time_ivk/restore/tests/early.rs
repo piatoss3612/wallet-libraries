@@ -1,5 +1,11 @@
 use super::*;
-use zcash_client_backend::data_api::one_time_ivk::restore::{EarlyRestoreKey, PublicationEnd};
+use std::num::NonZeroU32;
+
+use zcash_client_backend::data_api::{
+    AccountBirthday,
+    one_time_ivk::restore::{EarlyRestoreKey, PublicationEnd},
+    wallet::ConfirmationsPolicy,
+};
 
 /// Receive key `index`.
 fn receive(index: u64) -> KeyId {
@@ -339,13 +345,29 @@ fn a_late_hint_becomes_a_payment_to_insert() {
     assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), false));
 }
 
-/// Adds a second account from the test seed with the test account's birthday, which
-/// rewinds the wallet to the block before it.
-fn add_account_at_birthday(st: &mut State) {
+/// Adds the test seed's second account at `birthday`, which rewinds the wallet to the
+/// block before it.
+fn add_account(st: &mut State, birthday: &AccountBirthday) -> AccountUuid {
     let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
-    let birthday = st.test_account().unwrap().birthday().clone();
     let db = st.wallet_mut().db_mut();
-    db.create_account("added", &seed, &birthday, None).unwrap();
+    db.create_account("added", &seed, birthday, None).unwrap().0
+}
+
+/// [`add_account`] with the test account's birthday.
+fn add_account_at_birthday(st: &mut State) -> AccountUuid {
+    let birthday = st.test_account().unwrap().birthday().clone();
+    add_account(st, &birthday)
+}
+
+/// Key `key` of the test seed's second account, which [`add_account`] adds.
+fn second_key(st: &State, key: KeyId) -> FullViewingKey {
+    let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
+        st.network(),
+        st.test_seed().unwrap().expose_secret(),
+        zip32::AccountId::try_from(1).unwrap(),
+    )
+    .unwrap();
+    key.derive(&FullViewingKey::from(usk.orchard())).unwrap()
 }
 
 /// Adding an account while another account's early restore waits for its anchor keeps
@@ -422,17 +444,7 @@ fn an_added_account_restores_early_over_requeued_history() {
     let mut st = ironwood_wallet();
     let first = st.test_account().unwrap().id();
     retain(st.wallet_mut().db_mut(), first);
-    let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
-    let network = *st.network();
-    let usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
-        &network,
-        seed.expose_secret(),
-        zip32::AccountId::try_from(1).unwrap(),
-    )
-    .unwrap();
-    let fvk = receive(8)
-        .derive(&FullViewingKey::from(usk.orchard()))
-        .unwrap();
+    let fvk = second_key(&st, receive(8));
     let amount = Zatoshis::const_from_u64(100_000);
     let recipient = IronwoodFvk(fvk.clone());
     let (paid, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, amount);
@@ -444,9 +456,7 @@ fn an_added_account_restores_early_over_requeued_history() {
     let blocks = (u32::from(last) - u32::from(paid) + 1) as usize;
     st.scan_cached_blocks_with_one_time_ivks(paid, blocks);
     let candidate = candidate_at(&st, paid, &fvk);
-    let birthday = st.test_account().unwrap().birthday().clone();
-    let db = st.wallet_mut().db_mut();
-    let (added, _) = db.create_account("added", &seed, &birthday, None).unwrap();
+    let added = add_account_at_birthday(&mut st);
     let sql = "SELECT EXISTS(SELECT 1 FROM blocks WHERE height = ?1)";
     assert!(value::<bool>(st.wallet().conn(), sql, [u32::from(paid)]));
 
@@ -469,4 +479,489 @@ fn an_added_account_restores_early_over_requeued_history() {
                WHERE a.uuid = ?1 AND n.one_time_key_id IS NOT NULL";
     assert_eq!(value::<u32>(st.wallet().conn(), sql, [added.0]), 1);
     assert!(queued(&st).is_empty());
+}
+
+/// Unscanned blocks for two accounts' early restores: a block paying a foreign key, which
+/// gives the wallet a checkpoint to truncate to, a block paying the test account's
+/// receive key 8, one paying the second account's (see [`second_key`]), and two empty
+/// blocks. The test account retains its spend history.
+struct Grid {
+    st: State,
+    /// The test account's payment, then the second account's.
+    paid: [PendingPayment; 2],
+    first: BlockHeight,
+    last: BlockHeight,
+    /// The birthday at the second account's payment.
+    late_birthday: AccountBirthday,
+}
+
+/// Mines the [`Grid`] blocks.
+fn grid() -> Grid {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    retain(st.wallet_mut().db_mut(), account);
+    let value = Zatoshis::const_from_u64(100_000);
+    let key = orchard::keys::SpendingKey::from_bytes([0xf5; 32]).unwrap();
+    let foreign = IronwoodFvk(FullViewingKey::from(&key));
+    let (first, _, _) = st.generate_next_block(&foreign, AddressType::DefaultExternal, value);
+    let ours = derive(&st, receive(8));
+    let recipient = IronwoodFvk(ours.clone());
+    let (h1, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
+    let prior = st.latest_cached_block().unwrap().chain_state().clone();
+    let late_birthday = AccountBirthday::from_parts(prior, None);
+    let theirs = second_key(&st, receive(8));
+    let recipient = IronwoodFvk(theirs.clone());
+    let (h2, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
+    st.generate_empty_block();
+    let (last, _) = st.generate_empty_block();
+    let paid = [candidate_at(&st, h1, &ours), candidate_at(&st, h2, &theirs)];
+    Grid {
+        st,
+        paid,
+        first,
+        last,
+        late_birthday,
+    }
+}
+
+/// Begins `account`'s early restore at cached block `last` with [`filtered`] keys, receive
+/// key 8 paid.
+fn begin(st: &mut State, account: AccountUuid, last: BlockHeight) {
+    let end = end_at(st, last);
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        db.begin_one_time_early_restore(account, end, &filtered(8))
+            .unwrap()
+    );
+}
+
+/// Records the early lookup of `account`'s receive key 8 finding `candidate`, with its
+/// witness at cached block `at` if any.
+fn lookup(
+    st: &mut State,
+    account: AccountUuid,
+    candidate: &PendingPayment,
+    at: Option<BlockHeight>,
+) {
+    let siblings = at.map(|at| siblings_at(st, candidate.position, at));
+    let answer = [directory_answer(candidate)];
+    let db = st.wallet_mut().db_mut();
+    db.record_one_time_early_lookup(account, receive(8), &answer, |_, _| siblings)
+        .unwrap();
+}
+
+/// `account`'s early restore state.
+fn state_of(st: &State, account: AccountUuid) -> u8 {
+    let sql = "SELECT r.state FROM ironwood_one_time_restores r
+               JOIN accounts a ON a.id = r.account_id WHERE a.uuid = ?1";
+    value(st.wallet().conn(), sql, [account.0])
+}
+
+/// How many one-time-key notes `account` holds, and how many of those are mined.
+fn one_time_notes(st: &State, account: AccountUuid) -> (u32, u32) {
+    let sql = "SELECT COUNT(*), COUNT(t.mined_height) FROM ironwood_received_notes n
+               JOIN accounts a ON a.id = n.account_id
+               JOIN transactions t ON t.id_tx = n.transaction_id
+               WHERE a.uuid = ?1 AND n.one_time_key_id IS NOT NULL";
+    row(st.wallet().conn(), sql, [account.0])
+}
+
+/// Keys that neither scan, wait for a sweep, nor are closed, so nothing would ever find
+/// a later payment to them.
+fn stranded(st: &State) -> u32 {
+    let sql = "SELECT COUNT(*) FROM ironwood_one_time_keys k
+               WHERE k.closed_at IS NULL AND k.active_from IS NULL
+                 AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s
+                     WHERE s.one_time_key_id = k.id AND s.done_height IS NULL)";
+    value(st.wallet().conn(), sql, [])
+}
+
+/// Whether `account` still has restore sweeps or queued payments through `through`.
+fn history_pending(st: &State, account: AccountUuid, through: BlockHeight) -> bool {
+    let db = st.wallet().db();
+    db.one_time_history_pending(account, through).unwrap()
+}
+
+/// Runs each of `account`'s due restore sweeps once at the wallet's tip, the directory
+/// answering receive key 8 with `paid` and every other key with nothing, and expects
+/// each to finish.
+fn sweep_all(st: &mut State, account: AccountUuid, paid: &PendingPayment) {
+    let through = tip(st);
+    let siblings = siblings_at(st, paid.position, through.height);
+    let answer = [directory_answer(paid)];
+    let (now, limit) = (clock_now(), NonZeroU32::new(256).unwrap());
+    let db = st.wallet_mut().db_mut();
+    let work = db.prepare_one_time_sweeps(account, through, now, limit);
+    for item in work.unwrap().unwrap() {
+        let answer: &[DirectoryPayment] = if item.key == receive(8) { &answer } else { &[] };
+        db.begin_one_time_sweep_attempt(account, item.key, now, false)
+            .unwrap();
+        let queued = db.queue_directory_lookup(account, item.key, through, answer);
+        assert_eq!(queued.unwrap(), Ok(()));
+        let applied =
+            db.apply_one_time_sweep(account, item.key, through, through, false, |_, _| {
+                Some(siblings)
+            });
+        assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
+    }
+}
+
+/// An account added below a provisional early restore's queued hint rewinds that
+/// restore's history but keeps it, and the added account restores early beside it: one
+/// scan finds both payments by their hints and accepts both publications.
+#[test]
+fn an_account_added_below_a_provisional_restore_restores_early_beside_it() {
+    let Grid {
+        mut st,
+        paid,
+        first,
+        last,
+        ..
+    } = grid();
+    let ours = st.test_account().unwrap().id();
+    begin(&mut st, ours, last);
+    lookup(&mut st, ours, &paid[0], None);
+    st.scan_cached_blocks_with_one_time_ivks(first, 1);
+    assert_eq!(queued(&st), [(u32::from(paid[0].height), true)]);
+
+    let theirs = add_account_at_birthday(&mut st);
+    assert_eq!(state_of(&st, ours), 0);
+    assert_eq!(queued(&st), [(u32::from(paid[0].height), true)]);
+    assert_eq!(sweep_row(&st, receive(0)), (Some(u32::from(last)), true));
+    retain(st.wallet_mut().db_mut(), theirs);
+    let db = st.wallet().db();
+    assert_eq!(
+        db.one_time_early_restore_start(theirs).unwrap(),
+        Some(first)
+    );
+    begin(&mut st, theirs, last);
+    lookup(&mut st, theirs, &paid[1], None);
+
+    st.scan_cached_blocks_with_one_time_ivks(first, 5);
+    for account in [ours, theirs] {
+        assert_eq!(state_of(&st, account), 1);
+        assert_eq!(one_time_notes(&st, account), (1, 1));
+        assert!(!history_pending(&st, account, last));
+    }
+    assert!(queued(&st).is_empty());
+    assert_eq!(stranded(&st), 0);
+}
+
+/// An account added below an accepted early restore's history rewinds it as it rewinds
+/// any finished restore: every sweep the restore finished above the rewind is due again,
+/// and the payment's transaction is un-mined. No key scans for that payment, so it stays
+/// un-mined through the rescan, while the added account restores early, until the rerun
+/// sweep credits it again, once.
+#[test]
+fn an_account_added_below_an_accepted_restore_reruns_its_sweeps() {
+    let Grid {
+        mut st,
+        paid,
+        first,
+        last,
+        ..
+    } = grid();
+    let ours = st.test_account().unwrap().id();
+    begin(&mut st, ours, last);
+    lookup(&mut st, ours, &paid[0], None);
+    st.scan_cached_blocks_with_one_time_ivks(first, 5);
+    assert_eq!(state_of(&st, ours), 1);
+    assert_eq!(one_time_notes(&st, ours), (1, 1));
+    assert!(!history_pending(&st, ours, last));
+
+    let theirs = add_account_at_birthday(&mut st);
+    assert_eq!(state_of(&st, ours), 1);
+    assert_eq!(one_time_notes(&st, ours), (1, 0));
+    assert_eq!(sweep_row(&st, receive(0)), (None, false));
+    assert_eq!(sweep_row(&st, receive(8)), (None, false));
+    assert!(history_pending(&st, ours, last));
+    retain(st.wallet_mut().db_mut(), theirs);
+    let db = st.wallet().db();
+    assert_eq!(
+        db.one_time_early_restore_start(theirs).unwrap(),
+        Some(first)
+    );
+    begin(&mut st, theirs, last);
+    lookup(&mut st, theirs, &paid[1], None);
+
+    st.scan_cached_blocks_with_one_time_ivks(first, 5);
+    assert_eq!(state_of(&st, theirs), 1);
+    assert_eq!(one_time_notes(&st, ours), (1, 0));
+    assert_eq!(one_time_notes(&st, theirs), (1, 1));
+    assert!(history_pending(&st, ours, last));
+    assert!(!history_pending(&st, theirs, last));
+
+    sweep_all(&mut st, ours, &paid[0]);
+    for account in [ours, theirs] {
+        assert_eq!(state_of(&st, account), 1);
+        assert_eq!(one_time_notes(&st, account), (1, 1));
+        assert!(!history_pending(&st, account, last));
+    }
+    assert!(queued(&st).is_empty());
+    assert_eq!(stranded(&st), 0);
+}
+
+/// An account added with a birthday above everything an early restore has scanned
+/// rewinds none of that history: the payment its hint already found stays settled, and
+/// the added account restores early from its birthday in the same scan.
+#[test]
+fn an_account_added_above_a_restore_leaves_its_history_alone() {
+    let Grid {
+        mut st,
+        paid,
+        first,
+        last,
+        late_birthday,
+    } = grid();
+    let ours = st.test_account().unwrap().id();
+    begin(&mut st, ours, last);
+    lookup(&mut st, ours, &paid[0], None);
+    st.scan_cached_blocks_with_one_time_ivks(first, 2);
+    assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), true));
+
+    let theirs = add_account(&mut st, &late_birthday);
+    assert_eq!(state_of(&st, ours), 0);
+    assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), true));
+    assert_eq!(one_time_notes(&st, ours), (1, 1));
+    retain(st.wallet_mut().db_mut(), theirs);
+    let db = st.wallet().db();
+    let start = db.one_time_early_restore_start(theirs).unwrap();
+    assert_eq!(start, Some(paid[1].height));
+    begin(&mut st, theirs, last);
+    lookup(&mut st, theirs, &paid[1], None);
+
+    st.scan_cached_blocks_with_one_time_ivks(paid[1].height, 3);
+    for account in [ours, theirs] {
+        assert_eq!(state_of(&st, account), 1);
+        assert_eq!(one_time_notes(&st, account), (1, 1));
+        assert!(!history_pending(&st, account, last));
+    }
+    assert!(queued(&st).is_empty());
+    assert_eq!(stranded(&st), 0);
+}
+
+/// Mines, without scanning, a block paying receive key 8, a block spending that note to a
+/// foreign receiver, and two empty blocks, retaining spend history. Returns the wallet,
+/// the payment as a candidate, its nullifier, and the first and last heights.
+fn spent_restore() -> (
+    State,
+    PendingPayment,
+    orchard::note::Nullifier,
+    BlockHeight,
+    BlockHeight,
+) {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    retain(st.wallet_mut().db_mut(), account);
+    let fvk = derive(&st, receive(8));
+    let recipient = IronwoodFvk(fvk.clone());
+    let value = Zatoshis::const_from_u64(100_000);
+    let (paid, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
+    let candidate = candidate_at(&st, paid, &fvk);
+    let recovered = candidate.encrypted_note.decrypt(&parent(&st), receive(8));
+    let nf = *recovered.unwrap().nullifier();
+    st.generate_next_block_spending(
+        &recipient,
+        (nf, value),
+        unified(foreign_receiver()),
+        Zatoshis::const_from_u64(20_000),
+    );
+    st.generate_empty_block();
+    let (last, _) = st.generate_empty_block();
+    (st, candidate, nf, paid, last)
+}
+
+/// A payment spent before the restore finds it is stored with its spend, whether the scan
+/// finds it by a hint or it is inserted after the scan passed it, so it never counts
+/// toward the balance, and its key's restore still finishes.
+#[test]
+fn a_spent_payment_found_early_is_stored_spent() {
+    for hinted in [false, true] {
+        let (mut st, candidate, nf, paid, last) = spent_restore();
+        let account = st.test_account().unwrap().id();
+        begin(&mut st, account, last);
+        if hinted {
+            lookup(&mut st, account, &candidate, None);
+            for height in u32::from(paid)..=u32::from(last) {
+                st.scan_cached_blocks_with_one_time_ivks(height.into(), 1);
+            }
+        } else {
+            st.scan_cached_blocks_with_one_time_ivks(paid, 4);
+            lookup(&mut st, account, &candidate, Some(last));
+        }
+        assert_eq!(restore_state(&st), 1, "hinted={hinted}");
+        let sql = "SELECT COUNT(*) FROM ironwood_received_notes n
+                   JOIN ironwood_received_note_spends s ON s.ironwood_received_note_id = n.id
+                   WHERE n.nf = ?1 AND n.one_time_key_id IS NOT NULL";
+        let spends: u32 = value(st.wallet().conn(), sql, [nf.to_bytes()]);
+        assert_eq!(spends, 1, "hinted={hinted}");
+        assert!(unspent_keys(&st, last).is_empty(), "hinted={hinted}");
+        let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+        let balance = summary.account_balances().get(&account).unwrap();
+        assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
+        assert!(queued(&st).is_empty());
+        assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), false));
+        assert!(closed(&st, receive(8)));
+        assert!(!history_pending(&st, account, last));
+    }
+}
+
+/// A paid key whose early lookup never arrives, even across a reopen, keeps waiting once
+/// the scan accepts the publication, and its history stays pending. An ordinary restore
+/// sweep then finds its payment and credits it once.
+#[test]
+fn a_lookup_that_never_arrives_leaves_the_key_to_a_sweep() {
+    let (mut st, candidate, paid, last) = unscanned_restore();
+    let account = st.test_account().unwrap().id();
+    begin(&mut st, account, last);
+    reopen(&mut st);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 3);
+    assert_eq!(restore_state(&st), 1);
+    assert_eq!(sweep_row(&st, receive(8)), (None, true));
+    assert!(!closed(&st, receive(8)) && closed(&st, receive(0)));
+    assert!(history_pending(&st, account, last));
+
+    sweep_all(&mut st, account, &candidate);
+    assert_eq!(one_time_notes(&st, account), (1, 1));
+    assert!(queued(&st).is_empty());
+    assert!(!history_pending(&st, account, last));
+    assert_eq!(sweep_row(&st, receive(8)).0, Some(u32::from(last)));
+    assert!(closed(&st, receive(8)));
+    assert_eq!(stranded(&st), 0);
+}
+
+/// A rewind below a provisional restore's queued payment keeps the payment, as a hint
+/// now that its block is unscanned again, and keeps unpaid keys done at the anchor.
+/// Rescanning the same chain finds the payment there and accepts the publication.
+#[test]
+fn a_rewind_below_a_queued_payment_keeps_it_as_a_hint() {
+    let Grid {
+        mut st,
+        paid,
+        first,
+        last,
+        ..
+    } = grid();
+    let account = st.test_account().unwrap().id();
+    begin(&mut st, account, last);
+    // The scan passes the payment before its lookup comes in, short of the anchor.
+    st.scan_cached_blocks_with_one_time_ivks(first, 3);
+    lookup(&mut st, account, &paid[0], Some(last));
+    assert_eq!(queued(&st), [(u32::from(paid[0].height), false)]);
+
+    st.truncate_to_height_retaining_cache(first);
+    assert_eq!(restore_state(&st), 0);
+    assert_eq!(queued(&st), [(u32::from(paid[0].height), true)]);
+    assert_eq!(sweep_row(&st, receive(0)), (Some(u32::from(last)), true));
+    assert_eq!(sweep_row(&st, receive(8)), (None, true));
+
+    st.scan_cached_blocks_with_one_time_ivks(first + 1, 4);
+    assert_eq!(restore_state(&st), 1);
+    assert_eq!(one_time_notes(&st, account), (1, 1));
+    assert!(queued(&st).is_empty());
+    assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), false));
+    assert!(!history_pending(&st, account, last));
+    assert_eq!(stranded(&st), 0);
+}
+
+/// The row ID of the test account's receive key `index`.
+fn key_row(st: &State, index: u64) -> i64 {
+    let sql = "SELECT id FROM ironwood_one_time_keys WHERE purpose = 1 AND key_index = ?1";
+    value(st.wallet().conn(), sql, [index.to_be_bytes()])
+}
+
+/// A reorg that replaces the anchor block rejects the provisional publication when the
+/// scan stores the new block: keys it registered without a note are deleted and the
+/// incoming lookahead restarts as ordinary sweeps, while the key whose hint already found
+/// its note keeps it. The sweeps then credit that payment once.
+#[test]
+fn a_reorg_replacing_the_anchor_rejects_the_publication() {
+    let (mut st, candidate, paid, last) = unscanned_restore();
+    let account = st.test_account().unwrap().id();
+    begin(&mut st, account, last);
+    lookup(&mut st, account, &candidate, None);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 2);
+    assert_eq!(restore_state(&st), 0);
+    let (unpaid, anchor) = (key_row(&st, 0), end_at(&st, last));
+
+    st.truncate_to_height(paid);
+    st.generate_empty_block();
+    let (replaced, _) = st.generate_empty_block();
+    assert_eq!(replaced, last);
+    assert_ne!(end_at(&st, last).hash, anchor.hash);
+    st.scan_cached_blocks_with_one_time_ivks(paid + 1, 2);
+    assert_eq!(restore_state(&st), 2);
+    assert_ne!(key_row(&st, 0), unpaid);
+    assert_eq!(unspent_keys(&st, last), [Some(receive(8))]);
+    assert_eq!(sweep_row(&st, receive(8)), (None, false));
+    let sql = "SELECT COUNT(*) FROM ironwood_one_time_keys k
+               JOIN ironwood_one_time_sweeps s ON s.one_time_key_id = k.id
+               WHERE k.purpose = 1 AND s.done_height IS NULL AND s.provisional = 0";
+    let pending: u32 = value(st.wallet().conn(), sql, []);
+    assert_eq!(pending, RECEIVE_GAP_LIMIT as u32);
+
+    sweep_all(&mut st, account, &candidate);
+    assert_eq!(one_time_notes(&st, account), (1, 1));
+    assert!(!history_pending(&st, account, last));
+    assert_eq!(stranded(&st), 0);
+}
+
+/// A rewind below an accepted restore's anchor, on the same chain, treats a note the
+/// restore inserted as a restore sweep's: its transaction is un-mined, every sweep the
+/// restore finished above the rewind is due again, and the key stays closed, so the rescan
+/// does not find the note. It stays un-mined until the rerun sweep credits it, once.
+#[test]
+fn a_rewind_below_an_accepted_anchor_reruns_the_restore_sweeps() {
+    let Grid {
+        mut st,
+        paid,
+        first,
+        last,
+        ..
+    } = grid();
+    let account = st.test_account().unwrap().id();
+    begin(&mut st, account, last);
+    st.scan_cached_blocks_with_one_time_ivks(first, 5);
+    lookup(&mut st, account, &paid[0], Some(last));
+    assert_eq!(restore_state(&st), 1);
+    assert_eq!(one_time_notes(&st, account), (1, 1));
+
+    st.truncate_to_height_retaining_cache(first);
+    assert_eq!(one_time_notes(&st, account), (1, 0));
+    assert_eq!(sweep_row(&st, receive(0)), (None, false));
+    assert_eq!(sweep_row(&st, receive(8)), (None, false));
+    assert!(closed(&st, receive(8)));
+    st.scan_cached_blocks_with_one_time_ivks(first + 1, 4);
+    assert_eq!(restore_state(&st), 1);
+    assert_eq!(one_time_notes(&st, account), (1, 0));
+    assert!(history_pending(&st, account, last));
+
+    sweep_all(&mut st, account, &paid[0]);
+    assert_eq!(one_time_notes(&st, account), (1, 1));
+    assert!(!history_pending(&st, account, last));
+    assert_eq!(stranded(&st), 0);
+}
+
+/// A paid key whose early lookup never arrived, and which an ordinary sweep then
+/// finished, reruns that sweep after a rewind below its lookup, like any finished sweep,
+/// so a payment to it in a replacement block is found.
+#[test]
+fn a_waiting_key_finished_by_a_sweep_reruns_it_after_a_rewind() {
+    let (mut st, candidate, paid, last) = unscanned_restore();
+    let account = st.test_account().unwrap().id();
+    begin(&mut st, account, last);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 3);
+    sweep_all(&mut st, account, &candidate);
+    assert_eq!(sweep_row(&st, receive(8)).0, Some(u32::from(last)));
+
+    // A reorg replaces the blocks after the payment with one paying the key again.
+    st.truncate_to_height(paid);
+    let recipient = IronwoodFvk(derive(&st, receive(8)));
+    let value = Zatoshis::const_from_u64(50_000);
+    st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
+    st.generate_empty_block();
+    st.scan_cached_blocks_with_one_time_ivks(paid + 1, 2);
+    assert_eq!(sweep_row(&st, receive(0)), (None, false));
+    assert_eq!(sweep_row(&st, receive(8)), (None, false));
+    assert!(history_pending(&st, account, last));
 }
