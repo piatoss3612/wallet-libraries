@@ -209,3 +209,20 @@ pub(in crate::wallet::one_time_ivk) fn finish(
     }
     Ok(Ok(()))
 }
+
+/// Reruns each finished sweep whose recorded finish block in `range`, which the scan just
+/// stored, is not the block it finished at (see `one_time_ivk::truncate_to_height`).
+pub(crate) fn revalidate(
+    conn: &rusqlite::Transaction<'_>,
+    range: std::ops::Range<BlockHeight>,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_sweeps SET done_height = NULL, lookup_height = NULL,
+             lookup_hash = NULL, next_attempt_at = 0
+         WHERE provisional = 0 AND done_height = lookup_height
+           AND lookup_height >= ?1 AND lookup_height < ?2
+           AND lookup_hash IS NOT (SELECT hash FROM blocks WHERE height = lookup_height)",
+        params![u32::from(range.start), u32::from(range.end)],
+    )?;
+    Ok(())
+}

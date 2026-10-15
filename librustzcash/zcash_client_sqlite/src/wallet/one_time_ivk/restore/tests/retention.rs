@@ -266,10 +266,10 @@ fn retention_waits_for_internal_memos_until_their_blocks_are_scanned() {
     assert!(finish(db, account, through));
 }
 
-/// Completion rewinds with the chain, its replay recording rescanned blocks again, and
-/// the rewound sweeps hold evidence until they rerun.
+/// A rewind on the same chain leaves released evidence released, since its sweeps stay
+/// finished, while ordinary nullifier tracking still covers the rescanned blocks.
 #[test]
-fn retention_rewinds_and_resumes_for_new_blocks() {
+fn a_rewind_on_the_same_chain_keeps_evidence_released() {
     let (mut st, _, original) = swept();
     let account = st.test_account().unwrap().id();
     assert!(finish(st.wallet_mut().db_mut(), account, original));
@@ -280,13 +280,13 @@ fn retention_rewinds_and_resumes_for_new_blocks() {
     assert!(finish(db, account, tip));
     assert_eq!(retained_from(db), Some(tip.height + 1));
     st.truncate_to_height_retaining_cache(original.height);
-    assert_eq!(retained_from(st.wallet().db()), Some(original.height + 1));
+    // Rescanning the same chain keeps every sweep finished, so nothing needs evidence.
+    assert_eq!(retained_from(st.wallet().db()), Some(tip.height + 1));
     st.scan_cached_blocks_with_one_time_ivks(tip.height, 1);
     let db = st.wallet_mut().db_mut();
     let sql = "SELECT COUNT(*) FROM ironwood_nullifier_scan_blocks WHERE height = ?1";
+    // Ordinary nullifier retention still covers the pruning window.
     assert_eq!(value::<u32>(&db.conn, sql, [u32::from(tip.height)]), 1);
-    assert!(!finish(db, account, tip));
-    finish_sweeps(db, account, tip);
     assert!(finish(db, account, tip));
 }
 

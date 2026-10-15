@@ -47,7 +47,8 @@ pub(crate) fn history_pending<P: Parameters>(
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s
             JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
-            WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.done_height IS NULL)
+            WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND (s.done_height IS NULL
+                OR (s.done_height = s.lookup_height AND s.lookup_height > ?2)))
          OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
             JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
             WHERE k.account_id = ?1)",
@@ -86,7 +87,8 @@ pub(crate) fn prepare_sweeps<P: Parameters>(
          FROM ironwood_one_time_sweeps s
          JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
          WHERE k.account_id = ?1 AND k.scan_from <= ?2 AND s.next_attempt_at <= ?3
-           AND (s.done_height IS NULL OR EXISTS(
+           AND (s.done_height IS NULL
+               OR (s.done_height = s.lookup_height AND s.lookup_height > ?2) OR EXISTS(
                SELECT 1 FROM ironwood_one_time_payment_recovery p
                WHERE p.one_time_key_id = s.one_time_key_id))
          ORDER BY s.next_attempt_at, s.one_time_key_id LIMIT ?4",

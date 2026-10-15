@@ -8,7 +8,7 @@ pub(super) mod payments;
 pub(super) mod planner;
 pub(super) mod recovery;
 pub(super) mod retention;
-pub(super) mod sweep;
+pub(crate) mod sweep;
 
 pub(crate) use apply::apply_sweep;
 use payments::{PendingPayment, SpendStatus};

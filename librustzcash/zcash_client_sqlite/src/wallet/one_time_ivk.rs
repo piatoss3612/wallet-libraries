@@ -474,13 +474,18 @@ pub(crate) fn rescan_missed_keys(
     Ok(())
 }
 
-/// Repairs one-time IVK state for a rewind that rescans every block above `height`: spend
-/// evidence and replays above it go, and a sweep whose lookup or completion the rewind removed runs again. Active
-/// keys need no repair, since the scanner rescans the truncated blocks with them. A
+/// Repairs one-time IVK state for a rewind that rescans every block above `height`.
+/// Active keys need no repair, since the scanner rescans the truncated blocks with them. A
 /// closed key that scanned reopens if the rewind leaves one of its receipts short of the
 /// confirmations closing requires (see `WalletDb::close_finished_one_time_keys`), and
-/// closes again once that receipt is confirmed again; a key a sweep closed without
-/// scanning has nothing to rescan.
+/// closes again once that receipt is confirmed again. A key a sweep closed without
+/// scanning reopens from its first note above `height`, so the rescan finds the note
+/// again, and closes the same way.
+///
+/// A finished sweep stays finished: it records the block it finished at and reruns only if
+/// the rescan stores a different block there (see `restore::sweep::revalidate`), so a
+/// rewind on the same chain, such as adding an account, repeats no lookup. Retained spend
+/// evidence is left alone, since a rerun sweep replays what it needs.
 ///
 /// An early restore's provisional keys keep their state, which the scan still verifies
 /// (see `restore::early`): their queued payments above `height` become scan hints. Only
@@ -493,9 +498,7 @@ pub(crate) fn truncate_to_height(
         .saturating_add(1)
         .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
     conn.execute(
-        "UPDATE ironwood_one_time_spend_retention SET
-            nullifier_retention_height = MIN(nullifier_retention_height, ?1 + 1),
-            replay_through = MIN(replay_through, ?1)",
+        "UPDATE ironwood_one_time_spend_retention SET replay_through = MIN(replay_through, ?1)",
         [u32::from(height)],
     )?;
     conn.execute(
@@ -505,6 +508,19 @@ pub(crate) fn truncate_to_height(
              JOIN transactions t ON t.id_tx = n.transaction_id
              WHERE t.mined_height > ?1)",
         [confirmed_below],
+    )?;
+    let note_above = "SELECT MIN(t.mined_height) FROM ironwood_received_notes n
+         JOIN transactions t ON t.id_tx = n.transaction_id
+         WHERE n.one_time_key_id = ironwood_one_time_keys.id AND t.mined_height > ?1";
+    conn.execute(
+        &format!(
+            "UPDATE ironwood_one_time_keys SET closed_at = NULL, active_from = ({note_above})
+             WHERE closed_at IS NOT NULL AND active_from IS NULL
+               AND ({note_above}) IS NOT NULL
+               AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s
+                   WHERE s.one_time_key_id = ironwood_one_time_keys.id AND s.provisional = 1)"
+        ),
+        [u32::from(height)],
     )?;
     // Closed without scanning, such a key would not find its note again.
     let unmined_note = "SELECT s.one_time_key_id FROM ironwood_one_time_sweeps s
@@ -532,11 +548,21 @@ pub(crate) fn truncate_to_height(
              SELECT one_time_key_id FROM ironwood_one_time_sweeps WHERE provisional = 1)",
         [u32::from(height)],
     )?;
+    // The finish block's hash commits to every block below it.
+    conn.execute(
+        "UPDATE ironwood_one_time_sweeps SET lookup_height = done_height, next_attempt_at = 0,
+             lookup_hash = COALESCE(
+                 CASE WHEN lookup_height = done_height THEN lookup_hash END,
+                 (SELECT hash FROM blocks WHERE height = done_height))
+         WHERE done_height > ?1 AND provisional = 0",
+        [u32::from(height)],
+    )?;
     conn.execute(
         "UPDATE ironwood_one_time_sweeps SET done_height = NULL, next_attempt_at = 0,
             lookup_height = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_height END,
             lookup_hash = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_hash END
-         WHERE (done_height > ?1 OR lookup_height > ?1) AND provisional = 0",
+         WHERE ((done_height > ?1 AND lookup_hash IS NULL)
+             OR (done_height IS NULL AND lookup_height > ?1)) AND provisional = 0",
         [u32::from(height)],
     )?;
     conn.execute(

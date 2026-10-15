@@ -3569,6 +3569,10 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             &self.gap_limits,
             &scanned_block_identities,
         )?;
+        #[cfg(feature = "orchard")]
+        if let Some(range) = scanned_range.clone() {
+            wallet::one_time_ivk::restore::sweep::revalidate(self.conn.0, range)?;
+        }
         // A key activated after the scanner captured its keys missed this batch.
         #[cfg(feature = "orchard")]
         if let Some((keys, range)) = one_time_keys.zip(scanned_range) {
