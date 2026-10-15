@@ -9,6 +9,15 @@ use super::recovery;
 use crate::wallet::one_time_ivk::{account_key, corrupt, queue_rescan, restore_start};
 use crate::{AccountUuid, error::SqliteClientError, wallet, wallet::scanning::priority_code};
 
+/// The most blocks of retained evidence one release frees. Freeing more at once makes the
+/// prune, in the release and in the next scan batch, hold the wallet's write lock for
+/// seconds; later releases continue where this one stopped.
+#[cfg(not(test))]
+const RELEASE_STEP: u32 = 10_000;
+/// Small enough for test chains to need several releases.
+#[cfg(test)]
+pub(in crate::wallet::one_time_ivk) const RELEASE_STEP: u32 = 50;
+
 /// Retains `account`'s Ironwood spend evidence from its birthday, or Ironwood
 /// activation if later, until [`finish_nullifier_recovery`] releases it.
 pub(in crate::wallet::one_time_ivk) fn retain_spend_history<P: Parameters>(
@@ -72,6 +81,17 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
         |r| r.get(0),
     )?;
     let next = pending.unwrap_or(u32::from(through.height).saturating_add(1));
+    let floor: u32 = conn.query_row(
+        "SELECT nullifier_retention_height FROM ironwood_one_time_spend_retention
+         WHERE account_id = ?1",
+        [id.0],
+        |r| r.get(0),
+    )?;
+    let next = if next > floor {
+        next.min(floor.saturating_add(RELEASE_STEP))
+    } else {
+        next
+    };
     // Raising the floor ends any replay below it.
     conn.execute(
         "UPDATE ironwood_one_time_spend_retention SET nullifier_retention_height = ?2,

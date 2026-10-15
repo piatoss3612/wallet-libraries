@@ -1,5 +1,6 @@
 use super::apply::{fixture, fixture_in};
 use super::*;
+use crate::wallet::one_time_ivk::restore::retention::RELEASE_STEP;
 use rusqlite::params;
 use zakura_one_time_ivk::swap::OperationStatus;
 
@@ -66,8 +67,9 @@ fn suggests_scanning(st: &State, height: BlockHeight) -> bool {
 }
 
 /// Completion ignores a pending provider outcome and releases above its chain point, which
-/// survives a reopen and must be canonical. Later completions retain the next large batch
-/// only to the pruning depth, keeping the restored note.
+/// survives a reopen and must be canonical. Later completions release the next large batch
+/// at most `RELEASE_STEP` blocks at a time, down to the pruning depth, keeping the
+/// restored note.
 #[test]
 fn completed_recovery_survives_reopen_and_retains_the_next_large_batch() {
     let (mut st, key, original) = swept();
@@ -94,7 +96,13 @@ fn completed_recovery_survives_reopen_and_retains_the_next_large_batch() {
     let above = |db: &Db| value::<u32>(&db.conn, sql, [u32::from(original.height)]);
     let db = st.wallet_mut().db_mut();
     assert_eq!(above(db), 201);
-    assert!(finish(db, account, through));
+    assert!(!finish(db, account, through));
+    assert_eq!(above(db), 201 - RELEASE_STEP);
+    let mut releases = 1;
+    while !finish(db, account, through) {
+        releases += 1;
+    }
+    assert_eq!(releases + 1, 202u32.div_ceil(RELEASE_STEP));
     assert_eq!(above(db), crate::PRUNING_DEPTH + 1);
     assert_eq!(notes(&st, through.height).len(), 1);
 }

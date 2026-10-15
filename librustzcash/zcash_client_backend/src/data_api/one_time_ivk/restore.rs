@@ -285,8 +285,9 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
 
     /// Releases retained Ironwood nullifiers at `through` once no restore sweep needs them,
     /// and only while `through` is still the wallet's fully scanned chain tip. Missing
-    /// memos, pending sweeps and queued payments protect their evidence. Returns true when
-    /// release reaches the tip.
+    /// memos, pending sweeps and queued payments protect their evidence. Each call frees a
+    /// bounded span of blocks, so pruning stays short, and later calls continue. Returns
+    /// true when release reaches the tip.
     ///
     /// Restore discovery (see [`Self::maintain_one_time_ivks`]) runs first, in the same
     /// transaction, so a payment at the lookahead's edge cannot race with pruning.
