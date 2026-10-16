@@ -15,7 +15,8 @@ and this library adheres to Rust's notion of
   so a store can find a restored account's one-time payments during its restore scan instead
   of only by sweeps after it. `OneTimeIvkRead::get_one_time_scanning_keys_for_range` gives the
   keys for one scan batch, and `chain::scan_cached_blocks_with_one_time_ivks` now uses it.
-  Its default is `get_one_time_scanning_keys`, and `one_time_early_restore_start`'s is `None`.
+  Its default is `get_one_time_scanning_keys`, and the early restore methods default to no
+  early restore, so it stays opt-in for other stores.
 
 ### Changed
 

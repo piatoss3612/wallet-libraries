@@ -172,14 +172,18 @@ pub trait OneTimeIvkRestoreRead: OneTimeIvkRead {
     }
 
     /// The receivers of `account`'s keys of `purpose` at `count` indices from `from`,
-    /// without registering them, for an early restore's lookahead.
+    /// without registering them, for an early restore's lookahead. Stores without early
+    /// restore return none.
     fn one_time_receivers(
         &self,
         account: Self::AccountId,
         purpose: zakura_one_time_ivk::Purpose,
         from: u64,
         count: u32,
-    ) -> Result<Vec<DiscoveryWork>, Self::Error>;
+    ) -> Result<Vec<DiscoveryWork>, Self::Error> {
+        let _ = (account, purpose, from, count);
+        Ok(Vec::new())
+    }
 }
 
 /// One-time IVK restore writes: key recovery, restore sweeps (see the
@@ -311,12 +315,17 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
     /// scan stores block `end.height`: a matching hash and tree size accept it, and keys
     /// that neither scan nor wait for payments close there. A mismatch discards the keys
     /// it registered that hold no payment and falls back to restore sweeps.
+    ///
+    /// Stores without early restore return false.
     fn begin_one_time_early_restore(
         &mut self,
         account: <Self as WalletRead>::AccountId,
         end: PublicationEnd,
         keys: &[EarlyRestoreKey],
-    ) -> Result<bool, <Self as WalletRead>::Error>;
+    ) -> Result<bool, <Self as WalletRead>::Error> {
+        let _ = (account, end, keys);
+        Ok(false)
+    }
 
     /// Records the payments the early restore's publication lists for paid key `key`,
     /// authenticating each with the key. A payment whose block the scan has yet to reach
@@ -327,11 +336,15 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
     ///
     /// A payment before the account's restore start, one that fails authentication, or
     /// a key the publication later fails to confirm leaves the key to a restore sweep.
+    /// Stores without early restore ignore the lookup.
     fn record_one_time_early_lookup(
         &mut self,
         account: <Self as WalletRead>::AccountId,
         key: KeyId,
         payments: &[DirectoryPayment],
         witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
-    ) -> Result<(), <Self as WalletRead>::Error>;
+    ) -> Result<(), <Self as WalletRead>::Error> {
+        let _ = (account, key, payments, witness);
+        Ok(())
+    }
 }
