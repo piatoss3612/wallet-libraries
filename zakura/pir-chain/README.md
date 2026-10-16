@@ -1,4 +1,4 @@
-# Server chain adapters
+# PIR chain readers
 
 `zakura-server-chain` reads Zakura node data for the PIR services in wallet-pir and
 interprets it, returning plain values (bytes, heights, amounts, positions) that the
@@ -16,6 +16,14 @@ node or Zakura Common types.
   resolving spent outputs from the same block, a bounded cache, then batched reads;
   an unresolved output fails the block.
 - `status`: canonical blocks' transaction IDs and the mempool's.
+- `transparent`: every transaction's transparent outputs and the outputs its inputs
+  spend, as raw scripts with exact fees, resolving same-block spends first, then a
+  bounded cache, then batched reads; an unresolved output fails the block. Also
+  compact blocks rebuilt from raw blocks, and the raw JSON-RPC calls the services'
+  independent spot checks make.
+- `rocksdb` (feature): `transparent::state::StateReader`, which opens an archive
+  node's finalized state as a RocksDB secondary and reads the same transparent
+  blocks from it. Its `zakura-state` revision must match the running node's format.
 - `testing` (feature): synthetic transactions, block envelopes and a JSON-RPC node
   double built with the node's own encoders, for service tests.
 
@@ -23,9 +31,9 @@ Receiver backfill and the combined Enhance block reader currently use mainnet
 activation rules. `Network::Testnet` provides explicit identity/height queries; it
 does not configure the RPC client or enable Testnet backfill.
 
-This crate is server-only. It lives in the separate `server/` workspace with its
-own lockfile, so no wallet build resolves the node's packages, and it may use the
-wallet-owned crates under `zakura/` by path, never the reverse. Its dependency
+This crate is server-only. It lives in the separate `zakura/pir-chain/` workspace
+with its own lockfile, so no wallet build resolves the node's packages. It may use
+the wallet-owned crates under `zakura/` by path, never the reverse. Its dependency
 graph, including test support and inactive optional or platform dependencies, must
 contain no package owned or released by wallet-pir. Service-facing values contain
 only library-owned records, errors, bytes, heights and network choices; node and
