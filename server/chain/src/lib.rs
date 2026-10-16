@@ -6,7 +6,9 @@
 //! headers, hashes converted between the node's display order and protocol order,
 //! activation rules applied, receiver payments and note positions found, Enhance
 //! actions extracted with their transactions' exact fees (resolving spent outputs
-//! through a bounded cache and batched reads), and Status blocks and mempools read.
+//! through a bounded cache and batched reads), Status blocks and mempools read, and
+//! every transparent output and spent output read raw, with exact fees, for the
+//! transparent services, over RPC or (with `rocksdb`) from the node's own database.
 //!
 //! Every result is a plain, chain-neutral value owned by this crate: bytes, heights,
 //! amounts and positions, never a node type. The services map these onto their own
@@ -24,6 +26,7 @@ pub mod rpc;
 pub mod status;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod transparent;
 
 pub use fee::{DEFAULT_CACHE_OUTPUTS, FeeError};
 pub use rpc::{NodeClient, NodeError};
@@ -38,7 +41,7 @@ pub enum Network {
 }
 
 impl Network {
-    fn node(self) -> zakura_chain::parameters::Network {
+    pub(crate) fn node(self) -> zakura_chain::parameters::Network {
         match self {
             Self::Mainnet => zakura_chain::parameters::Network::Mainnet,
             Self::Testnet => zakura_chain::parameters::Network::new_default_testnet(),
