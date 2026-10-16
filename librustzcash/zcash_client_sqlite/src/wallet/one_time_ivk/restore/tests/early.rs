@@ -277,6 +277,44 @@ fn a_mismatched_publication_falls_back_to_sweeps() {
         .unwrap();
 }
 
+/// A hint is satisfied only by its own note: a directory that pairs one payment's
+/// ciphertext with another payment's position to the same key gets a scan that finds the
+/// other payment there, and the key falls back to a sweep instead of closing.
+#[test]
+fn a_hint_at_another_payments_position_falls_back_to_a_sweep() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    retain(st.wallet_mut().db_mut(), account);
+    let fvk = derive(&st, receive(8));
+    let recipient = IronwoodFvk(fvk.clone());
+    let value = Zatoshis::const_from_u64(100_000);
+    let (first, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
+    let (second, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
+    let (last, _) = st.generate_empty_block();
+    st.wallet_mut().update_chain_tip(last).unwrap();
+    let (genuine, other) = (
+        candidate_at(&st, first, &fvk),
+        candidate_at(&st, second, &fvk),
+    );
+    let mut misplaced = directory_answer(&genuine);
+    misplaced.height = u32::from(other.height);
+    misplaced.block_hash = other.block_hash.0;
+    misplaced.tx_index = other.tx_index.into();
+    misplaced.position = other.position.into();
+    begin(&mut st, account, last);
+    let db = st.wallet_mut().db_mut();
+    db.record_one_time_early_lookup(account, receive(8), &[misplaced], |_, _| None)
+        .unwrap();
+    assert_eq!(queued(&st), [(u32::from(second), true)]);
+
+    st.scan_cached_blocks_with_one_time_ivks(first, 3);
+    assert!(queued(&st).is_empty());
+    assert_eq!(sweep_row(&st, receive(8)), (None, false));
+    assert!(!closed(&st, receive(8)));
+    let db = st.wallet().db();
+    assert!(db.one_time_history_pending(account, last).unwrap());
+}
+
 /// An early restore needs a restored account none of whose history is scanned, with an
 /// anchor at or above its restore start.
 #[test]

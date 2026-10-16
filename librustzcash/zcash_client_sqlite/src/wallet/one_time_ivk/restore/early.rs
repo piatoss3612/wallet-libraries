@@ -355,10 +355,10 @@ fn check_hints(
     keys: &[(AccountUuid, KeyId)],
     range: Range<BlockHeight>,
 ) -> Result<(), SqliteClientError> {
-    let hints: Vec<(KeyId, AccountUuid, i64, i64, TxId, u32, u32)> = conn
+    let hints: Vec<(KeyId, AccountUuid, i64, i64, TxId, u32, u32, Vec<u8>)> = conn
         .prepare(
             "SELECT k.purpose, k.key_index, a.uuid, k.account_id, p.one_time_key_id, p.txid,
-                 p.action_index, p.position
+                 p.action_index, p.position, substr(p.encrypted_note, 1, 32)
              FROM ironwood_one_time_payment_recovery p
              JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
              JOIN accounts a ON a.id = k.account_id
@@ -373,10 +373,11 @@ fn check_hints(
                 TxId::from_bytes(r.get(5)?),
                 r.get(6)?,
                 r.get(7)?,
+                r.get(8)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
-    for (key, account, owner, id, txid, action, position) in hints {
+    for (key, account, owner, id, txid, action, position, rho) in hints {
         if !keys.contains(&(account, key)) {
             conn.execute(
                 "UPDATE ironwood_one_time_payment_recovery SET scan_hint = 0
@@ -385,10 +386,12 @@ fn check_hints(
             )?;
             continue;
         }
+        // The note's rho is the action's nullifier, which the candidate carries, so another
+        // payment to the key at the claimed position does not satisfy the hint.
         let found: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes
-             WHERE one_time_key_id = ?1 AND commitment_tree_position = ?2)",
-            params![id, position],
+             WHERE one_time_key_id = ?1 AND commitment_tree_position = ?2 AND rho = ?3)",
+            params![id, position, rho],
             |r| r.get(0),
         )?;
         conn.execute(
