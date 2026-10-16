@@ -236,11 +236,26 @@ fn a_mismatched_publication_falls_back_to_sweeps() {
     let mut end = end_at(&st, last);
     end.tree_size += 1;
     let beyond = receive(RECEIVE_GAP_LIMIT + 1);
+    let (seen, paid_beyond) = (
+        receive(RECEIVE_GAP_LIMIT + 2),
+        receive(RECEIVE_GAP_LIMIT + 3),
+    );
     let mut keys = filtered(8);
-    keys.push(EarlyRestoreKey {
-        key: beyond,
-        ..keys[0]
-    });
+    keys.extend([
+        EarlyRestoreKey {
+            key: beyond,
+            ..keys[0]
+        },
+        EarlyRestoreKey {
+            key: seen,
+            seen: true,
+            ..keys[0]
+        },
+        EarlyRestoreKey {
+            key: paid_beyond,
+            ..keys[8]
+        },
+    ]);
     let db = st.wallet_mut().db_mut();
     assert!(
         db.begin_one_time_early_restore(account, end, &keys)
@@ -252,7 +267,10 @@ fn a_mismatched_publication_falls_back_to_sweeps() {
     // The hint found the note before the anchor was judged, so its key stays.
     assert_eq!(unspent_keys(&st, last), [Some(receive(8))]);
     assert_eq!(sweep_row(&st, receive(8)), (None, false));
-    assert_eq!(receive_sweeps(&st), RECEIVE_GAP_LIMIT as u32);
+    // Keys the filters marked seen or paid stay and are swept, even past the gap.
+    assert_eq!(sweep_row(&st, seen), (None, false));
+    assert_eq!(sweep_row(&st, paid_beyond), (None, false));
+    assert_eq!(receive_sweeps(&st), RECEIVE_GAP_LIMIT as u32 + 2);
     let db = st.wallet_mut().db_mut();
     assert_eq!(db.one_time_early_restore_start(account).unwrap(), None);
     db.record_one_time_early_lookup(account, beyond, &[], |_, _| None)

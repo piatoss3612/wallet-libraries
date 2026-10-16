@@ -302,9 +302,10 @@ fn judge<P: Parameters>(
 }
 
 /// Discards what `restore`'s rejected publication registered and falls back to restore
-/// sweeps: keys holding no payment, operation or reservation go, the rest are swept
-/// again, and the incoming lookahead restarts from index zero. Refund keys come back from
-/// their funding memos.
+/// sweeps: keys its filters marked neither seen nor paid, and that hold no payment,
+/// operation or reservation, go; the rest are swept again, so a paid key past the gap is
+/// still looked up and a seen one is never issued. The incoming lookahead restarts from
+/// index zero, and refund keys come back from their funding memos.
 fn reject<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -316,7 +317,7 @@ fn reject<P: Parameters>(
     )?;
     conn.execute(
         "DELETE FROM ironwood_one_time_keys WHERE account_id = ?1 AND reserved_at IS NULL
-           AND id IN (SELECT one_time_key_id FROM ironwood_one_time_sweeps WHERE provisional = 1)
+           AND provider_seen = 0 AND id IN (SELECT one_time_key_id FROM ironwood_one_time_sweeps WHERE provisional = 1)
            AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
                WHERE n.one_time_key_id = ironwood_one_time_keys.id)
            AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
