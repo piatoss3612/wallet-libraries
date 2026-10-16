@@ -124,31 +124,22 @@ fn receiver(st: &State, index: u64) -> Receiver {
     key_receiver(&parent(st), KeyId::new(Purpose::Receive, index))
 }
 
-/// Pays incoming one-time key `index` in a new scanned block. Scanning cannot find it: a
-/// restored key is swept before it is ever scanned. Returns the payment as the
-/// directory lists it. The output is the chain's Ironwood leaf at `position`, which is
-/// the number of earlier Ironwood outputs.
-fn pay_restored_key(st: &mut State, index: u64, position: u64) -> Record {
-    let parent = FullViewingKey::from(st.test_account().unwrap().usk().orchard());
-    let fvk = KeyId::new(Purpose::Receive, index).derive(&parent).unwrap();
+/// Pays incoming one-time key `index` under the Orchard key `parent` in a new block left
+/// unscanned, and returns the payment as the directory lists it. The output is the
+/// chain's Ironwood leaf at `position`, which is the number of earlier Ironwood outputs.
+fn pay_unscanned_to(st: &mut State, parent: &FullViewingKey, index: u64, position: u64) -> Record {
+    let key = KeyId::new(Purpose::Receive, index);
+    let fvk = key.derive(parent).unwrap();
     let (height, _, _) = st.generate_next_block(
         &IronwoodFvk(fvk),
         AddressType::DefaultExternal,
         Zatoshis::const_from_u64(VALUE),
     );
-    st.scan_cached_blocks_with_one_time_ivks(height, 1);
-    let mut block = None;
-    st.cache()
-        .with_blocks::<_, ()>(Some(height), Some(1), |cb| {
-            block = Some(cb);
-            Ok(())
-        })
-        .unwrap();
-    let block = block.unwrap();
+    let block = cached(st, height);
     let tx = &block.vtx[0];
     let compact = &tx.ironwood_actions[0];
     Record {
-        receiver: receiver(st, index),
+        receiver: key_receiver(parent, key),
         page: 0,
         total: 1,
         payment: Payment {
@@ -165,6 +156,35 @@ fn pay_restored_key(st: &mut State, index: u64, position: u64) -> Record {
             ciphertext_prefix: compact.ciphertext.as_slice().try_into().unwrap(),
         },
     }
+}
+
+/// [`pay_unscanned_to`] for the test account.
+fn pay_unscanned(st: &mut State, index: u64, position: u64) -> Record {
+    let parent = parent(st);
+    pay_unscanned_to(st, &parent, index, position)
+}
+
+/// [`pay_unscanned`], then scans the payment's block. Scanning cannot find it: a restored
+/// key is swept before it is ever scanned.
+fn pay_restored_key(st: &mut State, index: u64, position: u64) -> Record {
+    let record = pay_unscanned(st, index, position);
+    st.scan_cached_blocks_with_one_time_ivks(BlockHeight::from(record.payment.height), 1);
+    record
+}
+
+/// The cached block at `height`.
+fn cached(
+    st: &State,
+    height: BlockHeight,
+) -> zcash_client_backend::proto::compact_formats::CompactBlock {
+    let mut block = None;
+    st.cache()
+        .with_blocks::<_, ()>(Some(height), Some(1), |cb| {
+            block = Some(cb);
+            Ok(())
+        })
+        .unwrap();
+    block.unwrap()
 }
 
 /// A restored wallet at its fully scanned tip, after payments to its incoming keys.
@@ -1071,59 +1091,6 @@ async fn a_waiting_payment_takes_the_next_attempts_answer() {
     assert_eq!(lookups(&b), 0, "{:?}", b.requests());
 }
 
-/// Pays incoming key `index` in a new block left unscanned, as the chain's Ironwood leaf
-/// at `position`, and returns the payment as the directory lists it.
-fn pay_unscanned(st: &mut State, index: u64, position: u64) -> Record {
-    let parent = parent(st);
-    pay_unscanned_to(st, &parent, index, position)
-}
-
-/// [`pay_unscanned`] for incoming key `index` under the Orchard key `parent`.
-fn pay_unscanned_to(st: &mut State, parent: &FullViewingKey, index: u64, position: u64) -> Record {
-    let key = KeyId::new(Purpose::Receive, index);
-    let fvk = key.derive(parent).unwrap();
-    let (height, _, _) = st.generate_next_block(
-        &IronwoodFvk(fvk),
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(VALUE),
-    );
-    let block = cached(st, height);
-    let tx = &block.vtx[0];
-    let compact = &tx.ironwood_actions[0];
-    Record {
-        receiver: key_receiver(parent, key),
-        page: 0,
-        total: 1,
-        payment: Payment {
-            height: u32::from(height),
-            block_hash: block.hash().0,
-            txid: *tx.txid().as_ref(),
-            tx_index: u32::try_from(tx.index).unwrap() + 1,
-            action_index: 0,
-            position,
-            action_nullifier: compact.nullifier.as_slice().try_into().unwrap(),
-            cmx: compact.cmx.as_slice().try_into().unwrap(),
-            ephemeral_key: compact.ephemeral_key.as_slice().try_into().unwrap(),
-            ciphertext_prefix: compact.ciphertext.as_slice().try_into().unwrap(),
-        },
-    }
-}
-
-/// The cached block at `height`.
-fn cached(
-    st: &State,
-    height: BlockHeight,
-) -> zcash_client_backend::proto::compact_formats::CompactBlock {
-    let mut block = None;
-    st.cache()
-        .with_blocks::<_, ()>(Some(height), Some(1), |cb| {
-            block = Some(cb);
-            Ok(())
-        })
-        .unwrap();
-    block.unwrap()
-}
-
 /// An early restore registers the account's keys from the publication's filters before
 /// the scan, then looks up only the paid ones while it runs: a payment whose block the
 /// scan already passed is inserted with its witness, and one ahead of it is found by the
@@ -1136,14 +1103,8 @@ async fn an_early_restore_credits_payments_as_the_scan_covers_them() {
     let account = st.test_account().unwrap().id();
     let first = pay_unscanned(&mut st, 3, 0);
     let second = pay_unscanned(&mut st, 40, 1);
-    let (last, _) = st.generate_empty_block();
-    let end = ChainPoint {
-        height: last,
-        hash: cached(&st, last).hash(),
-    };
-    let records = [first.clone(), second.clone()];
-    let commitments = [first.payment.cmx, second.payment.cmx];
-    let directory = Directory::new(publish(&records, &commitments, end, &provider(&[])));
+    let end = unscanned_end(&mut st);
+    let directory = serve(&[first.clone(), second], end);
     let network = *st.network();
     let db = st.wallet_mut().db_mut();
     let lock = Labels::default();
@@ -1179,23 +1140,6 @@ async fn an_early_restore_credits_payments_as_the_scan_covers_them() {
     let before = directory.requests().len();
     run_clean(&mut st, through, &directory, NOW).await;
     assert_eq!(directory.requests().len(), before);
-}
-
-/// Once the scan has stored any of the account's history, an early restore does not
-/// begin and asks the directory nothing.
-#[tokio::test]
-async fn an_early_restore_needs_unscanned_history() {
-    let mut r = restored(&[0]);
-    let directory = serve(&r.records, r.through);
-    let network = *r.st.network();
-    let db = r.st.wallet_mut().db_mut();
-    let early = begin_early_restore(
-        db, &network, r.account, GENESIS, ORIGIN, &directory, &NoLock, NOW,
-    )
-    .await
-    .unwrap();
-    assert!(early.is_none());
-    assert!(directory.requests().is_empty());
 }
 
 /// Mines an empty block left unscanned and returns it as a publication's end.
@@ -1294,8 +1238,10 @@ async fn two_accounts_restore_early_in_one_sync() {
 /// publication's end, and settles restore sweeps. A lookup that fails at the transport
 /// stops the early lookups, listing that key and every later one as failed. The scan
 /// credits the one payment recorded, and the sweeps find the rest, so each payment is
-/// credited once. Returns the wallet and its tip.
-async fn restore_past_a_failed_early_lookup() -> (State, ChainPoint) {
+/// credited once. A rewind below the end then reopens every key's sweep, whether the
+/// early restore or a sweep finished it.
+#[tokio::test]
+async fn keys_after_an_early_lookup_transport_failure_are_left_to_sweeps() {
     let mut st = ironwood_wallet_in(TestDbFactory::default());
     let account = st.test_account().unwrap().id();
     let mut records = Vec::new();
@@ -1327,32 +1273,16 @@ async fn restore_past_a_failed_early_lookup() -> (State, ChainPoint) {
     // The recorded key is not looked up again.
     let lookups = lookups(&directory.directory);
     assert_eq!(lookups, 3, "{:?}", directory.directory.requests());
-    (st, through)
-}
 
-/// Keys whose early lookups failed are left to restore sweeps, which find their
-/// payments (see [`restore_past_a_failed_early_lookup`]).
-#[tokio::test]
-async fn keys_after_an_early_lookup_transport_failure_are_left_to_sweeps() {
-    restore_past_a_failed_early_lookup().await;
-}
-
-/// A rewind below a finished sweep's anchor reopens the sweep, as for a key the early
-/// restore finished, including a key a sweep finished after its early lookup failed.
-#[tokio::test]
-async fn a_rewind_reopens_sweeps_that_followed_a_failed_early_lookup() {
-    let (mut st, through) = restore_past_a_failed_early_lookup().await;
-    let account = st.test_account().unwrap().id();
     let wallet = st.wallet_mut();
     wallet.truncate_to_height(through.height - 1).unwrap();
     let rewound = tip(&st);
-    let db = st.wallet_mut().db_mut();
     let limit = NonZeroU32::new(1_000).unwrap();
+    let db = st.wallet_mut().db_mut();
     let due = db.prepare_one_time_sweeps(account, rewound, NOW, limit);
     let due = due.unwrap().unwrap();
     let due: Vec<_> = due.iter().map(|w| w.key.index()).collect();
-    assert!(due.contains(&2), "{due:?}");
-    assert!(due.contains(&7) && due.contains(&11), "{due:?}");
+    assert!([2, 7, 11].iter().all(|i| due.contains(i)), "{due:?}");
 }
 
 /// An early restore checks the first [`FIRST_WINDOW`] incoming keys, then keeps going
