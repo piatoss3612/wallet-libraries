@@ -19,9 +19,19 @@ and this library adheres to Rust's notion of
   each shard that lies wholly inside the range, holds no wallet note, and is
   already stored as its root alone, as `put_*_subtree_roots` stores a completed
   shard. Inserting such a shard would collapse it back to that root, so the
-  trees end in the same state without hashing its note commitments. The
-  computed root is then not checked against the stored one for these shards,
-  as it is not for shards the wallet has not scanned.
+  trees end in the same state without hashing its note commitments. Inserting
+  a shard never checked the computed root against the stored one, so this
+  trusts the stored root no more than before.
+- `put_blocks` now checks stored roots where it builds a shard that has one: a
+  random sample of about one in 16 of the shards it could leave out, and every
+  shard holding a wallet note. A mismatch is logged and counted, without failing
+  the scan or replacing the stored root, and stops shards being left out for
+  the rest of the process.
+
+### Added
+
+- `data_api::ll::wallet::stored_root_mismatches`, the number of shards whose
+  computed root differed from the stored one since the process started.
 
 ## [0.1.0-rc9] - 2026-10-14
 
