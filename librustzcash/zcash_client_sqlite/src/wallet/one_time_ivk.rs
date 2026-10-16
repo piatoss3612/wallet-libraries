@@ -167,9 +167,7 @@ pub(crate) fn scanning_keys<P: Parameters>(
     })
 }
 
-/// Implements `OneTimeIvkRead::get_one_time_scanning_keys_for_range`: the open keys
-/// active before `range` ends, and keys with an early-restore payment inside it (see
-/// `restore::early`). A key is tried only on the batches it may have a payment in.
+/// Implements `OneTimeIvkRead::get_one_time_scanning_keys_for_range`.
 pub(crate) fn scanning_keys_for_range<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -523,24 +521,13 @@ pub(crate) fn truncate_to_height(
         [u32::from(height)],
     )?;
     // Closed without scanning, such a key would not find its note again.
-    let unmined_note = "SELECT s.one_time_key_id FROM ironwood_one_time_sweeps s
+    restore::early::fall_back(
+        conn,
+        "SELECT s.one_time_key_id FROM ironwood_one_time_sweeps s
          WHERE s.provisional = 1 AND EXISTS(SELECT 1 FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
-             WHERE n.one_time_key_id = s.one_time_key_id AND t.mined_height > ?1)";
-    conn.execute(
-        &format!(
-            "DELETE FROM ironwood_one_time_payment_recovery
-             WHERE one_time_key_id IN ({unmined_note})"
-        ),
-        [u32::from(height)],
-    )?;
-    conn.execute(
-        &format!(
-            "UPDATE ironwood_one_time_sweeps SET done_height = NULL, lookup_height = NULL,
-                 lookup_hash = NULL, next_attempt_at = 0, provisional = 0
-             WHERE one_time_key_id IN ({unmined_note})"
-        ),
-        [u32::from(height)],
+             WHERE n.one_time_key_id = s.one_time_key_id AND t.mined_height > ?1)",
+        u32::from(height),
     )?;
     conn.execute(
         "UPDATE ironwood_one_time_payment_recovery SET scan_hint = 1

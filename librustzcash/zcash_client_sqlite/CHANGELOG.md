@@ -10,13 +10,8 @@ and this library adheres to Rust's notion of
 ### Added
 
 - Early restore of one-time IVK payments (with `orchard`): `WalletDb` implements the backend's
-  `one_time_early_restore_start`, `one_time_receivers`, `begin_one_time_early_restore`,
-  `record_one_time_early_lookup` and `get_one_time_scanning_keys_for_range`. A restored
-  account whose history is not scanned yet registers its one-time keys from a receiver
-  directory publication's filters and records its paid keys' lookups; the scan then finds each
-  payment in its block, or the wallet inserts one in a block it already scanned, so restored
-  swap payments appear as the scan covers them. The publication is checked when the scan stores
-  its last block, and anything that does not settle falls back to restore sweeps.
+  early restore methods and `get_one_time_scanning_keys_for_range`, so a restored account's
+  swap payments appear as its restore scan covers them rather than after restore sweeps.
 - `wallet::init::migrations::ids::ONE_TIME_IVK_EARLY_RESTORE`, an additive migration for early
   restores.
 - `TransparentPirSession`, with `WalletDb::with_transparent_pir_session`,

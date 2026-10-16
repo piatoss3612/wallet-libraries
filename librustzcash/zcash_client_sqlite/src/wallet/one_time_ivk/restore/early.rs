@@ -1,25 +1,16 @@
-//! Early restore: finds a restored account's one-time payments while the restore scan
-//! runs, rather than through sweeps after it (see `OneTimeIvkRestoreWrite`).
+//! Early restore's store side (see `OneTimeIvkRestoreWrite::begin_one_time_early_restore`).
 //!
-//! Before the scan reaches the account's history, the caller reads a receiver-directory
-//! publication's public filters and registers the account's keys from them ([`begin`]),
-//! then looks up only the paid ones ([`record_lookup`]). Each returned payment is queued
-//! with its witness. One whose block is not scanned yet is a scan hint: the scanner tries
-//! its key on the batch holding that block (see `one_time_ivk::scanning_keys_for_range`),
-//! and [`after_blocks_stored`] checks that the batch found that exact note. One whose
-//! block is already scanned is inserted with `apply::apply_payment` once every block from
-//! it on carries spend evidence. Anything that does not settle this way falls back to a
-//! restore sweep.
-//!
-//! The publication stays provisional until the scan stores its last block, which must
-//! match its hash and tree size; a mismatch discards what it registered.
+//! A queued payment whose block is not scanned yet is a scan hint: the scanner tries its
+//! key on the batch holding that block (see `one_time_ivk::scanning_keys_for_range`), and
+//! [`after_blocks_stored`] checks that the batch found that exact note. One whose block is
+//! already scanned is inserted with `apply::apply_payment` once every block from it on
+//! carries spend evidence. Anything that does not settle this way falls back to a sweep.
 use std::ops::Range;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::{
     one_time_ivk::restore::{
         DirectoryPayment, DiscoveryWork, EarlyRestoreKey, PaymentApplication, PublicationEnd,
-        recovery::EncryptedNote,
     },
     scanning::ScanPriority,
     transparent_ledger::{ChainPoint, TransparentLedgerMode},
@@ -28,14 +19,13 @@ use zcash_primitives::{block::BlockHash, transaction::TxId};
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 use super::{
-    PendingPayment,
     apply::{Gate, apply_payment, merkle_path},
-    payments::{authenticate, pending_payments, queue_payment},
+    payments::{authenticate, directory_candidate, pending_payments, queue_payment},
     recovery::watch_receive_key,
 };
 use crate::wallet::one_time_ivk::{
-    Discovery, KeyId, Purpose, account_key, corrupt, index_after, key_ref, register, restore_start,
-    swap::RECEIVE_GAP_LIMIT, swap::reservations::record_provider_seen,
+    Discovery, KeyId, Purpose, account_key, index_after, key_ref, register, restore_start,
+    stored_key_id, swap::RECEIVE_GAP_LIMIT, swap::reservations::record_provider_seen,
 };
 use crate::{
     AccountUuid,
@@ -49,6 +39,7 @@ use crate::{
 /// A publication an account's early restore registered keys from.
 struct Restore {
     account: i64,
+    uuid: AccountUuid,
     restore_from: u32,
     anchor: ChainPoint,
     tree_size: u64,
@@ -194,11 +185,12 @@ pub(crate) fn record_lookup<P: Parameters>(
     payments: &[DirectoryPayment],
     mut witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
 ) -> Result<(), SqliteClientError> {
-    let id = key_ref(conn, account, key)?;
     let (owner, _) = account_key(conn, params, account)?;
-    let Some(restore) = restore(conn, owner.0)? else {
+    // A rejection may have deleted the key, which a sweep now restores if it is used.
+    let Some(restore) = restore(conn, owner.0)?.filter(|r| r.state != REJECTED) else {
         return Ok(());
     };
+    let id = key_ref(conn, account, key)?;
     // Only a paid key still waiting for this lookup takes it, once.
     let waiting: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_sweeps
@@ -208,23 +200,25 @@ pub(crate) fn record_lookup<P: Parameters>(
         [id],
         |r| r.get(0),
     )?;
-    if restore.state == REJECTED || !waiting {
+    if !waiting {
         return Ok(());
     }
     let mut candidates = Vec::with_capacity(payments.len());
     for payment in payments {
-        let Some(candidate) = pending_payment(payment)? else {
-            return fall_back(conn, id);
+        let Some(candidate) = directory_candidate(payment) else {
+            return fall_back(conn, "?1", id);
         };
         if u32::from(candidate.height) < restore.restore_from
             || candidate.height > restore.anchor.height
         {
-            return fall_back(conn, id);
+            return fall_back(conn, "?1", id);
         }
         // A payment the key cannot decrypt is the directory's error, not the wallet's.
         match authenticate(conn, params, account, key, &candidate) {
             Ok(_) => candidates.push(candidate),
-            Err(SqliteClientError::InvalidOneTimeIvkInput(_)) => return fall_back(conn, id),
+            Err(SqliteClientError::InvalidOneTimeIvkInput(_)) => {
+                return fall_back(conn, "?1", id);
+            }
             Err(e) => return Err(e),
         }
     }
@@ -260,13 +254,13 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     keys: &[(AccountUuid, KeyId)],
     range: Range<BlockHeight>,
 ) -> Result<(), SqliteClientError> {
-    for restore in restores(conn, PROVISIONAL)? {
+    for restore in restores(conn, "r.state", PROVISIONAL.into())? {
         if range.contains(&restore.anchor.height) {
             judge(conn, params, &restore)?;
         }
     }
     check_hints(conn, keys, range)?;
-    for restore in restores(conn, ACCEPTED)? {
+    for restore in restores(conn, "r.state", ACCEPTED.into())? {
         insert_ready(conn, params, configured, session, tpir_session, &restore)?;
     }
     Ok(())
@@ -293,10 +287,6 @@ fn judge<P: Parameters>(
         "UPDATE ironwood_one_time_restores SET state = ?2 WHERE account_id = ?1",
         params![restore.account, ACCEPTED],
     )?;
-    let accepted = Restore {
-        state: ACCEPTED,
-        ..*restore
-    };
     let done: Vec<i64> = conn
         .prepare(
             "SELECT s.one_time_key_id FROM ironwood_one_time_sweeps s
@@ -306,7 +296,7 @@ fn judge<P: Parameters>(
         .query_map([restore.account], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
     for id in done {
-        close_done(conn, id, &accepted)?;
+        close_done(conn, id, restore.anchor.height)?;
     }
     Ok(())
 }
@@ -333,22 +323,14 @@ fn reject<P: Parameters>(
                WHERE o.one_time_key_id = ironwood_one_time_keys.id)",
         [restore.account],
     )?;
-    // Every payment a provisional key holds came from this publication.
-    conn.execute(
-        "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN (
-             SELECT s.one_time_key_id FROM ironwood_one_time_sweeps s
-             JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
-             WHERE k.account_id = ?1 AND s.provisional = 1)",
-        [restore.account],
+    // A provisional sweep has made no attempt (see `begin`), so `attempts` stays zero.
+    fall_back(
+        conn,
+        "SELECT s.one_time_key_id FROM ironwood_one_time_sweeps s
+         JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
+         WHERE k.account_id = ?1 AND s.provisional = 1",
+        restore.account,
     )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_sweeps SET done_height = NULL, lookup_height = NULL,
-             lookup_hash = NULL, attempts = 0, next_attempt_at = 0, provisional = 0
-         WHERE provisional = 1 AND one_time_key_id IN (
-             SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
-        [restore.account],
-    )?;
-    let account = account_uuid(conn, restore.account)?;
     let from = BlockHeight::from(restore.restore_from);
     for index in 0..RECEIVE_GAP_LIMIT {
         let registered: bool = conn.query_row(
@@ -358,7 +340,7 @@ fn reject<P: Parameters>(
             |r| r.get(0),
         )?;
         if !registered {
-            watch_receive_key(conn, params, account, index, from, 0)?;
+            watch_receive_key(conn, params, restore.uuid, index, from, 0)?;
         }
     }
     Ok(())
@@ -372,38 +354,28 @@ fn check_hints(
     keys: &[(AccountUuid, KeyId)],
     range: Range<BlockHeight>,
 ) -> Result<(), SqliteClientError> {
-    let hints: Vec<(i64, AccountUuid, KeyId, TxId, u32, u32)> = conn
+    let hints: Vec<(KeyId, AccountUuid, i64, i64, TxId, u32, u32)> = conn
         .prepare(
-            "SELECT p.one_time_key_id, a.uuid, k.purpose, k.key_index, p.txid,
+            "SELECT k.purpose, k.key_index, a.uuid, k.account_id, p.one_time_key_id, p.txid,
                  p.action_index, p.position
              FROM ironwood_one_time_payment_recovery p
              JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
              JOIN accounts a ON a.id = k.account_id
              WHERE p.scan_hint = 1 AND p.height >= ?1 AND p.height < ?2",
         )?
-        .query_map(params![u32::from(range.start), u32::from(range.end)], |r| {
-            Ok((
-                r.get(0)?,
-                AccountUuid(r.get(1)?),
-                (r.get::<_, u8>(2)?, r.get::<_, Vec<u8>>(3)?),
-                TxId::from_bytes(r.get(4)?),
-                r.get(5)?,
+        .query_and_then(params![u32::from(range.start), u32::from(range.end)], |r| {
+            Ok::<_, SqliteClientError>((
+                stored_key_id(r)?,
+                AccountUuid(r.get(2)?),
+                r.get(3)?,
+                r.get(4)?,
+                TxId::from_bytes(r.get(5)?),
                 r.get(6)?,
+                r.get(7)?,
             ))
         })?
-        .map(|row| {
-            let (id, account, (purpose, index), txid, action, position) = row?;
-            Ok((
-                id,
-                account,
-                decoded_key(purpose, index)?,
-                txid,
-                action,
-                position,
-            ))
-        })
-        .collect::<Result<_, SqliteClientError>>()?;
-    for (id, account, key, txid, action, position) in hints {
+        .collect::<Result<_, _>>()?;
+    for (key, account, owner, id, txid, action, position) in hints {
         if !keys.contains(&(account, key)) {
             conn.execute(
                 "UPDATE ironwood_one_time_payment_recovery SET scan_hint = 0
@@ -423,12 +395,11 @@ fn check_hints(
             params![txid.as_ref(), action],
         )?;
         if found {
-            let owner = account_ref_of(conn, id)?;
             if let Some(restore) = restore(conn, owner)? {
                 settle(conn, id, &restore)?;
             }
         } else {
-            fall_back(conn, id)?;
+            fall_back(conn, "?1", id)?;
         }
     }
     Ok(())
@@ -444,9 +415,6 @@ fn insert_ready<P: Parameters>(
     tpir_session: &TpirSessionState,
     restore: &Restore,
 ) -> Result<(), SqliteClientError> {
-    if restore.state != ACCEPTED {
-        return Ok(());
-    }
     // The highest block the scan stored, as later blocks' spend evidence is still missing.
     let through: Option<(u32, [u8; 32])> = conn
         .query_row(
@@ -465,23 +433,19 @@ fn insert_ready<P: Parameters>(
         height: BlockHeight::from(height),
         hash: BlockHash(hash),
     };
-    let account = account_uuid(conn, restore.account)?;
-    let ready: Vec<(i64, KeyId)> = conn
+    let account = restore.uuid;
+    let ready: Vec<(KeyId, i64)> = conn
         .prepare(
-            "SELECT DISTINCT k.id, k.purpose, k.key_index
+            "SELECT DISTINCT k.purpose, k.key_index, k.id
              FROM ironwood_one_time_payment_recovery p
              JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
              WHERE k.account_id = ?1 AND p.scan_hint = 0 AND p.witness IS NOT NULL",
         )?
-        .query_map([restore.account], |r| {
-            Ok((r.get(0)?, (r.get::<_, u8>(1)?, r.get::<_, Vec<u8>>(2)?)))
+        .query_and_then([restore.account], |r| {
+            Ok::<_, SqliteClientError>((stored_key_id(r)?, r.get(2)?))
         })?
-        .map(|row| {
-            let (id, (purpose, index)) = row?;
-            Ok((id, decoded_key(purpose, index)?))
-        })
-        .collect::<Result<_, SqliteClientError>>()?;
-    for (id, key) in ready {
+        .collect::<Result<_, _>>()?;
+    for (key, id) in ready {
         for candidate in pending_payments(conn, account, key)? {
             let witness: Option<Vec<u8>> = conn.query_row(
                 "SELECT witness FROM ironwood_one_time_payment_recovery
@@ -511,17 +475,10 @@ fn insert_ready<P: Parameters>(
                 (restore.anchor, &path),
                 Gate::Covered,
             )?;
-            match applied {
-                Ok(PaymentApplication::Applied)
-                | Ok(PaymentApplication::AwaitingScan)
-                | Ok(PaymentApplication::AwaitingWitness)
-                | Ok(PaymentApplication::AwaitingSpendHistory)
-                | Err(_) => {}
-                // `apply_payment` discarded the key's candidates and reopened its sweep.
-                Ok(PaymentApplication::Rejected) => {
-                    fall_back(conn, id)?;
-                    break;
-                }
+            // `apply_payment` discarded the key's candidates and reopened its sweep.
+            if let Ok(PaymentApplication::Rejected) = applied {
+                fall_back(conn, "?1", id)?;
+                break;
             }
         }
         settle(conn, id, restore)?;
@@ -543,23 +500,23 @@ fn settle(
         params![id, u32::from(restore.anchor.height)],
     )?;
     if changed > 0 && restore.state == ACCEPTED {
-        close_done(conn, id, restore)?;
+        close_done(conn, id, restore.anchor.height)?;
     }
     Ok(())
 }
 
-/// Closes done key `id` at the accepted anchor's block time unless it scans, as a
-/// finished sweep does (see `sweep::finish`), and ends its provisional state.
+/// Closes done key `id` at the time of accepted anchor block `anchor` unless it scans, as
+/// a finished sweep does (see `sweep::finish`), and ends its provisional state.
 fn close_done(
     conn: &rusqlite::Transaction<'_>,
     id: i64,
-    restore: &Restore,
+    anchor: BlockHeight,
 ) -> Result<(), SqliteClientError> {
     conn.execute(
         "UPDATE ironwood_one_time_keys SET closed_at = COALESCE(closed_at,
              (SELECT time FROM blocks WHERE height = ?2))
          WHERE id = ?1 AND active_from IS NULL",
-        params![id, u32::from(restore.anchor.height)],
+        params![id, u32::from(anchor)],
     )?;
     conn.execute(
         "UPDATE ironwood_one_time_sweeps SET provisional = 0 WHERE one_time_key_id = ?1",
@@ -568,18 +525,27 @@ fn close_done(
     Ok(())
 }
 
-/// Hands key `id` to an ordinary restore sweep, dropping the payments its early lookup
-/// queued, which are all it holds while its restore is provisional.
-fn fall_back(conn: &rusqlite::Transaction<'_>, id: i64) -> Result<(), SqliteClientError> {
+/// Hands the provisional keys that SQL `keys` selects, with `?1` bound to `param`, to
+/// ordinary restore sweeps, dropping the payments their early lookups queued, which are
+/// all such a key holds.
+pub(in crate::wallet::one_time_ivk) fn fall_back(
+    conn: &rusqlite::Transaction<'_>,
+    keys: &str,
+    param: impl rusqlite::ToSql,
+) -> Result<(), SqliteClientError> {
     conn.execute(
-        "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id = ?1",
-        [id],
+        &format!(
+            "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN ({keys})"
+        ),
+        [&param],
     )?;
     conn.execute(
-        "UPDATE ironwood_one_time_sweeps SET done_height = NULL, lookup_height = NULL,
-             lookup_hash = NULL, next_attempt_at = 0, provisional = 0
-         WHERE one_time_key_id = ?1",
-        [id],
+        &format!(
+            "UPDATE ironwood_one_time_sweeps SET done_height = NULL, lookup_height = NULL,
+                 lookup_hash = NULL, next_attempt_at = 0, provisional = 0
+             WHERE one_time_key_id IN ({keys})"
+        ),
+        [&param],
     )?;
     Ok(())
 }
@@ -597,100 +563,40 @@ fn scanned(conn: &Connection, height: BlockHeight) -> Result<bool, SqliteClientE
 
 /// The account's early restore, if any.
 fn restore(conn: &Connection, account: i64) -> Result<Option<Restore>, SqliteClientError> {
-    Ok(conn
-        .query_row(
-            "SELECT account_id, restore_from, anchor_height, anchor_hash, anchor_tree_size,
-                 state FROM ironwood_one_time_restores WHERE account_id = ?1",
-            [account],
-            restore_row,
-        )
-        .optional()?)
+    Ok(restores(conn, "r.account_id", account)?.pop())
 }
 
-/// Every early restore in `state`.
-fn restores(conn: &Connection, state: u8) -> Result<Vec<Restore>, SqliteClientError> {
+/// Every early restore whose `column` is `value`.
+fn restores(
+    conn: &Connection,
+    column: &str,
+    value: i64,
+) -> Result<Vec<Restore>, SqliteClientError> {
     Ok(conn
-        .prepare(
-            "SELECT account_id, restore_from, anchor_height, anchor_hash, anchor_tree_size,
-                 state FROM ironwood_one_time_restores WHERE state = ?1",
-        )?
-        .query_map([state], restore_row)?
+        .prepare(&format!(
+            "SELECT r.account_id, a.uuid, r.restore_from, r.anchor_height, r.anchor_hash,
+                 r.anchor_tree_size, r.state
+             FROM ironwood_one_time_restores r JOIN accounts a ON a.id = r.account_id
+             WHERE {column} = ?1"
+        ))?
+        .query_map([value], |r| {
+            Ok(Restore {
+                account: r.get(0)?,
+                uuid: AccountUuid(r.get(1)?),
+                restore_from: r.get(2)?,
+                anchor: ChainPoint {
+                    height: BlockHeight::from(r.get::<_, u32>(3)?),
+                    hash: BlockHash(r.get(4)?),
+                },
+                tree_size: r.get(5)?,
+                state: r.get(6)?,
+            })
+        })?
         .collect::<Result<_, _>>()?)
-}
-
-/// A restore from a row selecting its columns in declaration order.
-fn restore_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Restore> {
-    Ok(Restore {
-        account: r.get(0)?,
-        restore_from: r.get(1)?,
-        anchor: ChainPoint {
-            height: BlockHeight::from(r.get::<_, u32>(2)?),
-            hash: BlockHash(r.get(3)?),
-        },
-        tree_size: r.get(4)?,
-        state: r.get(5)?,
-    })
-}
-
-/// A directory payment as a queued candidate, or `None` if a field is out of range.
-fn pending_payment(
-    payment: &DirectoryPayment,
-) -> Result<Option<PendingPayment>, SqliteClientError> {
-    let (Ok(position), Ok(tx_index)) = (
-        u32::try_from(payment.position),
-        u16::try_from(payment.tx_index),
-    ) else {
-        return Ok(None);
-    };
-    Ok(Some(PendingPayment {
-        txid: TxId::from_bytes(payment.txid),
-        action_index: payment.action_index,
-        height: payment.height.into(),
-        block_hash: BlockHash(payment.block_hash),
-        tx_index,
-        position,
-        encrypted_note: EncryptedNote::from_parts(
-            payment.action_nullifier,
-            payment.cmx,
-            payment.ephemeral_key,
-            payment.ciphertext_prefix,
-        ),
-    }))
 }
 
 /// The 32 sibling hashes a stored witness holds.
 fn siblings(bytes: &[u8]) -> Option<[[u8; 32]; 32]> {
     let (chunks, rest) = bytes.as_chunks::<32>();
     rest.is_empty().then(|| chunks.try_into().ok()).flatten()
-}
-
-/// Decodes a stored purpose code and key index.
-fn decoded_key(purpose: u8, index: Vec<u8>) -> Result<KeyId, SqliteClientError> {
-    let purpose = match purpose {
-        0 => Purpose::Refund,
-        1 => Purpose::Receive,
-        _ => return Err(corrupt("unsupported one-time key purpose")),
-    };
-    let index: [u8; 8] = index
-        .try_into()
-        .map_err(|_| corrupt("invalid one-time key index"))?;
-    Ok(KeyId::new(purpose, u64::from_be_bytes(index)))
-}
-
-/// The UUID of account row `id`.
-fn account_uuid(conn: &Connection, id: i64) -> Result<AccountUuid, SqliteClientError> {
-    Ok(AccountUuid(conn.query_row(
-        "SELECT uuid FROM accounts WHERE id = ?1",
-        [id],
-        |r| r.get(0),
-    )?))
-}
-
-/// The account row of registered key `id`.
-fn account_ref_of(conn: &Connection, id: i64) -> Result<i64, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT account_id FROM ironwood_one_time_keys WHERE id = ?1",
-        [id],
-        |r| r.get(0),
-    )?)
 }

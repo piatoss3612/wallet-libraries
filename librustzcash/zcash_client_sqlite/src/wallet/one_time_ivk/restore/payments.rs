@@ -2,7 +2,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::{
     one_time_ivk::restore::{
-        SweepDeferral,
+        DirectoryPayment, SweepDeferral,
         recovery::{EncryptedNote, RecoveredNote},
     },
     transparent_ledger::ChainPoint,
@@ -33,6 +33,27 @@ pub(in crate::wallet::one_time_ivk) struct PendingPayment {
     pub position: u32,
     /// Full incoming encrypted-note context, without service fee or expiry assertions.
     pub encrypted_note: EncryptedNote,
+}
+
+/// `payment` as a candidate, or `None` if its position or transaction index is out of
+/// range.
+pub(in crate::wallet::one_time_ivk) fn directory_candidate(
+    payment: &DirectoryPayment,
+) -> Option<PendingPayment> {
+    Some(PendingPayment {
+        txid: TxId::from_bytes(payment.txid),
+        action_index: payment.action_index,
+        height: payment.height.into(),
+        block_hash: BlockHash(payment.block_hash),
+        tx_index: payment.tx_index.try_into().ok()?,
+        position: payment.position.try_into().ok()?,
+        encrypted_note: EncryptedNote::from_parts(
+            payment.action_nullifier,
+            payment.cmx,
+            payment.ephemeral_key,
+            payment.ciphertext_prefix,
+        ),
+    })
 }
 
 /// Local spend evidence as of one independently checked scan anchor.

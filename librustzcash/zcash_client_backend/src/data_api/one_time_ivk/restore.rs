@@ -13,12 +13,8 @@
 //! a caller may stop between any two.
 //!
 //! A wallet that has scanned nothing of an account's history yet can instead run an
-//! early restore. It reads the publication's public filters before scanning, registers
-//! the account's keys from them with
-//! [`OneTimeIvkRestoreWrite::begin_one_time_early_restore`], and looks up only the paid
-//! ones with [`OneTimeIvkRestoreWrite::record_one_time_early_lookup`]. The store then
-//! has the scan find each payment in its block, or inserts one whose block it already
-//! scanned, so payments appear as the scan covers them rather than after it.
+//! early restore (see [`OneTimeIvkRestoreWrite::begin_one_time_early_restore`]), so
+//! payments appear as the scan covers them rather than after it.
 
 use std::num::NonZeroU32;
 

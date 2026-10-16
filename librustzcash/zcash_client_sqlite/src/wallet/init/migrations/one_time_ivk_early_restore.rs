@@ -1,10 +1,5 @@
 //! Adds early restore of one-time IVK payments (see `one_time_ivk::restore::early`).
 //!
-//! An early restore queues each payment its lookups return with the directory's
-//! `witness`; `scan_hint` marks one whose block the scan has yet to reach, so the scanner
-//! tries its key there. Its sweep rows are `provisional` until the scan accepts or rejects
-//! the publication recorded in `ironwood_one_time_restores`.
-//!
 //! Additive: existing queued payments have no witness and are no hints, existing sweeps
 //! are not provisional, and no account has an early restore.
 use std::collections::HashSet;

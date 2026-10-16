@@ -1,9 +1,7 @@
 //! Restore sweep steps around an app's directory lookups (see `OneTimeIvkRestoreWrite`).
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::{
-    one_time_ivk::restore::{
-        DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral, recovery::EncryptedNote,
-    },
+    one_time_ivk::restore::{DirectoryPayment, MAX_PUBLICATION_LAG, SweepDeferral},
     transparent_ledger::ChainPoint,
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
@@ -11,7 +9,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
     PendingPayment,
-    payments::pending_payments,
+    payments::{directory_candidate, pending_payments},
     planner::{anchor, canonical, queue_lookup},
 };
 use crate::wallet::one_time_ivk::{KeyId, activate, corrupt, invalid, key_ref};
@@ -133,26 +131,12 @@ pub(crate) fn queue_directory_lookup<P: Parameters>(
             )?;
         }
     }
+    // `sort_directory_payments` checked each position.
     let fresh = missing
         .into_iter()
-        .map(|(payment, position)| {
-            Ok(PendingPayment {
-                txid: TxId::from_bytes(payment.txid),
-                action_index: payment.action_index,
-                height: payment.height.into(),
-                block_hash: BlockHash(payment.block_hash),
-                tx_index: payment
-                    .tx_index
-                    .try_into()
-                    .map_err(|_| invalid("directory payment index out of range"))?,
-                position,
-                encrypted_note: EncryptedNote::from_parts(
-                    payment.action_nullifier,
-                    payment.cmx,
-                    payment.ephemeral_key,
-                    payment.ciphertext_prefix,
-                ),
-            })
+        .map(|(payment, _)| {
+            directory_candidate(payment)
+                .ok_or_else(|| invalid("directory payment index out of range"))
         })
         .collect::<Result<Vec<_>, SqliteClientError>>()?;
     queue_lookup(conn, params, account, key, anchor, &fresh)
