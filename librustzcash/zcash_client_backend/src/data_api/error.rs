@@ -104,6 +104,12 @@ pub enum Error<DataSourceError, CommitmentTreeError, SelectionError, FeeError, C
     #[cfg(feature = "orchard")]
     OneTimeKeyNotDerivable(zakura_one_time_ivk::KeyId),
 
+    /// A transaction spending a one-time-key note has no Ironwood output that the spending
+    /// account's internal viewing key decrypts (see
+    /// [`crate::fees::orchard::InputView::is_one_time`]).
+    #[cfg(feature = "orchard")]
+    OneTimeSpendWithoutMarker,
+
     /// An error occurred parsing the address from a payment request.
     Address(ConversionError<&'static str>),
 
@@ -321,6 +327,12 @@ where
             Error::OneTimeKeyNotDerivable(key_id) => write!(
                 f,
                 "The one-time key {key_id:?} of a note being spent derives no valid viewing key."
+            ),
+            #[cfg(feature = "orchard")]
+            Error::OneTimeSpendWithoutMarker => write!(
+                f,
+                "A transaction spending a one-time-key note must include an Ironwood output to \
+                 the spending account's internal address."
             ),
 
             Error::Address(e) => {

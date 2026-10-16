@@ -810,6 +810,7 @@ pub(crate) mod tests {
     pub(crate) struct TestOrchardInput {
         pub note_id: u32,
         pub value: Zatoshis,
+        pub one_time: bool,
     }
 
     #[cfg(feature = "orchard")]
@@ -819,6 +820,9 @@ pub(crate) mod tests {
         }
         fn value(&self) -> Zatoshis {
             self.value
+        }
+        fn is_one_time(&self) -> bool {
+            self.one_time
         }
     }
 }

@@ -3,7 +3,7 @@
 use {
     crate::{
         data_api::CoinbaseFilter,
-        fees::{ChangeValue, StandardFeeRule},
+        fees::StandardFeeRule,
         proposal::{Step, StepOutput, StepOutputIndex},
     },
     std::convert::Infallible,
@@ -43,7 +43,9 @@ use crate::{
         InputSource, MaxSpendMode, ReceivedNotes, SimpleNoteRetention, TargetValue,
         anchor_retention::PoolMigrationParams, wallet::TargetHeight,
     },
-    fees::{ChangeError, ChangeStrategy, EphemeralBalance, TransactionBalance, sapling},
+    fees::{
+        ChangeError, ChangeStrategy, ChangeValue, EphemeralBalance, TransactionBalance, sapling,
+    },
     proposal::{Proposal, ProposalError, ShieldedInputs},
     wallet::WalletTransparentOutput,
 };
@@ -2043,12 +2045,21 @@ where
     #[cfg(feature = "orchard")]
     let orchard_bundle_required = orchard_action_count > 0;
 
+    // Spending a one-time-key note adds a zero-valued Ironwood change output (see
+    // `orchard_fees::InputView::is_one_time`).
+    #[cfg(feature = "orchard")]
+    let one_time_marker = spendable_notes
+        .ironwood
+        .iter()
+        .any(|note| note.one_time_key_id().is_some());
+
     #[cfg(feature = "orchard")]
     let ironwood_action_count = orchard_fees::transactional_action_count(
         ::orchard::builder::BundleType::DEFAULT,
         ironwood_bundle_version_for_height(params, target_height),
         spendable_notes.ironwood.len(),
-        usize::from(orchard_receiver_payable && orchard_receivers_fill_ironwood),
+        usize::from(orchard_receiver_payable && orchard_receivers_fill_ironwood)
+            + usize::from(one_time_marker),
     )
     .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?;
     #[cfg(not(feature = "orchard"))]
@@ -2201,15 +2212,22 @@ where
         tr1_fee.map(|fee| (total_to_recipient + fee).expect("overflow already checked"));
 
     #[cfg(feature = "transparent-inputs")]
-    let tr0_change = ephemeral_output_value
+    #[allow(unused_mut)]
+    let mut tr0_change: Vec<ChangeValue> = ephemeral_output_value
         .into_iter()
         .map(ChangeValue::ephemeral_transparent)
         .collect();
     #[cfg(not(feature = "transparent-inputs"))]
-    let tr0_change = vec![];
+    #[allow(unused_mut)]
+    let mut tr0_change: Vec<ChangeValue> = vec![];
+    #[cfg(feature = "orchard")]
+    if one_time_marker {
+        tr0_change.push(ChangeValue::ironwood(Zatoshis::ZERO, None));
+    }
 
-    // The transaction produces no change, unless this is a transaction to a TEX address; in this
-    // case, the first transaction produces a single ephemeral change output.
+    // The transaction produces no change, unless this is a transaction to a TEX address, whose
+    // first transaction produces a single ephemeral change output, or it spends a one-time-key
+    // note, which adds the zero-valued Ironwood change output.
     let tr0_balance = TransactionBalance::new(tr0_change, tr0_fee)
         .expect("the sum of an single-element vector of fee values cannot overflow");
 

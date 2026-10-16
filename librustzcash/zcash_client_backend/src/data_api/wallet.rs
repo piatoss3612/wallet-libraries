@@ -172,6 +172,9 @@ struct ProposalInfo<AccountId> {
         deserialize_with = "deserialize_target_height"
     )]
     target_height: TargetHeight,
+    /// Whether the transaction spends a one-time-key note, so extraction must find the
+    /// marker output (see [`crate::fees::orchard::InputView::is_one_time`]).
+    spends_one_time: bool,
 }
 
 /// Reduced version of [`Recipient`] stored inside a PCZT.
@@ -1500,6 +1503,10 @@ struct BuildState<P, AccountId> {
     )>,
     #[cfg(feature = "transparent-inputs")]
     utxos_spent: Vec<OutPoint>,
+    /// Whether the transaction spends a one-time-key note, so it must carry the marker
+    /// output (see [`crate::fees::orchard::InputView::is_one_time`]).
+    #[cfg(feature = "orchard")]
+    spends_one_time: bool,
 }
 
 // `unused_transparent_outputs` maps `StepOutput`s for transparent outputs
@@ -1833,6 +1840,22 @@ where
             *orchard_note,
             merkle_path,
         )?;
+    }
+
+    // The marker is Ironwood change, which goes to the account's internal address.
+    #[cfg(feature = "orchard")]
+    let spends_one_time = ironwood_inputs
+        .iter()
+        .any(|((_, one_time_key_id), _)| one_time_key_id.is_some());
+    #[cfg(feature = "orchard")]
+    if spends_one_time
+        && !proposal_step
+            .balance()
+            .proposed_change()
+            .iter()
+            .any(|change| change.output_pool() == PoolType::IRONWOOD)
+    {
+        return Err(Error::OneTimeSpendWithoutMarker);
     }
 
     #[cfg(feature = "orchard")]
@@ -2371,6 +2394,25 @@ where
         transparent_output_meta,
         #[cfg(feature = "transparent-inputs")]
         utxos_spent,
+        #[cfg(feature = "orchard")]
+        spends_one_time,
+    })
+}
+
+/// Returns whether one of `tx`'s Ironwood outputs decrypts with `internal_ivk`, the
+/// spending account's internal viewing key. A one-time-key spend must carry such an
+/// output (see [`crate::fees::orchard::InputView::is_one_time`]).
+#[cfg(feature = "orchard")]
+fn has_one_time_marker(
+    tx: &zcash_primitives::transaction::Transaction,
+    internal_ivk: &orchard::keys::IncomingViewingKey,
+) -> bool {
+    tx.ironwood_bundle().is_some_and(|bundle| {
+        (0..bundle.actions().len()).any(|index| {
+            bundle
+                .decrypt_output_with_key(index, internal_ivk)
+                .is_some()
+        })
     })
 }
 
@@ -2478,6 +2520,12 @@ where
     let orchard_fvk: orchard::keys::FullViewingKey = spending_keys.usk.orchard().into();
     #[cfg(feature = "orchard")]
     let orchard_internal_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::Internal);
+    #[cfg(feature = "orchard")]
+    if build_state.spends_one_time
+        && !has_one_time_marker(build_result.transaction(), &orchard_internal_ivk)
+    {
+        return Err(Error::OneTimeSpendWithoutMarker);
+    }
     // Same-address Orchard change (post-NU6.3, when spending Orchard notes) is returned to a spent
     // note's own address, which may be external-scoped; try the external IVK as well so such change
     // outputs remain decryptable for recording.
@@ -2836,6 +2884,10 @@ where
                 postcard::to_allocvec(&ProposalInfo::<<DbT as WalletRead>::AccountId> {
                     from_account: account_id,
                     target_height: proposal.min_target_height(),
+                    #[cfg(feature = "orchard")]
+                    spends_one_time: build_state.spends_one_time,
+                    #[cfg(not(feature = "orchard"))]
+                    spends_one_time: false,
                 })
                 .expect("postcard encoding of PCZT proposal metadata should not fail"),
             )
@@ -3517,6 +3569,22 @@ where
     }
     let transaction = tx_extractor.extract()?;
     let txid = transaction.txid();
+
+    #[cfg(feature = "orchard")]
+    if proposal_info.spends_one_time {
+        let account = wallet_db
+            .get_account(proposal_info.from_account)
+            .map_err(Error::DataSource)?
+            .ok_or(Error::AccountIdNotRecognized)?;
+        let internal_ivk = account
+            .ufvk()
+            .and_then(|ufvk| ufvk.orchard())
+            .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?
+            .to_ivk(orchard::keys::Scope::Internal);
+        if !has_one_time_marker(&transaction, &internal_ivk) {
+            return Err(Error::OneTimeSpendWithoutMarker);
+        }
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn to_sent_transaction_output<

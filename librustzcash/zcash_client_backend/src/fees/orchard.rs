@@ -87,6 +87,16 @@ pub trait InputView<NoteRef> {
     fn note_id(&self) -> &NoteRef;
     /// The value of the input being spent.
     fn value(&self) -> Zatoshis;
+    /// Whether the input is a one-time-key note.
+    ///
+    /// A transaction spending a one-time-key note must include an Ironwood output to the
+    /// spending account's internal address, zero-valued when there is no other change. A
+    /// restore then finds every spend of the account's one-time notes by scanning with the
+    /// account's ordinary keys alone. Change strategies add that output, and transaction
+    /// building rejects a transaction without it.
+    fn is_one_time(&self) -> bool {
+        false
+    }
 }
 
 impl<N> InputView<N> for Infallible {
