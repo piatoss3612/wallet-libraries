@@ -1,17 +1,48 @@
 #!/usr/bin/env python3
 """Verify the server ownership boundary and fresh wallet/server consumer graphs."""
 import json
+import posixpath
 from pathlib import Path
 import subprocess
 import tempfile
 import tomllib
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+GITHUB_HOSTS = ("github.com", "www.github.com", "ssh.github.com")
+
+
 def wallet_pir_owned(value):
-    """Recognize both historical and current ownership URLs, including git sources."""
-    return "github.com/valargroup/wallet-pir" in (value or "").lower() or "github.com/zakura-core/wallet-pir" in (value or "").lower()
+    """Recognize both historical and current ownership URLs, including git sources.
+
+    Release and graph verification share this predicate; it names the repository
+    only, so package-name checks must stay alongside it.
+    """
+    if not value:
+        return False
+    # Cargo source IDs add git+ and a revision; repository metadata can also
+    # use Git's scp-style SSH URL. Parse the host independently of its port.
+    value = value.strip().removeprefix("git+")
+    # Cargo parses special-scheme URLs as WHATWG URLs, which read a backslash as
+    # a slash; urlsplit would otherwise keep it inside the hostname.
+    if value.split(":", 1)[0].lower() in ("http", "https"):
+        value = value.replace("\\", "/")
+    if "://" not in value and ":" in value:
+        host, path = value.split(":", 1)
+        if host.rsplit("@", 1)[-1].lower().rstrip(".") in GITHUB_HOSTS:
+            value = f"ssh://{host}/{path}"
+    try:
+        parsed = urlsplit(value)
+        if unquote(parsed.hostname or "").lower().rstrip(".") not in GITHUB_HOSTS:
+            return False
+    except ValueError:
+        return False
+    # Git accepts escaped hostnames and resolves dot segments in HTTP paths.
+    # Decode once: double escaping names a different path on GitHub.
+    path = posixpath.normpath(unquote(parsed.path).lower()).strip("/")
+    return path.removesuffix(".git") in ("valargroup/wallet-pir", "zakura-core/wallet-pir")
 
 
 def problems(metadata, owned, node_packages=(), wallet=False, ownership=True):
@@ -28,6 +59,15 @@ def problems(metadata, owned, node_packages=(), wallet=False, ownership=True):
                 errors.append(f"{name}: server/node dependency in wallet consumer: {dependency['name']}")
             if ownership and (dependency["name"] in owned or wallet_pir_owned(dependency.get("source"))):
                 errors.append(f"{name}: dependency on wallet-pir package {dependency['name']}")
+    return errors
+
+
+def lock_problems(lockfile, owned):
+    """A checked-in lockfile must not resolve a wallet-pir package, under any name or source."""
+    errors = []
+    for package in tomllib.loads(lockfile.read_text()).get("package", []):
+        if package["name"] in owned or wallet_pir_owned(package.get("source")):
+            errors.append(f"{lockfile.relative_to(ROOT)}: resolves wallet-pir package {package['name']}")
     return errors
 
 
@@ -49,8 +89,14 @@ def main():
     errors = problems(graph, owned)
     if Path(graph["workspace_root"]) != workspace:
         errors.append("server packages must resolve in their separate workspace")
-    root_members = metadata(ROOT / "Cargo.toml", no_deps=True)["workspace_members"]
-    if set(root_members) & set(graph["workspace_members"]):
+    # The ordinary wallet workspace too: every member's declarations of every kind,
+    # and both checked-in lockfiles. A wallet-libraries release never waits on a
+    # wallet-pir release.
+    root = metadata(ROOT / "Cargo.toml", no_deps=True)
+    errors.extend(problems(root, owned))
+    for lockfile in (ROOT / "Cargo.lock", workspace / "Cargo.lock"):
+        errors.extend(lock_problems(lockfile, owned))
+    if set(root["workspace_members"]) & set(graph["workspace_members"]):
         errors.append("server and ordinary wallet workspace members overlap")
 
     # Fresh lockfiles exercise downstream resolution independently of both checked-in
@@ -103,9 +149,8 @@ fn main() {
             errors.extend(problems(fresh, owned, nodes, wallet=kind == "wallet"))
             if not errors:
                 subprocess.run(["cargo", "check", "--locked", "--manifest-path", str(consumer / "Cargo.toml")], cwd=ROOT, check=True)
-        # The primary wallet facade must also remain node-free in each mutually
-        # exclusive backend mode. Its legacy PIR dependencies are a separate
-        # migration; only the node/server boundary is enforced here.
+        # Each mutually exclusive facade backend must remain free of both
+        # node packages and wallet-pir ownership, including transitive packages.
         for mode, options in (
             ("default", ""),
             ("zakura", ', default-features = false, features = ["zakura"]'),
@@ -119,10 +164,10 @@ fn main() {
                 f'[dependencies]\nzakura-wallet-lib = {{ path = "{ROOT / "wallet-lib"}"{options} }}\n'
             )
             fresh = metadata(consumer / "Cargo.toml", locked=False)
-            errors.extend(problems(fresh, owned, nodes, wallet=True, ownership=False))
+            errors.extend(problems(fresh, owned, nodes, wallet=True))
     if errors:
         raise SystemExit("server ownership boundary failed:\n  " + "\n  ".join(sorted(set(errors))))
-    print("verified: separate server workspace and fresh consumers; no wallet-pir-owned dependencies in the affected graphs")
+    print("verified: separate server workspace and fresh consumers; no wallet-pir-owned dependency in either workspace or lockfile")
 
 
 if __name__ == "__main__":

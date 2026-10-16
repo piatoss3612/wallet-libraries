@@ -43,7 +43,7 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
         vec![receive, spend],
     );
     events.covered_scripts.clear();
-    events.cached_runs = vec![transparent_wallet::store::CachedRun {
+    events.cached_runs = vec![crate::engine::store::CachedRun {
         child_digest: "cd".repeat(32),
         script: script.clone(),
         shard_id: sealed.shard_id,
@@ -115,21 +115,42 @@ fn a_publication_change_resets_the_store_and_keeps_the_catalog() {
     let reset = store_rows(&adapter);
     assert_eq!(reset.len(), 11);
     for (table, rows) in reset {
-        let kept = table == "wallet_meta" || table == "failed_entries";
-        assert_eq!(rows, u64::from(kept), "{table}");
+        let expected = match table.as_str() {
+            "wallet_meta" => 3, // schema version and two shard revision bindings
+            "failed_entries" => 1,
+            _ => 0,
+        };
+        assert_eq!(rows, expected, "{table}");
     }
     assert_eq!(
         adapter
             .store
-            .entry_failures(tail.shard_id, &script)
+            .entry_failures(tail.shard_id, &tail.manifest_digest, &script)
             .unwrap(),
         1
     );
-    let kept: String = adapter
+    let kept: BTreeMap<String, String> = adapter
         .catalog
-        .query_row("SELECT key FROM wallet_meta", [], |row| row.get(0))
+        .prepare("SELECT key, value FROM wallet_meta ORDER BY key")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(kept, "schema_version");
+    assert_eq!(
+        kept,
+        BTreeMap::from([
+            ("schema_version".to_owned(), "7".to_owned()),
+            (
+                format!("failure_revision:{}", sealed.shard_id),
+                sealed.manifest_digest.clone(),
+            ),
+            (
+                format!("failure_revision:{}", tail.shard_id),
+                tail.manifest_digest.clone(),
+            ),
+        ])
+    );
     // The catalog keeps every row. Only the tail's revision, whose source the
     // resealed map no longer names, stops counting as exported.
     assert_eq!(cataloged(&adapter), 2);

@@ -1,6 +1,7 @@
 //! Restore sweeps end to end: a restored wallet looks up its one-time keys in a receiver
-//! directory served in process, over the service's own routes and real PIR, and
-//! imports what it finds only after checking it against its own chain.
+//! directory served in process, over the service's routes and real PIR, and imports
+//! what it finds only after checking it against its own chain. The service's own HTTP
+//! router is tested against these clients in wallet-pir.
 
 use std::{
     cell::RefCell,
@@ -11,20 +12,20 @@ use std::{
     },
 };
 
-use axum::{Router, body::Body, http::Request};
 use orchard::keys::{FullViewingKey, Scope};
 use receiver_directory::{
-    Payment, Receiver, Record,
+    RawRecord,
     snapshot::{Manifest, PROFILE, ProviderSet, Snapshot},
-    witness::WitnessSnapshot,
 };
 use receiver_pir::{MIN_ROWS, server::Server};
-use receiver_pir_server::{Publication, Publications, router_with_publications};
-use tower::ServiceExt as _;
 use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
 use zakura_pir_receiver::{
     DirectoryError, EarlyRestore, Error, FIRST_WINDOW, GAP, MAX_KEYS, Swept, Transport, WriteLock,
     begin_early_restore, fetch_seen, sweep,
+};
+use zakura_receiver_crypto::{
+    Payment, Receiver, Record,
+    witness::{Publication, WitnessSnapshot},
 };
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _, WalletWrite as _,
@@ -266,7 +267,7 @@ fn provider_named(name: &str, seen: &[Receiver]) -> Vec<ProviderSet> {
             window_secs: None,
             since_unix,
             until_unix,
-            receivers: seen.to_vec(),
+            receivers: seen.iter().map(|r| *r.as_bytes()).collect(),
         },
     ]
 }
@@ -279,7 +280,18 @@ fn publish(
     commitments: &[[u8; 32]],
     end: ChainPoint,
     provider: &[ProviderSet],
-) -> Router {
+) -> Routes {
+    let raw: Vec<_> = records.iter().map(raw_record).collect();
+    publish_raw(&raw, commitments, end, provider)
+}
+
+/// [`publish`]es row slots as given, whether or not a publisher would accept them.
+fn publish_raw(
+    records: &[RawRecord],
+    commitments: &[[u8; 32]],
+    end: ChainPoint,
+    provider: &[ProviderSet],
+) -> Routes {
     let manifest = Manifest {
         profile: PROFILE.into(),
         genesis: GENESIS,
@@ -303,14 +315,85 @@ fn publish(
         .collect();
     // A chain without Ironwood outputs has no witnesses to serve.
     let witnesses = (!commitments.is_empty()).then(|| {
-        WitnessSnapshot::build(&snapshot.manifest, commitments, &positions)
+        WitnessSnapshot::build(&publication(&snapshot.manifest), commitments, &positions)
             .unwrap()
             .encode()
     });
-    let publication = Publication::new(Server::new(snapshot).unwrap(), witnesses).unwrap();
-    let publications = Publications::default();
-    assert!(publications.publish(publication, publications.epoch()));
-    router_with_publications(publications)
+    Routes::new(Server::new(snapshot).unwrap(), witnesses)
+}
+
+/// `record`'s row slot, which the publisher writes after validating it.
+fn raw_record(record: &Record) -> RawRecord {
+    RawRecord::decode(&record.encode().unwrap())
+        .unwrap()
+        .unwrap()
+}
+
+/// The fields of `manifest` its witness file binds to.
+fn publication(manifest: &Manifest) -> Publication {
+    Publication {
+        genesis: manifest.genesis,
+        directory_revision: manifest.revision().unwrap(),
+        end_height: manifest.end_height,
+        end_hash: manifest.end_hash,
+        start_position: manifest.start_position,
+        end_position: manifest.end_position,
+        records: manifest.records,
+    }
+}
+
+/// One publication's receiver routes, answered as the receiver service answers them:
+/// its manifest, PIR setup, rows, filters and witnesses, and real PIR evaluation of
+/// each encrypted query. A session it does not serve is gone (410).
+struct Routes {
+    server: Server,
+    id: String,
+    witnesses: Option<Vec<u8>>,
+}
+
+impl Routes {
+    fn new(server: Server, witnesses: Option<Vec<u8>>) -> Self {
+        Self {
+            id: hex::encode(server.id()),
+            server,
+            witnesses,
+        }
+    }
+
+    /// The status and body for `method` on `path`.
+    fn answer(&self, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
+        let route = path.strip_prefix("/v1/receiver/").unwrap_or(path);
+        if (method, route) == ("POST", "query") {
+            return match self.server.respond(body) {
+                Ok(response) => (200, response),
+                Err(receiver_pir::Error::Revision) => (410, Vec::new()),
+                Err(receiver_pir::Error::Malformed) => (400, Vec::new()),
+                Err(_) => (500, Vec::new()),
+            };
+        }
+        if (method, route) == ("GET", "init") {
+            return (200, serde_json::to_vec(self.server.manifest()).unwrap());
+        }
+        let Some((material, id)) = route.split_once('/').filter(|_| method == "GET") else {
+            return (404, Vec::new());
+        };
+        if hex::decode(id).ok().filter(|id| id.len() == 32).is_none() {
+            return (400, Vec::new());
+        }
+        if id != self.id {
+            return (410, Vec::new());
+        }
+        match material {
+            "public" => (200, self.server.public().to_vec()),
+            "rows" => (200, self.server.rows().to_vec()),
+            "filters" => (200, self.server.filters().to_vec()),
+            "witness" => match &self.witnesses {
+                Some(bytes) => (200, bytes.clone()),
+                None => (503, Vec::new()),
+            },
+            _ => (404, Vec::new()),
+        }
+    }
 }
 
 /// Serves a [`publish`]ed publication of `records`, the chain's only Ironwood outputs,
@@ -322,15 +405,15 @@ fn serve(records: &[Record], end: ChainPoint) -> Directory {
 
 /// Serves a directory's routes in process and records every request.
 struct Directory {
-    router: Router,
+    routes: Routes,
     requests: Mutex<Vec<String>>,
 }
 
 impl Directory {
-    /// Serves `router` at [`ORIGIN`].
-    fn new(router: Router) -> Self {
+    /// Serves `routes` at [`ORIGIN`].
+    fn new(routes: Routes) -> Self {
         Self {
-            router,
+            routes,
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -355,18 +438,12 @@ impl Directory {
             .lock()
             .unwrap()
             .push(format!("{method} {path}"));
-        let request = Request::builder()
-            .method(method)
-            .uri(path)
-            .body(Body::from(body))
-            .unwrap();
-        let response = self.router.clone().oneshot(request).await.unwrap();
-        let status = response.status().as_u16();
-        let body = axum::body::to_bytes(response.into_body(), limit)
-            .await
-            .map_err(|_| DirectoryError::Transport("response over its limit".into()))?;
+        let (status, body) = self.routes.answer(method, path, &body);
+        if body.len() > limit {
+            return Err(DirectoryError::Transport("response over its limit".into()));
+        }
         match status {
-            200 => Ok(body.to_vec()),
+            200 => Ok(body),
             409 | 410 => Err(DirectoryError::Revision),
             status => Err(DirectoryError::Transport(format!("HTTP {status}"))),
         }
@@ -606,7 +683,7 @@ async fn only_recently_quoted_addresses_keep_scanning_after_their_sweep() {
         let sets = if case == "quoted" {
             // The old device quoted addresses 0 and 2, and 2 only today.
             let mut sets = provider(&[receiver(&r.st, 0), receiver(&r.st, 2)]);
-            sets[0].receivers = vec![receiver(&r.st, 2)];
+            sets[0].receivers = vec![*receiver(&r.st, 2).as_bytes()];
             sets
         } else {
             // Provider `b` publishes only its seen set in the last case.
@@ -976,6 +1053,41 @@ async fn a_run_wide_directory_failure_leases_no_further_key() {
             due.contains(&0) != opened && due.contains(&1),
             "{fault:?}: {due:?}"
         );
+    }
+}
+
+/// A payment the directory serves with a noncanonical note commitment or Action
+/// nullifier, or an invalid ephemeral key, is refused once looked up, before anything
+/// is queued or credited: the directory crates parse records structurally only.
+#[tokio::test]
+async fn a_forged_payment_is_refused() {
+    let forgeries: [fn(&mut RawRecord); 3] = [
+        |r| r.payment.cmx = [0xff; 32],
+        |r| r.payment.action_nullifier = [0xff; 32],
+        |r| r.payment.ephemeral_key = [0xff; 32],
+    ];
+    for (case, forge) in forgeries.into_iter().enumerate() {
+        let mut r = restored(&[0]);
+        let commitments: Vec<_> = r.records.iter().map(|r| r.payment.cmx).collect();
+        let mut raw = raw_record(&r.records[0]);
+        forge(&mut raw);
+        let directory =
+            Directory::new(publish_raw(&[raw], &commitments, r.through, &provider(&[])));
+        let swept = run(&mut r.st, r.through, &directory, &NoLock, NOW)
+            .await
+            .unwrap();
+        let malformed = |e: &_| {
+            matches!(
+                e,
+                Error::Directory(DirectoryError::Directory(
+                    receiver_directory::Error::Malformed
+                ))
+            )
+        };
+        assert_matches!(swept.deferred[..], [(k, e)] if k.index() == 0 && malformed(e));
+        assert_eq!(lookups(&directory), 1, "case {case}");
+        assert_eq!(balance(&r.st), 0, "case {case}");
+        assert!(pending(&r.st, r.through), "case {case}");
     }
 }
 

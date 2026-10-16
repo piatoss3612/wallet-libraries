@@ -17,12 +17,12 @@
 use std::cell::Cell;
 use std::fmt;
 
+use crate::engine::client::Table;
+use crate::engine::transport::{
+    BoxError, FilterSource, Overloaded, ShardRequest, ShardTransport, TransferFailure, refusal,
+};
 use transparent_txid_client::{
     Method as TxidMethod, Route as TxidRoute, TransportError, TxidReply, TxidRequest, TxidTransport,
-};
-use transparent_wallet::client::Table;
-use transparent_wallet::transport::{
-    BoxError, FilterSource, Overloaded, ShardRequest, ShardTransport, refusal,
 };
 
 /// Error-body bytes worth reading from a shard-bound refusal: a stale
@@ -253,7 +253,10 @@ impl<E: HttpExchange> TransparentPirHttp<E> {
         if failing && (binding.is_none() || refused.is_none()) {
             self.outage.set(true);
         }
-        Err(refused.unwrap_or_else(|| Box::new(HttpStatus(reply.status))))
+        Err(TransferFailure::boxed(
+            reply.body.len() as u64,
+            refused.unwrap_or_else(|| Box::new(HttpStatus(reply.status))),
+        ))
     }
 }
 
@@ -446,9 +449,9 @@ impl<E: HttpExchange> TxidTransport for TxidHttp<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::transport::StaleRevision;
     use std::cell::RefCell;
     use std::time::Duration;
-    use transparent_wallet::transport::StaleRevision;
 
     const SHARD: u64 = 4242;
     const REVISION: &str = "5f0c2b9e7d41a8c36e19f0b2d47a5c8e9b1d3f6a2c4e8b0d7f9a1c3e5b7d9f0a";
@@ -527,6 +530,9 @@ mod tests {
     }
 
     fn status(error: &BoxError) -> u16 {
+        let error = error
+            .downcast_ref::<TransferFailure>()
+            .map_or(error.as_ref(), |failure| failure.source.as_ref());
         error
             .downcast_ref::<HttpStatus>()
             .unwrap_or_else(|| panic!("not a status failure: {error}"))
@@ -630,6 +636,10 @@ mod tests {
             let error = result.unwrap_err();
             match kind {
                 Kind::ShardBound => {
+                    assert_eq!(
+                        TransferFailure::downloaded(&error),
+                        br#"{"error":"gone","map_sha256":"beef"}"#.len() as u64
+                    );
                     let stale = StaleRevision::found_in(&error).expect("stale");
                     assert_eq!(stale.shard_id, SHARD);
                     assert_eq!(stale.revision, REVISION);

@@ -30,13 +30,14 @@ The **One-time IVK scenarios** workflow runs everything, slow scenarios included
 nightly on `main` and on demand for any branch from the Actions tab, and keeps the
 report as a run artifact. When a PR changes one-time IVK behavior, run the suite
 locally or dispatch the workflow on its branch. The report is stamped with the
-wallet-libraries commit and the wallet-pir revision it ran against.
+wallet-libraries commit it ran against, which includes the receiver crates.
 
 ## What is real and what is simulated
 
 Real: the SQLite wallet store and its one-time IVK tables, compact scanning, the
-receiver restore client (`zakura-pir-receiver`), the receiver directory's routes
-and PIR (`receiver-pir-server`), Ironwood note encryption, and signed transactions
+receiver restore client (`zakura-pir-receiver`), the receiver directory's
+publications and PIR evaluation (`zakura-receiver-directory`, `zakura-receiver-pir`),
+answered in process on the service's routes, Ironwood note encryption, and signed transactions
 with proofs where a scenario needs them (swap funding, payouts that a reorg
 returns).
 

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use rusqlite::{Connection, Transaction, TransactionBehavior, named_params};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use super::identity::Published;
 use super::recut::record_epoch;
@@ -19,7 +19,7 @@ use crate::error::{RecoveryError, failure};
 // A companion's file name commits to the shard
 // schema (see `companion`), so a schema-v12 companion never opens a file a schema-v11
 // build wrote.
-const _: () = assert!(transparent_wallet_store::SCHEMA_VERSION == 7);
+const _: () = assert!(crate::engine_store::SCHEMA_VERSION == 7);
 
 /// The reference store's tables at schema version 7 that a reset empties, besides
 /// `wallet_meta`.
@@ -28,7 +28,7 @@ const _: () = assert!(transparent_wallet_store::SCHEMA_VERSION == 7);
 /// store keeps it across a rollback, and pruning leaves it alone: a superseded
 /// tail's sealed page shards are the replacement's too. Only a reset empties it.
 ///
-/// `failed_entries`, the content failures counted per shard and script, is not
+/// `failed_entries`, the content failures counted per shard revision and script, is not
 /// listed: a reset keeps it. A service that changes its publication set would
 /// otherwise earn every held entry three more attempts.
 const STORE_TABLES: [&str; 9] = [
@@ -47,7 +47,7 @@ const STORE_TABLES: [&str; 9] = [
 /// longer continues the one the store is bound to, in one transaction.
 ///
 /// Every store table, the run cache included, is emptied but for the content
-/// failure counts, and `wallet_meta` keeps only the schema version, so the next
+/// failure counts, and `wallet_meta` keeps the schema version and failure revision bindings, so the next
 /// sync binds the new set and retrieves from the floor.
 /// The recorded re-cut epoch is cleared with it: the empty store follows no
 /// map. The catalog stays: each source keeps its highest lineage, so a source
@@ -69,8 +69,11 @@ pub(crate) fn reset_store_keep_catalog(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failure)?;
-    tx.execute("DELETE FROM wallet_meta WHERE key<>'schema_version'", [])
-        .map_err(failure)?;
+    tx.execute(
+        "DELETE FROM wallet_meta WHERE key<>'schema_version' AND key NOT GLOB 'failure_revision:*'",
+        [],
+    )
+    .map_err(failure)?;
     for table in STORE_TABLES {
         tx.execute(&format!("DELETE FROM {table}"), [])
             .map_err(failure)?;
@@ -103,16 +106,7 @@ pub(super) fn prune_store_caches(
     tx: &Transaction<'_>,
     digests: &[&str],
 ) -> Result<(), RecoveryError> {
-    let named = serde_json::to_string(digests).map_err(failure)?;
-    for table in ["filter_cache", "setup_cache"] {
-        tx.execute(
-            &format!(
-                "DELETE FROM {table} WHERE revision_digest NOT IN (SELECT value FROM json_each(:named))"
-            ),
-            named_params![":named": named],
-        )
-        .map_err(failure)?;
-    }
+    crate::engine_store::prune_revision_caches(tx, digests).map_err(failure)?;
     tx.execute(
         "DELETE FROM commits WHERE id < (SELECT MAX(id) FROM commits)",
         [],

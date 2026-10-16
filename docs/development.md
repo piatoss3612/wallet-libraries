@@ -26,10 +26,11 @@ python3 scripts/dev.py verify
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |
+| `enhance-testing` | Enhance PIR; `testing` (the synthetic Ironwood output fixture service tests authenticate PIR-returned records with) |
 | `transparent-filter-client` | Transparent filter with its wallet HTTP `client` (profile validation and bounded streaming responses) |
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
-| `transparent-pir-testing` | Transparent PIR adapter; `sqlite` and `testing` (the test support applications build their recovery and txid display tests on) |
+| `transparent-pir-testing` | Transparent PIR adapter; `sqlite`, `testing` and `reqwest` (the test support applications build their recovery and txid display tests on; the private recovery and discovery tests go through the HTTP transport) |
 | `pir-receiver` | Receiver PIR; `wallet` (which enables the backend's `orchard`; its tests use SQLite with `orchard`) |
 | `receiver-wire` | Library-owned receiver codec with default features disabled |
 | `receiver-pir-server` | Receiver PIR client with the `server` evaluator, which the golden client/evaluator vectors need |
@@ -213,11 +214,10 @@ A successful run means all selected packages passed; a failed run must be
 investigated before publishing. This checks package contents and builds, not
 crates.io ownership or all wallet behavior. Required repository CI still applies.
 
-Transparent PIR requires the registry versions declared for its eight `wallet-pir`
-dependencies, including optional test support. Publish those upstream packages
-first. To release the other nine crates separately, add `--without-transparent`
-to any of the commands above. This script does not publish `wallet-pir` or change
-credentials, changelog dates, tags, or source files. After publication, confirm the
+The release never waits on `wallet-pir`: the script refuses any selected crate
+that declares a `wallet-pir` package, of any dependency kind or source, so no
+`wallet-pir` tag or registry release is ever a prerequisite. This script does not
+change credentials, changelog dates, tags, or source files. After publication, confirm the
 registry versions and confirm the corresponding changelog dates.
 
 `--output PATH` writes a JSON receipt and partial progress outside the checkout.

@@ -55,7 +55,7 @@ class PublishingTests(unittest.TestCase):
              patch.object(release, "release_packages", return_value=([package("first")], [("upstream", "1.0.0")])), \
              patch.object(release, "registry_version", return_value="absent"), \
              patch.object(release.subprocess, "run") as cargo:
-            with self.assertRaisesRegex(release.ReleaseError, "required wallet-pir"):
+            with self.assertRaisesRegex(release.ReleaseError, "required upstream"):
                 release.run_release(Path("."), publish=True)
             cargo.assert_not_called()
 
@@ -101,7 +101,7 @@ class PublishingTests(unittest.TestCase):
         with patch.object(release.sys, "argv", ["publish-crates.py", "--dry-run"]), \
              patch.object(release, "run_release") as run:
             self.assertEqual(release.main(), 0)
-            run.assert_called_once_with(release.ROOT, False, False, False,
+            run.assert_called_once_with(release.ROOT, False, False,
                                         output=None, publish_verified=None)
 
     def test_dry_run_cannot_be_combined_with_publish(self):
@@ -119,14 +119,151 @@ class PublishingTests(unittest.TestCase):
                      for directory in workspace["members"]]
         members = {package["name"] for package in manifests if package.get("publish") is not False}
         self.assertEqual({p["name"] for p in packages}, members)
-        # wallet-pir's crates come from crates.io, so no git prerequisite remains.
-        self.assertEqual(upstream, [])
-        selected, upstream = release.release_packages(release.ROOT, without_transparent=True)
-        self.assertEqual(len(selected), len(packages) - 1)
+        # Nothing the release selects waits on a git prerequisite.
         self.assertEqual(upstream, [])
 
+    def test_wallet_pir_packages_are_refused_under_any_source(self):
+        declarations = (
+            'receiver-pir = "=0.1.0"',
+            'receiver-pir = { version = "=0.1.0" }',
+            'alias = { package = "transparent-shard", version = "=0.1.0" }',
+            'renamed = { git = "https://github.com/valargroup/wallet-pir", version = "=0.1.0" }',
+        )
+        for declaration in declarations:
+            for inherited in (False, True):
+                self.check_forbidden_dependency(declaration, inherited)
+
+    def test_wallet_pir_repository_spellings_are_refused(self):
+        # An unlisted package name leaves only the repository identity to refuse it.
+        for owner in ("valargroup", "zakura-core"):
+            for url in (
+                f"https://github.com/{owner}/wallet%2Dpir",
+                f"https://%67ithub.com/{owner}/wallet-pir.git",
+                f"https://github.com/{owner}/ignored/../wallet-pir.git",
+                f"https://github.com/{owner}%2Fwallet-pir",
+                f"https://github.com/{owner}/wallet-pir%2Egit",
+                f"https://GITHUB.COM:443/{owner.upper()}/WALLET-PIR.git/",
+                f"https://www.github.com/{owner}/wallet-pir",
+                f"https://github.com./{owner}/wallet-pir",
+                f"https://github.com//{owner}/wallet-pir",
+                f"git+https://github.com/{owner}/wallet-pir?branch=main#0123abc",
+                f"ssh://git@github.com/{owner}/wallet-pir.git",
+                f"ssh://git@ssh.github.com:443/{owner}/wallet-pir",
+                f"git@github.com:{owner}/wallet-pir.git",
+                f" https://github.com/{owner}/wallet-pir ",
+            ):
+                for inherited in (False, True):
+                    self.check_forbidden_dependency(f'future-wire = {{ git = "{url}", version = "=0.1.0" }}', inherited)
+
+    def test_backslash_separated_repository_urls_are_refused(self):
+        # Cargo parses special-scheme URLs as WHATWG URLs, where a backslash is a slash.
+        urls = []
+        for owner in ("valargroup", "zakura-core"):
+            urls += [f"https:\\\\github.com\\{owner}\\wallet-pir", f"https://github.com\\{owner}\\wallet-pir.git",
+                     f"https://github.com\\{owner}/wallet-pir", f"git+https://github.com/{owner}\\wallet-pir"]
+        for url in urls:
+            escaped = url.replace("\\", "\\\\")
+            for declaration in (f'future-wire = {{ git = "{escaped}", version = "=1.0.0" }}',
+                                f'future-wire = {{ git = "{escaped}", version = "=1.0.0", optional = true }}',
+                                f'renamed = {{ package = "future-wire", git = "{escaped}", version = "=1.0.0" }}'):
+                for inherited in (False, True):
+                    self.check_forbidden_dependency(declaration, inherited)
+
+    def test_cargo_normalized_backslash_sources_match_the_raw_predicate(self):
+        # Independent oracle: Cargo's own source normalization, offline and without building.
+        url = "https://github.com\\valargroup\\wallet-pir"
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "Cargo.toml"
+            manifest.write_text('[package]\nname = "probe"\nversion = "0.0.0"\n[lib]\npath = "lib.rs"\n'
+                                f"[dependencies]\nfuture-wire = {{ git = '{url}', version = '=1.0.0' }}\n")
+            output = subprocess.check_output(["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1",
+                                              "--manifest-path", str(manifest)], text=True)
+        source = json.loads(output)["packages"][0]["dependencies"][0]["source"]
+        self.assertEqual(source, "git+https://github.com/valargroup/wallet-pir")
+        self.assertTrue(release.server_graph.wallet_pir_owned(source))
+        self.assertTrue(release.server_graph.wallet_pir_owned(url))
+
+    def test_neighbouring_git_repositories_remain_release_prerequisites(self):
+        for url in (
+            "https://evil.example\\github.com\\valargroup\\wallet-pir",
+            "https://github.com\\valargroup\\wallet-pir-extra",
+            "https://github.com\\other\\wallet-pir",
+            "https://github.com/valargroup/wallet-pir-extra",
+            "https://github.com/valargroup/wallet-pirate",
+            "https://github.com/other/wallet-pir",
+            "https://github.com/valargroup/wallet%252Dpir",
+            "https://github.com.evil.example/valargroup/wallet-pir",
+            "https://%67ithub.com.evil.example/valargroup/wallet-pir",
+            "https://github.com/valargroup/wallet-pir/../ordinary",
+            "https://evil.example/github.com/valargroup/wallet-pir",
+            "https://github.com@evil.example/valargroup/wallet-pir",
+            "https://github.com/zcash/librustzcash",
+        ):
+            for inherited in (False, True):
+                escaped = url.replace("\\", "\\\\")
+                declaration = f'external = {{ git = "{escaped}", version = "=0.1.0" }}'
+                for table, root in self.release_roots(declaration, inherited):
+                    with self.subTest(url=url, inherited=inherited, table=table), \
+                            patch.object(release, "ORDER", ("first",)):
+                        self.assertEqual(release.release_packages(root)[1], [("external", "0.1.0")])
+
+    def release_roots(self, declaration, inherited):
+        alias = declaration.split(" =", 1)[0]
+        for table in ("dependencies", "dev-dependencies", "build-dependencies", 'target."cfg(unix)".dependencies',
+                      'target."cfg(unix)".dev-dependencies', 'target."cfg(unix)".build-dependencies'):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "manifests").mkdir()
+                (root / "manifests/sources.toml").write_text(
+                    '[server]\nwallet_pir_packages = ["receiver-pir", "transparent-shard"]\n')
+                (root / "first").mkdir()
+                (root / "first/Cargo.toml").write_text(
+                    f'[package]\nname = "first"\nversion = "1.0.0"\n[{table}]\n'
+                    + (f'{alias} = {{ workspace = true }}\n' if inherited else declaration + "\n"))
+                (root / "Cargo.toml").write_text('[workspace]\nmembers = ["first"]\n[workspace.dependencies]\n'
+                                                     + (declaration + '\n' if inherited else ''))
+                yield table, root
+
+    def check_forbidden_dependency(self, declaration, inherited):
+        for table, root in self.release_roots(declaration, inherited):
+            with self.subTest(declaration=declaration, inherited=inherited, table=table), \
+                    patch.object(release, "ORDER", ("first",)), \
+                    self.assertRaisesRegex(release.ReleaseError, "depends on the wallet-pir package"):
+                release.release_packages(root)
+
+    def test_string_dependencies_keep_release_version_and_order_checks(self):
+        for inherited in (False, True):
+            for requirement, ordered, expected in (
+                ("=1.0.0", True, None),
+                ("=2.0.0", True, "mismatched dependency"),
+                ("=1.0.0", False, "must be published before"),
+            ):
+                with self.subTest(inherited=inherited, requirement=requirement, ordered=ordered), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "manifests").mkdir()
+                    (root / "manifests/sources.toml").write_text('[server]\nwallet_pir_packages = []\n')
+                    (root / "first").mkdir()
+                    (root / "first/Cargo.toml").write_text('[package]\nname = "first"\nversion = "1.0.0"\n')
+                    (root / "second").mkdir()
+                    declaration = 'first = { workspace = true }' if inherited else f'first = "{requirement}"'
+                    (root / "second/Cargo.toml").write_text(
+                        '[package]\nname = "second"\nversion = "1.0.0"\n[dependencies]\n'
+                        + declaration + '\nexternal = "0.5"\n')
+                    (root / "Cargo.toml").write_text(
+                        '[workspace]\nmembers = ["first", "second"]\n[workspace.dependencies]\n'
+                        + f'first = "{requirement}"\n')
+                    order = ("first", "second") if ordered else ("second", "first")
+                    with patch.object(release, "ORDER", order):
+                        if expected:
+                            with self.assertRaisesRegex(release.ReleaseError, expected):
+                                release.release_packages(root)
+                        else:
+                            packages, upstream = release.release_packages(root)
+                            self.assertEqual([p["name"] for p in packages], ["first", "second"])
+                            self.assertEqual(upstream, [])
+
     def receipt(self, directory, selection, **changes):
-        data = {"schema_version": 1, "commit": "commit", "without_transparent": False,
+        data = {"schema_version": 2, "commit": "commit",
                 "verification_passed": True,
                 "packages": [{"name": p["name"], "version": p["version"],
                               "registry_status": "absent", "result": "remaining"}
@@ -156,8 +293,8 @@ class PublishingTests(unittest.TestCase):
     def test_bad_receipts_stop_before_registry_queries_or_uploads(self):
         packages = [package("first"), package("second")]
         invalid = ({"commit": "other"}, {"verification_passed": False},
-                   {"verification_passed": 1}, {"schema_version": 2},
-                   {"without_transparent": True}, {"packages": []},
+                   {"verification_passed": 1}, {"schema_version": 1},
+                   {"packages": []},
                    {"packages": [{"name": "second", "version": "1.0.0"},
                                  {"name": "first", "version": "1.0.0"}]},
                    {"packages": [{"name": "first", "version": "2.0.0"}]})
@@ -211,7 +348,7 @@ class PublishingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "progress.json"
             self.run_with([package("first")], {"first": "absent"}, output=output)
-            release.validate_receipt(output, "commit", [package("first")], False)
+            release.validate_receipt(output, "commit", [package("first")])
 
     def test_receipts_cannot_be_written_inside_checkout(self):
         with tempfile.TemporaryDirectory() as directory:

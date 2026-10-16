@@ -23,11 +23,16 @@ CONFIGS = {
     "sqlite": (["-p", "zakura-client-sqlite"], ["test-dependencies"]),
     "enhance-wallet": (["-p", "zakura-pir-enhance"], ["wallet"]),
     "enhance": (["-p", "zakura-pir-enhance"], []),
+    "enhance-testing": (["-p", "zakura-pir-enhance"], ["testing"]),
+    # The recovery engine alone, and with its SQLite store, the store suite and
+    # the reference HTTP adapters, without the wallet.
+    "transparent-engine": (["-p", "zakura-pir-transparent"], ["engine"]),
+    "transparent-engine-store": (["-p", "zakura-pir-transparent"], ["engine-store", "engine-conformance", "reqwest"]),
     # The Transparent filter's wallet HTTP client, which no other lane enables.
     "transparent-filter-client": (["-p", "zakura-transparent-filter"], ["client"]),
     "transparent-pir": (["-p", "zakura-pir-transparent"], ["wallet"]),
     "transparent-pir-sqlite": (["-p", "zakura-pir-transparent"], ["sqlite"]),
-    "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing"]),
+    "transparent-pir-testing": (["-p", "zakura-pir-transparent"], ["sqlite", "testing", "reqwest"]),
     "pir-receiver": (["-p", "zakura-pir-receiver"], ["wallet"]),
     "receiver-wire": (["-p", "zakura-receiver-crypto", "--no-default-features"], []),
     # The receiver PIR evaluator with its client: runs the golden vectors.

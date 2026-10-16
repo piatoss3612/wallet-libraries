@@ -14,13 +14,13 @@
 
 use std::collections::BTreeSet;
 
-use transparent::address::TransparentAddress;
-use transparent_filter::ShardMap;
-use transparent_wallet::transport::{FilterSource, ShardTransport};
-use transparent_wallet::{
+use crate::engine::transport::{FilterSource, ShardTransport};
+use crate::engine::{
     Acceptance, Anchor, ChainView, Completion, IncompleteReason, MemoryStore, ScriptEntry,
     ScriptOrigin, StaticChain, StaticScripts, SyncError, WalletStore, WorkLimits,
 };
+use transparent::address::TransparentAddress;
+use transparent_filter::ShardMap;
 
 use crate::convert::address_script;
 use crate::error::{RecoveryError, ensure_valid, failure};
@@ -121,7 +121,7 @@ pub fn discover_active_addresses<F: FilterSource, T: ShardTransport>(
     refuse_parent_filters(filters)?;
     let (raw_map, map_bytes) = filters.shard_map().map_err(failure)?;
     let map: ShardMap = serde_json::from_slice(&raw_map).map_err(failure)?;
-    map.check_shape().map_err(failure)?;
+    map.validate_supported().map_err(failure)?;
     check_publication_limits(&map, floor, limits.shards)?;
     ensure_mainnet_publication(&map)?;
     // The sync plans each script from the map's start when that is above its
@@ -175,7 +175,7 @@ pub fn discover_active_addresses<F: FilterSource, T: ShardTransport>(
                 })
                 .collect(),
         );
-        let report = match transparent_wallet::sync_into(
+        let report = match crate::engine::sync_into(
             &mut store,
             &map,
             map_bytes,
@@ -260,7 +260,7 @@ fn carry_filters(
     previous: &MemoryStore,
     store: &mut MemoryStore,
     map: &ShardMap,
-) -> Result<(), transparent_wallet::StoreError> {
+) -> Result<(), crate::engine::StoreError> {
     for entry in &map.shards {
         if let Some(bytes) = previous.filter(&entry.manifest_digest, &entry.filter_hash)? {
             store.put_filter(

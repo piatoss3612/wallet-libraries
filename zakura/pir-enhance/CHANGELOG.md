@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `testing` feature (off by default) with `testing::IronwoodOutputFixture`, a
+  deterministic synthetic Ironwood output built from fixed public test seeds,
+  and byte-level `testing::decrypt_incoming` / `testing::recover_outgoing`
+  checks, so services can authenticate PIR-returned records without depending
+  on Orchard or note encryption directly.
+
 ## [0.0.1-rc4] - 2026-10-16
 
 ### Changed

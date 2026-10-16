@@ -70,8 +70,9 @@ fn failed_entries_are_counted_from_the_report() {
     assert_eq!(FailedEntries::of(&report), FailedEntries::default());
     report.failed_entries = [(0, 1), (0, 3), (2, 2), (4, 3)]
         .into_iter()
-        .map(|(shard_id, failures)| transparent_wallet::FailedEntry {
+        .map(|(shard_id, failures)| crate::engine::FailedEntry {
             shard_id,
+            revision_digest: "revision".into(),
             script: vec![failures as u8],
             failures,
         })
