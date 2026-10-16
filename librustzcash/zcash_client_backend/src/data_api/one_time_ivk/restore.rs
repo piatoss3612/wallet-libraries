@@ -310,7 +310,8 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
     /// payments; any other is done at `end`. The publication stays provisional until the
     /// scan stores block `end.height`: a matching hash and tree size accept it, and keys
     /// that neither scan nor wait for payments close there. A mismatch discards the keys
-    /// it registered that hold no payment and falls back to restore sweeps.
+    /// it registered that hold no payment and that its filters marked neither seen nor
+    /// paid, and falls back to restore sweeps for the rest.
     ///
     /// Stores without early restore return false.
     fn begin_one_time_early_restore(

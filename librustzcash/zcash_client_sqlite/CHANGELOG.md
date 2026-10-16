@@ -23,8 +23,10 @@ and this library adheres to Rust's notion of
 
 - A rewind on the same chain, such as adding an account with an older birthday, keeps finished
   one-time restore sweeps: each reruns only if the rescan stores a different block where it
-  finished. A key a sweep closed scans again from its first payment above the rewind until that
-  payment is confirmed again, instead of waiting for a rerun sweep.
+  finished, or if the rewind lowers its account's birthday. A key a sweep closed scans again
+  from its first payment above the rewind until that payment is confirmed again, instead of
+  waiting for a rerun sweep. An open one-time key that started above the rewind scans from the
+  first rescanned block.
 - `finish_one_time_nullifier_recovery` releases at most 50,000 retained Ironwood nullifiers
   per call, so its prune stays short; later calls continue. Pruning checks only transaction
   locators below the retention floor.
