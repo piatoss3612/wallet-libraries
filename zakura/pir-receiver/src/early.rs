@@ -1,21 +1,16 @@
 //! Early restore of an account's one-time keys from a receiver directory's public
 //! filters (see the backend's `OneTimeIvkRestoreWrite::begin_one_time_early_restore`).
 
-use receiver_directory::{
-    Receiver,
-    filter::{Filters, PAID, RECENT},
-};
-use receiver_pir::{AcceptedCoverage, transport::DirectoryClient};
+use receiver_pir::transport::DirectoryClient;
 use zakura_one_time_ivk::{KeyId, Purpose};
 use zcash_client_backend::data_api::one_time_ivk::restore::{
     DiscoveryWork, EarlyRestoreKey, OneTimeIvkRestoreWrite, PublicationEnd,
 };
-use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::{
     DirectoryError, Transport,
-    seen::seen_sets,
-    sweep::{AccountError, AccountId, Error, WriteLock, covers_restore_watch, directory_payment},
+    sweep::{AccountError, AccountId, Directory, Error, WriteLock},
 };
 
 /// Keys an early restore always checks, from index zero, in each purpose.
@@ -27,15 +22,12 @@ pub const GAP: u64 = 30;
 /// left to restore sweeps beyond it.
 pub const MAX_KEYS: u64 = 5_000;
 /// Receivers derived per wallet read.
-const CHUNK: u32 = 100;
+const CHUNK: u64 = 100;
 
 /// An early restore that registered its keys, with the paid ones still to look up (see
 /// [`EarlyRestore::look_up`]).
 pub struct EarlyRestore<'a, T> {
-    origin: &'a str,
-    transport: T,
-    manifest: receiver_pir::Manifest,
-    accepted: AcceptedCoverage,
+    directory: Directory<'a, T>,
     /// Paid keys with their receivers.
     paid: Vec<DiscoveryWork>,
 }
@@ -88,76 +80,55 @@ where
     {
         return Ok(None);
     }
-    let activation = params
-        .activation_height(NetworkUpgrade::Nu6_3)
-        .ok_or(Error::Unavailable("Ironwood is not active on this network"))?;
     let manifest = DirectoryClient::fetch_manifest(origin, &transport).await?;
-    let directory = &manifest.directory;
-    let accepted = AcceptedCoverage {
-        genesis,
-        required_start: activation.into(),
-        height: directory.end_height,
-        hash: directory.end_hash,
+    let end = PublicationEnd {
+        height: BlockHeight::from(manifest.directory.end_height),
+        hash: manifest.directory.end_hash,
+        tree_size: manifest.directory.end_position,
     };
-    accepted.check(directory)?;
-    let filters = DirectoryClient::fetch_filters(origin, &transport, &manifest).await?;
-    let sets = Sets::new(&manifest, &filters, now)?;
+    let (height, hash) = (end.height.into(), end.hash);
+    let mut directory = Directory::new(params, genesis, origin, transport, manifest, height, hash)?;
     let mut keys = Vec::new();
+    let mut paid = Vec::new();
     for purpose in [Purpose::Receive, Purpose::Refund] {
         let mut from = 0;
-        let mut last_used: Option<u64> = None;
-        while from < MAX_KEYS {
-            let reach = last_used.map_or(0, |used| used + 1 + GAP).max(FIRST_WINDOW);
-            if from >= reach {
-                break;
-            }
-            let count = u32::try_from((reach - from).min(MAX_KEYS - from))
-                .unwrap_or(CHUNK)
-                .min(CHUNK);
+        // Each used key moves `reach` to `GAP` keys past it.
+        let mut reach = FIRST_WINDOW;
+        while from < reach.min(MAX_KEYS) {
+            let to = reach.min(MAX_KEYS).min(from + CHUNK);
+            let count = u32::try_from(to - from).expect("at most CHUNK");
             let work = wallet
                 .one_time_receivers(account, purpose, from, count)
                 .map_err(Error::Wallet)?;
-            for (item, check) in work.iter().zip(sets.check(&work)?) {
+            let checks = directory.check(&work, now).await?;
+            for (item, check) in work.into_iter().zip(checks) {
                 let used = check.seen || check.paid;
                 if used {
-                    last_used = Some(item.key.index());
+                    reach = reach.max(item.key.index() + 1 + GAP);
                 }
                 if purpose == Purpose::Receive || used {
-                    keys.push((item.clone(), check));
+                    keys.push(EarlyRestoreKey {
+                        key: item.key,
+                        seen: check.seen,
+                        paid: check.paid,
+                        recent: check.recent,
+                    });
+                }
+                if check.paid {
+                    paid.push(item);
                 }
             }
-            from += u64::from(count);
+            from = to;
         }
     }
-    let end = PublicationEnd {
-        height: BlockHeight::from(directory.end_height),
-        hash: directory.end_hash,
-        tree_size: directory.end_position,
-    };
-    let registered: Vec<_> = keys
-        .iter()
-        .map(|(item, check)| check.key(item.key))
-        .collect();
+    // The filters can be large, and the lookups run alongside the scan.
+    directory.release_filters();
     let begun = lock
         .write("one_time_early_restore.begin", || {
-            wallet.begin_one_time_early_restore(account, end, &registered)
+            wallet.begin_one_time_early_restore(account, end, &keys)
         })
         .map_err(Error::Wallet)?;
-    if !begun {
-        return Ok(None);
-    }
-    let paid = keys
-        .into_iter()
-        .filter(|(_, check)| check.paid)
-        .map(|(item, _)| item)
-        .collect();
-    Ok(Some(EarlyRestore {
-        origin,
-        transport,
-        manifest,
-        accepted,
-        paid,
-    }))
+    Ok(begun.then_some(EarlyRestore { directory, paid }))
 }
 
 impl<T: Transport> EarlyRestore<'_, T> {
@@ -173,7 +144,7 @@ impl<T: Transport> EarlyRestore<'_, T> {
     /// sweeps, while the others go on, unless the directory's connection failed or it
     /// revoked the session: then the remaining keys are left too.
     pub async fn look_up<W, L>(
-        self,
+        mut self,
         wallet: &mut W,
         account: AccountId<W>,
         lock: &L,
@@ -182,150 +153,37 @@ impl<T: Transport> EarlyRestore<'_, T> {
         W: OneTimeIvkRestoreWrite,
         L: WriteLock,
     {
-        let mut looked_up = LookedUp {
-            recorded: 0,
-            failed: Vec::new(),
-        };
-        if self.paid.is_empty() {
-            return Ok(looked_up);
+        let mut recorded = 0;
+        let mut failed = Vec::new();
+        if !self.paid.is_empty() {
+            self.directory.open_session(self.paid.len()).await?;
         }
-        let mut client = DirectoryClient::connect_manifest(
-            self.origin,
-            self.transport,
-            self.accepted,
-            self.manifest,
-            self.paid.len(),
-        )
-        .await?;
-        let witnesses = client.witnesses().await?;
         let mut keys = self.paid.into_iter();
         for item in keys.by_ref() {
-            let receiver = Receiver::from_bytes(item.receiver).map_err(DirectoryError::from)?;
-            let payments = match client.lookup(receiver, self.accepted).await {
-                Ok(payments) => payments
-                    .into_iter()
-                    .map(directory_payment)
-                    .collect::<Vec<_>>(),
+            let payments = match self.directory.look_up(&item).await {
+                Ok(payments) => payments,
                 Err(e) => {
                     let run_wide =
                         matches!(e, DirectoryError::Revision | DirectoryError::Transport(_));
-                    looked_up.failed.push((item.key, e.into()));
+                    failed.push((item.key, e.into()));
                     if run_wide {
                         break;
                     }
                     continue;
                 }
             };
+            let directory = &self.directory;
             lock.write("one_time_early_restore.lookup", || {
                 wallet.record_one_time_early_lookup(account, item.key, &payments, |p, cmx| {
-                    witnesses.path(p, cmx).ok()
+                    directory.witness(p, cmx)
                 })
             })
             .map_err(Error::Wallet)?;
-            looked_up.recorded += 1;
+            recorded += 1;
         }
         for item in keys {
-            looked_up
-                .failed
-                .push((item.key, Error::Unavailable("the directory session ended")));
+            failed.push((item.key, Error::Unavailable("the directory session ended")));
         }
-        Ok(looked_up)
-    }
-}
-
-/// What a publication's filters say about one key's receiver.
-#[derive(Clone, Copy)]
-struct Check {
-    paid: bool,
-    seen: bool,
-    recent: bool,
-}
-
-impl Check {
-    /// The registration of `key` this check gives.
-    fn key(self, key: KeyId) -> EarlyRestoreKey {
-        EarlyRestoreKey {
-            key,
-            seen: self.seen,
-            paid: self.paid,
-            recent: self.recent,
-        }
-    }
-}
-
-/// A publication's filters and the provider sets [`crate::sweep`] reads from them.
-struct Sets<'a> {
-    salt: [u8; 32],
-    filters: &'a Filters,
-    /// Each provider's seen set label, and its recent set label when that set is current.
-    providers: Vec<(String, Option<String>)>,
-}
-
-impl<'a> Sets<'a> {
-    /// The sets of `manifest`'s `filters`, with recent sets current at `now`.
-    fn new(
-        manifest: &receiver_pir::Manifest,
-        filters: &'a Filters,
-        now: i64,
-    ) -> Result<Self, DirectoryError> {
-        let sets = &manifest.directory.filters;
-        let providers = seen_sets(sets)?
-            .into_iter()
-            .map(|(label, _, _)| {
-                let provider = label.split_once('/').map_or(label, |(p, _)| p);
-                let recent = format!("{provider}/{RECENT}");
-                let current = sets
-                    .iter()
-                    .any(|set| set.label == recent && covers_restore_watch(set, now));
-                (label.to_owned(), current.then_some(recent))
-            })
-            .collect();
-        Ok(Self {
-            salt: manifest.directory.salt,
-            filters,
-            providers,
-        })
-    }
-
-    /// What the sets say about each of `work`'s receivers. Without a current recent set
-    /// from every provider, every receiver is recent, as for sweeps.
-    fn check<E>(&self, work: &[DiscoveryWork]) -> Result<Vec<Check>, Error<E>> {
-        let receivers = work
-            .iter()
-            .map(|item| Receiver::from_bytes(item.receiver))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(DirectoryError::from)?;
-        // Fetching the filters checked them against the manifest's sets.
-        let matches = |label: &str| {
-            self.filters
-                .get(label)
-                .expect("the manifest declares every set")
-                .matches(&self.salt, &receivers)
-        };
-        let mut checks: Vec<_> = matches(PAID)
-            .into_iter()
-            .map(|paid| Check {
-                paid,
-                seen: false,
-                recent: false,
-            })
-            .collect();
-        let complete = self.providers.iter().all(|(_, recent)| recent.is_some());
-        for (seen, recent) in &self.providers {
-            for (check, hit) in checks.iter_mut().zip(matches(seen)) {
-                check.seen |= hit;
-            }
-            if let Some(recent) = recent {
-                for (check, hit) in checks.iter_mut().zip(matches(recent)) {
-                    check.recent |= hit;
-                }
-            }
-        }
-        if !complete {
-            for check in &mut checks {
-                check.recent = true;
-            }
-        }
-        Ok(checks)
+        Ok(LookedUp { recorded, failed })
     }
 }
