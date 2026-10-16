@@ -267,10 +267,10 @@ struct Session<T> {
 
 impl<'a, T: Transport> Directory<'a, T> {
     /// Takes `manifest`, the publication `origin` serves, if it commits to `genesis`, covers
-    /// history from Ironwood activation on `params`' network, ends at block `height` with
+    /// history from `activation` (see [`ironwood_activation`]), ends at block `height` with
     /// hash `hash`, and has the seen sets [`fetch_seen`](crate::fetch_seen) requires.
-    pub(crate) fn new<E, P: Parameters>(
-        params: &P,
+    pub(crate) fn new<E>(
+        activation: BlockHeight,
         genesis: [u8; 32],
         origin: &'a str,
         transport: T,
@@ -278,9 +278,6 @@ impl<'a, T: Transport> Directory<'a, T> {
         height: u32,
         hash: [u8; 32],
     ) -> Result<Self, Error<E>> {
-        let activation = params
-            .activation_height(NetworkUpgrade::Nu6_3)
-            .ok_or(Error::Unavailable("Ironwood is not active on this network"))?;
         let accepted = AcceptedCoverage {
             genesis,
             required_start: activation.into(),
@@ -321,8 +318,11 @@ impl<'a, T: Transport> Directory<'a, T> {
             .directory_publication_anchor(end, through)
             .map_err(Error::Wallet)?
             .map_err(Error::Deferred)?;
+        let activation = ironwood_activation(params)?;
         let (height, hash) = (anchor.height.into(), anchor.hash.0);
-        let directory = Self::new(params, genesis, origin, transport, manifest, height, hash)?;
+        let directory = Self::new(
+            activation, genesis, origin, transport, manifest, height, hash,
+        )?;
         // Height and hash alone accept a publication that stops partway through the
         // anchor block, whose omitted payments no lookup or scan from `anchor + 1` finds.
         let tree_size = wallet
@@ -438,6 +438,13 @@ impl<'a, T: Transport> Directory<'a, T> {
         let session = self.session.as_ref()?;
         session.witnesses.path(position, cmx).ok()
     }
+}
+
+/// Ironwood activation on `params`' network, the history every publication must cover.
+pub(crate) fn ironwood_activation<E>(params: &impl Parameters) -> Result<BlockHeight, Error<E>> {
+    params
+        .activation_height(NetworkUpgrade::Nu6_3)
+        .ok_or(Error::Unavailable("Ironwood is not active on this network"))
 }
 
 /// Whether a provider's recent set can rule a receiver out at `now` (see [`sweep`]).

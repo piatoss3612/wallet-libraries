@@ -10,7 +10,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::{
     DirectoryError, Transport,
-    sweep::{AccountError, AccountId, Directory, Error, WriteLock},
+    sweep::{AccountError, AccountId, Directory, Error, WriteLock, ironwood_activation},
 };
 
 /// Keys an early restore always checks, from index zero, in each purpose.
@@ -78,6 +78,7 @@ where
     {
         return Ok(None);
     }
+    let activation = ironwood_activation(params)?;
     let manifest = DirectoryClient::fetch_manifest(origin, &transport).await?;
     let end = PublicationEnd {
         height: BlockHeight::from(manifest.directory.end_height),
@@ -85,7 +86,9 @@ where
         tree_size: manifest.directory.end_position,
     };
     let (height, hash) = (end.height.into(), end.hash);
-    let mut directory = Directory::new(params, genesis, origin, transport, manifest, height, hash)?;
+    let mut directory = Directory::new(
+        activation, genesis, origin, transport, manifest, height, hash,
+    )?;
     let mut keys = Vec::new();
     let mut paid = Vec::new();
     for purpose in [Purpose::Receive, Purpose::Refund] {

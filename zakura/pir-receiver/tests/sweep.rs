@@ -1151,6 +1151,25 @@ fn unscanned_end(st: &mut State) -> ChainPoint {
     }
 }
 
+/// On a network without Ironwood, an early restore fails before asking the directory
+/// anything.
+#[tokio::test]
+async fn an_early_restore_without_ironwood_asks_nothing() {
+    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    let account = st.test_account().unwrap().id();
+    unscanned_end(&mut st);
+    let network = LocalNetwork {
+        nu6_3: None,
+        ..*st.network()
+    };
+    let down = Down::default();
+    let db = st.wallet_mut().db_mut();
+    let result =
+        begin_early_restore(db, &network, account, GENESIS, ORIGIN, &down, &NoLock, NOW).await;
+    assert!(matches!(result, Err(Error::Unavailable(_))));
+    assert_eq!(*down.0.lock().unwrap(), 0);
+}
+
 /// Begins `account`'s early restore against the publication `directory` serves, at
 /// [`NOW`], if the wallet allows one.
 async fn begin<T: Transport>(
