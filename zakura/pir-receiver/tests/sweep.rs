@@ -1120,7 +1120,7 @@ async fn an_early_restore_credits_payments_as_the_scan_covers_them() {
     let notes = "SELECT COUNT(*) FROM ironwood_received_notes";
     assert_eq!(column::<i64>(&st, notes), [0]);
     let db = st.wallet_mut().db_mut();
-    let looked_up = early.look_up(db, account, &lock).await.unwrap();
+    let looked_up = early.look_up(db, &lock).await.unwrap();
     assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
     st.scan_cached_blocks_with_one_time_ivks(paid_at + 1, 2);
     assert_eq!(balance(&st), 2 * VALUE);
@@ -1179,7 +1179,7 @@ async fn begin<T: Transport>(
     st: &mut State,
     account: AccountUuid,
     directory: T,
-) -> Option<EarlyRestore<'static, T>> {
+) -> Option<EarlyRestore<'static, T, AccountUuid>> {
     let network = *st.network();
     let db = st.wallet_mut().db_mut();
     begin_early_restore(
@@ -1237,9 +1237,9 @@ async fn two_accounts_restore_early_in_one_sync() {
     let down = Down::default();
     assert!(begin(&mut st, c, &down).await.is_none());
     assert_eq!(*down.0.lock().unwrap(), 0);
-    for (early, account) in [(early_a, a), (early_b, b)] {
+    for early in [early_a, early_b] {
         let db = st.wallet_mut().db_mut();
-        let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
+        let looked_up = early.look_up(db, &NoLock).await.unwrap();
         assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
     }
     st.scan_cached_blocks_with_one_time_ivks(paid_at + 1, 2);
@@ -1277,7 +1277,7 @@ async fn keys_after_an_early_lookup_transport_failure_are_left_to_sweeps() {
     };
     let early = begin(&mut st, account, &directory).await.unwrap();
     let db = st.wallet_mut().db_mut();
-    let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
+    let looked_up = early.look_up(db, &NoLock).await.unwrap();
     assert_eq!(lookups(&directory.directory), 1);
     let failed: Vec<_> = looked_up.failed.iter().map(|(k, _)| k.index()).collect();
     assert_eq!(failed, [7, 11]);
@@ -1327,7 +1327,7 @@ async fn an_early_restore_looks_ahead_past_each_used_incoming_key() {
     assert_eq!(registered(&st, Purpose::Receive), expected);
     assert!(registered(&st, Purpose::Refund).is_empty());
     let db = st.wallet_mut().db_mut();
-    let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
+    let looked_up = early.look_up(db, &NoLock).await.unwrap();
     assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
     assert_eq!(lookups(&directory), 1);
 }
@@ -1378,7 +1378,7 @@ async fn an_early_restore_checks_at_most_max_keys() {
     // The paid filter's false matches among the checked keys are looked up and found
     // unpaid.
     let db = st.wallet_mut().db_mut();
-    let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
+    let looked_up = early.look_up(db, &NoLock).await.unwrap();
     assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
 
     let from = BlockHeight::from(paid.payment.height);

@@ -3,8 +3,11 @@
 
 use receiver_pir::transport::DirectoryClient;
 use zakura_one_time_ivk::{KeyId, Purpose};
-use zcash_client_backend::data_api::one_time_ivk::restore::{
-    DiscoveryWork, EarlyRestoreKey, OneTimeIvkRestoreWrite, PublicationEnd,
+use zcash_client_backend::data_api::{
+    WalletRead,
+    one_time_ivk::restore::{
+        DiscoveryWork, EarlyRestoreKey, OneTimeIvkRestoreWrite, PublicationEnd,
+    },
 };
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
@@ -24,10 +27,12 @@ pub const MAX_KEYS: u64 = 5_000;
 /// Receivers derived per wallet read.
 const CHUNK: u64 = 100;
 
-/// An early restore that registered its keys, with the paid ones still to look up (see
-/// [`EarlyRestore::look_up`]).
-pub struct EarlyRestore<'a, T> {
+/// One account's early restore that registered its keys, with the paid ones still to look
+/// up (see [`EarlyRestore::look_up`]).
+pub struct EarlyRestore<'a, T, A> {
     directory: Directory<'a, T>,
+    /// The account the restore began for, which its lookups are recorded for.
+    account: A,
     /// Paid keys with their receivers.
     paid: Vec<DiscoveryWork>,
 }
@@ -64,7 +69,7 @@ pub async fn begin_early_restore<'a, W, P, T, L>(
     transport: T,
     lock: &L,
     now: i64,
-) -> Result<Option<EarlyRestore<'a, T>>, Error<AccountError<W>>>
+) -> Result<Option<EarlyRestore<'a, T, AccountId<W>>>, Error<AccountError<W>>>
 where
     W: OneTimeIvkRestoreWrite,
     P: Parameters,
@@ -129,27 +134,31 @@ where
             wallet.begin_one_time_early_restore(account, end, &keys)
         })
         .map_err(Error::Wallet)?;
-    Ok(begun.then_some(EarlyRestore { directory, paid }))
+    Ok(begun.then_some(EarlyRestore {
+        directory,
+        account,
+        paid,
+    }))
 }
 
-impl<T: Transport> EarlyRestore<'_, T> {
-    /// Looks up every paid key over PIR and records each answer with the publication's
-    /// witnesses (see `OneTimeIvkRestoreWrite::record_one_time_early_lookup`). Runs
-    /// alongside the restore scan. The keys looked up come only from the public filters.
+impl<T: Transport, A: Copy> EarlyRestore<'_, T, A> {
+    /// Looks up every paid key over PIR and records each answer for the restore's account,
+    /// with the publication's witnesses (see
+    /// `OneTimeIvkRestoreWrite::record_one_time_early_lookup`). Runs alongside the restore
+    /// scan. The keys looked up come only from the public filters.
     /// A key whose lookup fails is listed in [`LookedUp::failed`] and left to restore
     /// sweeps, while the others go on, unless the directory's connection failed or it
     /// revoked the session: then the remaining keys are left too.
     pub async fn look_up<W, L>(
         mut self,
         wallet: &mut W,
-        account: AccountId<W>,
         lock: &L,
     ) -> Result<LookedUp<AccountError<W>>, Error<AccountError<W>>>
     where
-        W: OneTimeIvkRestoreWrite,
+        W: OneTimeIvkRestoreWrite + WalletRead<AccountId = A>,
         L: WriteLock,
     {
-        let mut failed = Vec::new();
+        let (account, mut failed) = (self.account, Vec::new());
         if !self.paid.is_empty() {
             self.directory.open_session(self.paid.len()).await?;
         }
