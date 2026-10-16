@@ -3500,8 +3500,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
     /// Stores scanned blocks for `put_blocks` and, with `one_time_keys`, the one-time key
     /// snapshot that scanned them, for `put_blocks_with_one_time_ivks`. Blocks scanned
     /// without one-time keys, as every build without `orchard` scans them, are refused while
-    /// `wallet::one_time_key_open`: storing them would mark a key's payments scanned without
-    /// finding them.
+    /// `wallet::one_time_scan_required`: storing them would mark a key's payments scanned
+    /// without finding them, or skip an early restore's checks.
     fn store_scanned_blocks(
         &mut self,
         from_state: &ChainState,
@@ -3510,7 +3510,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
     ) -> Result<(), SqliteClientError> {
         #[cfg(not(feature = "orchard"))]
         let one_time_keys: Option<()> = None;
-        if one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)? {
+        if one_time_keys.is_none() && wallet::one_time_scan_required(self.conn.0)? {
             return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
         // Without one-time IVK state, nothing needs Ironwood spend evidence kept longer.

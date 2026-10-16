@@ -872,6 +872,19 @@ pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientE
     )?)
 }
 
+/// Whether scanned blocks must come with one-time keys: a key is open (see
+/// [`one_time_key_open`]), or an early restore still waits for the scan to judge its
+/// publication or to try a key in a hinted block (see `one_time_ivk::restore::early`).
+pub(crate) fn one_time_scan_required(conn: &Connection) -> Result<bool, SqliteClientError> {
+    Ok(one_time_key_open(conn)?
+        || conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_restores WHERE state = 0)
+             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery WHERE scan_hint = 1)",
+            [],
+            |row| row.get(0),
+        )?)
+}
+
 /// Returns `true` if `address` (an encoded transparent receiver address) is already recorded
 /// in the `addresses` table, whether as a derived account receiver or as a prior standalone
 /// import.
