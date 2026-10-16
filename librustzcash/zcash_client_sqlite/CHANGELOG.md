@@ -19,6 +19,10 @@ and this library adheres to Rust's notion of
   its last block, and anything that does not settle falls back to restore sweeps.
 - `wallet::init::migrations::ids::ONE_TIME_IVK_EARLY_RESTORE`, an additive migration for early
   restores.
+- `TransparentPirSession`, with `WalletDb::with_transparent_pir_session`,
+  `WalletDb::set_transparent_pir_session` and `WalletDb::transparent_pir_session`: the transparent work an open wallet holds
+  back until the next chain tip, shared by the wallet's database handles like
+  `EnhancePirSession`. It is kept in memory only, with no new table or migration.
 
 ### Changed
 
@@ -29,6 +33,30 @@ and this library adheres to Rust's notion of
 - `finish_one_time_nullifier_recovery` releases at most 50,000 retained Ironwood nullifiers
   per call, so its prune stays short; later calls continue. Pruning checks only transaction
   locators below the retention floor.
+
+- Operations that can queue transparent lookups now reject caller-owned SQL transactions
+  without a wallet-owned session journal with `TransparentSessionTransactionRequired`.
+  Use `WalletDb::transactionally` or `transactionally_with_extension` so a rollback cannot
+  release an existing lookup's privacy hold.
+
+- A txid lookup newly queued at the current chain tip (by a recovery, Enhance,
+  status or receiver PIR reply, a policy change or the scan) is not listed by
+  `TransparentDetailRead::transparent_detail_work` until the chain tip changes,
+  whether it rose or a reorg lowered it, even when the caller prefers its txid.
+  The display service therefore never sees a reply from another service turn
+  into a lookup at the same tip. Adding a reason to a queued lookup does not hold
+  it back. The record lives in the handle's `TransparentPirSession` and changes
+  with the wallet transaction that queued the work; a fresh session, as after a
+  restart, lists the work at once.
+
+- Newly queued Ironwood Enhance positions no longer wait a random time before
+  their first private query. The shared session still tracks content failures.
+  `EnhancePirRead` for `WalletDb` no longer requires `CL: Clock`.
+
+### Removed
+
+- `WalletDb::set_enhance_pir_max_delay` and the session's in-memory query deadlines.
+  No database migration is required.
 
 ## [0.1.0-rc9] - 2026-10-14
 

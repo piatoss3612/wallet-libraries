@@ -28,7 +28,7 @@ use zip32::Scope;
 
 use crate::{AccountUuid, error::SqliteClientError};
 
-use super::transparent_ledger;
+use super::transparent_ledger::{self, session::SessionState as TransparentSession};
 use super::{TxQueryType, get_account, memo_repr, orchard::parse_note_version};
 
 use zcash_client_backend::data_api::transparent_ledger::TransparentLedgerMode;
@@ -322,6 +322,7 @@ fn require_lwd(
 #[cfg(feature = "orchard")]
 pub(crate) fn finish_private_receipt(
     conn: &Transaction<'_>,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
     tx_ref: crate::TxRef,
@@ -337,6 +338,7 @@ pub(crate) fn finish_private_receipt(
         super::queue_tx_retrieval(conn, std::iter::once(txid), None)?;
         return queue_transaction(
             conn,
+            tpir_session,
             configured,
             session,
             tx_ref,
@@ -356,6 +358,7 @@ pub(crate) fn finish_private_receipt(
 /// then requeues the memos of its received Ironwood notes, which remain privately recoverable.
 fn require_private_details_unsupported(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     tx_ref: crate::TxRef,
 ) -> Result<(), SqliteClientError> {
     conn.execute(
@@ -366,6 +369,7 @@ fn require_private_details_unsupported(
     clear_work(conn, tx_ref)?;
     transparent_ledger::details::enqueue_tx(
         conn,
+        tpir_session,
         tx_ref,
         zcash_client_backend::data_api::transparent_ledger::TransparentDetailReasons::MIXED,
     )?;
@@ -393,6 +397,7 @@ pub(crate) fn queue_unsupported_memos(
 /// authority is current, otherwise a private-details marker with no public request.
 fn require_transparent_details(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     tx_ref: crate::TxRef,
     expected_generation: u64,
@@ -402,7 +407,7 @@ fn require_transparent_details(
         require_lwd(conn, tx_ref, expected_generation)?;
         Ok(EnhancePirStoreResult::LwdRequired)
     } else {
-        require_private_details_unsupported(conn, tx_ref)?;
+        require_private_details_unsupported(conn, tpir_session, tx_ref)?;
         Ok(EnhancePirStoreResult::PrivateDetailsUnsupported)
     }
 }
@@ -410,11 +415,12 @@ fn require_transparent_details(
 /// Like [`require_transparent_details`], for scan-time paths that do not return a store result.
 pub(super) fn route_transparent_details(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     tx_ref: crate::TxRef,
 ) -> Result<(), SqliteClientError> {
     let expected = transparent_ledger::capture_policy_generation(conn)?;
-    let _ = require_transparent_details(conn, configured, tx_ref, expected)?;
+    let _ = require_transparent_details(conn, tpir_session, configured, tx_ref, expected)?;
     Ok(())
 }
 
@@ -450,9 +456,6 @@ const OUTGOING_SUSPENDED: u8 = 4;
 
 /// Content failures after which a request leaves query work until a rescan or fresh session.
 pub(crate) const MAX_REJECTIONS: u32 = 3;
-
-/// The longest random delay before the first private query of a newly queued position.
-pub(crate) const MAX_NOT_BEFORE_DELAY: std::time::Duration = std::time::Duration::from_secs(75);
 
 /// Selects enhancement rows from `tx_retrieval_queue q` (joined with `transactions t`) that may use
 /// ordinary public transport. When `:protect_ironwood` is set, privately protected transactions
@@ -598,10 +601,10 @@ pub(crate) fn work(
 ) -> Result<Vec<EnhancePirWork>, SqliteClientError> {
     let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
     Ok(session
-        .filter(
-            read_work(&mut stmt, named_params![":public_authority": false])?,
-            None,
-        )
+        .filter(read_work(
+            &mut stmt,
+            named_params![":public_authority": false],
+        )?)
         .into_iter()
         .map(|work| match work {
             TransactionEnhancementWork::Private(work) => work,
@@ -623,8 +626,6 @@ pub(crate) fn transaction_enhancement_work(
     mode: EnhancementMode,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
-    now: std::time::SystemTime,
-    max_delay: std::time::Duration,
 ) -> Result<Vec<TransactionEnhancementWork>, SqliteClientError> {
     // A caller-owned transaction can expose temporary removals that later roll back.
     // Only prune committed state, or stage cleanup in the wallet's commit journal.
@@ -650,13 +651,14 @@ pub(crate) fn transaction_enhancement_work(
                 })?,
             ],
         )?;
-        Ok(session.filter(work, Some((now, max_delay))))
+        Ok(session.filter(work))
     })
 }
 
 /// Authentication context and writes share the transaction owned by the public operation.
 struct Storage<'a, 'conn, P> {
     tx: &'a Transaction<'conn>,
+    tpir_session: &'a TransparentSession,
     params: &'a P,
     configured: Option<TransparentLedgerMode>,
     expected_generation: u64,
@@ -719,6 +721,7 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
     ) -> Result<EnhancePirStoreResult, Self::Error> {
         apply(
             self.tx,
+            self.tpir_session,
             self.params,
             self.configured,
             self.expected_generation,
@@ -729,6 +732,7 @@ impl<P: Parameters> EnhancePirStorage for Storage<'_, '_, P> {
 
 pub(crate) fn apply_records<P: Parameters>(
     tx: &Transaction<'_>,
+    tpir_session: &TransparentSession,
     params: &P,
     configured: Option<TransparentLedgerMode>,
     records: &[(EnhancePirRequest, EnhanceRecord)],
@@ -737,6 +741,7 @@ pub(crate) fn apply_records<P: Parameters>(
     zcash_client_backend::data_api::enhance_pir::storage::validate_and_apply_records(
         &mut Storage {
             tx,
+            tpir_session,
             params,
             configured,
             expected_generation,
@@ -800,6 +805,7 @@ pub(crate) fn pending_outgoing(
 /// Runs exactly once per scanned wallet transaction, after its notes are stored.
 pub(crate) fn queue_scanned(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
     tx_ref: crate::TxRef,
@@ -813,7 +819,7 @@ pub(crate) fn queue_scanned(
         IronwoodEnhancementPlan::Ineligible
     ) && (!tx.ironwood_spends().is_empty() || !tx.ironwood_outputs().is_empty())
     {
-        route_transparent_details(conn, configured, tx_ref)?;
+        route_transparent_details(conn, tpir_session, configured, tx_ref)?;
         // Route 2 keeps private memo work; this rescan re-arms it as queue_transaction does.
         return rearm_rejected_positions(conn, session, tx_ref);
     }
@@ -828,10 +834,11 @@ pub(crate) fn queue_scanned(
         .iter()
         .any(|(account, _)| !scanned_accounts.contains(account))
     {
-        discovery::queue(conn, configured, tx_ref)?;
+        discovery::queue(conn, tpir_session, configured, tx_ref)?;
     }
     queue_transaction(
         conn,
+        tpir_session,
         configured,
         session,
         tx_ref,
@@ -841,6 +848,7 @@ pub(crate) fn queue_scanned(
 
 fn queue_transaction(
     conn: &Connection,
+    tpir_session: &TransparentSession,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
     tx_ref: crate::TxRef,
@@ -856,7 +864,7 @@ fn queue_transaction(
     }
     let route = route(conn, tx_ref)?;
     if route == Some(LWD_REQUIRED) || route == Some(PRIVATE_DETAILS_UNSUPPORTED) {
-        route_transparent_details(conn, configured, tx_ref)?;
+        route_transparent_details(conn, tpir_session, configured, tx_ref)?;
         // Route 2 keeps private memo work; the rescan re-arms it like any other.
         return rearm_rejected_positions(conn, session, tx_ref);
     }
@@ -869,7 +877,7 @@ fn queue_transaction(
                 |row| row.get(0),
             )?;
             if route.is_some() || has_notes {
-                route_transparent_details(conn, configured, tx_ref)?;
+                route_transparent_details(conn, tpir_session, configured, tx_ref)?;
                 rearm_rejected_positions(conn, session, tx_ref)?;
             }
             return Ok(());
@@ -1010,57 +1018,6 @@ fn rearm_rejected_positions(
     Ok(())
 }
 
-/// Every position an Enhance queue holds, or with `tx_ref`, every one of that transaction.
-fn queued_positions(
-    conn: &Connection,
-    tx_ref: Option<crate::TxRef>,
-) -> Result<std::collections::BTreeSet<u64>, SqliteClientError> {
-    conn.prepare_cached(
-        "SELECT q.commitment_tree_position
-         FROM ironwood_memo_retrieval_queue q
-         JOIN ironwood_received_notes rn ON rn.id = q.received_note_id
-         WHERE :tx IS NULL OR rn.transaction_id = :tx
-         UNION
-         SELECT commitment_tree_position FROM ironwood_enhance_outgoing_queue
-         WHERE :tx IS NULL OR transaction_id = :tx
-         UNION
-         SELECT commitment_tree_position FROM ironwood_enhance_metadata_queue
-         WHERE commitment_tree_position IS NOT NULL
-           AND (:tx IS NULL OR transaction_id = :tx)",
-    )?
-    .query_map(named_params![":tx": tx_ref.map(|t| t.0)], |row| {
-        row.get::<_, u64>(0)
-    })?
-    .collect::<Result<_, _>>()
-    .map_err(Into::into)
-}
-
-/// Draws a not-before time for each queued position of `tx_ref` (every queued position, without
-/// one) that `session` has none for: `now` plus a delay drawn uniformly from zero to `max_delay`
-/// with `rng`, independently per position, in position order. An existing time is kept, so a
-/// rescan in the same session does not draw again.
-///
-/// The time is session memory, not wallet state: a fresh session draws again at its first
-/// write. A restart is the application's doing, not a reply's, so it cannot steer the query.
-pub(crate) fn arm_not_before<R: rand::Rng + ?Sized>(
-    conn: &Connection,
-    session: &SessionState,
-    tx_ref: Option<crate::TxRef>,
-    now: std::time::SystemTime,
-    max_delay: std::time::Duration,
-    rng: &mut R,
-) -> Result<(), SqliteClientError> {
-    use rand::RngExt;
-    let deadlines = session.deadlines();
-    for position in queued_positions(conn, tx_ref)? {
-        if !deadlines.contains_key(&position) {
-            let delay = rng.random_range(0..=max_delay.as_secs());
-            session.set_not_before(position, now + std::time::Duration::from_secs(delay));
-        }
-    }
-    Ok(())
-}
-
 /// Counts a content failure against each distinct position of `requests` that is still query
 /// work. Called in a transaction after a rejected batch rolled back or a reply failed to decode.
 /// A request that is stale, completed or already suspended is ignored, so a late result cannot
@@ -1075,13 +1032,10 @@ pub(crate) fn record_content_failures(
     let public_authority = transparent_ledger::retains_public_authority(conn, configured)?;
     let mut stmt = conn.prepare_cached(&transaction_enhancement_work_sql(true, false))?;
     let live: std::collections::BTreeSet<_> = session
-        .filter(
-            read_work(
-                &mut stmt,
-                named_params![":public_authority": public_authority],
-            )?,
-            None,
-        )
+        .filter(read_work(
+            &mut stmt,
+            named_params![":public_authority": public_authority],
+        )?)
         .into_iter()
         .filter_map(|work| match work {
             TransactionEnhancementWork::Private(EnhancePirWork::Query(request)) => Some(request),
@@ -1116,7 +1070,6 @@ pub(crate) fn retain_live_failures(
         })
         .collect();
     session.retain(live);
-    session.retain_not_before(queued_positions(conn, None)?);
     Ok(())
 }
 
@@ -1311,6 +1264,7 @@ fn pending_note<P: Parameters>(
 /// back together if any operation fails.
 pub(crate) fn apply<P: Parameters>(
     tx: &Transaction<'_>,
+    tpir_session: &TransparentSession,
     params: &P,
     configured: Option<TransparentLedgerMode>,
     expected_generation: u64,
@@ -1390,6 +1344,7 @@ pub(crate) fn apply<P: Parameters>(
         }
         return store_unsupported_details(
             tx,
+            tpir_session,
             tx_ref,
             route,
             has_transparent_outputs,
@@ -1529,8 +1484,10 @@ pub(crate) fn apply<P: Parameters>(
 /// sticky route-2 marker here, keeping memo work for its other received notes, and every later
 /// response for it lands in this function again. The marker stays when every memo is known:
 /// its transparent details remain unsupported, and history keeps reporting them as pending.
+#[allow(clippy::too_many_arguments)]
 fn store_unsupported_details(
     tx: &Transaction<'_>,
+    tpir_session: &TransparentSession,
     tx_ref: crate::TxRef,
     route: i64,
     has_transparent_outputs: bool,
@@ -1613,7 +1570,7 @@ fn store_unsupported_details(
         [tx_ref.0],
     )?;
     if route == PRIVATE_PROTECTED {
-        require_private_details_unsupported(tx, tx_ref)?;
+        require_private_details_unsupported(tx, tpir_session, tx_ref)?;
     }
     Ok(EnhancePirStoreResult::PrivateDetailsUnsupported)
 }

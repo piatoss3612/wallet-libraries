@@ -1693,6 +1693,37 @@ fn a_malformed_entry_fails_alone_and_its_third_failure_holds_the_account() {
     f.assert_private(&[0]);
 }
 
+/// Publication lag is public even when a selected entry fails on content.
+/// The actual source and adapter must retain the same service wait in both
+/// cases; a coordinator must not infer it from synthetic fixture outcomes.
+#[test]
+fn a_malformed_entry_preserves_the_publication_wait() {
+    let _heavy = HEAVY.lock().unwrap_or_else(PoisonError::into_inner);
+    let published = H0 + 649;
+    for malformed in [false, true] {
+        let mut f = Fixture::new(H0 + 250, published + 1);
+        let (a0, a1) = (
+            f.derived(TransparentKeyScope::EXTERNAL, 0),
+            f.derived(TransparentKeyScope::EXTERNAL, 1),
+        );
+        f.publish(&failing_entry(a0, a1, published, malformed), SEAL);
+        let pass = f.drive();
+        assert_eq!(pass.report.failed_entries.entries, usize::from(malformed));
+        assert_eq!(
+            pass.report.progress.retry(),
+            Retry::After(Retry::BEHIND),
+            "a failed private entry must not remove the public publication wait"
+        );
+        // The private result still records the failure and cannot qualify
+        // coverage through the wallet's target.
+        assert!(pass.report.progress.covered_through < published + 1);
+        if malformed {
+            assert_eq!(pass.report.retry(), Retry::Stalled);
+            assert_eq!(pass.report.failed_entries.held, 0);
+        }
+    }
+}
+
 /// A service that publishes the wallet's directory entry malformed learns nothing
 /// from the sync it answers when the honest entry is inline: the wallet sends the
 /// same requests as it does to the honest service.
@@ -2557,6 +2588,12 @@ fn private_details_end_to_end() {
             .map(|r| (r.txid, u64::from(u32::from(r.mined_height))))
             .collect()
     };
+    // Activation queued both lookups at this tip, so they are held until the next one, or
+    // until a restart forgets the session; this fixture restarts to keep its tip.
+    assert_eq!(due(&f, now), vec![]);
+    f.st.wallet_mut()
+        .db_mut()
+        .set_transparent_pir_session(zcash_client_sqlite::TransparentPirSession::default());
     let work = due(&f, now);
     assert_eq!(
         work.iter()

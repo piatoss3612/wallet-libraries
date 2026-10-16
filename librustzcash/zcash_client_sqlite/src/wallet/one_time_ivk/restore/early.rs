@@ -40,7 +40,10 @@ use crate::wallet::one_time_ivk::{
 use crate::{
     AccountUuid,
     error::SqliteClientError,
-    wallet::{enhance_pir::session::SessionState, scanning::priority_code},
+    wallet::{
+        enhance_pir::session::SessionState, scanning::priority_code,
+        transparent_ledger::session::SessionState as TpirSessionState,
+    },
 };
 
 /// A publication an account's early restore registered keys from.
@@ -184,6 +187,7 @@ pub(crate) fn record_lookup<P: Parameters>(
     params: &P,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
+    tpir_session: &TpirSessionState,
     account: AccountUuid,
     key: KeyId,
     payments: &[DirectoryPayment],
@@ -238,7 +242,7 @@ pub(crate) fn record_lookup<P: Parameters>(
         )?;
     }
     if restore.state == ACCEPTED {
-        insert_ready(conn, params, configured, session, &restore)?;
+        insert_ready(conn, params, configured, session, tpir_session, &restore)?;
     }
     settle(conn, id, &restore)
 }
@@ -251,6 +255,7 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     params: &P,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
+    tpir_session: &TpirSessionState,
     keys: &[(AccountUuid, KeyId)],
     range: Range<BlockHeight>,
 ) -> Result<(), SqliteClientError> {
@@ -261,7 +266,7 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     }
     check_hints(conn, keys, range)?;
     for restore in restores(conn, ACCEPTED)? {
-        insert_ready(conn, params, configured, session, &restore)?;
+        insert_ready(conn, params, configured, session, tpir_session, &restore)?;
     }
     Ok(())
 }
@@ -435,6 +440,7 @@ fn insert_ready<P: Parameters>(
     params: &P,
     configured: Option<TransparentLedgerMode>,
     session: &SessionState,
+    tpir_session: &TpirSessionState,
     restore: &Restore,
 ) -> Result<(), SqliteClientError> {
     if restore.state != ACCEPTED {
@@ -493,6 +499,7 @@ fn insert_ready<P: Parameters>(
             }
             let applied = apply_payment(
                 conn,
+                tpir_session,
                 params,
                 configured,
                 session,

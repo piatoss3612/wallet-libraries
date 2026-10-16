@@ -90,11 +90,11 @@ fn state_with_factory(factory: TestDbFactory) -> State {
 }
 
 mod discovery;
-mod not_before;
 
 fn outgoing(st: &State, tx_ref: crate::TxRef, position: u64, index: usize) -> EnhancePirRequest {
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -229,6 +229,7 @@ fn either_transparent_flag_routes_the_entire_transaction_and_is_sticky() {
         );
         queue_transaction(
             st.wallet().conn(),
+            &Default::default(),
             Some(TransparentLedgerMode::Public),
             &st.wallet().db().enhance_pir_session,
             tx_ref,
@@ -420,6 +421,7 @@ fn completion_retires_only_enhancement_and_survives_replay() {
     assert_eq!(statuses, 1);
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -529,6 +531,7 @@ fn explicit_mixed_scan_discards_all_work_but_keeps_recovered_data() {
     finish_incoming(&mut st, request);
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -549,6 +552,7 @@ fn explicit_mixed_scan_discards_all_work_but_keeps_recovered_data() {
     assert_eq!(memo, vec![0xf6]);
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -847,6 +851,7 @@ fn rescanning_removes_outgoing_jobs_now_covered_by_incoming_decryption() {
     );
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -902,6 +907,7 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
     .with_ironwood_enhancement_plan(IronwoodEnhancementPlan::Ineligible);
     queue_scanned(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -912,6 +918,7 @@ fn a_mixed_spend_without_received_ironwood_notes_is_sticky() {
         .with_ironwood_enhancement_plan(IronwoodEnhancementPlan::Eligible { outgoing: vec![] });
     queue_scanned(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -1017,6 +1024,7 @@ impl<C: std::borrow::BorrowMut<Connection>, P: Parameters, CL: crate::util::Cloc
                 crate::wallet::transparent_ledger::capture_policy_generation(wdb.conn.0)?;
             apply(
                 wdb.conn.0,
+                &wdb.transparent_pir_session,
                 wdb.params,
                 wdb.transparent_ledger_mode,
                 expected,
@@ -1042,6 +1050,7 @@ fn unified_work_preserves_both_suspension_kinds_across_reopen() {
     // This incoming-only fixture has no durable spending associations.
     super::discovery::queue(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         tx_ref,
     )
@@ -1192,9 +1201,7 @@ fn reopening_requires_mode_before_enumerating_persisted_work() {
         db.transaction_enhancement_work(),
         Err(SqliteClientError::EnhancementModeNotConfigured)
     ));
-    let mut db = db.with_enhancement_mode(EnhancementMode::PrivateIronwood);
-    // A new handle starts a new session, which would draw each position's wait again.
-    db.set_enhance_pir_max_delay(std::time::Duration::ZERO);
+    let db = db.with_enhancement_mode(EnhancementMode::PrivateIronwood);
     assert_eq!(db.transaction_enhancement_work().unwrap(), expected);
 }
 
@@ -1286,6 +1293,7 @@ fn pir_recovers_history_and_backfills_without_losing_a_stored_memo() {
         .unwrap();
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -1868,6 +1876,7 @@ fn batch_transparent_routing_is_order_independent_and_sticky() {
             .set_enhancement_mode(EnhancementMode::PrivateIronwood);
         queue_transaction(
             st.wallet().conn(),
+            &Default::default(),
             Some(TransparentLedgerMode::Public),
             &st.wallet().db().enhance_pir_session,
             tx_ref,
@@ -2109,6 +2118,7 @@ fn scan_persists_compact_fields_and_rescan_preserves_them() {
     let tx = st.wallet().conn().unchecked_transaction().unwrap();
     super::super::orchard::put_received_note(
         &tx,
+        &Default::default(),
         st.network(),
         ShieldedPool::Ironwood,
         &output,
@@ -2205,7 +2215,6 @@ fn routed(st: &State) -> (Vec<TxId>, Vec<EnhancePirWork>) {
     for work in &private {
         let txid = match work {
             EnhancePirWork::Query(request)
-            | EnhancePirWork::Waiting { request, .. }
             | EnhancePirWork::Suspended(
                 EnhancePirSuspension::OutgoingNotRecoverable(request)
                 | EnhancePirSuspension::Rejected(request),
@@ -2358,6 +2367,7 @@ fn private_suspensions_are_never_routed_publicly() {
     // This incoming-only fixture has no durable spending associations.
     super::discovery::queue(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::Public),
         tx_ref,
     )
@@ -2547,6 +2557,7 @@ fn scan_time_mixed_routing_keeps_private_memo_work_under_private_required() {
     // Explicit non-Ironwood compact fields route the transaction before any PIR query.
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::PrivateRequired),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -2578,6 +2589,7 @@ fn scan_time_mixed_routing_keeps_private_memo_work_under_private_required() {
     // Replayed scans neither requeue the recovered memo nor change the route.
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::PrivateRequired),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -2596,6 +2608,7 @@ fn route_two_memo_work_follows_public_authority_across_policy_transitions() {
     private_required(&mut st);
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::PrivateRequired),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -2791,7 +2804,7 @@ fn third_rejection_suspends_the_position() {
     assert!(!visible(&st, request));
 
     // A newly opened wallet starts a new in-memory allowance.
-    let mut reopened = crate::WalletDb::for_path(
+    let reopened = crate::WalletDb::for_path(
         st.wallet().data_file_path(),
         *st.network(),
         test_clock(),
@@ -2800,8 +2813,6 @@ fn third_rejection_suspends_the_position() {
     .unwrap()
     .with_enhancement_mode(EnhancementMode::PrivateIronwood)
     .with_transparent_ledger_mode(TransparentLedgerMode::Public);
-    // Its session would also draw the position's wait again.
-    reopened.set_enhance_pir_max_delay(std::time::Duration::ZERO);
     assert_eq!(rejections(&reopened, request), None);
     assert!(
         reopened
@@ -3097,6 +3108,7 @@ fn a_rescan_rearms_route_two_memo_positions() {
     private_required(&mut st);
     queue_transaction(
         st.wallet().conn(),
+        &Default::default(),
         Some(TransparentLedgerMode::PrivateRequired),
         &st.wallet().db().enhance_pir_session,
         tx_ref,
@@ -3164,6 +3176,7 @@ fn a_mixed_rescan_rearms_route_two_memo_positions() {
     let rescan = |st: &State| {
         queue_scanned(
             st.wallet().conn(),
+            &Default::default(),
             Some(TransparentLedgerMode::PrivateRequired),
             &st.wallet().db().enhance_pir_session,
             tx_ref,
@@ -3291,6 +3304,7 @@ fn a_rolled_back_rescan_keeps_the_suspension() {
     let result: Result<(), SqliteClientError> = st.wallet_mut().db_mut().transactionally(|db| {
         queue_transaction(
             db.conn.0,
+            &db.transparent_pir_session,
             db.transparent_ledger_mode,
             &db.enhance_pir_session,
             tx_ref,
@@ -3324,6 +3338,7 @@ fn a_failed_rescan_commit_keeps_the_suspension() {
     let result: Result<(), SqliteClientError> = st.wallet_mut().db_mut().transactionally(|db| {
         queue_transaction(
             db.conn.0,
+            &db.transparent_pir_session,
             db.transparent_ledger_mode,
             &db.enhance_pir_session,
             tx_ref,

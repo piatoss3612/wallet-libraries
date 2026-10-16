@@ -334,9 +334,16 @@ fn a_late_hint_becomes_a_payment_to_insert() {
     // The batch's key snapshot predates the lookup.
     st.scan_cached_blocks(paid, 3);
     let db = st.wallet_mut().db_mut();
-    let (mode, session) = (db.transparent_ledger_mode, db.enhance_pir_session.clone());
-    tx(db, |c, p| {
-        store::restore::early::after_blocks_stored(c, p, mode, &session, &[], paid..last + 1)
+    db.transactionally(|db| {
+        store::restore::early::after_blocks_stored(
+            db.conn.0,
+            db.params,
+            db.transparent_ledger_mode,
+            &db.enhance_pir_session,
+            &db.transparent_pir_session,
+            &[],
+            paid..last + 1,
+        )
     })
     .unwrap();
     assert_eq!(restore_state(&st), 1);

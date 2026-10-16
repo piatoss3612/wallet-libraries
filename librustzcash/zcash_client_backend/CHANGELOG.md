@@ -22,6 +22,12 @@ and this library adheres to Rust's notion of
 - `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery` may release only part of the
   retained evidence per call; it returns true once release reaches the tip.
 
+### Removed
+
+- `EnhancePirWork::Waiting`: newly queued private payload work is eligible through
+  the ordinary recovery schedule without a randomized first-query delay.
+  Consumers must remove waiting-state handling.
+
 ## [0.1.0-rc9] - 2026-10-14
 
 ### Added
