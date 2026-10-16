@@ -359,8 +359,12 @@ fn a_late_hint_becomes_a_payment_to_insert() {
     begin(&mut st, account, last);
     lookup(&mut st, account, &candidate, true);
     assert_eq!(queued(&st), [(u32::from(paid), true)]);
-    // The batch's key snapshot predates the lookup.
-    st.scan_cached_blocks(paid, 3);
+    // The batch's key snapshot predates the lookup: the hint is out of the scanner's sight
+    // while the batch scans, and the store then sees it with that empty snapshot.
+    let moved = "UPDATE ironwood_one_time_payment_recovery SET height = height + ?1";
+    exec(st.wallet().conn(), moved, [1000]);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 3);
+    exec(st.wallet().conn(), moved, [-1000]);
     let db = st.wallet_mut().db_mut();
     db.transactionally(|db| {
         store::restore::early::after_blocks_stored(
@@ -378,6 +382,49 @@ fn a_late_hint_becomes_a_payment_to_insert() {
     assert_eq!(unspent_keys(&st, last), [Some(receive(8))]);
     assert!(queued(&st).is_empty());
     assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), false));
+}
+
+/// While an early restore waits for the scan, blocks scanned without one-time keys are
+/// refused, since storing them would skip judging its publication and trying its hints.
+#[test]
+fn an_early_restore_refuses_scans_without_one_time_keys() {
+    let (mut st, _, paid, last) = unscanned_restore();
+    let account = st.test_account().unwrap().id();
+    begin(&mut st, account, last);
+    assert!(matches!(
+        st.try_scan_cached_blocks(paid, 1),
+        Err(zcash_client_backend::data_api::chain::error::Error::Wallet(
+            SqliteClientError::OneTimeIvksNotUsed
+        ))
+    ));
+    st.scan_cached_blocks_with_one_time_ivks(paid, 3);
+    assert_eq!(state_of(&st, account), 1);
+}
+
+/// A rewind below an accepted publication's anchor makes it provisional again, so a paid
+/// key whose lookup arrives afterwards, here empty, finishes only when the rescan judges
+/// the anchor again, and closes then instead of against the removed block.
+#[test]
+fn a_rewind_below_an_accepted_anchor_judges_it_again() {
+    let (mut st, _, paid, last) = unscanned_restore();
+    let account = st.test_account().unwrap().id();
+    begin(&mut st, account, last);
+    st.scan_cached_blocks_with_one_time_ivks(paid, 3);
+    assert_eq!(state_of(&st, account), 1);
+    assert_eq!(sweep_row(&st, receive(8)), (None, true));
+
+    st.truncate_to_height_retaining_cache(paid);
+    assert_eq!(state_of(&st, account), 0);
+    let db = st.wallet_mut().db_mut();
+    db.record_one_time_early_lookup(account, receive(8), &[], |_, _| None)
+        .unwrap();
+    assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), true));
+    assert!(!closed(&st, receive(8)));
+
+    st.scan_cached_blocks_with_one_time_ivks(paid + 1, 2);
+    assert_eq!(state_of(&st, account), 1);
+    assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), false));
+    assert!(closed(&st, receive(8)));
 }
 
 /// Adds the test seed's second account at `birthday`, which rewinds the wallet to the
@@ -640,7 +687,8 @@ fn an_account_added_below_an_accepted_restore_keeps_its_sweeps() {
     assert!(closed(&st, receive(8)));
 
     let theirs = add_account_at_birthday(&mut st);
-    assert_eq!(state_of(&st, ours), 1);
+    // The rewind removed the anchor, so the rescan judges the publication again.
+    assert_eq!(state_of(&st, ours), 0);
     assert_eq!(one_time_notes(&st, ours), (1, 0));
     assert_eq!(sweep_row(&st, receive(0)), (Some(u32::from(last)), false));
     assert_eq!(sweep_row(&st, receive(8)), (Some(u32::from(last)), false));
@@ -651,8 +699,8 @@ fn an_account_added_below_an_accepted_restore_keeps_its_sweeps() {
     lookup(&mut st, theirs, &paid[1], false);
 
     st.scan_cached_blocks_with_one_time_ivks(first, 5);
-    assert_eq!(state_of(&st, theirs), 1);
     for account in [ours, theirs] {
+        assert_eq!(state_of(&st, account), 1);
         assert_eq!(one_time_notes(&st, account), (1, 1));
         assert!(!history_pending(&st, account, last));
     }
