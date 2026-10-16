@@ -1153,14 +1153,12 @@ async fn an_early_restore_credits_payments_as_the_scan_covers_them() {
     .await
     .unwrap()
     .expect("nothing is scanned yet");
-    assert_eq!(early.paid(), 2);
     // The scan passes the first payment before the lookups come in.
     let paid_at = BlockHeight::from(first.payment.height);
     st.scan_cached_blocks_with_one_time_ivks(paid_at, 1);
     assert_eq!(balance(&st), 0);
     let db = st.wallet_mut().db_mut();
     let looked_up = early.look_up(db, account, &lock).await.unwrap();
-    assert_eq!(looked_up.recorded, 2);
     assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
     st.scan_cached_blocks_with_one_time_ivks(paid_at + 1, 2);
     assert_eq!(balance(&st), 2 * VALUE);
@@ -1263,7 +1261,6 @@ async fn two_accounts_restore_early_in_one_sync() {
     let directory = serve(&[first.clone(), second], end);
     let early_a = begin(&mut st, a, &directory).await.unwrap();
     let early_b = begin(&mut st, b, &directory).await.unwrap();
-    assert_eq!((early_a.paid(), early_b.paid()), (1, 1));
     let start = |st: &State| st.wallet().db().one_time_early_restore_start(c).unwrap();
     assert!(start(&st).is_some());
 
@@ -1277,7 +1274,6 @@ async fn two_accounts_restore_early_in_one_sync() {
     for (early, account) in [(early_a, a), (early_b, b)] {
         let db = st.wallet_mut().db_mut();
         let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
-        assert_eq!(looked_up.recorded, 1);
         assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
     }
     st.scan_cached_blocks_with_one_time_ivks(paid_at + 1, 2);
@@ -1312,10 +1308,9 @@ async fn restore_past_a_failed_early_lookup() -> (State, ChainPoint) {
         fault: Fault::LaterQueries,
     };
     let early = begin(&mut st, account, &directory).await.unwrap();
-    assert_eq!(early.paid(), 3);
     let db = st.wallet_mut().db_mut();
     let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
-    assert_eq!(looked_up.recorded, 1);
+    assert_eq!(lookups(&directory.directory), 1);
     let failed: Vec<_> = looked_up.failed.iter().map(|(k, _)| k.index()).collect();
     assert_eq!(failed, [7, 11]);
     let transport = |e: &_| matches!(e, Error::Directory(DirectoryError::Transport(_)));
@@ -1376,10 +1371,13 @@ async fn an_early_restore_looks_ahead_past_each_used_incoming_key() {
     let records = std::slice::from_ref(&paid);
     let directory = Directory::new(publish(records, &commitments, end, &provider(&seen)));
     let early = begin(&mut st, account, &directory).await.unwrap();
-    assert_eq!(early.paid(), 1);
     let expected: Vec<_> = (0..=used[2] + GAP).collect();
     assert_eq!(registered(&st, Purpose::Receive), expected);
     assert!(registered(&st, Purpose::Refund).is_empty());
+    let db = st.wallet_mut().db_mut();
+    let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
+    assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
+    assert_eq!(lookups(&directory), 1);
 }
 
 /// An early restore registers a refund key only when a seen set or the paid filter holds
@@ -1393,8 +1391,7 @@ async fn an_early_restore_registers_only_used_refund_keys() {
     let end = unscanned_end(&mut st);
     let refund = |index| key_receiver(&parent(&st), KeyId::new(Purpose::Refund, index));
     let directory = Directory::new(publish(&[], &[], end, &provider(&[refund(7)])));
-    let early = begin(&mut st, account, &directory).await.unwrap();
-    assert_eq!(early.paid(), 0);
+    begin(&mut st, account, &directory).await.unwrap();
     assert_eq!(registered(&st, Purpose::Refund), [7]);
 
     st.scan_cached_blocks_with_one_time_ivks(end.height, 1);
@@ -1426,13 +1423,11 @@ async fn an_early_restore_checks_at_most_max_keys() {
     let early = begin(&mut st, account, &directory).await.unwrap();
     let expected: Vec<_> = (0..MAX_KEYS).collect();
     assert_eq!(registered(&st, Purpose::Receive), expected);
-    // The paid filter matches about one in 1,533 receivers it does not hold, so a few of
-    // the checked keys are looked up and found unpaid.
-    let false_matches = early.paid();
+    // The paid filter's false matches among the checked keys are looked up and found
+    // unpaid.
     let db = st.wallet_mut().db_mut();
     let looked_up = early.look_up(db, account, &NoLock).await.unwrap();
-    assert_eq!(looked_up.recorded, false_matches);
-    assert_eq!(lookups(&directory), false_matches);
+    assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
 
     let from = BlockHeight::from(paid.payment.height);
     st.scan_cached_blocks_with_one_time_ivks(from, 2);

@@ -35,8 +35,6 @@ pub struct EarlyRestore<'a, T> {
 /// What [`EarlyRestore::look_up`] did. `E` is the wallet's error type.
 #[derive(Debug)]
 pub struct LookedUp<E> {
-    /// Paid keys whose lookups the wallet recorded.
-    pub recorded: usize,
     /// Paid keys left to restore sweeps, with why.
     pub failed: Vec<(KeyId, Error<E>)>,
 }
@@ -132,11 +130,6 @@ where
 }
 
 impl<T: Transport> EarlyRestore<'_, T> {
-    /// The paid keys [`Self::look_up`] looks up.
-    pub fn paid(&self) -> usize {
-        self.paid.len()
-    }
-
     /// Looks up every paid key over PIR and records each answer with the publication's
     /// witnesses (see `OneTimeIvkRestoreWrite::record_one_time_early_lookup`). Runs
     /// alongside the restore scan. The keys looked up come only from the public filters.
@@ -153,7 +146,6 @@ impl<T: Transport> EarlyRestore<'_, T> {
         W: OneTimeIvkRestoreWrite,
         L: WriteLock,
     {
-        let mut recorded = 0;
         let mut failed = Vec::new();
         if !self.paid.is_empty() {
             self.directory.open_session(self.paid.len()).await?;
@@ -179,11 +171,10 @@ impl<T: Transport> EarlyRestore<'_, T> {
                 })
             })
             .map_err(Error::Wallet)?;
-            recorded += 1;
         }
         for item in keys {
             failed.push((item.key, Error::Unavailable("the directory session ended")));
         }
-        Ok(LookedUp { recorded, failed })
+        Ok(LookedUp { failed })
     }
 }

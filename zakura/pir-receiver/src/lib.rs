@@ -11,14 +11,12 @@
 //! authenticates every payment with its derived key and its own chain before crediting
 //! it.
 //!
-//! `begin_early_restore` runs before a restore scan instead. It registers an account's
-//! keys from the publication's public filters, then [`EarlyRestore::look_up`] looks up
-//! the paid ones while the scan runs, so the scan finds each payment in its block or the
-//! wallet inserts one it already passed. The publication stays provisional until the
-//! scan reaches its last block. A payment found this way is an ordinary note from then
-//! on: its enhancement, scan priority and any rebroadcast follow as for any note. So when
-//! a directory's answer is wrong, traffic to the wallet's other services in that sync can
-//! differ from an honest answer's, another route to the test above.
+//! `begin_early_restore` runs before a restore scan instead, and `EarlyRestore::look_up`
+//! looks up its paid keys while the scan runs. A payment found this way is an ordinary
+//! note from then on: its enhancement, scan priority and any rebroadcast follow as for
+//! any note. So when a directory's answer is wrong, traffic to the wallet's other
+//! services in that sync can differ from an honest answer's, another route to the test
+//! above.
 //!
 //! `fetch_seen` downloads the swap provider seen sets that a wallet checks before
 //! issuing a swap address. The `wallet` feature adds `sweep`, which runs these lookups
