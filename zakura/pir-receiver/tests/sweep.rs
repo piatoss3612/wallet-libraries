@@ -1117,7 +1117,8 @@ async fn an_early_restore_credits_payments_as_the_scan_covers_them() {
     // The scan passes the first payment before the lookups come in.
     let paid_at = BlockHeight::from(first.payment.height);
     st.scan_cached_blocks_with_one_time_ivks(paid_at, 1);
-    assert_eq!(balance(&st), 0);
+    let notes = "SELECT COUNT(*) FROM ironwood_received_notes";
+    assert_eq!(column::<i64>(&st, notes), [0]);
     let db = st.wallet_mut().db_mut();
     let looked_up = early.look_up(db, account, &lock).await.unwrap();
     assert!(looked_up.failed.is_empty(), "{:?}", looked_up.failed);
@@ -1142,9 +1143,11 @@ async fn an_early_restore_credits_payments_as_the_scan_covers_them() {
     assert_eq!(directory.requests().len(), before);
 }
 
-/// Mines an empty block left unscanned and returns it as a publication's end.
+/// Mines an empty block left unscanned and returns it as a publication's end. The
+/// wallet learns it as its chain tip, as sync does before an early restore begins.
 fn unscanned_end(st: &mut State) -> ChainPoint {
     let (height, _) = st.generate_empty_block();
+    st.wallet_mut().db_mut().update_chain_tip(height).unwrap();
     ChainPoint {
         height,
         hash: cached(st, height).hash(),
