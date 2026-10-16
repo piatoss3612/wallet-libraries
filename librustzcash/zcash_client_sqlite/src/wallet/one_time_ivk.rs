@@ -473,8 +473,8 @@ pub(crate) fn rescan_missed_keys(
 }
 
 /// Repairs one-time IVK state for a rewind that rescans every block above `height`.
-/// An open key starting above `height` starts at the first rescanned block instead, since
-/// the replacement chain may mine its payment below its old start. A closed key that scanned reopens if the rewind leaves one of its receipts short of the
+/// Open keys start at the first rescanned block at the latest, which
+/// `wallet::truncate_to_height_internal` sets after this in every build. A closed key that scanned reopens if the rewind leaves one of its receipts short of the
 /// confirmations closing requires (see `WalletDb::close_finished_one_time_keys`), and
 /// closes again once that receipt is confirmed again. A key a sweep closed without
 /// scanning reopens from its first note above `height`, so the rescan finds the note
@@ -500,11 +500,6 @@ pub(crate) fn truncate_to_height(
     conn.execute(
         "UPDATE ironwood_one_time_spend_retention SET replay_through = MIN(replay_through, ?1)",
         [u32::from(height)],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_keys SET active_from = ?1
-         WHERE closed_at IS NULL AND active_from > ?1",
-        [u32::from(height + 1)],
     )?;
     conn.execute(
         "UPDATE ironwood_one_time_keys SET closed_at = NULL

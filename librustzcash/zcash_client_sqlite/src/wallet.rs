@@ -4334,6 +4334,14 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // truncation height.
     #[cfg(feature = "orchard")]
     one_time_ivk::truncate_to_height(conn, rescan_floor)?;
+    // Scans take only one-time keys started by each batch's end, and the replacement chain
+    // may mine a payment below an open key's old start, so open keys, including any the
+    // repair above reopened, start at the first rescanned block at the latest.
+    conn.execute(
+        "UPDATE ironwood_one_time_keys SET active_from = ?1
+         WHERE closed_at IS NULL AND active_from > ?1",
+        [u32::from(rescan_floor + 1)],
+    )?;
 
     // Mark transparent utxos as un-mined. Since the TXO is now not mined, it would ideally be
     // considered to have been returned to the mempool; it _might_ be spendable in this state, but
