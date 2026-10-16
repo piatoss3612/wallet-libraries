@@ -299,7 +299,9 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
 
     /// Starts `account`'s early restore against the publication ending at `end`, unless
     /// [`OneTimeIvkRestoreRead::one_time_early_restore_start`] no longer allows one, and
-    /// returns whether it started.
+    /// returns whether it started. It also refuses an `end` below that start, or above the
+    /// wallet's chain tip or with no tip known, since the scan might never store block
+    /// `end.height` to check it.
     ///
     /// Registers each of `keys`, which the caller read from that publication's filters.
     /// A seen or paid key is never issued again and advances allocation. A recent key

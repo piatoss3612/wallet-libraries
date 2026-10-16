@@ -126,8 +126,9 @@ pub(crate) fn begin<P: Parameters>(
     let Some(from) = start(conn, params, account)? else {
         return Ok(false);
     };
-    // The scan never reaches an anchor below the restore start, so nothing would check it.
-    if end.height < from {
+    // See the trait doc for why each anchor is refused.
+    let tip = crate::wallet::chain_tip_height(conn)?;
+    if end.height < from || tip.is_none_or(|tip| end.height > tip) {
         return Ok(false);
     }
     let (owner, _) = account_key(conn, params, account)?;

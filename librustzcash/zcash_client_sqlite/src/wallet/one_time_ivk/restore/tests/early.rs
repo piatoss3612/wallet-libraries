@@ -74,7 +74,8 @@ fn siblings_at(st: &State, position: u32, height: BlockHeight) -> [[u8; 32]; 32]
 }
 
 /// Retains spend history in a new [`ironwood_wallet`], then mines a block paying receive
-/// key 8 and two empty blocks, scanning none of them. Returns the wallet, the payment as
+/// key 8 and two empty blocks, scanning none of them but knowing the last as the chain
+/// tip. Returns the wallet, the payment as
 /// a candidate, and the first and last heights.
 fn unscanned_restore() -> (State, PendingPayment, BlockHeight, BlockHeight) {
     let mut st = ironwood_wallet();
@@ -86,6 +87,7 @@ fn unscanned_restore() -> (State, PendingPayment, BlockHeight, BlockHeight) {
     let (paid, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
     st.generate_empty_block();
     let (last, _) = st.generate_empty_block();
+    st.wallet_mut().update_chain_tip(last).unwrap();
     let candidate = candidate_at(&st, paid, &fvk);
     (st, candidate, paid, last)
 }
@@ -291,6 +293,44 @@ fn an_early_restore_needs_unscanned_history() {
     let db = fresh.wallet_mut().db_mut();
     db.mark_one_time_account_fresh(account).unwrap();
     assert_eq!(db.one_time_early_restore_start(account).unwrap(), None);
+}
+
+/// An anchor the scan might never store is refused without writing anything: one above
+/// the wallet's chain tip, or any while no tip is known.
+#[test]
+fn an_anchor_above_the_chain_tip_is_refused() {
+    let (mut st, _, paid, last) = unscanned_restore();
+    let account = st.test_account().unwrap().id();
+    let above = PublicationEnd {
+        height: last + 1,
+        ..end_at(&st, last)
+    };
+    let db = st.wallet_mut().db_mut();
+    assert!(
+        !db.begin_one_time_early_restore(account, above, &filtered(8))
+            .unwrap()
+    );
+    assert_eq!(
+        db.one_time_early_restore_start(account).unwrap(),
+        Some(paid)
+    );
+    let sql = "SELECT (SELECT COUNT(*) FROM ironwood_one_time_restores)
+                    + (SELECT COUNT(*) FROM ironwood_one_time_keys)";
+    assert_eq!(value::<u32>(st.wallet().conn(), sql, []), 0);
+
+    let mut untipped = ironwood_wallet();
+    let account = untipped.test_account().unwrap().id();
+    let (height, _) = untipped.generate_empty_block();
+    let end = end_at(&untipped, height);
+    let db = untipped.wallet_mut().db_mut();
+    assert!(
+        !db.begin_one_time_early_restore(account, end, &filtered(8))
+            .unwrap()
+    );
+    assert_eq!(
+        db.one_time_early_restore_start(account).unwrap(),
+        Some(height)
+    );
 }
 
 /// A recent key scans from the block after the anchor, never the history before it, and
@@ -521,6 +561,7 @@ fn grid() -> Grid {
     let (h2, _, _) = st.generate_next_block(&recipient, AddressType::DefaultExternal, value);
     st.generate_empty_block();
     let (last, _) = st.generate_empty_block();
+    st.wallet_mut().update_chain_tip(last).unwrap();
     let paid = [candidate_at(&st, h1, &ours), candidate_at(&st, h2, &theirs)];
     Grid {
         st,
@@ -783,6 +824,7 @@ fn spent_restore() -> (
     );
     st.generate_empty_block();
     let (last, _) = st.generate_empty_block();
+    st.wallet_mut().update_chain_tip(last).unwrap();
     (st, candidate, nf, paid, last)
 }
 
