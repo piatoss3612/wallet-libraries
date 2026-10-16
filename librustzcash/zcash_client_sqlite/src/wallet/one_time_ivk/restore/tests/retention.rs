@@ -1,6 +1,5 @@
 use super::apply::{fixture, fixture_in};
 use super::*;
-use crate::wallet::one_time_ivk::restore::retention::RELEASE_NULLIFIERS;
 use rusqlite::params;
 use zakura_one_time_ivk::swap::OperationStatus;
 
@@ -101,11 +100,11 @@ fn completed_recovery_survives_reopen_and_retains_the_next_large_batch() {
     assert_eq!(notes(&st, through.height).len(), 1);
 }
 
-/// A release frees at most `RELEASE_NULLIFIERS` retained Ironwood nullifiers, so a large
-/// backlog takes several releases, each pruning a bounded batch, until release reaches the
-/// tip.
+/// A release frees at most its limit of retained Ironwood nullifiers, so a large backlog
+/// takes several releases, each pruning a bounded batch, until release reaches the tip.
 #[test]
 fn a_release_frees_a_bounded_batch_of_nullifiers() {
+    const LIMIT: u32 = 4;
     let (mut st, _, original) = swept();
     let account = st.test_account().unwrap().id();
     assert!(finish(st.wallet_mut().db_mut(), account, original));
@@ -127,17 +126,17 @@ fn a_release_frees_a_bounded_batch_of_nullifiers() {
     let retained = |db: &Db| value::<u32>(&db.conn, sql, params![pool, u32::from(original.height)]);
     let db = st.wallet_mut().db_mut();
     let mut left = retained(db);
-    assert!(left > 2 * RELEASE_NULLIFIERS, "{left} nullifiers retained");
+    assert!(left > 2 * LIMIT, "{left} nullifiers retained");
+    let at = clock_now();
     let mut releases = 0;
     loop {
         releases += 1;
-        let done = finish(db, account, through);
+        let done = tx(db, |c, p| {
+            store::restore::retention::release_spend_history(c, p, account, through, at, LIMIT)
+        })
+        .unwrap();
         let now = retained(db);
-        assert!(
-            left - now <= RELEASE_NULLIFIERS,
-            "freed {} at once",
-            left - now
-        );
+        assert!(left - now <= LIMIT, "freed {} at once", left - now);
         left = now;
         if done {
             break;

@@ -13,11 +13,7 @@ use crate::{AccountUuid, error::SqliteClientError, wallet, wallet::scanning::pri
 /// prune, in the release and in the next scan batch, hold the wallet's write lock for
 /// seconds; later releases continue where this one stopped. Counted in nullifiers rather
 /// than blocks, because Ironwood actions per block vary by an order of magnitude.
-#[cfg(not(test))]
 const RELEASE_NULLIFIERS: u32 = 50_000;
-/// Small enough for test chains to need several releases.
-#[cfg(test)]
-pub(in crate::wallet::one_time_ivk) const RELEASE_NULLIFIERS: u32 = 4;
 
 /// Retains `account`'s Ironwood spend evidence from its birthday, or Ironwood
 /// activation if later, until [`finish_nullifier_recovery`] releases it.
@@ -42,13 +38,26 @@ pub(in crate::wallet::one_time_ivk) fn retain_spend_history<P: Parameters>(
     Ok(())
 }
 
-/// Implements `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery`.
+/// Implements `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery`, freeing at
+/// most [`RELEASE_NULLIFIERS`] nullifiers per call.
 pub(crate) fn finish_nullifier_recovery<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     through: ChainPoint,
     now: i64,
+) -> Result<bool, SqliteClientError> {
+    release_spend_history(conn, params, account, through, now, RELEASE_NULLIFIERS)
+}
+
+/// [`finish_nullifier_recovery`], freeing at most `limit` retained nullifiers.
+pub(in crate::wallet::one_time_ivk) fn release_spend_history<P: Parameters>(
+    conn: &rusqlite::Transaction<'_>,
+    params: &P,
+    account: AccountUuid,
+    through: ChainPoint,
+    now: i64,
+    limit: u32,
 ) -> Result<bool, SqliteClientError> {
     let (id, _) = account_key(conn, params, account)?;
     let enabled: bool = conn.query_row(
@@ -88,7 +97,7 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
         [id.0],
         |r| r.get(0),
     )?;
-    // At most `RELEASE_NULLIFIERS` rows of any pool lie below the bound, which the
+    // At most `limit` rows of any pool lie below the bound, which the
     // locator index answers without reading rows; below the pruning height they are all
     // Ironwood. A release always passes at least one block.
     let next = if next > floor {
@@ -96,7 +105,7 @@ pub(crate) fn finish_nullifier_recovery<P: Parameters>(
             .query_row(
                 "SELECT block_height FROM nullifier_map WHERE block_height >= ?1
                  ORDER BY block_height LIMIT 1 OFFSET ?2",
-                params![floor, RELEASE_NULLIFIERS],
+                params![floor, limit],
                 |r| r.get(0),
             )
             .optional()?;
