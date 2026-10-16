@@ -173,6 +173,47 @@ impl Overloaded {
     }
 }
 
+/// The caller's transport declined a request before sending any of it,
+/// because the request would cross a budget the caller enforces for the sync.
+///
+/// For a transport that adds requests of its own, which the sync's
+/// [`WorkLimits`](crate::engine::WorkLimits) do not count. Return it only when nothing
+/// of the request was sent. The sync then stops as it does on its own budget:
+/// it keeps every reply it already received, including the earlier replies of
+/// a round of page queries, and reports an incomplete sync with
+/// [`IncompleteReason::QueryBudget`] or [`IncompleteReason::ByteBudget`]. It is
+/// not a refusal by the service: nothing is retried or waited for. In a
+/// [`ShardTransport::batch`], send nothing after a declined request: the sync
+/// reads no reply past it.
+///
+/// [`IncompleteReason::QueryBudget`]: crate::engine::IncompleteReason::QueryBudget
+/// [`IncompleteReason::ByteBudget`]: crate::engine::IncompleteReason::ByteBudget
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum BudgetStop {
+    #[error("the request would cross the caller's query budget")]
+    Queries,
+    #[error("the request would cross the caller's private byte budget")]
+    Bytes,
+}
+
+impl BudgetStop {
+    /// Why the sync stopped, as its report names it.
+    pub fn reason(self) -> crate::engine::IncompleteReason {
+        match self {
+            Self::Queries => crate::engine::IncompleteReason::QueryBudget,
+            Self::Bytes => crate::engine::IncompleteReason::ByteBudget,
+        }
+    }
+
+    pub fn found_in(error: &BoxError) -> Option<&Self> {
+        found_in(error)
+    }
+
+    pub fn boxed(self) -> BoxError {
+        Box::new(self)
+    }
+}
+
 /// Classifies a non-success reply into a refusal a wallet can act on.
 ///
 /// Takes the parts rather than a response type, so the wallet crate stays free
@@ -196,7 +237,7 @@ pub fn refusal(
     Overloaded::from_http(status, retry_after).map(Overloaded::boxed)
 }
 
-/// The shared `source`-chain walk behind both `found_in` methods.
+/// The shared `source`-chain walk behind every `found_in` method.
 fn found_in<E: std::error::Error + 'static>(error: &BoxError) -> Option<&E> {
     if let Some(found) = error.downcast_ref::<E>() {
         return Some(found);
@@ -305,10 +346,12 @@ impl ByteCharges {
 
     /// Charges one dispatched query, even if its reply failed. Upload size is
     /// known locally; failed response bytes are counted when the transport
-    /// retained them in [`TransferFailure`].
+    /// retained them in [`TransferFailure`]. A [`BudgetStop`] is a request the
+    /// transport declined before sending any of it, so it costs nothing.
     pub(crate) fn add_query_reply(&mut self, table: Table, upload: u64, reply: &ShardReply) {
         let download = match reply {
             Ok((_, cost)) => *cost,
+            Err(error) if BudgetStop::found_in(error).is_some() => return,
             Err(error) => TransferFailure::downloaded(error),
         };
         self.add_query(table, upload, download);
@@ -518,6 +561,18 @@ pub trait ShardTransport {
         body: &[u8],
     ) -> Result<Vec<u8>, BoxError>;
 
+    /// Announces a round of page queries before any of it is sent: the
+    /// directory shard revision and the distinct page tables the round's
+    /// queries address, its real queries and the dummies it owes alike.
+    ///
+    /// The default ignores it. A transport that adds cover around the walk's
+    /// requests can use it to know every table the round needs, including
+    /// the heads of walks the directory phase just found, before it chooses
+    /// what to cover. It must send nothing here.
+    fn page_round(&mut self, shard_id: u64, revision: &str, tables: &[u32]) {
+        let _ = (shard_id, revision, tables);
+    }
+
     /// Requests this transport keeps in flight when handed a [`batch`].
     ///
     /// One, the default, means the sync issues every request itself, one at a
@@ -726,6 +781,9 @@ impl<T: ShardTransport + ?Sized> ShardTransport for Box<T> {
     ) -> Result<Vec<u8>, BoxError> {
         (**self).query(shard_id, revision, table, body)
     }
+    fn page_round(&mut self, shard_id: u64, revision: &str, tables: &[u32]) {
+        (**self).page_round(shard_id, revision, tables)
+    }
     fn concurrency(&self) -> usize {
         (**self).concurrency()
     }
@@ -737,6 +795,27 @@ impl<T: ShardTransport + ?Sized> ShardTransport for Box<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A query a budget stop declined was never sent and is not charged; any
+    /// other failed query is, with the bytes it delivered.
+    #[test]
+    fn a_declined_query_costs_nothing() {
+        let mut charges = ByteCharges::default();
+        let table = Table::Pages(0);
+        charges.add_query_reply(table, 100, &Err(BudgetStop::Queries.boxed()));
+        let wrapped = TransferFailure::boxed(0, BudgetStop::Bytes.boxed());
+        charges.add_query_reply(table, 100, &Err(wrapped));
+        assert_eq!((charges.queries(), charges.query_upload()), (0, 0));
+        charges.add_query_reply(table, 100, &Err(TransferFailure::boxed(7, "failed".into())));
+        assert_eq!(
+            (
+                charges.queries(),
+                charges.query_upload(),
+                charges.query_download()
+            ),
+            (1, 100, 7)
+        );
+    }
 
     const DIGEST: &str = "aa";
 
