@@ -488,7 +488,8 @@ pub(crate) fn rescan_missed_keys(
 /// An early restore's provisional keys keep their state, which the scan still verifies
 /// (see `restore::early`): their queued payments above `height` become scan hints. Only
 /// a provisional key whose note the rewind un-mines falls back to a sweep. A publication
-/// already accepted becomes provisional again if the rewind removes its anchor.
+/// already accepted becomes provisional again if the rewind removes its anchor, which
+/// `wallet::truncate_to_height_internal` does in every build.
 pub(crate) fn truncate_to_height(
     conn: &rusqlite::Transaction<'_>,
     height: BlockHeight,
@@ -496,12 +497,6 @@ pub(crate) fn truncate_to_height(
     let confirmed_below = u32::from(height)
         .saturating_add(1)
         .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
-    // Judged again when the scan stores the anchor (0 is `restore::early`'s provisional),
-    // so no waiting key closes against a block that is gone.
-    conn.execute(
-        "UPDATE ironwood_one_time_restores SET state = 0 WHERE state = 1 AND anchor_height > ?1",
-        [u32::from(height)],
-    )?;
     conn.execute(
         "UPDATE ironwood_one_time_spend_retention SET replay_through = MIN(replay_through, ?1)",
         [u32::from(height)],
@@ -568,6 +563,24 @@ pub(crate) fn truncate_to_height(
            AND one_time_key_id NOT IN (
                SELECT one_time_key_id FROM ironwood_one_time_sweeps WHERE provisional = 1)",
         [u32::from(height)],
+    )?;
+    Ok(())
+}
+
+/// Reruns `account`'s finished restore sweeps after a rewind lowers its birthday: one that
+/// finished under the later birthday ignored payments before it, and `truncate_to_height`
+/// otherwise keeps finished sweeps.
+pub(crate) fn rerun_finished_sweeps(
+    conn: &rusqlite::Transaction<'_>,
+    account: AccountUuid,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE ironwood_one_time_sweeps SET done_height = NULL, lookup_height = NULL,
+             lookup_hash = NULL, next_attempt_at = 0
+         WHERE provisional = 0 AND one_time_key_id IN (
+             SELECT k.id FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
+             WHERE a.uuid = ?1)",
+        [account.0],
     )?;
     Ok(())
 }

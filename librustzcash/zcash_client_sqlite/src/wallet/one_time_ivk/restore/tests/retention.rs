@@ -146,6 +146,30 @@ fn a_release_frees_a_bounded_batch_of_nullifiers() {
     assert_eq!(retained_from(db), Some(through.height + 1));
 }
 
+/// Lowering an account's birthday reruns its finished restore sweeps, since a sweep that
+/// finished under the later birthday ignored payments before it.
+#[test]
+fn lowering_a_birthday_reruns_finished_sweeps() {
+    let (mut st, _, _) = swept();
+    let account = st.test_account().unwrap().id();
+    let birthday = st.test_account().unwrap().birthday().height();
+    let due = "SELECT COUNT(*) FROM ironwood_one_time_sweeps WHERE done_height IS NULL";
+    assert_eq!(value::<u32>(st.wallet().conn(), due, []), 0);
+    st.wallet_mut()
+        .rewind_to_chain_state(
+            zcash_client_backend::data_api::chain::ChainState::empty(
+                birthday - 10,
+                BlockHash([0; 32]),
+            ),
+            std::collections::HashSet::from([account]),
+        )
+        .unwrap();
+    let all = "SELECT COUNT(*) FROM ironwood_one_time_sweeps";
+    let swept = value::<u32>(st.wallet().conn(), all, []);
+    assert!(swept > 0);
+    assert_eq!(value::<u32>(st.wallet().conn(), due, []), swept);
+}
+
 /// Unfinished sweeps and queued candidates hold spend evidence: from the candidate's
 /// height while it predates its key's sweep start, then from that start until the key's
 /// sweep finishes.

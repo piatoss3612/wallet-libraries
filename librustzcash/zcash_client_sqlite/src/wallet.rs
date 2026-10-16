@@ -4322,6 +4322,14 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // equal to the truncation height + 1. This sets our view of the chain tip back
     // to the retained height.
     trim_scan_queue_to(conn, truncation_height)?;
+    // An early restore accepted against a block the rewind may replace is judged again
+    // when the scan stores it (0 is `one_time_ivk::restore::early`'s provisional), so no
+    // waiting key closes against a removed anchor. This runs in every build: one without
+    // `orchard` cannot scan while a restore is provisional (see `one_time_scan_required`).
+    conn.execute(
+        "UPDATE ironwood_one_time_restores SET state = 0 WHERE state = 1 AND anchor_height > ?1",
+        [u32::from(rescan_floor)],
+    )?;
     // Every block above the rescan floor may be replaced, not only those above the
     // truncation height.
     #[cfg(feature = "orchard")]
@@ -5022,20 +5030,27 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
     let new_orchard_tree_size: Option<u64> = None;
 
     for uuid in &reset_account_birthdays {
-        conn.execute(
-            "UPDATE accounts
+        let lowered = conn
+            .execute(
+                "UPDATE accounts
              SET birthday_height = :new_birthday,
                  birthday_sapling_tree_size = :new_sapling_tree_size,
                  birthday_orchard_tree_size = :new_orchard_tree_size
              WHERE uuid = :uuid AND birthday_height > :new_birthday",
-            named_params![
-                ":new_birthday": u32::from(new_birthday),
-                ":new_sapling_tree_size": new_sapling_tree_size,
-                ":new_orchard_tree_size": new_orchard_tree_size,
-                ":uuid": uuid.0,
-            ],
-        )
-        .map_err(|e| RewindError::DataSource(e.into()))?;
+                named_params![
+                    ":new_birthday": u32::from(new_birthday),
+                    ":new_sapling_tree_size": new_sapling_tree_size,
+                    ":new_orchard_tree_size": new_orchard_tree_size,
+                    ":uuid": uuid.0,
+                ],
+            )
+            .map_err(|e| RewindError::DataSource(e.into()))?;
+        #[cfg(feature = "orchard")]
+        if lowered > 0 {
+            one_time_ivk::rerun_finished_sweeps(conn, *uuid).map_err(RewindError::DataSource)?;
+        }
+        #[cfg(not(feature = "orchard"))]
+        let _ = lowered;
     }
 
     Ok(())
@@ -8153,6 +8168,65 @@ mod tests {
             (0, u32::from(start_height), true),
         );
         assert_eq!(table_row_count(st.wallet().conn(), "ironwood_tree_cap"), 1);
+    }
+
+    /// A rewind makes an early restore accepted against a removed block provisional again
+    /// in every build, and leaves one anchored below the rewind accepted.
+    #[test]
+    fn a_rewind_reopens_early_restores_anchored_above_it() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let dfvk = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
+        let value = Zatoshis::const_from_u64(10000);
+        let start = st.sapling_activation_height();
+        st.generate_block_at(
+            start,
+            BlockHash([0; 32]),
+            &[FakeCompactOutput::new(
+                &dfvk,
+                AddressType::DefaultExternal,
+                value,
+            )],
+            0,
+            0,
+            0,
+            false,
+        );
+        for _ in 1..5 {
+            st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        }
+        st.scan_cached_blocks(start, 5);
+        let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
+        let birthday = st.test_account().unwrap().birthday().clone();
+        st.wallet_mut()
+            .create_account("other", &seed, &birthday, None)
+            .unwrap();
+        st.scan_cached_blocks(start, 5);
+        let conn = st.wallet().conn();
+        for (account, anchor) in [(1, start + 4), (2, start + 1)] {
+            conn.execute(
+                "INSERT INTO ironwood_one_time_restores
+                    (account_id, restore_from, anchor_height, anchor_hash, anchor_tree_size, state)
+                 VALUES (?1, ?2, ?3, zeroblob(32), 0, 1)",
+                rusqlite::params![account, u32::from(start), u32::from(anchor)],
+            )
+            .unwrap();
+        }
+
+        st.wallet_mut().truncate_to_height(start + 2).unwrap();
+        let states: Vec<(i64, u8)> = st
+            .wallet()
+            .conn()
+            .prepare("SELECT account_id, state FROM ironwood_one_time_restores ORDER BY account_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(states, [(1, 0), (2, 1)]);
     }
 
     /// `truncate_to_height` applies the same per-pool truncation tolerances as
