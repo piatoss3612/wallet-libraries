@@ -8236,7 +8236,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-enhance"
-version = "0.0.1-rc3"
+version = "0.0.1-rc4"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -8268,12 +8268,15 @@ version = "0.0.1-rc1"
 
 [[package]]
 name = "zakura-pir-native"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 dependencies = [
+ "hex",
  "ipir-sp",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
+ "rayon",
  "reinspiring",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -8298,7 +8301,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-pir-status"
-version = "0.0.1-rc1"
+version = "0.0.1-rc2"
 dependencies = [
  "hex",
  "rand 0.8.8",
@@ -8493,7 +8496,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-transaction-status"
-version = "0.0.1-rc2"
+version = "0.0.1-rc3"
 dependencies = [
  "tokio",
  "tonic",
@@ -8525,6 +8528,74 @@ dependencies = [
  "zcash_script",
  "zcash_spec",
  "zip32 0.2.1",
+]
+
+[[package]]
+name = "zakura-transparent-events"
+version = "0.0.1-rc0"
+dependencies = [
+ "hex",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "zakura-transparent-filter"
+version = "0.0.1-rc0"
+dependencies = [
+ "bitcoin",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "zakura-transparent-native"
+version = "0.0.1-rc0"
+dependencies = [
+ "hex",
+ "ipir-sp",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zakura-pir-native",
+]
+
+[[package]]
+name = "zakura-transparent-shard"
+version = "0.0.1-rc0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "zakura-transparent-events",
+ "zakura-transparent-filter",
+]
+
+[[package]]
+name = "zakura-transparent-txid-client"
+version = "0.0.1-rc0"
+dependencies = [
+ "base64 0.22.1",
+ "clap",
+ "flate2",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zakura-transparent-events",
+ "zakura-transparent-native",
+ "zakura-transparent-shard",
 ]
 
 [[package]]

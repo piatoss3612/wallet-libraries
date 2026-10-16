@@ -26,6 +26,7 @@ python3 scripts/dev.py verify
 | `sqlite` | SQLite; `test-dependencies`, without Orchard |
 | `enhance-wallet` | Enhance PIR; `wallet` |
 | `enhance` | Enhance PIR; default features |
+| `transparent-filter-client` | Transparent filter with its wallet HTTP `client` (profile validation and bounded streaming responses) |
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
 | `transparent-pir-testing` | Transparent PIR adapter; `sqlite` and `testing` (the test support applications build their recovery and txid display tests on) |
@@ -118,7 +119,7 @@ proving-key caches and the cargo test runner.
 ### GitHub Actions
 
 Use **Publish crates** from `main` in `zakura-core/wallet-libraries`. The workflow
-uses the exact commit selected by the dispatch, and reads versions from all twelve
+uses the exact commit selected by the dispatch, and reads versions from all seventeen
 crate manifests. It does not create tags, change versions, or publish wallet-pir.
 Successful **Verify wallet libraries** CI for that exact main commit is required;
 wait for it to finish before dispatching the release workflow.
@@ -132,7 +133,7 @@ that each crate has the right publisher configuration.
 
 Before the first run, a repository administrator must create the `crates-io`
 GitHub Environment, allow only the `main` branch, and require approval by `ebfull`
-(self-approval is allowed, matching Zakura). An owner of **each of the twelve crates**
+(self-approval is allowed, matching Zakura). An owner of **each of the seventeen crates**
 must configure this Trusted Publisher on crates.io:
 
 | Setting | Value |
@@ -142,12 +143,12 @@ must configure this Trusted Publisher on crates.io:
 | Workflow filename | `publish-crates.yml` |
 | Environment | `crates-io` |
 
-Use `python3 scripts/publish-crates.py --plan` to list the twelve names and versions.
+Use `python3 scripts/publish-crates.py --plan` to list the seventeen names and versions.
 Check every crate's publisher settings, including names already reserved by a
 placeholder release. Trusted Publishing needs existing crate names.
-`zakura-one-time-ivk` and `zakura-near-intents` have no crates.io release yet, so
-reserve both names and configure their Trusted Publisher before the first run that
-includes them. No permanent API token or new Infisical secret is required.
+The five `zakura-transparent-{native,events,filter,shard,txid-client}` crates
+have no crates.io release yet, so reserve those names and configure their
+Trusted Publisher before the first run that includes them. No permanent API token or new Infisical secret is required.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch
 commit, requires environment approval, then acquires its temporary credential.
