@@ -35,14 +35,16 @@ and this library adheres to Rust's notion of
   `ironwood_one_time_spend_retention` tables, which released wallets hold empty.
 - Scanned blocks need one-time keys only while a key is open: a plain scan judges discovery's
   publications and turns the hints it skips into late candidates. Builds without `orchard`,
-  which cannot, also refuse blocks while discovery waits for the scan.
+  which cannot, also refuse blocks while discovery waits for the scan or a payment
+  candidate is pending.
 - `WalletDb::recheck_one_time_key_history` returns nothing. It ends the account's discovery
   pass, so the next one rechecks every key against a newer publication.
 - A rewind on the same chain, such as adding an account with an older birthday, repairs
   discovery from its rescan floor: a publication ending above it is judged again, a late
   candidate there becomes a hint again, and a lookup cursor that passed a record there
   restarts. A key closed without scanning scans again from its first payment above the
-  rewind until that payment is confirmed again. Lowering a birthday reopens discovery.
+  rewind until that payment is confirmed again. Lowering a birthday reopens discovery. Builds
+  without `orchard` make the same repairs.
 
 - Operations that can queue transparent lookups now reject caller-owned SQL transactions
   without a wallet-owned session journal with `TransparentSessionTransactionRequired`.

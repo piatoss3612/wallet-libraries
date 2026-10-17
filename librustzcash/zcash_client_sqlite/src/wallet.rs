@@ -864,10 +864,10 @@ pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientE
 }
 
 /// Whether a build without `orchard` must refuse scanned blocks: a key is open (see
-/// [`one_time_key_open`]), or discovery waits for the scan to judge a publication that a
-/// pass in its account's range, a lookup or a candidate uses, or to try a key in a hinted
-/// block, which only an `orchard` build's scan does (see
-/// `one_time_ivk::restore::discovery`).
+/// [`one_time_key_open`]), discovery waits for the scan to judge a publication that a pass
+/// in its account's range or a lookup uses, or a payment candidate waits, whether for the
+/// scan to try its key, to cover its blocks or to judge its publication. Only an `orchard`
+/// build's scan does those (see `one_time_ivk::restore::discovery`).
 #[cfg(not(feature = "orchard"))]
 pub(crate) fn one_time_scan_required(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(one_time_key_open(conn)?
@@ -878,10 +878,8 @@ pub(crate) fn one_time_scan_required(conn: &Connection) -> Result<bool, SqliteCl
                      WHERE d.publication_height = p.height AND d.publication_hash = p.hash
                        AND p.height >= a.birthday_height)
                  OR EXISTS(SELECT 1 FROM ironwood_one_time_lookup_reads r
-                     WHERE r.publication_height = p.height AND r.publication_hash = p.hash)
-                 OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery c
-                     WHERE c.publication_height = p.height AND c.publication_hash = p.hash)))
-             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery WHERE scan_hint = 1)",
+                     WHERE r.publication_height = p.height AND r.publication_hash = p.hash)))
+             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery)",
             [],
             |row| row.get(0),
         )?)

@@ -680,6 +680,28 @@ mod tests {
                 .conn()
                 .execute_batch("DELETE FROM ironwood_one_time_discovery")
                 .unwrap();
+            // So does a late candidate, which waits for the scan to cover its blocks.
+            st.wallet()
+                .conn()
+                .execute(
+                    "INSERT INTO ironwood_one_time_payment_recovery
+                        (one_time_key_id, txid, action_index, height, block_hash, tx_index,
+                         position, encrypted_note, publication_height, publication_hash,
+                         scan_hint)
+                     SELECT id, zeroblob(32), 0, ?1, zeroblob(32), 0, 0, zeroblob(148), ?1,
+                         zeroblob(32), 0
+                     FROM ironwood_one_time_keys",
+                    [u32::from(h3) + 10],
+                )
+                .unwrap();
+            assert!(matches!(
+                st.try_scan_cached_blocks(h4, 1),
+                Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
+            ));
+            st.wallet()
+                .conn()
+                .execute_batch("DELETE FROM ironwood_one_time_payment_recovery")
+                .unwrap();
             st.scan_cached_blocks(h4, 1);
         }
     }
