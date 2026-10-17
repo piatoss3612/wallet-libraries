@@ -16,8 +16,8 @@ and this library adheres to Rust's notion of
   restores and the spend journal.
 - A spend journal (with `orchard`): every block scan keeps each recognized transaction's
   compact form and every Ironwood nullifier it reveals, matched to a wallet note or not, and
-  records which blocks it covered for each account. It grows with the wallet's own
-  transactions only. A rewind drops the entries and coverage above its rescan floor.
+  records which blocks it covered for each account. A rewind drops the entries and coverage
+  above its rescan floor.
 - `TransparentPirSession`, with `WalletDb::with_transparent_pir_session`,
   `WalletDb::set_transparent_pir_session` and `WalletDb::transparent_pir_session`: the transparent work an open wallet holds
   back until the next chain tip, shared by the wallet's database handles like
