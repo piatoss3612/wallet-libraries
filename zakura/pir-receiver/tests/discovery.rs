@@ -22,7 +22,13 @@ use zakura_receiver_crypto::{
 use zcash_client_backend::data_api::{
     Account as _, WalletRead as _, WalletWrite as _,
     chain::BlockSource as _,
-    one_time_ivk::{OneTimeIvkRead as _, restore::OneTimeIvkRestoreRead as _},
+    one_time_ivk::{
+        OneTimeIvkRead as _,
+        restore::{
+            EnumerationCursor, FilterCheck, OneTimeIvkRestoreRead as _,
+            OneTimeIvkRestoreWrite as _, PublicationEnd,
+        },
+    },
     testing::{AddressType, IronwoodFvk, TestBuilder, TestState},
     transparent_ledger::ChainPoint,
 };
@@ -548,6 +554,62 @@ async fn discovery_imports_every_late_payment() {
         requests + 1,
         "only the manifest"
     );
+}
+
+/// A key the wallet registered past the first window of unused keys is checked again by
+/// a newer publication, so a payment after it closed is found.
+#[tokio::test]
+async fn a_registered_key_past_a_filter_gap_is_rechecked() {
+    let mut st = ironwood_wallet_in(TestDbFactory::default());
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let index = FIRST_WINDOW + 50;
+    // An earlier pass saw the key unpaid, so it closed.
+    let end = tip(&st);
+    let tree_size: u64 = st
+        .wallet()
+        .conn()
+        .query_row(
+            "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
+            [u32::from(end.height)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let earlier = PublicationEnd {
+        height: end.height,
+        hash: end.hash.0,
+        tree_size,
+    };
+    let seen = FilterCheck {
+        key: KeyId::new(Purpose::Receive, index),
+        seen: true,
+        paid: false,
+        recent: false,
+    };
+    let done = EnumerationCursor {
+        next: index + 1,
+        reach: index + 1,
+    };
+    let db = st.wallet_mut().db_mut();
+    for (purpose, checks) in [(Purpose::Receive, vec![seen]), (Purpose::Refund, vec![])] {
+        assert!(
+            db.record_one_time_filter_checks(account, earlier, purpose, &checks, done, true, NOW)
+                .unwrap()
+        );
+    }
+    assert!(
+        db.one_time_discovery(account, NOW)
+            .unwrap()
+            .unwrap()
+            .refresh_due
+    );
+
+    let record = pay_restored_key(&mut st, index, 0);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let directory = serve(&[record], tip(&st));
+    let found = run_clean(&mut st, &directory).await;
+    assert!(found.complete);
+    assert_eq!(balance(&st), VALUE);
 }
 
 /// A wallet with no payments downloads only the manifest and the filters, and is complete

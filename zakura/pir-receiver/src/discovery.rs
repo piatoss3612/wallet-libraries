@@ -101,8 +101,8 @@ pub struct Discovered<E> {
 /// rejected, when `refresh` asks for one, when its pass has keys left to check and the
 /// directory has moved on, or when a newer publication should check keys that closed
 /// without a known payment (see `DiscoveryStatus::refresh_due`). Each purpose's keys are checked against the filters from index
-/// zero: always the first [`FIRST_WINDOW`], then on until [`GAP`] consecutive keys are in
-/// no seen set and not in the paid filter. A provider's recent set counts only if its feed's
+/// zero: always the first [`FIRST_WINDOW`] and every key the wallet registered, then on
+/// until [`GAP`] consecutive keys are in no seen set and not in the paid filter. A provider's recent set counts only if its feed's
 /// last read began at most fifteen minutes before `now` and at most a minute after it, and
 /// its window, with the feed running throughout, covers [`RESTORE_WATCH_SECS`]; unless
 /// every provider has one, every key is recent.
@@ -166,6 +166,16 @@ where
     };
     if let Some(cursors) = cursors {
         for (purpose, cursor) in cursors {
+            // Every key the wallet registered is checked, even past a gap in the filters.
+            let registered = status
+                .registered_reach
+                .iter()
+                .find(|(p, _)| *p == purpose)
+                .map_or(0, |(_, reach)| *reach);
+            let cursor = EnumerationCursor {
+                reach: cursor.reach.max(registered),
+                ..cursor
+            };
             check_purpose(
                 wallet,
                 &mut directory,

@@ -31,8 +31,8 @@ use super::{
     recovery::recover_refund_memos,
 };
 use crate::wallet::one_time_ivk::{
-    Discovery, KeyId, Purpose, account_key, activate, corrupt, index_after, key_ref, register,
-    restore_start, stored_key_id, swap::reservations::record_provider_seen,
+    Discovery, KeyId, Purpose, account_key, activate, corrupt, decode_index, index_after, key_ref,
+    register, restore_start, stored_key_id, swap::reservations::record_provider_seen,
 };
 use crate::{
     AccountUuid,
@@ -263,6 +263,21 @@ pub(crate) fn status<P: Parameters>(
             })
         })?
         .collect::<Result<_, _>>()?;
+    let registered = |purpose: Purpose| -> Result<(Purpose, u64), SqliteClientError> {
+        let top: Option<Vec<u8>> = conn.query_row(
+            "SELECT MAX(key_index) FROM ironwood_one_time_keys
+             WHERE account_id = ?1 AND purpose = ?2",
+            params![owner.0, u8::from(purpose == Purpose::Receive)],
+            |r| r.get(0),
+        )?;
+        Ok((
+            purpose,
+            top.map(decode_index)
+                .transpose()?
+                .map_or(0, |index| index + 1),
+        ))
+    };
+    let registered_reach = [registered(Purpose::Receive)?, registered(Purpose::Refund)?];
     let complete = complete(conn, params, owner)?;
     let refresh_due = complete && unpaid_closed;
     Ok(Some(DiscoveryStatus {
@@ -275,6 +290,7 @@ pub(crate) fn status<P: Parameters>(
         complete,
         refresh_due,
         enumeration,
+        registered_reach,
         lookups,
         witnesses,
     }))
@@ -922,10 +938,7 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
                     1 => Purpose::Receive,
                     _ => return Err(corrupt("unsupported one-time key purpose")),
                 };
-                KeyId::new(
-                    purpose,
-                    crate::wallet::one_time_ivk::decode_index(r.get(2)?)?,
-                )
+                KeyId::new(purpose, decode_index(r.get(2)?)?)
             };
             Ok::<_, SqliteClientError>((
                 r.get(0)?,

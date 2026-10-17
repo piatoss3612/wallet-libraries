@@ -13,7 +13,8 @@ and this library adheres to Rust's notion of
   sweeps. `OneTimeIvkRestoreRead::one_time_discovery` returns a `DiscoveryStatus`: whether
   discovery is complete, where filter checks resume (`EnumerationCursor`), the lookups due
   with each one's paging cursor (`LookupWork`), the late payments waiting for an inclusion
-  path (`WitnessRequest`), and whether a newer publication should check keys again.
+  path (`WitnessRequest`), how far the keys it registered reach, and whether a newer
+  publication should check keys again.
   `OneTimeIvkRestoreWrite::record_one_time_filter_checks` records `FilterCheck`s against a
   `PublicationEnd`, `record_one_time_lookup` applies pages of a paid key's history,
   `defer_one_time_lookup` backs a lookup off, and `record_one_time_witness` gives a late
