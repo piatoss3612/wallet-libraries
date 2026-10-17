@@ -652,6 +652,19 @@ pub fn scan_full_block_detects_outputs<T: ShieldedPoolTester>(
         .sum();
     assert_eq!(received_outputs, 1);
 
+    // The block names the account that scanned it, and the recognized transaction carries
+    // its compact form, so a store can journal it as it does compact-scanned blocks.
+    #[cfg(feature = "orchard")]
+    {
+        assert_eq!(scanned.scanned_accounts(), [zip32::AccountId::ZERO]);
+        let wtx = &scanned.transactions()[0];
+        let compact = wtx.scanned_compact().expect("the full scanner records it");
+        assert_eq!(compact.tx().txid(), wtx.txid());
+        let shielded = compact.tx().outputs.len() + compact.tx().actions.len();
+        assert_eq!(shielded, 2);
+        assert_eq!(u64::from(compact.ironwood_start_position()), 0);
+    }
+
     // The note commitment tree should have grown by exactly the two shielded outputs in
     // the block's single transaction (the payment and the change), starting from the
     // empty prior tree. The outputs all belong to the pool under test; the other pool (if
