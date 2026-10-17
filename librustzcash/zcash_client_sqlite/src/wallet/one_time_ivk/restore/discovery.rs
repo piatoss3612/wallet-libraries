@@ -178,13 +178,27 @@ pub(crate) fn status<P: Parameters>(
     }
     let (owner, _) = account_key(conn, params, account)?;
     // A fresh account has no restored history, so it needs discovery only once a key it
-    // issued closed without a payment, which a newer publication could still show paid.
+    // issued closed without a payment, which a newer publication could still show paid, and
+    // until the work that started, or a recheck asked for, finishes.
     let unpaid_closed: bool = conn.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k WHERE {UNPAID_CLOSED})"),
         [owner.0],
         |r| r.get(0),
     )?;
-    if fresh(conn, owner.0)? && !unpaid_closed {
+    if fresh(conn, owner.0)?
+        && !unpaid_closed
+        && complete(conn, params, owner)?
+        && !conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+                 JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+                 WHERE k.account_id = ?1 AND l.done_height IS NULL)
+             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
+                 JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
+                 WHERE k.account_id = ?1)",
+            [owner.0],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
         return Ok(None);
     }
     let current = pass(conn, owner.0)?;

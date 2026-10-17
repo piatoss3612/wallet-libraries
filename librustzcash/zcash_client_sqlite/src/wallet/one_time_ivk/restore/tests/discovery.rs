@@ -562,6 +562,51 @@ fn a_fresh_account_rechecks_keys_that_closed_unpaid() {
     assert!(status(db, account).complete);
 }
 
+/// A fresh account's discovery stays visible while a lookup it started is unfinished, even
+/// once a payment it found leaves no key closed unpaid, and again after a recheck.
+#[test]
+fn a_fresh_accounts_unfinished_discovery_stays_visible() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    // The key starts after its payment, so the scan misses it and discovery finds it late.
+    let after = tip(&st).height + 10;
+    let db = st.wallet_mut().db_mut();
+    let key = reserve_key(db, account, Purpose::Receive, after).key_id();
+    exec(
+        &db.conn,
+        "UPDATE ironwood_one_time_keys SET closed_at = 1 WHERE key_index = ?1",
+        [key.index().to_be_bytes()],
+    );
+    let candidate = pay_candidate_at(&mut st, key);
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, account, publication, &[paid(key)]));
+    let page = [directory_answer(&candidate)];
+    assert!(
+        db.record_one_time_lookup(account, key, publication, 0, &page, false, clock_now())
+            .unwrap()
+    );
+    send_witness(&mut st, key, &candidate);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
+    let db = st.wallet_mut().db_mut();
+    let found = status(db, account);
+    assert!(!found.complete);
+    assert_eq!(found.lookups.len(), 1);
+    assert!(
+        db.record_one_time_lookup(account, key, publication, 1, &[], true, clock_now())
+            .unwrap()
+    );
+    assert!(
+        db.one_time_discovery(account, clock_now())
+            .unwrap()
+            .is_none()
+    );
+    // A recheck, which finds a later payment to a closed key paid before, starts a pass.
+    db.recheck_one_time_key_history(account).unwrap();
+    assert!(status(db, account).publication.is_none());
+}
+
 /// A late payment whose blocks the scan finished without journal coverage, as before the
 /// journal existed, has those blocks scanned again, then is admitted.
 #[test]
