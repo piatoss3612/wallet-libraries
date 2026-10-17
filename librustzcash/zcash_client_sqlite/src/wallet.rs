@@ -6160,16 +6160,19 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     .map(Some)
 }
 
-/// Deletes from the nullifier map any entries with block height lower than the given
-/// height.
+/// Deletes from the nullifier map any entries with a locator referencing a block height
+/// lower than the pruning height.
 pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "DELETE FROM tx_locator_map WHERE block_height < ?1",
-        [u32::from(block_height)],
+    let mut stmt_delete_locators = conn.prepare_cached(
+        "DELETE FROM tx_locator_map
+        WHERE block_height < :block_height",
     )?;
+
+    stmt_delete_locators.execute(named_params![":block_height": u32::from(block_height)])?;
+
     Ok(())
 }
 
