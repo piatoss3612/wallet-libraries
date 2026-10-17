@@ -510,8 +510,9 @@ pub(crate) fn record_filter_checks<P: Parameters>(
         params![owner.0, cursor.next, cursor.reach, finished],
     )?;
     // `judge` closes a pass's keys when it accepts the publication, which happened before
-    // these keys registered if the scan had already stored its block.
-    if pass(conn, owner.0)?.is_some_and(|pass| pass.state == ACCEPTED) {
+    // these keys registered if the scan had already stored its block. A publication before
+    // the birthday is never judged, so its keys close here.
+    if pass(conn, owner.0)?.is_some_and(|pass| pass.state == ACCEPTED || !in_range) {
         close_looked_up(conn, owner.0)?;
     }
     Ok(true)
@@ -809,13 +810,15 @@ fn reject(
 
 /// Closes account `owner`'s keys whose lookups are done and which neither scan nor belong to
 /// a reservation or operation of this wallet, at the time of the block the lookup finished
-/// at, as a found restore key does once its history is known.
+/// at, as a found restore key does once its history is known. A key done at a block the
+/// wallet never stores, before the birthday, closes at time zero: discovery reads only
+/// whether a key closed.
 fn close_looked_up(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
     conn.execute(
         "UPDATE ironwood_one_time_keys SET closed_at = COALESCE(closed_at,
              (SELECT b.time FROM ironwood_one_time_lookups l
               JOIN blocks b ON b.height = l.done_height
-              WHERE l.one_time_key_id = ironwood_one_time_keys.id))
+              WHERE l.one_time_key_id = ironwood_one_time_keys.id), 0)
          WHERE account_id = ?1 AND active_from IS NULL AND reserved_at IS NULL
            AND id IN (SELECT one_time_key_id FROM ironwood_one_time_lookups
                WHERE cutoff_height IS NULL AND done_height IS NOT NULL)

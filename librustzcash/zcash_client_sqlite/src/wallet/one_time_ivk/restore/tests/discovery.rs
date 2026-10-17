@@ -304,7 +304,8 @@ fn a_rewind_returns_late_payments_to_hints() {
 }
 
 /// A publication ending before the birthday completes discovery without lookups, still
-/// protecting its paid keys from issuance.
+/// protecting its paid keys from issuance. Its keys close, so a newer publication checks
+/// them for a payment after the birthday.
 #[test]
 fn a_publication_before_the_birthday_needs_no_lookups() {
     let mut st = restored_wallet();
@@ -320,6 +321,7 @@ fn a_publication_before_the_birthday_needs_no_lookups() {
     let found = status(db, account);
     assert!(found.complete);
     assert!(found.lookups.is_empty());
+    assert!(found.refresh_due);
     assert!(key_state(db, key8()).1);
 }
 
