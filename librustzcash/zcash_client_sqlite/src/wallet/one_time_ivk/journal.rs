@@ -29,10 +29,10 @@ pub(crate) struct Entry {
 }
 
 /// What a batch of scanned blocks adds to the journal: its recognized transactions, and
-/// the range it covers for the accounts that scanned it.
+/// the ranges it covers for each account that scanned them.
 pub(crate) struct Batch {
     entries: Vec<Entry>,
-    coverage: Option<(Range<BlockHeight>, Vec<AccountUuid>)>,
+    coverage: Vec<(AccountUuid, Range<BlockHeight>)>,
 }
 
 /// Collects the journal entries and coverage of `blocks`, a contiguous batch.
@@ -61,12 +61,22 @@ pub(crate) fn collect(blocks: &[ScannedBlock<AccountUuid>]) -> Batch {
             })
         })
         .collect();
-    let coverage = blocks.first().zip(blocks.last()).map(|(first, last)| {
-        (
-            first.height()..last.height() + 1,
-            first.scanned_accounts().to_vec(),
-        )
-    });
+    // Each block names the accounts whose keys scanned it, so one batch can cover different
+    // ranges for different accounts. A block scanned without that record, as the full-block
+    // scanner produces, covers nothing.
+    let mut coverage: Vec<(AccountUuid, Range<BlockHeight>)> = vec![];
+    for block in blocks {
+        for account in block.scanned_accounts() {
+            match coverage
+                .iter_mut()
+                .rev()
+                .find(|(a, range)| a == account && range.end == block.height())
+            {
+                Some((_, range)) => range.end = block.height() + 1,
+                None => coverage.push((*account, block.height()..block.height() + 1)),
+            }
+        }
+    }
     Batch { entries, coverage }
 }
 
@@ -107,10 +117,8 @@ pub(crate) fn record(conn: &Connection, batch: Batch) -> Result<(), SqliteClient
             })?;
         }
     }
-    if let Some((range, accounts)) = batch.coverage {
-        for account in accounts {
-            cover(conn, account, range.clone())?;
-        }
+    for (account, range) in batch.coverage {
+        cover(conn, account, range)?;
     }
     Ok(())
 }
