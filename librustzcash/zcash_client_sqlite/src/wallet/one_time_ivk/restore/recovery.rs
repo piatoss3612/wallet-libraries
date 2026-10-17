@@ -27,8 +27,9 @@ pub(in crate::wallet::one_time_ivk) fn recheck<P: Parameters>(
         "UPDATE ironwood_one_time_lookups SET cutoff_height = NULL, done_height = NULL
          WHERE done_height IS NOT NULL AND one_time_key_id IN (
              SELECT k.id FROM ironwood_one_time_keys k
-             WHERE k.account_id = ?1 AND EXISTS(SELECT 1 FROM ironwood_received_notes n
-                 WHERE n.one_time_key_id = k.id))",
+             WHERE k.account_id = ?1 AND (k.paid_before_birthday = 1
+                 OR EXISTS(SELECT 1 FROM ironwood_received_notes n
+                     WHERE n.one_time_key_id = k.id)))",
         [owner.0],
     )?;
     Ok(())
