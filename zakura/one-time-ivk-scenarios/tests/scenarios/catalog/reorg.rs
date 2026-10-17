@@ -342,7 +342,7 @@ fn funding_reorged_and_remined() -> Scenario {
                 &key,
                 &refund,
                 Class::FoundAutomatically,
-                "A restore recovers the refund key from the funding memo on the surviving branch, then finds the refund by its sweep or the rescan the sweep starts.",
+                "A restore recovers the refund key from the funding memo on the surviving branch, then finds the refund through discovery, from a scan hint or the late path.",
             );
             ctx.check_same_balance(a, b);
         }),
@@ -353,9 +353,10 @@ fn restored_key_near_rewind() -> Scenario {
     Scenario {
         id: "F4-restored-key-near-a-rewind".into(),
         group: REORGS,
-        title: "A reorg rewinds a restored wallet just after it swept a paid key".into(),
+        title: "A reorg rewinds a restored wallet just after its discovery looked up a paid key"
+            .into(),
         summary: "A restored key that is not recent closes at its lookup without ever scanning. A \
-            rewind that reopens keys with receipts near the truncation, while keeping the sweep's \
+            rewind that reopens keys with receipts near the truncation, while keeping the finished \
             lookup, can leave such a key neither scanning nor closed, so a later payment is never \
             rechecked. This scenario checks whether that happens."
             .into(),
@@ -404,7 +405,7 @@ fn restored_key_near_rewind() -> Scenario {
                 &key,
                 &first,
                 Class::FoundByDiscovery,
-                "A restore sweeps the incoming lookahead through the receiver directory.",
+                "A restore's discovery looks the incoming lookahead's paid keys up in the receiver directory.",
             );
             ctx.expect(
                 b,

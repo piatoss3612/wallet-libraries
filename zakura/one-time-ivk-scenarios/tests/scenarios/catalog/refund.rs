@@ -18,7 +18,7 @@ const FUNDS: u64 = 3 * ZEC;
 const DEPOSIT: u64 = ZEC;
 
 const REFUND_OPEN: &str = "A refund key scans from its funding transaction while NEAR owes a refund: until the refund is received and confirmed 10 times, or 30 days after the deadline.";
-const RESTORE_MEMO: &str = "A restore recovers the refund key from the refund memo on its funding transaction's Ironwood change, then sweeps it through the receiver directory, which lists NEAR's zero-OVK refund.";
+const RESTORE_MEMO: &str = "A restore recovers the refund key from the refund memo on its funding transaction's Ironwood change, then looks it up in the receiver directory, which lists NEAR's zero-OVK refund.";
 
 pub fn all() -> Vec<Scenario> {
     let mut scenarios = Vec::new();
@@ -113,7 +113,7 @@ fn refund_once(delay: i64) -> Scenario {
             } else {
                 (
                     Class::FoundByDiscovery,
-                    "The key closed unpaid 30 days after the deadline; a newer publication's paid filter holds it, so a sweep imports the refund.",
+                    "The key closed unpaid 30 days after the deadline; a newer publication's paid filter holds it, so discovery finds the refund.",
                 )
             };
             ctx.expect(f.a, "refund", &f.key, &refund, class, why);
@@ -246,8 +246,8 @@ fn restore_before_refund(delay: i64) -> Scenario {
         ),
         summary:
             "A restore recovers the refund key from the funding memo. NEAR was given the refund \
-            address within the last day, so the key scans for 24 hours after its sweep; a later \
-            refund relies on the paid-filter check."
+            address within the last day, so the key scans for 24 hours after discovery finds it; \
+            a later refund relies on newer publications' paid filters."
                 .into(),
         params: vec![("refund after restore".into(), span(delay))],
         slow: false,
@@ -259,7 +259,7 @@ fn restore_before_refund(delay: i64) -> Scenario {
             ctx.sync(b);
             let watched = ctx.get(b).scanning();
             ctx.check(
-                format!("B watches {} after its restore sweep", f.key),
+                format!("B watches {} after its restore's discovery", f.key),
                 watched.contains(&f.key),
                 format!("scanning {watched:?}"),
             );
@@ -279,12 +279,12 @@ fn restore_before_refund(delay: i64) -> Scenario {
             let (class, why) = if delay < 24 * HOUR {
                 (
                     Class::FoundLive,
-                    "NEAR was given the refund address within the last day, so the restored key scans for 24 hours after its sweep.",
+                    "NEAR was given the refund address within the last day, so the restored key scans for 24 hours after discovery finds it.",
                 )
             } else {
                 (
                     Class::FoundByDiscovery,
-                    "The restored key closed after its 24-hour watch with no payment; a newer publication's paid filter holds it, so a sweep imports the refund.",
+                    "The restored key closed after its 24-hour watch with no payment; a newer publication's paid filter holds it, so discovery finds the refund.",
                 )
             };
             ctx.expect(b, "refund", &f.key, &refund, class, why);

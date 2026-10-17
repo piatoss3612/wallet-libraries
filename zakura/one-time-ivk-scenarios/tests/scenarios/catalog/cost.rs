@@ -1,5 +1,5 @@
 //! Scale and cost: how many keys scan at once, what each costs a scan, what a restore
-//! downloads after many swaps, and how long Check swap history's replay runs. These run
+//! downloads after many swaps, and what Check swap history's late find costs. These run
 //! one at a time after the other scenarios, since they time work.
 
 use std::time::Instant;
@@ -28,11 +28,11 @@ pub fn all() -> Vec<Scenario> {
         scenarios.push(restore_after_swaps(swaps, recent));
     }
     for age in [30 * DAY, 90 * DAY, 180 * DAY] {
-        scenarios.push(recheck_replay(age, 10, Parity::Even));
+        scenarios.push(recheck_late_find(age, 10, Parity::Even));
     }
     // The same late find at an odd and an even tree position (see `Parity`).
     for parity in [Parity::Odd, Parity::Even] {
-        scenarios.push(recheck_replay(12 * DAY, 10, parity));
+        scenarios.push(recheck_late_find(12 * DAY, 10, parity));
     }
     scenarios
 }
@@ -190,11 +190,10 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                 "two days earlier"
             }
         ),
-        summary: "A restore sweeps every paid key through the receiver directory: one PIR lookup \
-            per payment page, or the whole row file past about 400 lookups. Keys NEAR was given in \
-            the last day then scan for 24 hours. Every payment must be credited to its key, and \
-            after a restart the next quote must take an address past every paid one and find its \
-            payout live."
+        summary: "A restore's discovery looks every paid key up in the receiver directory, one \
+            PIR lookup per payment page. Keys NEAR was given in the last day then scan for 24 \
+            hours. Every payment must be credited to its key, and after a restart the next quote \
+            must take an address past every paid one and find its payout live."
             .into(),
         params: vec![
             ("paid addresses".into(), swaps.to_string()),
@@ -244,7 +243,7 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
             );
             let pending = ctx.get(b).history_pending();
             ctx.check(
-                "no sweeps or queued payments remain after the restore",
+                "no lookups or late payments remain after the restore",
                 !pending,
                 format!("{syncs} syncs, pending {pending}"),
             );
@@ -264,7 +263,7 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                 .collect();
             ctx.check(
                 format!(
-                    "B's sweeps credit every one of the {swaps} payouts to its key, with its value"
+                    "B's discovery credits every one of the {swaps} payouts to its key, with its value"
                 ),
                 wrong.is_empty(),
                 format!(
@@ -283,7 +282,7 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                         &format!("I{i}"),
                         m,
                         Class::FoundByDiscovery,
-                        "A restore sweeps paid keys through the directory.",
+                        "A restore's discovery looks paid keys up in the directory.",
                     );
                 }
             }
@@ -327,7 +326,7 @@ enum Parity {
     Even,
 }
 
-fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
+fn recheck_late_find(age: i64, every: u32, parity: Parity) -> Scenario {
     let side = match parity {
         Parity::Odd => "odd",
         Parity::Even => "even",
@@ -335,7 +334,7 @@ fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
     let cost = age > 20 * DAY;
     Scenario {
         id: if cost {
-            format!("J4-recheck-replay-wallet-{}-old", span(age))
+            format!("J4-recheck-late-find-wallet-{}-old", span(age))
         } else {
             format!(
                 "E10-late-find-at-{side}-tree-position-wallet-{}-old",
@@ -355,15 +354,15 @@ fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
             )
         },
         summary: if cost {
-            "Crediting a payment Check swap history finds can wait on a replay of the wallet's \
-            history since its birthday, because ordinary wallets keep only about 100 blocks of \
-            Ironwood spend evidence. Measures that replay. The payment lands at an even tree \
-            position, so E10's odd-position failure does not mask the measurement."
+            "A payment Check swap history finds after the scan passed it takes the late path: \
+            the spend journal decides whether it was spent, so nothing is rescanned. Measures \
+            the blocks the recheck scans and its time. The payment lands at an even tree \
+            position (E10 covers both)."
                 .into()
         } else {
             "The same late find twice, differing only in whether the payment's leaf is the right \
-            (odd) or left (even) child of its pair. After the spend-history replay, applying the \
-            payment needs the wallet's tree root at a recent checkpoint."
+            (odd) or left (even) child of its pair. Admitting the late payment needs its \
+            inclusion path to the wallet's tree root at a recent checkpoint."
                 .into()
         },
         params: vec![
@@ -417,10 +416,10 @@ fn recheck_replay(age: i64, every: u32, parity: Parity) -> Scenario {
             let started = Instant::now();
             ctx.check_swap_history(a);
             let ms = started.elapsed().as_secs_f64() * 1000.0;
-            let replayed = ctx.get(a).scanned_blocks - scanned_before;
+            let scanned = ctx.get(a).scanned_blocks - scanned_before;
             ctx.metric(
                 "blocks scanned by Check swap history",
-                replayed as f64,
+                scanned as f64,
                 "blocks",
             );
             ctx.metric("Check swap history wall time", ms, "ms");

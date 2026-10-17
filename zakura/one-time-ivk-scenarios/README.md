@@ -45,8 +45,8 @@ Simulated:
 
 - The chain. Blocks every 75 seconds at real heights, with background Ironwood
   traffic every ten blocks. Wallets checkpoint their trees only at blocks with
-  shielded outputs, and restore sweeps need a recent checkpoint, so an empty chain
-  would not behave like mainnet. Most payouts are fake compact outputs, which scan
+  shielded outputs, and a late payment's inclusion path must end at a recent
+  checkpoint, so an empty chain would not behave like mainnet. Most payouts are fake compact outputs, which scan
   like real ones but have no full transaction behind them.
 - NEAR. Quotes, deposit addresses, statuses (normalized through
   `zakura-near-intents`), payouts and refunds, and the seen and recent sets its
@@ -54,17 +54,16 @@ Simulated:
 - The receiver directory. Publications are built from the chain's zero-OVK payments,
   two blocks behind the tip, the way the indexer builds them. Failures can be
   injected.
-- Vizor's sync loop. Recovery maintenance at the start, scanning, maintenance again at
-  the tip, closing finished keys, status and payload work served from the chain, then
-  one restore sweep run per sync. Payload work goes over the public path, not Enhance
-  PIR.
+- Vizor's sync loop. A discovery run, then scanning with status and payload work
+  served from the chain, closing finished keys, then another discovery run. Payload
+  work goes over the public path, not Enhance PIR.
 - Time. One clock follows the chain; a device can run fast or slow.
 
 ## Reading the outcomes
 
 Every payment to a one-time key gets a class for each wallet that should see it:
-found live (scanning while the key was open), found by sweep (a restore or the
-paid-filter check of a closed key), found after recheck (only after Check swap
+found live (scanning while the key was open), found by discovery (a restore, or a
+newer publication's paid filter holding a closed key), found after recheck (only after Check swap
 history), or missed. Each scenario states the class the documented contract predicts,
 with the reason, and fails when the wallet does something else. A miss the library
 documents passes and is listed under the documented gaps, because whether it is

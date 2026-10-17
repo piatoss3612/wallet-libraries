@@ -181,9 +181,9 @@ impl Ctx {
 
     /// Keeps every wallet syncing a block at a time, as Vizor's polling would, until each
     /// is quiet: nothing pending, deferred or left to scan. A wallet that goes 40 syncs
-    /// without finding a payment or finishing a sweep, or 1,000 syncs in all, fails the
-    /// scenario. Runs after every scenario so a find that needs another sync (a
-    /// spend-history replay, a sweep's rescan) counts.
+    /// without finding a payment or making a lookup, or 1,000 syncs in all, fails the
+    /// scenario. Runs after every scenario so a find that needs another sync (a late
+    /// payment waiting for the scan, a rescan of blocks the journal did not cover) counts.
     pub fn settle(&mut self) {
         const STALLED: usize = 40;
         const ROUNDS: usize = 1_000;
@@ -254,8 +254,8 @@ impl Ctx {
     }
 
     /// Quotes an incoming swap on `dev` with a deposit deadline `deadline_in` seconds out.
-    /// Like the app, it answers a refusal by catching up and trying again, at most three
-    /// times: `Gap` by running the restore sweeps it waits for, `Coverage` by syncing.
+    /// Like the app, it answers a `Gap` or `Coverage` refusal by syncing, which runs the
+    /// discovery `Gap` waits for, and trying again, at most three times.
     pub fn quote_incoming(
         &mut self,
         dev: Dev,

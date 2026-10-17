@@ -27,7 +27,7 @@ pub fn all() -> Vec<Scenario> {
         scenarios.push(directory_errors(status));
     }
     for stops in [false, true] {
-        scenarios.push(directory_fails_after_leasing(stops));
+        scenarios.push(directory_fails_on_a_later_page(stops));
     }
     for (skew, after_deadline) in [(5 * DAY, 29 * DAY), (-2 * DAY, 31 * DAY)] {
         scenarios.push(clock_skew(skew, after_deadline));
@@ -78,8 +78,8 @@ fn directory_down_at_restore() -> Scenario {
         group: RESTORE,
         title: "The receiver directory is down when the seed is restored, and back an hour later"
             .into(),
-        summary: "Without the directory a restore cannot sweep its keys, so it cannot issue new \
-            addresses either (Gap). The sweep runs once the directory answers."
+        summary: "Without the directory a restore's discovery cannot check its keys, so it cannot \
+            issue new addresses either (Gap). Discovery runs once the directory answers."
             .into(),
         params: vec![("outage".into(), "1h".into())],
         slow: false,
@@ -91,7 +91,7 @@ fn directory_down_at_restore() -> Scenario {
             ctx.sync(b);
             let quote = ctx.prepare_incoming(b);
             ctx.check(
-                "B cannot issue an address while its lookahead is unswept",
+                "B cannot issue an address while its discovery is incomplete",
                 quote == Err(ReservationPolicy::Gap),
                 format!("{quote:?}"),
             );
@@ -105,7 +105,7 @@ fn directory_down_at_restore() -> Scenario {
                 &swap.label(),
                 &payout,
                 Class::FoundByDiscovery,
-                "The sweep runs once the directory answers.",
+                "Discovery runs once the directory answers.",
             );
         }),
     }
@@ -120,7 +120,7 @@ fn directory_errors(status: u16) -> Scenario {
         ),
         summary: "409 and 410 mean a new publication; anything else, 429 included, is a retryable \
             transport failure that backs the key off. Either way the payment is found by a later \
-            sweep."
+            discovery run."
             .into(),
         params: vec![("status".into(), status.to_string())],
         slow: false,
@@ -140,17 +140,17 @@ fn directory_errors(status: u16) -> Scenario {
                 &swap.label(),
                 &payout,
                 Class::FoundByDiscovery,
-                "A failed sweep backs off and a later one finds the payment.",
+                "A later discovery run finds the payment after the failures.",
             );
         }),
     }
 }
 
-/// A restore's sweep loses the directory on I1's second payment page, after leasing I1
-/// and finishing I0. The directory answers HTTP 503, or, when `stops`, the app stops
-/// during the request and its next sync's witness download fails too. Every payment must
-/// be credited once in the end, and I1's retry must wait out its backoff.
-fn directory_fails_after_leasing(stops: bool) -> Scenario {
+/// A restore's discovery loses the directory on I1's second payment page, after reading
+/// I1's first and finishing I0. The directory answers HTTP 503, or, when `stops`, the app
+/// stops during the request and its next sync's witness download fails too. Every payment
+/// must be credited once in the end, and I1's retry must wait out its backoff.
+fn directory_fails_on_a_later_page(stops: bool) -> Scenario {
     let what = if stops {
         "the app stops during the request, then the witness download fails"
     } else {
@@ -158,9 +158,9 @@ fn directory_fails_after_leasing(stops: bool) -> Scenario {
     };
     Scenario {
         id: if stops {
-            "E7-app-stops-mid-sweep-then-witnesses-fail".into()
+            "E7-app-stops-mid-lookup-then-witnesses-fail".into()
         } else {
-            "E7-directory-fails-a-later-page-after-leasing".into()
+            "E7-directory-fails-a-later-page".into()
         },
         group: RESTORE,
         title: format!("A restore's lookup of a twice-paid key fails on its second page: {what}"),

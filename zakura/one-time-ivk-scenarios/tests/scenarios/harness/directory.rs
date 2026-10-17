@@ -305,8 +305,8 @@ impl Transport for Directory {
     }
 }
 
-/// A directory published on its first request, so a sweep with nothing due pays for no
-/// PIR setup. An unreachable directory refuses every request.
+/// A directory published on its first request, so a discovery run with nothing due pays
+/// for no PIR setup. An unreachable directory refuses every request.
 pub struct Served<'a> {
     make: Box<dyn Fn() -> Directory + 'a>,
     directory: OnceCell<Directory>,

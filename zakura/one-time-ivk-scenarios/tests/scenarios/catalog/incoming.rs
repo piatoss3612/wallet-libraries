@@ -17,7 +17,7 @@ const HALF: u64 = ZEC / 2;
 const CONFIRMATIONS: u32 = 10;
 
 const OPEN_LIVE: &str = "The key was open: an incoming key scans from its reservation until its swap settles (a final status and every receipt confirmed 10 times), or 30 days after its deadline.";
-const RESTORE_SWEEP: &str = "A restore sweeps the incoming lookahead through the receiver directory, which lists NEAR's zero-OVK payouts, one page per payment.";
+const RESTORE_DISCOVERY: &str = "A restore's discovery checks the incoming lookahead against the receiver directory, which lists NEAR's zero-OVK payouts, and looks each paid key up, one page per payment.";
 const OWN_OVK: &str = "The payer used its own OVK, so the receiver directory cannot list the payment, and a key that is not scanning cannot find it.";
 
 pub fn all() -> Vec<Scenario> {
@@ -252,10 +252,10 @@ fn paid_twice(gap: Option<i64>, payer2: Payer, offline: bool) -> Scenario {
                 &key,
                 &p1,
                 Class::FoundByDiscovery,
-                RESTORE_SWEEP,
+                RESTORE_DISCOVERY,
             );
             let (b2, why) = match payer2 {
-                Payer::Near => (Class::FoundByDiscovery, RESTORE_SWEEP),
+                Payer::Near => (Class::FoundByDiscovery, RESTORE_DISCOVERY),
                 // B's scan tries the key on the whole batch holding payout 1's hint, so it
                 // finds a payment in the same batch, but no other.
                 Payer::Wallet if gap.is_none_or(|g| g <= HOUR) => (
@@ -284,8 +284,8 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
             span(after)
         ),
         summary: "The seed is restored on a new device while NEAR still owes a payout. A restored \
-            key that NEAR was given recently scans for 24 hours after its sweep; a later payout \
-            relies on the paid-filter check of newer publications."
+            key that NEAR was given recently scans for 24 hours after discovery finds it; a later \
+            payout relies on newer publications' paid filters."
             .into(),
         params: vec![
             ("payout after restore".into(), span(after)),
@@ -304,12 +304,12 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
             let watched = ctx.get(b).scanning();
             let open_keys = watched.len();
             ctx.metric(
-                "B keys scanning after its restore sweep",
+                "B keys scanning after its restore's discovery",
                 open_keys as f64,
                 "keys",
             );
             ctx.check(
-                format!("B watches {} after its restore sweep", s.key),
+                format!("B watches {} after its restore's discovery", s.key),
                 watched.contains(&s.key),
                 format!("scanning {watched:?}"),
             );
@@ -330,12 +330,12 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
             let (class, why) = if within {
                 (
                     Class::FoundLive,
-                    "NEAR was given the address within the last day, so the restored key scans for 24 hours after its sweep (RESTORE_WATCH_SECS).",
+                    "NEAR was given the address within the last day, so the restored key scans for 24 hours after discovery finds it (RESTORE_WATCH_SECS).",
                 )
             } else {
                 (
                     Class::FoundByDiscovery,
-                    "The restored key closed after its 24-hour watch with no payment, so the next publication's paid filter holds it and the sweep imports it (record_paid_filter_check).",
+                    "The restored key closed after its 24-hour watch with no payment, so the next publication's paid filter holds it and discovery finds the payment (DiscoveryStatus::refresh_due).",
                 )
             };
             ctx.expect(b, "payout", &s.key, &payout, class, why);
@@ -479,7 +479,7 @@ fn provider_silent(after_deadline: i64) -> Scenario {
             } else {
                 (
                     Class::FoundByDiscovery,
-                    "The key closed unpaid at its 30-day limit; a newer publication's paid filter holds it, so a sweep imports the payment (record_paid_filter_check).",
+                    "The key closed unpaid at its 30-day limit; a newer publication's paid filter holds it, so discovery finds the payment (DiscoveryStatus::refresh_due).",
                 )
             };
             ctx.expect(a, "payout", &key, &payout, class, why);
