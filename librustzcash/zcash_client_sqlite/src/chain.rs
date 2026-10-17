@@ -684,10 +684,11 @@ mod tests {
         }
     }
 
-    /// A rewind removes the spend journal above its rescan floor in every build, since an
-    /// `orchard` build may reopen the wallet and read the journal as spend evidence.
+    /// A rewind removes the spend journal above its rescan floor and has discovery judge a
+    /// publication there again in every build, since an `orchard` build may reopen the
+    /// wallet and read that state.
     #[test]
-    fn a_rewind_truncates_the_spend_journal() {
+    fn a_rewind_repairs_one_time_state_in_every_build() {
         use zcash_client_backend::data_api::{
             WalletWrite,
             testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
@@ -718,7 +719,23 @@ mod tests {
             [u32::from(h1), u32::from(h3) + 1],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO ironwood_one_time_publications (height, hash, tree_size, state)
+             VALUES (?1, zeroblob(32), 0, 1)",
+            [u32::from(h3)],
+        )
+        .unwrap();
         st.wallet_mut().truncate_to_height(h1).unwrap();
+        let rejudged: i64 = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT state FROM ironwood_one_time_publications",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rejudged, 0);
         let (journal, past): (i64, i64) = st
             .wallet()
             .conn()

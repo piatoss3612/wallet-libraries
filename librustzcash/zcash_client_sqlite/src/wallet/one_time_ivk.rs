@@ -46,7 +46,6 @@ use zcash_client_backend::{
     data_api::{
         Account as _,
         scanning::{ScanPriority, ScanRange},
-        wallet::ConfirmationsPolicy,
     },
     scanning::one_time_ivk::OneTimeScanningKey,
 };
@@ -470,62 +469,6 @@ pub(crate) fn rescan_missed_keys(
         queue_rescan(conn, start..range.end)?;
     }
     Ok(())
-}
-
-/// Repairs one-time IVK state for a rewind that rescans every block above `height`.
-/// Open keys start at the first rescanned block at the latest, which
-/// `wallet::truncate_to_height_internal` sets after this in every build. A closed key that
-/// scanned reopens if the rewind leaves one of its receipts short of the confirmations
-/// closing requires (see `WalletDb::close_finished_one_time_keys`), and closes again once
-/// that receipt is confirmed again. A key closed without scanning, whose note a lookup
-/// found, reopens from its first note above `height`, so the rescan finds the note again,
-/// and closes the same way. Discovery is repaired too (see `restore::discovery::truncate`).
-pub(crate) fn truncate_to_height(
-    conn: &rusqlite::Transaction<'_>,
-    height: BlockHeight,
-) -> Result<(), SqliteClientError> {
-    let confirmed_below = u32::from(height)
-        .saturating_add(1)
-        .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
-    conn.execute(
-        "UPDATE ironwood_one_time_keys SET closed_at = NULL
-         WHERE closed_at IS NOT NULL AND active_from IS NOT NULL AND id IN (
-             SELECT n.one_time_key_id FROM ironwood_received_notes n
-             JOIN transactions t ON t.id_tx = n.transaction_id
-             WHERE t.mined_height > ?1)",
-        [confirmed_below],
-    )?;
-    let note_above = "SELECT MIN(t.mined_height) FROM ironwood_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id
-         WHERE n.one_time_key_id = ironwood_one_time_keys.id AND t.mined_height > ?1";
-    conn.execute(
-        &format!(
-            "UPDATE ironwood_one_time_keys SET closed_at = NULL, active_from = ({note_above})
-             WHERE closed_at IS NOT NULL AND active_from IS NULL
-               AND ({note_above}) IS NOT NULL"
-        ),
-        [u32::from(height)],
-    )?;
-    restore::discovery::truncate(conn, height)
-}
-
-/// Reopens `account`'s discovery after a rewind lowers its birthday (see
-/// `restore::discovery::reopen`).
-pub(crate) fn reopen_discovery(
-    conn: &rusqlite::Transaction<'_>,
-    account: AccountUuid,
-) -> Result<(), SqliteClientError> {
-    let owner: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM accounts WHERE uuid = ?1",
-            [account.0],
-            |r| r.get(0),
-        )
-        .optional()?;
-    match owner {
-        Some(owner) => restore::discovery::reopen(conn, owner),
-        None => Ok(()),
-    }
 }
 
 /// Seconds since the Unix epoch on the wallet clock, or 0 before it.

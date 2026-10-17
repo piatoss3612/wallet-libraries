@@ -7,7 +7,7 @@
 //! scan that used that account's keys, the journal therefore holds every nullifier
 //! that could spend one of the account's one-time notes. Entries and coverage above a
 //! rewind's rescan floor are removed with those blocks, in every build (see
-//! `wallet::truncate_to_height_internal`).
+//! `wallet::one_time_rewind::truncate`).
 
 use std::ops::Range;
 

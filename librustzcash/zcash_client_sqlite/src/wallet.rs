@@ -198,6 +198,7 @@ pub(crate) mod ironwood_hooks;
 pub(crate) mod locking;
 #[cfg(feature = "orchard")]
 pub mod one_time_ivk;
+pub(crate) mod one_time_rewind;
 #[cfg(feature = "orchard")]
 pub(crate) mod orchard;
 pub(crate) mod sapling;
@@ -4325,24 +4326,7 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     trim_scan_queue_to(conn, truncation_height)?;
     // Every block above the rescan floor may be replaced, not only those above the
     // truncation height.
-    #[cfg(feature = "orchard")]
-    one_time_ivk::truncate_to_height(conn, rescan_floor)?;
-    // The spend journal's entries and coverage above the floor may describe replaced
-    // blocks. This runs in every build, since an `orchard` build may reopen the wallet and
-    // read them as spend evidence.
-    let floor = u32::from(rescan_floor);
-    conn.execute(
-        "DELETE FROM ironwood_spend_journal WHERE block_height > ?1",
-        [floor],
-    )?;
-    conn.execute(
-        "DELETE FROM ironwood_journal_coverage WHERE start_height > ?1",
-        [floor],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_journal_coverage SET end_height = ?1 + 1 WHERE end_height > ?1 + 1",
-        [floor],
-    )?;
+    one_time_rewind::truncate(conn, rescan_floor)?;
     // Scans take only one-time keys started by each batch's end, and the replacement chain
     // may mine a payment below an open key's old start, so open keys, including any the
     // repair above reopened, start at the first rescanned block at the latest.
@@ -5062,12 +5046,9 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
                 ],
             )
             .map_err(|e| RewindError::DataSource(e.into()))?;
-        #[cfg(feature = "orchard")]
         if lowered > 0 {
-            one_time_ivk::reopen_discovery(conn, *uuid).map_err(RewindError::DataSource)?;
+            one_time_rewind::reopen_discovery(conn, *uuid).map_err(RewindError::DataSource)?;
         }
-        #[cfg(not(feature = "orchard"))]
-        let _ = lowered;
     }
 
     Ok(())

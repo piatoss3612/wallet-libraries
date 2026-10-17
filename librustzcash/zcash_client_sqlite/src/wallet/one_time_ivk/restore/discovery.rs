@@ -34,11 +34,16 @@ use crate::wallet::one_time_ivk::{
     Discovery, KeyId, Purpose, account_key, activate, corrupt, decode_index, index_after, key_ref,
     register, restore_start, stored_key_id, swap::reservations::record_provider_seen,
 };
+use crate::wallet::one_time_rewind::{ACCEPTED, PROVISIONAL, restart_cursor};
 use crate::{
     AccountUuid,
     error::SqliteClientError,
     wallet::{self, scanning::priority_code},
 };
+
+/// `ironwood_one_time_publications.state` once the publication's last block did not match
+/// (see `one_time_rewind` for the other states).
+const REJECTED: u8 = 2;
 
 /// SQL condition on account `?1`'s key `k`: closed with no mined payment and none before the
 /// birthday, so only a newer publication's paid filter would show a payment after it closed.
@@ -47,13 +52,6 @@ const UNPAID_CLOSED: &str = "k.account_id = ?1 AND k.closed_at IS NOT NULL
     AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
         JOIN transactions t ON t.id_tx = n.transaction_id
         WHERE n.one_time_key_id = k.id AND t.mined_height IS NOT NULL)";
-
-/// `ironwood_one_time_publications.state` until the scan stores the publication's last block.
-const PROVISIONAL: u8 = 0;
-/// `ironwood_one_time_publications.state` once that block matched.
-const ACCEPTED: u8 = 1;
-/// `ironwood_one_time_publications.state` once that block did not match.
-const REJECTED: u8 = 2;
 
 /// An account's discovery pass against one publication.
 struct Pass {
@@ -660,37 +658,6 @@ pub(crate) fn defer_lookup(
     defer(conn, key_ref(conn, account, key)?, now).map(|_| ())
 }
 
-/// Restarts from page zero the lookup cursors that SQL `keys` selects, with `?1` bound to
-/// `param`, and makes each due again at the cutoff it last finished or still has.
-fn restart_cursor(
-    conn: &Connection,
-    keys: &str,
-    param: impl rusqlite::ToSql,
-) -> Result<(), SqliteClientError> {
-    conn.execute(
-        &format!(
-            "UPDATE ironwood_one_time_lookups
-             SET applied = 0, last_position = NULL, last_nullifier = NULL, last_height = NULL,
-                 cutoff_height = COALESCE(cutoff_height, done_height), done_height = NULL
-             WHERE one_time_key_id IN ({keys})"
-        ),
-        [&param],
-    )?;
-    conn.execute(
-        &format!("DELETE FROM ironwood_one_time_lookup_reads WHERE one_time_key_id IN ({keys})"),
-        [&param],
-    )?;
-    // Reading again from page zero replaces what the earlier reads queued, so a corrected
-    // answer is not refused as a conflict. Admitted notes stay.
-    conn.execute(
-        &format!(
-            "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id IN ({keys})"
-        ),
-        [&param],
-    )?;
-    Ok(())
-}
-
 /// Implements `OneTimeIvkRestoreWrite::record_one_time_witness`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_witness<P: Parameters>(
@@ -1082,68 +1049,6 @@ fn scanned(conn: &Connection, height: BlockHeight) -> Result<bool, SqliteClientE
         params![u32::from(height), priority_code(&ScanPriority::Scanned)],
         |r| r.get(0),
     )?)
-}
-
-/// Repairs discovery for a rewind whose blocks above `rescan_floor` may be replaced: a
-/// publication ending there is judged again, a late candidate there becomes a hint again
-/// (its block is rescanned), a path anchored there is requested again, and a cursor that
-/// passed a record there restarts, since the replacement chain may put a record before it.
-pub(crate) fn truncate(
-    conn: &rusqlite::Transaction<'_>,
-    rescan_floor: BlockHeight,
-) -> Result<(), SqliteClientError> {
-    let floor = u32::from(rescan_floor);
-    conn.execute(
-        "UPDATE ironwood_one_time_publications SET state = ?2 WHERE state = ?3 AND height > ?1",
-        params![floor, PROVISIONAL, ACCEPTED],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_payment_recovery
-         SET scan_hint = 1, witness = NULL, witness_height = NULL, witness_hash = NULL
-         WHERE height > ?1",
-        [floor],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_payment_recovery
-         SET witness = NULL, witness_height = NULL, witness_hash = NULL
-         WHERE witness_height > ?1",
-        [floor],
-    )?;
-    restart_cursor(
-        conn,
-        "SELECT one_time_key_id FROM ironwood_one_time_lookups WHERE last_height > ?1",
-        floor,
-    )?;
-    Ok(())
-}
-
-/// Reopens account `owner`'s discovery after its birthday was lowered: the next pass checks
-/// every key again and every paid key's history from the start, since outcomes outside the
-/// old range no longer hold. The account is no longer treated as fresh.
-pub(crate) fn reopen(
-    conn: &rusqlite::Transaction<'_>,
-    owner: i64,
-) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "DELETE FROM ironwood_one_time_discovery WHERE account_id = ?1",
-        [owner],
-    )?;
-    conn.execute(
-        "DELETE FROM ironwood_one_time_fresh_accounts WHERE account_id = ?1",
-        [owner],
-    )?;
-    restart_cursor(
-        conn,
-        "SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1",
-        owner,
-    )?;
-    // Until the next pass makes them due, no lookup runs.
-    conn.execute(
-        "UPDATE ironwood_one_time_lookups SET cutoff_height = NULL, done_height = NULL
-         WHERE one_time_key_id IN (SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
-        [owner],
-    )?;
-    Ok(())
 }
 
 /// The 32 sibling hashes a stored witness holds.
