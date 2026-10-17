@@ -39,7 +39,8 @@ pub const FIRST_WINDOW: u64 = 100;
 /// [`FIRST_WINDOW`].
 pub const GAP: u64 = 30;
 /// The most keys one [`discover`] call checks in a purpose. The wallet keeps the cursor, so
-/// the next call continues.
+/// the next call continues, unless the directory has published since: the search then
+/// starts over and runs to its end in one call, so it finishes against the newest filters.
 pub const KEYS_PER_RUN: u64 = 5_000;
 /// Receivers derived per wallet read.
 const CHUNK: u64 = 100;
@@ -102,16 +103,17 @@ pub struct Discovered<E> {
 /// provisional: the wallet judges it once its scan stores the publication's last block. A
 /// run with nothing due makes no request, and keys registered after discovery finished,
 /// such as a refund key recovered from a funding memo, are looked up by the next run. A run
-/// starts a new pass when the account has none or its pass's publication was rejected, and
-/// carries an unfinished pass's search over to a newer publication. Once discovery is
-/// complete, only `recheck_one_time_key_history` in the SQLite store starts another pass,
-/// so a payment to a closed key is found on request. Each purpose's keys are checked
-/// against the filters from index zero: always the first [`FIRST_WINDOW`], then on until
-/// [`GAP`] consecutive keys are in no seen set and not in the paid filter, and then every
-/// closed key past that (see `DiscoveryStatus::closed`). A provider's recent set counts
-/// only if its feed's last read began at most fifteen minutes before `now` and at most a
-/// minute after it, and its window, with the feed running throughout, covers
-/// [`RESTORE_WATCH_SECS`]; unless every provider has one, every key is recent.
+/// starts a new pass when the account has none, its pass's publication was rejected, or its
+/// pass's search is unfinished and the directory has published since (see
+/// [`KEYS_PER_RUN`]). Once discovery is complete, only `recheck_one_time_key_history` in
+/// the SQLite store starts another pass, so a payment to a closed key is found on request.
+/// Each purpose's keys are checked against the filters from index zero: always the first
+/// [`FIRST_WINDOW`], then on until [`GAP`] consecutive keys are in no seen set and not in
+/// the paid filter, and then every closed key past that (see `DiscoveryStatus::closed`). A
+/// provider's recent set counts only if its feed's last read began at most fifteen minutes
+/// before `now` and at most a minute after it, and its window, with the feed running
+/// throughout, covers [`RESTORE_WATCH_SECS`]; unless every provider has one, every key is
+/// recent.
 ///
 /// Paid keys are then looked up over PIR, several at once, each paging from the cursor the
 /// wallet keeps. A late payment's inclusion path comes from the publication's common
@@ -160,9 +162,10 @@ where
     let mut directory = Directory::new(activation, genesis, origin, transport, manifest)?;
     let publication = directory.publication_end();
 
-    // A newer publication takes over an unfinished search where it stopped, so a search
-    // longer than one run still finishes while the directory publishes.
-    let cursors = if status.publication.is_none() {
+    // A newer publication's filters can mark keys an unfinished search already passed, so the
+    // search starts over against them, and runs to its end so it cannot restart forever.
+    let moved = status.enumeration.is_some() && status.publication != Some(publication);
+    let cursors = if status.publication.is_none() || moved {
         Some([
             (Purpose::Receive, EnumerationCursor::default()),
             (Purpose::Refund, EnumerationCursor::default()),
@@ -170,6 +173,7 @@ where
     } else {
         status.enumeration
     };
+    let budget = if moved { u64::MAX } else { KEYS_PER_RUN };
     if let Some(cursors) = cursors {
         for (purpose, cursor) in cursors {
             check_purpose(
@@ -179,6 +183,7 @@ where
                 publication,
                 purpose,
                 cursor,
+                budget,
                 &status.closed,
                 lock,
                 now,
@@ -268,7 +273,7 @@ fn nothing_due<E>(failed: Vec<(KeyId, Error<E>)>) -> Discovered<E> {
 }
 
 /// Checks `purpose`'s keys from `cursor` against the filters and records each chunk, up to
-/// [`KEYS_PER_RUN`] keys. The last chunk also checks the `closed` keys past where the search
+/// `budget` keys. The last chunk also checks the `closed` keys past where the search
 /// stopped.
 #[allow(clippy::too_many_arguments)]
 async fn check_purpose<W, T, L>(
@@ -278,6 +283,7 @@ async fn check_purpose<W, T, L>(
     publication: PublicationEnd,
     purpose: Purpose,
     cursor: EnumerationCursor,
+    budget: u64,
     closed: &[DiscoveryWork],
     lock: &L,
     now: i64,
@@ -332,7 +338,7 @@ where
                 "the receiver directory's publication is ahead of the wallet's chain",
             ));
         }
-        if finished || from - start >= KEYS_PER_RUN {
+        if finished || from - start >= budget {
             return Ok(());
         }
     }
