@@ -470,6 +470,11 @@ pub(crate) fn record_filter_checks<P: Parameters>(
         ),
         params![owner.0, cursor.next, cursor.reach, finished],
     )?;
+    // `judge` closes a pass's keys when it accepts the publication, which happened before
+    // these keys registered if the scan had already stored its block.
+    if pass(conn, owner.0)?.is_some_and(|pass| pass.state == ACCEPTED) {
+        close_looked_up(conn, owner.0)?;
+    }
     Ok(true)
 }
 

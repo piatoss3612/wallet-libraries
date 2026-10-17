@@ -465,6 +465,30 @@ fn an_unknown_accounts_discovery_is_an_error() {
     ));
 }
 
+/// A key the filters mark seen but not paid closes even when the publication was accepted
+/// before the pass registered it, so a newer publication rechecks it.
+#[test]
+fn a_seen_key_closes_against_an_accepted_publication() {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    let seen = FilterCheck {
+        paid: false,
+        ..paid(key8())
+    };
+    let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, account, publication, &[seen]));
+    let (closed,): (bool,) = row(
+        &db.conn,
+        "SELECT closed_at IS NOT NULL FROM ironwood_one_time_keys WHERE key_index = ?1",
+        [key8().index().to_be_bytes()],
+    );
+    assert!(closed);
+    let found = status(db, account);
+    assert!(found.complete);
+    assert!(found.refresh_due);
+}
+
 /// Paging resumes from the cursor and refuses a page that does not continue it.
 #[test]
 fn paging_resumes_from_its_cursor() {
