@@ -489,6 +489,36 @@ fn a_seen_key_closes_against_an_accepted_publication() {
     assert!(found.refresh_due);
 }
 
+/// A page refused for a bad record keeps nothing it queued before that record, so the
+/// corrected page is taken.
+#[test]
+fn a_refused_page_queues_nothing() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    let candidate = pay_candidate(&mut st, key8());
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let publication = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, account, publication, &[paid(key8())]));
+    let beyond = DirectoryPayment {
+        height: u32::from(publication.height) + 1,
+        ..directory_answer(&candidate)
+    };
+    let page = [directory_answer(&candidate), beyond];
+    assert!(
+        !db.record_one_time_lookup(account, key8(), publication, 0, &page, true, clock_now())
+            .unwrap()
+    );
+    assert!(pending(db, account, key8()).is_empty());
+    exec(
+        &db.conn,
+        "UPDATE ironwood_one_time_lookups SET next_attempt_at = 0",
+        [],
+    );
+    assert!(look_up(db, account, key8(), publication, &[candidate]));
+    assert_eq!(pending(db, account, key8()).len(), 1);
+}
+
 /// Paging resumes from the cursor and refuses a page that does not continue it.
 #[test]
 fn paging_resumes_from_its_cursor() {

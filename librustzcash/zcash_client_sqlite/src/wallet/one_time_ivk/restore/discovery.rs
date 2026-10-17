@@ -530,17 +530,18 @@ pub(crate) fn record_lookup<P: Parameters>(
         restart_cursor(conn, "?1", id)?;
     }
     let start = restore_start(conn, params, owner)?;
+    conn.execute_batch("SAVEPOINT lookup_page")?;
     let mut last = None;
     for payment in records {
         let Some(candidate) = directory_candidate(payment) else {
-            return defer(conn, id, now);
+            return refuse(conn, id, now);
         };
         if u32::from(candidate.height) > cutoff {
-            return defer(conn, id, now);
+            return refuse(conn, id, now);
         }
         let note = match authenticate(conn, params, account, key, &candidate) {
             Ok((_, note)) => note,
-            Err(SqliteClientError::InvalidOneTimeIvkInput(_)) => return defer(conn, id, now),
+            Err(SqliteClientError::InvalidOneTimeIvkInput(_)) => return refuse(conn, id, now),
             Err(e) => return Err(e),
         };
         // A note the scan already found stays as it is.
@@ -554,7 +555,7 @@ pub(crate) fn record_lookup<P: Parameters>(
             match queue_payment(conn, params, account, key, &candidate, revision, hint) {
                 Ok(()) => {}
                 Err(SqliteClientError::InvalidOneTimeIvkInput(_)) => {
-                    return defer(conn, id, now);
+                    return refuse(conn, id, now);
                 }
                 Err(e) => return Err(e),
             }
@@ -565,6 +566,7 @@ pub(crate) fn record_lookup<P: Parameters>(
             candidate.height,
         ));
     }
+    conn.execute_batch("RELEASE lookup_page")?;
     if let Some((position, nullifier, height)) = last {
         conn.execute(
             "UPDATE ironwood_one_time_lookups
@@ -599,6 +601,13 @@ pub(crate) fn record_lookup<P: Parameters>(
     }
     admit(conn, params, sessions, account)?;
     Ok(true)
+}
+
+/// Undoes what a refused page queued since `record_lookup`'s savepoint, so a corrected
+/// answer is not refused as a conflict, then backs lookup `id` off (see [`defer`]).
+fn refuse(conn: &Connection, id: i64, now: i64) -> Result<bool, SqliteClientError> {
+    conn.execute_batch("ROLLBACK TO lookup_page; RELEASE lookup_page")?;
+    defer(conn, id, now)
 }
 
 /// Backs lookup `id` off from `now`, from one minute to twelve hours, and returns false.
