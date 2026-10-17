@@ -132,8 +132,15 @@ pub(in crate::wallet::one_time_ivk) fn send_witness(
     let account = st.test_account().unwrap().id();
     let (anchor, path) = (tip(st), witness_at(st, candidate.position));
     let db = st.wallet_mut().db_mut();
-    db.record_one_time_witness(account, key, candidate.position, anchor, siblings(&path))
-        .unwrap();
+    db.record_one_time_witness(
+        account,
+        key,
+        candidate.position,
+        anchor,
+        siblings(&path),
+        clock_now(),
+    )
+    .unwrap();
 }
 
 /// Pays [`key8`] in a [`restored_wallet`] before the wallet knows the key and scans past
@@ -382,6 +389,55 @@ fn a_hint_a_scan_skips_becomes_late() {
     assert!(!scan_hint(&st));
     send_witness(&mut st, key8(), &candidate);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
+}
+
+/// A hint the scan tried and missed is the directory's error: its lookup restarts from page
+/// zero, backed off so a directory that keeps giving it does not loop.
+#[test]
+fn a_missed_hint_restarts_its_lookup_backed_off() {
+    let (mut st, candidate) = hint_fixture();
+    let account = st.test_account().unwrap().id();
+    // The record claims the next position, which holds no note for the key.
+    exec(
+        st.wallet().conn(),
+        "UPDATE ironwood_one_time_payment_recovery SET position = position + 1",
+        [],
+    );
+    st.scan_cached_blocks_with_one_time_ivks(candidate.height, 1);
+    let db = st.wallet_mut().db_mut();
+    assert!(pending(db, account, key8()).is_empty());
+    let (cutoff, next_attempt): (Option<u32>, i64) = row(
+        &db.conn,
+        "SELECT cutoff_height, next_attempt_at FROM ironwood_one_time_lookups",
+        [],
+    );
+    assert!(cutoff.is_some());
+    assert!(next_attempt > clock_now());
+    assert!(status(db, account).lookups.is_empty());
+}
+
+/// A fresh account's key registered for a lookup after discovery finished, as a recovered
+/// refund key is, keeps discovery incomplete until a pass looks it up.
+#[test]
+fn a_fresh_accounts_waiting_lookup_keeps_discovery_incomplete() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let from = tip(&st).height + 1;
+    let db = st.wallet_mut().db_mut();
+    let key = reserve_key(db, account, Purpose::Receive, from).key_id();
+    exec(
+        &db.conn,
+        "INSERT INTO ironwood_one_time_lookups (one_time_key_id)
+         SELECT id FROM ironwood_one_time_keys WHERE key_index = ?1",
+        [key.index().to_be_bytes()],
+    );
+    let found = status(db, account);
+    assert!(!found.complete);
+    assert!(found.publication.is_none());
+    discover(&mut st, account, &[]);
+    let due = status(st.wallet().db(), account).lookups;
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].work.key, key);
 }
 
 /// A publication whose last block differs from the wallet's is rejected: nothing is due

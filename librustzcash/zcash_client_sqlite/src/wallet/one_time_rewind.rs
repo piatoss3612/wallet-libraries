@@ -12,6 +12,8 @@ use crate::{AccountUuid, error::SqliteClientError};
 pub(crate) const PROVISIONAL: u8 = 0;
 /// `ironwood_one_time_publications.state` once that block matched.
 pub(crate) const ACCEPTED: u8 = 1;
+/// `ironwood_one_time_publications.state` once that block did not match.
+pub(crate) const REJECTED: u8 = 2;
 
 /// Repairs one-time IVK state for a rewind that rescans every block above `height`.
 /// Open keys start at the first rescanned block at the latest, which
@@ -53,9 +55,12 @@ pub(crate) fn truncate(
         [u32::from(height)],
     )?;
     let floor = u32::from(height);
+    // A publication judged either way against a block the rewind replaces is judged again,
+    // so one rejected on an abandoned fork can match the fork that replaces it.
     conn.execute(
-        "UPDATE ironwood_one_time_publications SET state = ?2 WHERE state = ?3 AND height > ?1",
-        params![floor, PROVISIONAL, ACCEPTED],
+        "UPDATE ironwood_one_time_publications SET state = ?2
+         WHERE state IN (?3, ?4) AND height > ?1",
+        params![floor, PROVISIONAL, ACCEPTED, REJECTED],
     )?;
     conn.execute(
         "UPDATE ironwood_one_time_payment_recovery

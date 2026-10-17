@@ -18,9 +18,11 @@ use zcash_protocol::consensus::Parameters;
 use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, CL, R> {
-    /// Ends `account`'s discovery pass, so the next one checks every key against a newer
-    /// publication's filters and reads each paid key's history past its cursor, to find a
-    /// payment after its key closed.
+    /// Ends `account`'s discovery pass, so the next one checks every key against the
+    /// directory's current filters and reads each paid key's history past its cursor, to
+    /// find a payment after its key closed. This is "Check swap history": once discovery is
+    /// complete, nothing else starts a pass. A fresh account then runs that pass as a
+    /// restored one does, so new swap addresses wait for it to register the keys it finds.
     pub fn recheck_one_time_key_history(
         &mut self,
         account: AccountUuid,

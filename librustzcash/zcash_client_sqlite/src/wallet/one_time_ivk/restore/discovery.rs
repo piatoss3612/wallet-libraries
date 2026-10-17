@@ -34,16 +34,12 @@ use crate::wallet::one_time_ivk::{
     Discovery, KeyId, Purpose, account_key, activate, corrupt, index_after, key_ref, register,
     restore_start, stored_key_id, swap::reservations::record_provider_seen,
 };
-use crate::wallet::one_time_rewind::{ACCEPTED, PROVISIONAL, restart_cursor};
+use crate::wallet::one_time_rewind::{ACCEPTED, PROVISIONAL, REJECTED, restart_cursor};
 use crate::{
     AccountUuid,
     error::SqliteClientError,
     wallet::{self, scanning::priority_code},
 };
-
-/// `ironwood_one_time_publications.state` once the publication's last block did not match
-/// (see `one_time_rewind` for the other states).
-const REJECTED: u8 = 2;
 
 /// SQL condition on account `?1`'s key `k`: closed with no mined payment and none before the
 /// birthday, so only a newer publication's paid filter would show a payment after it closed.
@@ -110,18 +106,21 @@ fn fresh(conn: &Connection, owner: i64) -> Result<bool, SqliteClientError> {
 }
 
 /// Whether account `owner`'s discovery is complete (see `DiscoveryStatus::complete`): no
-/// lookup is due, no payment it found waits to be admitted, and every publication a lookup
-/// cursor read from matched the wallet's chain.
+/// lookup is due or waits for a pass, no payment it found waits to be admitted, and every
+/// publication a lookup cursor read from matched the wallet's chain or ended before the
+/// birthday.
 pub(in crate::wallet::one_time_ivk) fn complete<P: Parameters>(
     conn: &Connection,
     params: &P,
     owner: crate::AccountRef,
 ) -> Result<bool, SqliteClientError> {
+    let start = restore_start(conn, params, owner)?;
     let settled = |conn: &Connection| -> Result<bool, SqliteClientError> {
         Ok(conn.query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
                  JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
-                 WHERE k.account_id = ?1 AND l.cutoff_height IS NOT NULL)
+                 WHERE k.account_id = ?1
+                   AND (l.cutoff_height IS NOT NULL OR l.done_height IS NULL))
              AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery c
                  JOIN ironwood_one_time_keys k ON k.id = c.one_time_key_id
                  WHERE k.account_id = ?1)
@@ -129,8 +128,9 @@ pub(in crate::wallet::one_time_ivk) fn complete<P: Parameters>(
                  JOIN ironwood_one_time_keys k ON k.id = r.one_time_key_id
                  JOIN ironwood_one_time_publications p
                    ON p.height = r.publication_height AND p.hash = r.publication_hash
-                 WHERE k.account_id = ?1 AND p.state != ?2)",
-            params![owner.0, ACCEPTED],
+                 WHERE k.account_id = ?1 AND p.state != ?2
+                   AND NOT (p.state = ?3 AND p.height < ?4))",
+            params![owner.0, ACCEPTED, PROVISIONAL, u32::from(start)],
             |r| r.get(0),
         )?)
     };
@@ -139,7 +139,7 @@ pub(in crate::wallet::one_time_ivk) fn complete<P: Parameters>(
     let Some(pass) = pass(conn, owner.0)? else {
         return Ok(fresh(conn, owner.0)? && settled(conn)?);
     };
-    let before_birthday = pass.publication.height < restore_start(conn, params, owner)?;
+    let before_birthday = pass.publication.height < start;
     let judged = pass.state == ACCEPTED || (pass.state == PROVISIONAL && before_birthday);
     Ok(judged && pass.receive.1 && pass.refund.1 && settled(conn)?)
 }
@@ -183,16 +183,7 @@ pub(crate) fn status<P: Parameters>(
     // A fresh account has no restored history, so it needs discovery only until work it
     // started finishes.
     let complete = complete(conn, params, owner)?;
-    if fresh(conn, owner.0)?
-        && complete
-        && !conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
-                 JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
-                 WHERE k.account_id = ?1 AND l.done_height IS NULL)",
-            [owner.0],
-            |r| r.get::<_, bool>(0),
-        )?
-    {
+    if fresh(conn, owner.0)? && complete {
         return Ok(None);
     }
     let current = pass(conn, owner.0)?;
@@ -273,6 +264,9 @@ pub(crate) fn status<P: Parameters>(
             })
         })?
         .collect::<Result<_, _>>()?;
+    let witness_anchor_floor = scanned_tip(conn)?.map_or(BlockHeight::from(0), |tip| {
+        tip.height.saturating_sub(crate::PRUNING_DEPTH)
+    });
     Ok(Some(DiscoveryStatus {
         publication: usable.map(|pass| pass.publication),
         complete,
@@ -280,6 +274,7 @@ pub(crate) fn status<P: Parameters>(
         closed,
         lookups,
         witnesses,
+        witness_anchor_floor,
     }))
 }
 
@@ -618,7 +613,7 @@ pub(crate) fn record_lookup<P: Parameters>(
             close_looked_up(conn, owner.0)?;
         }
     }
-    admit(conn, params, sessions, account)?;
+    admit(conn, params, sessions, account, now)?;
     Ok(true)
 }
 
@@ -667,6 +662,7 @@ pub(crate) fn record_witness<P: Parameters>(
     position: u32,
     anchor: ChainPoint,
     siblings: [[u8; 32]; 32],
+    now: i64,
 ) -> Result<(), SqliteClientError> {
     let id = key_ref(conn, account, key)?;
     conn.execute(
@@ -681,7 +677,7 @@ pub(crate) fn record_witness<P: Parameters>(
             anchor.hash.0
         ],
     )?;
-    admit(conn, params, sessions, account)
+    admit(conn, params, sessions, account, now)
 }
 
 /// Runs after the scan stores `range`, with one-time keys `keys` if it used them: judges
@@ -708,7 +704,7 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     for height in heights {
         judge(conn, BlockHeight::from(height))?;
     }
-    check_hints(conn, keys.unwrap_or(&[]), range)?;
+    check_hints(conn, keys.unwrap_or(&[]), range, now)?;
     let accounts: Vec<AccountUuid> = conn
         .prepare(
             "SELECT a.uuid FROM ironwood_one_time_discovery d
@@ -718,7 +714,7 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
         .collect::<Result<_, _>>()?;
     for account in accounts {
         recover_refund_memos(conn, params, account, now)?;
-        admit(conn, params, sessions, account)?;
+        admit(conn, params, sessions, account, now)?;
     }
     Ok(())
 }
@@ -831,6 +827,7 @@ fn check_hints(
     conn: &rusqlite::Transaction<'_>,
     keys: &[(AccountUuid, KeyId)],
     range: Range<BlockHeight>,
+    now: i64,
 ) -> Result<(), SqliteClientError> {
     let hints: Vec<(KeyId, AccountUuid, i64, TxId, u32, u32, Vec<u8>)> = conn
         .prepare(
@@ -876,6 +873,7 @@ fn check_hints(
         )?;
         if !found {
             restart_cursor(conn, "?1", id)?;
+            defer(conn, id, now)?;
         }
     }
     Ok(())
@@ -888,24 +886,9 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
     params: &P,
     sessions: &Sessions<'_>,
     account: AccountUuid,
+    now: i64,
 ) -> Result<(), SqliteClientError> {
-    // The highest block the scan stored that the scan queue no longer requires.
-    let through = conn
-        .query_row(
-            "SELECT b.height, b.hash FROM blocks b WHERE EXISTS(SELECT 1 FROM scan_queue q
-                 WHERE q.priority = ?1 AND b.height >= q.block_range_start
-                   AND b.height < q.block_range_end)
-             ORDER BY b.height DESC LIMIT 1",
-            [priority_code(&ScanPriority::Scanned)],
-            |r| {
-                Ok(ChainPoint {
-                    height: BlockHeight::from(r.get::<_, u32>(0)?),
-                    hash: BlockHash(r.get(1)?),
-                })
-            },
-        )
-        .optional()?;
-    let Some(through) = through else {
+    let Some(through) = scanned_tip(conn)? else {
         return Ok(());
     };
     let (owner, _) = account_key(conn, params, account)?;
@@ -978,10 +961,30 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
                     params![txid.as_ref(), action],
                 )?;
                 restart_cursor(conn, "?1", id)?;
+                defer(conn, id, now)?;
             }
         }
     }
     Ok(())
+}
+
+/// The highest block the scan stored that the scan queue no longer requires.
+fn scanned_tip(conn: &Connection) -> Result<Option<ChainPoint>, SqliteClientError> {
+    Ok(conn
+        .query_row(
+            "SELECT b.height, b.hash FROM blocks b WHERE EXISTS(SELECT 1 FROM scan_queue q
+                 WHERE q.priority = ?1 AND b.height >= q.block_range_start
+                   AND b.height < q.block_range_end)
+             ORDER BY b.height DESC LIMIT 1",
+            [priority_code(&ScanPriority::Scanned)],
+            |r| {
+                Ok(ChainPoint {
+                    height: BlockHeight::from(r.get::<_, u32>(0)?),
+                    hash: BlockHash(r.get(1)?),
+                })
+            },
+        )
+        .optional()?)
 }
 
 /// Queues for a rescan each stretch from `from` through `through` that the scan finished

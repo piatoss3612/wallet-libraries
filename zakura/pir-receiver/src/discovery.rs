@@ -86,31 +86,32 @@ pub struct Discovered<E> {
     pub lookups: usize,
     /// Late payments still waiting for an inclusion path.
     pub witnesses: usize,
-    /// Keys whose lookup failed in this run, with why. A failed read or a page the wallet
-    /// refused backs its lookup off. A page the wallet skipped for another reason does not.
+    /// Keys whose lookup or inclusion path failed in this run, with why. A failed read or a
+    /// page the wallet refused backs its lookup off. A page the wallet skipped for another
+    /// reason does not, and a path the witnesses could not give is requested again.
     pub failed: Vec<(KeyId, Error<E>)>,
 }
 
-/// Runs `account`'s discovery (see `OneTimeIvkRestoreWrite`) against the receiver
-/// directory at `origin`. A wallet with several accounts calls it once for each, before the
-/// restore scan's first batch and again in the background until it is complete. Every step
-/// commits on its own, so dropping the future at any await is safe.
+/// Runs `account`'s discovery (see `OneTimeIvkRestoreWrite`) against the receiver directory
+/// at `origin`. A wallet with several accounts calls it once for each, before the restore
+/// scan's first batch and again after every sync. Every step commits on its own, so
+/// dropping the future at any await is safe.
 ///
-/// The publication must commit to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS)
-/// on mainnet) and cover history from Ironwood activation on `params`' network. It is
-/// provisional: the wallet judges it once its scan stores the publication's last block.
-/// A run starts a new pass when the account has none, when its pass's publication was
-/// rejected, when `refresh` asks for one, or when its pass has keys left to check and the
-/// directory has moved on. Once discovery is complete, only a recheck
-/// (`recheck_one_time_key_history` in the SQLite store, or `refresh`) starts another, so a
-/// payment to a closed key is found on request. Each purpose's keys are checked against the
-/// filters from index
-/// zero: always the first [`FIRST_WINDOW`], then on until [`GAP`] consecutive keys are in
-/// no seen set and not in the paid filter, and then every closed key past that (see
-/// `DiscoveryStatus::closed`). A provider's recent set counts only if its feed's
-/// last read began at most fifteen minutes before `now` and at most a minute after it, and
-/// its window, with the feed running throughout, covers [`RESTORE_WATCH_SECS`]; unless
-/// every provider has one, every key is recent.
+/// The publication must commit to `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on
+/// mainnet) and cover history from Ironwood activation on `params`' network. It is
+/// provisional: the wallet judges it once its scan stores the publication's last block. A
+/// run with nothing due makes no request, and keys registered after discovery finished,
+/// such as a refund key recovered from a funding memo, are looked up by the next run. A run
+/// starts a new pass when the account has none or its pass's publication was rejected, and
+/// carries an unfinished pass's search over to a newer publication. Once discovery is
+/// complete, only `recheck_one_time_key_history` in the SQLite store starts another pass,
+/// so a payment to a closed key is found on request. Each purpose's keys are checked
+/// against the filters from index zero: always the first [`FIRST_WINDOW`], then on until
+/// [`GAP`] consecutive keys are in no seen set and not in the paid filter, and then every
+/// closed key past that (see `DiscoveryStatus::closed`). A provider's recent set counts
+/// only if its feed's last read began at most fifteen minutes before `now` and at most a
+/// minute after it, and its window, with the feed running throughout, covers
+/// [`RESTORE_WATCH_SECS`]; unless every provider has one, every key is recent.
 ///
 /// Paid keys are then looked up over PIR, several at once, each paging from the cursor the
 /// wallet keeps. A late payment's inclusion path comes from the publication's common
@@ -127,7 +128,6 @@ pub async fn discover<W, P, T, L>(
     transport: T,
     lock: &L,
     now: i64,
-    refresh: bool,
 ) -> Result<Discovered<AccountError<W>>, Error<AccountError<W>>>
 where
     W: OneTimeIvkRestoreWrite,
@@ -141,6 +141,18 @@ where
     else {
         return Ok(nothing_due(vec![]));
     };
+    if status.publication.is_some()
+        && status.enumeration.is_none()
+        && status.lookups.is_empty()
+        && status.witnesses.is_empty()
+    {
+        return Ok(Discovered {
+            complete: status.complete,
+            lookups: 0,
+            witnesses: 0,
+            failed: vec![],
+        });
+    }
     let activation = params
         .activation_height(NetworkUpgrade::Nu6_3)
         .ok_or(Error::Unavailable("Ironwood is not active on this network"))?;
@@ -148,10 +160,9 @@ where
     let mut directory = Directory::new(activation, genesis, origin, transport, manifest)?;
     let publication = directory.publication_end();
 
-    let new_pass = refresh
-        || status.publication.is_none()
-        || (status.enumeration.is_some() && status.publication != Some(publication));
-    let cursors = if new_pass {
+    // A newer publication takes over an unfinished search where it stopped, so a search
+    // longer than one run still finishes while the directory publishes.
+    let cursors = if status.publication.is_none() {
         Some([
             (Purpose::Receive, EnumerationCursor::default()),
             (Purpose::Refund, EnumerationCursor::default()),
@@ -203,7 +214,8 @@ where
     else {
         return Ok(nothing_due(failed));
     };
-    if !status.witnesses.is_empty() {
+    // A path to a root the wallet would refuse as too old is not worth the download.
+    if !status.witnesses.is_empty() && publication.height >= status.witness_anchor_floor {
         directory.open_session().await?;
         let witnesses = directory.witnesses().await?;
         let anchor = ChainPoint {
@@ -212,17 +224,20 @@ where
         };
         for request in status.witnesses {
             // The common witnesses hold every record's position in this publication.
-            if let Ok(siblings) = witnesses.path(request.position, request.cmx) {
-                lock.write("one_time_discovery.witness", || {
-                    wallet.record_one_time_witness(
-                        account,
-                        request.key,
-                        request.position,
-                        anchor,
-                        siblings,
-                    )
-                })
-                .map_err(Error::Wallet)?;
+            match witnesses.path(request.position, request.cmx) {
+                Ok(siblings) => lock
+                    .write("one_time_discovery.witness", || {
+                        wallet.record_one_time_witness(
+                            account,
+                            request.key,
+                            request.position,
+                            anchor,
+                            siblings,
+                            now,
+                        )
+                    })
+                    .map_err(Error::Wallet)?,
+                Err(e) => failed.push((request.key, Error::Directory(crate::checked(e)))),
             }
         }
     }

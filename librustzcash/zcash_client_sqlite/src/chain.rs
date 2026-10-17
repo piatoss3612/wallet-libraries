@@ -736,18 +736,18 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO ironwood_one_time_publications (height, hash, tree_size, state)
-             VALUES (?1, zeroblob(32), 0, 1)",
+             VALUES (?1, zeroblob(32), 0, 1), (?1, randomblob(32), 0, 2)",
             [u32::from(h3)],
         )
         .unwrap();
         st.wallet_mut().truncate_to_height(h1).unwrap();
-        // The publication waits to be judged again, and the journal holds nothing above the
-        // floor.
+        // The publications, accepted or rejected, wait to be judged again, and the journal
+        // holds nothing above the floor.
         let repaired: (i64, i64, i64) = st
             .wallet()
             .conn()
             .query_row(
-                "SELECT (SELECT state FROM ironwood_one_time_publications),
+                "SELECT (SELECT MAX(state) FROM ironwood_one_time_publications),
                     (SELECT COUNT(*) FROM ironwood_spend_journal WHERE block_height > ?1),
                     (SELECT COUNT(*) FROM ironwood_journal_coverage WHERE end_height > ?1 + 1)",
                 [u32::from(h1)],

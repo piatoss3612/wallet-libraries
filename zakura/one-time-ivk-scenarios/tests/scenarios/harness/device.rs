@@ -217,8 +217,6 @@ pub struct Device {
     derived: RefCell<BTreeSet<[u8; 43]>>,
     found: BTreeMap<([u8; 32], u32), Found>,
     phase: Phase,
-    /// Whether the current recheck has started its new discovery pass.
-    refreshed: bool,
     /// Outputs a directory lookup listed as payments, seen after each discovery run.
     candidates: BTreeSet<([u8; 32], u32)>,
     pub syncs: u32,
@@ -281,7 +279,6 @@ impl Device {
             derived: RefCell::new(BTreeSet::new()),
             found: BTreeMap::new(),
             phase: Phase::Scan,
-            refreshed: false,
             candidates: BTreeSet::new(),
             syncs: 0,
             lookups: 0,
@@ -503,7 +500,6 @@ impl Device {
             .expect("a runtime");
         let mut problems = Vec::new();
         let mut stopped = false;
-        let refresh = self.phase == Phase::Recheck && !self.refreshed;
         let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
             runtime.block_on(discover(
                 &mut self.db,
@@ -514,12 +510,10 @@ impl Device {
                 &directory,
                 &NoLock,
                 now,
-                refresh,
             ))
         }));
         match run {
             Ok(Ok(found)) => {
-                self.refreshed |= refresh;
                 for (key, error) in &found.failed {
                     problems.push(format!(
                         "failed {key:?}: {error} ({})",
@@ -556,7 +550,6 @@ impl Device {
             .recheck_one_time_key_history(self.account)
             .expect("the recheck ends the pass");
         self.phase = Phase::Recheck;
-        self.refreshed = false;
         let report = self.sync(chain, near);
         self.phase = Phase::Scan;
         report

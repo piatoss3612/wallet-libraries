@@ -143,6 +143,10 @@ pub struct DiscoveryStatus {
     pub lookups: Vec<LookupWork>,
     /// Late candidates whose inclusion path is due.
     pub witnesses: Vec<WitnessRequest>,
+    /// The lowest block a late candidate's inclusion path may be anchored at: a path to an
+    /// older root is too old for the wallet to check (see
+    /// [`OneTimeIvkRestoreWrite::record_one_time_witness`]).
+    pub witness_anchor_floor: BlockHeight,
 }
 
 /// One-time IVK discovery reads.
@@ -230,7 +234,7 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
     /// Records the inclusion path of `key`'s late candidate at `position`, a path to the
     /// root at `anchor`, and admits it if the scan covers it. A path whose anchor is not on
     /// the wallet's chain, or more than the pruning depth below its scanned tip, is
-    /// requested again.
+    /// requested again. `now` is the caller's clock in seconds.
     fn record_one_time_witness(
         &mut self,
         account: <Self as WalletRead>::AccountId,
@@ -238,5 +242,6 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
         position: u32,
         anchor: ChainPoint,
         siblings: [[u8; 32]; 32],
+        now: i64,
     ) -> Result<(), <Self as WalletRead>::Error>;
 }

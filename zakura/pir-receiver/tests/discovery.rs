@@ -479,7 +479,6 @@ async fn run(
         directory,
         &NoLock,
         NOW,
-        false,
     )
     .await
 }
@@ -529,8 +528,8 @@ async fn discovery_imports_every_late_payment() {
     assert!(found.complete);
     assert_eq!(
         directory.requests().len(),
-        requests + 1,
-        "only the manifest"
+        requests,
+        "a run with nothing due makes no request"
     );
 }
 

@@ -2860,11 +2860,12 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         position: u32,
         anchor: ChainPoint,
         siblings: [[u8; 32]; 32],
+        now: i64,
     ) -> Result<(), SqliteClientError> {
         self.transactionally(|wdb| {
             let sessions = wdb.one_time_sessions();
             wallet::one_time_ivk::restore::discovery::record_witness(
-                wdb.conn.0, wdb.params, &sessions, account, key, position, anchor, siblings,
+                wdb.conn.0, wdb.params, &sessions, account, key, position, anchor, siblings, now,
             )
         })
     }

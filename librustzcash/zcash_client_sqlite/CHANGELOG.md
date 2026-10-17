@@ -36,7 +36,9 @@ and this library adheres to Rust's notion of
   they skip into late candidates. Builds without `orchard`, which cannot, also refuse blocks
   while discovery waits for the scan or a payment candidate is pending.
 - `WalletDb::recheck_one_time_key_history` returns nothing. It ends the account's discovery
-  pass, so the next one rechecks every key against a newer publication.
+  pass, so the next one checks every key against the directory's current filters and reads
+  each paid key's history again. Once discovery is complete, only this starts a pass. On a
+  fresh account, new swap addresses then wait for that pass.
 - A rewind repairs one-time IVK state in every build, not only with `orchard`: discovery
   redoes what the rescan may change, and lowering an account's birthday reopens its
   discovery. A key closed without scanning scans again from its first payment above the
