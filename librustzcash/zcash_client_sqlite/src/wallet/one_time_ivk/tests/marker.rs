@@ -6,16 +6,11 @@ use zcash_client_backend::{
         MaxSpendMode,
         error::Error,
         wallet::{
-            ConfirmationsPolicy,
-            input_selection::{GreedyInputSelector, LockedInputPolicy},
-            propose_send_max_transfer,
+            ConfirmationsPolicy, input_selection::LockedInputPolicy, propose_send_max_transfer,
         },
     },
     decrypt_transaction,
-    fees::{
-        ChangeValue, DustOutputPolicy, StandardFeeRule, TransactionBalance,
-        standard::SingleOutputChangeStrategy,
-    },
+    fees::{ChangeValue, StandardFeeRule, TransactionBalance},
     wallet::OvkPolicy,
 };
 use zcash_primitives::transaction::TxId;
@@ -50,7 +45,8 @@ fn markers(st: &mut State, txid: TxId) -> Vec<u64> {
         .collect()
 }
 
-/// A one-time note spent with nothing left over still carries a zero-value marker.
+/// A one-time note spent with nothing left over still carries a zero-value marker, and
+/// building the same spend without it is refused.
 #[test]
 fn exact_one_time_spend_carries_a_zero_value_marker() {
     let mut st = one_time_funded(2_000_000);
@@ -59,10 +55,34 @@ fn exact_one_time_spend_carries_a_zero_value_marker() {
     let to = payment(&unified(foreign_receiver()), 1_990_000, None);
     let change = (None, zcash_protocol::ShieldedPool::Orchard);
     let (proposal, txid) = transfer(&mut st, (account.id(), account.usk()), vec![to], change);
+    let step = &proposal.steps()[0];
     assert_eq!(
-        proposal.steps()[0].balance().proposed_change(),
+        step.balance().proposed_change(),
         [ChangeValue::ironwood(Zatoshis::ZERO, None)]
     );
+
+    // The same spend with its zero-value change dropped still balances.
+    let unmarked = Proposal::single_step(
+        step.transaction_request().clone(),
+        step.payment_pools().clone(),
+        vec![],
+        step.shielded_inputs().cloned(),
+        step.anchor_height().unwrap(),
+        TransactionBalance::new(vec![], step.balance().fee_required()).unwrap(),
+        *proposal.fee_rule(),
+        proposal.min_target_height(),
+        proposal.confirmations_policy(),
+        false,
+        true,
+    )
+    .unwrap();
+    let created = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+        account.usk(),
+        OvkPolicy::Sender,
+        &unmarked,
+    );
+    assert!(matches!(created, Err(Error::OneTimeSpendWithoutMarker)));
+
     assert_eq!(markers(&mut st, txid.unwrap()), [0]);
 }
 
@@ -101,51 +121,4 @@ fn sending_a_one_time_note_max_carries_a_zero_value_marker() {
         )
         .unwrap()[0];
     assert_eq!(markers(&mut st, txid), [0]);
-}
-
-/// Building refuses a proposal that spends a one-time note without Ironwood change.
-#[test]
-fn building_refuses_a_one_time_spend_without_its_marker() {
-    let mut st = one_time_funded(2_000_000);
-    let account = st.test_account().cloned().unwrap();
-    let strategy = SingleOutputChangeStrategy::<TestDb>::new(
-        StandardFeeRule::Zip317,
-        None,
-        zcash_protocol::ShieldedPool::Orchard,
-        DustOutputPolicy::default(),
-    );
-    let to = payment(&unified(foreign_receiver()), 1_990_000, None);
-    let request = zip321::TransactionRequest::new(vec![to]).unwrap();
-    let proposal = st
-        .propose_transfer(
-            account.id(),
-            &GreedyInputSelector::new(),
-            &strategy,
-            request,
-            ConfirmationsPolicy::MIN,
-        )
-        .unwrap();
-
-    // The same spend with its zero-value change dropped still balances.
-    let step = &proposal.steps()[0];
-    let unmarked = Proposal::single_step(
-        step.transaction_request().clone(),
-        step.payment_pools().clone(),
-        vec![],
-        step.shielded_inputs().cloned(),
-        step.anchor_height().unwrap(),
-        TransactionBalance::new(vec![], step.balance().fee_required()).unwrap(),
-        *proposal.fee_rule(),
-        proposal.min_target_height(),
-        proposal.confirmations_policy(),
-        false,
-        true,
-    )
-    .unwrap();
-    let created = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
-        account.usk(),
-        OvkPolicy::Sender,
-        &unmarked,
-    );
-    assert!(matches!(created, Err(Error::OneTimeSpendWithoutMarker)));
 }
