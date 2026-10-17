@@ -555,12 +555,7 @@ where
     // fee is an upper bound on the change value: the fee never falls below `min_fee`.
     let change_pool = if one_time_marker {
         // Ironwood change never crosses the turnstile, so this is always allowed.
-        #[cfg(feature = "orchard")]
-        {
-            ShieldedPool::Ironwood
-        }
-        #[cfg(not(feature = "orchard"))]
-        unreachable!("one-time-key notes exist only with the `orchard` feature")
+        ShieldedPool::Ironwood
     } else {
         select_change_pool(
             &net_flows,
