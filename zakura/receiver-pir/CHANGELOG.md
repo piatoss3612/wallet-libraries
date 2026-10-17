@@ -8,8 +8,6 @@
 
 ### Changed
 
-- `transport::DirectoryClient` reads histories over PIR only, one page per query:
-  `DirectoryClient::page` reads one page, and `lookup` reads a whole history page by page, up
-  to `MAX_LOOKUP_PAGES` pages (`Error::TooManyPages` beyond). The row-file download is gone, with `prefer_directory_file`,
-  `MAX_PIR_PAGES` and `use_file_for_work`, and `connect_manifest` no longer takes a lookup
-  count. A wallet that pages through a long history across revisions keeps its own cursor.
+- `transport::DirectoryClient` reads histories over PIR only, one page per query with
+  `DirectoryClient::page`. The row file, `prefer_directory_file`, `MAX_PIR_PAGES` and
+  `use_file_for_work` are gone, and `connect_manifest` no longer takes a lookup count.

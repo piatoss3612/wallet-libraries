@@ -10,8 +10,7 @@
 //! chose. The wallet judges each publication against its own chain and authenticates every
 //! payment with its derived key before crediting it.
 //!
-//! A payment found before the scan reaches it is found by the scan itself, and one found
-//! after is admitted once the scan covers it; either is an ordinary note from then on: its
+//! Once the wallet holds a payment discovery found, it is an ordinary note: its
 //! enhancement, scan priority and any rebroadcast follow as for any note. So when a
 //! directory's answer is wrong, traffic to the wallet's other services can differ from an
 //! honest answer's, another route to the test above.
@@ -32,8 +31,8 @@ pub use seen::{Seen, fetch_seen};
 
 pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.
-/// They parse records and witness files structurally only: payments from
-/// `DirectoryClient::lookup` and the bytes from `DirectoryClient::witnesses` are
+/// They parse records and witness files structurally only: records from
+/// `DirectoryClient::page` and the bytes from `DirectoryClient::witnesses` are
 /// unchecked. Validate them with `zakura-receiver-crypto`, as `discover` does, before use.
 pub use {receiver_directory, receiver_pir};
 

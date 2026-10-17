@@ -82,8 +82,7 @@ pub struct Discovered<E> {
     /// (see `DiscoveryStatus::complete`). Late payments may still wait for the scan.
     pub complete: bool,
     /// Lookups ready to run again now, for example after a page budget. A lookup backed off
-    /// after a failure counts only once its retry is due. `complete` stays false while any
-    /// lookup remains.
+    /// after a failure counts only once its retry is due.
     pub lookups: usize,
     /// Late payments still waiting for an inclusion path.
     pub witnesses: usize,
@@ -112,10 +111,9 @@ pub struct Discovered<E> {
 ///
 /// Paid keys are then looked up over PIR, several at once, each paging from the cursor the
 /// wallet keeps. A late payment's inclusion path comes from the publication's common
-/// witnesses. A key whose lookup fails is backed off and listed in [`Discovered::failed`]
-/// while the others go on, unless the directory's connection failed or it revoked the
-/// session: then the remaining keys wait for the next run. `now` is the caller's clock in
-/// seconds.
+/// witnesses. Lookups go on after one fails unless the directory's connection failed or it
+/// revoked the session: then the remaining keys wait for the next run. `now` is the
+/// caller's clock in seconds.
 #[allow(clippy::too_many_arguments)]
 pub async fn discover<W, P, T, L>(
     wallet: &mut W,
@@ -284,18 +282,11 @@ where
         let work = wallet
             .one_time_receivers(account, purpose, from, count)
             .map_err(Error::Wallet)?;
-        let found = directory.check(&work, now).await?;
-        let mut checks = Vec::with_capacity(work.len());
-        for (item, check) in work.into_iter().zip(found) {
+        let mut checks = directory.check(&work, now).await?;
+        for check in &checks {
             if check.seen || check.paid {
-                reach = reach.max(item.key.index() + 1 + GAP);
+                reach = reach.max(check.key.index() + 1 + GAP);
             }
-            checks.push(FilterCheck {
-                key: item.key,
-                seen: check.seen,
-                paid: check.paid,
-                recent: check.recent,
-            });
         }
         from = to;
         let finished = from >= reach;
@@ -305,17 +296,8 @@ where
                 .filter(|item| item.key.purpose() == purpose && item.key.index() >= from)
                 .cloned()
                 .collect();
-            if !rest.is_empty() {
-                let found = directory.check(&rest, now).await?;
-                for (item, check) in rest.into_iter().zip(found) {
-                    checks.push(FilterCheck {
-                        key: item.key,
-                        seen: check.seen,
-                        paid: check.paid,
-                        recent: check.recent,
-                    });
-                }
-            }
+            // The filters are already fetched, so an empty check makes no request.
+            checks.extend(directory.check(&rest, now).await?);
         }
         let next = EnumerationCursor { next: from, reach };
         let took = lock
@@ -386,10 +368,13 @@ where
                                 )
                             })
                             .map_err(Error::Wallet)?;
-                        // The wallet backs off a lookup whose records it refused.
+                        // The wallet backs off a lookup whose page it refused, but not one
+                        // that was no longer due, moved, or read too old a revision.
                         if !recorded {
-                            failed
-                                .push((key, Error::Unavailable("the wallet refused the records")));
+                            failed.push((
+                                key,
+                                Error::Unavailable("the wallet did not record the page"),
+                            ));
                         }
                     }
                     Err(e) => {
@@ -427,17 +412,6 @@ struct Walk {
     complete: bool,
     /// Why the walk stopped early, if it did.
     error: Option<DirectoryError>,
-}
-
-/// What a publication's filters say about one key's receiver.
-#[derive(Clone, Copy)]
-struct Check {
-    /// The paid set holds it, so a lookup may find payments.
-    paid: bool,
-    /// A swap may still pay it, so its key keeps scanning after discovery.
-    recent: bool,
-    /// A swap provider's seen set holds it, so it is never issued again.
-    seen: bool,
 }
 
 /// A receiver-directory publication whose coverage the client checked. Its filters are
@@ -504,7 +478,11 @@ impl<'a, T: Transport> Directory<'a, T> {
 
     /// What the filters say about each item's receiver at `now`, downloading them first
     /// if needed; see [`discover`] for how the recent sets are read.
-    async fn check<E>(&mut self, work: &[DiscoveryWork], now: i64) -> Result<Vec<Check>, Error<E>> {
+    async fn check<E>(
+        &mut self,
+        work: &[DiscoveryWork],
+        now: i64,
+    ) -> Result<Vec<FilterCheck>, Error<E>> {
         let receivers = work
             .iter()
             .map(|item| Receiver::from_bytes(item.receiver).map(|r| *r.as_bytes()))
@@ -531,12 +509,14 @@ impl<'a, T: Transport> Directory<'a, T> {
                 .expect("the manifest declares every set")
                 .matches(key, &receivers)
         };
-        let mut checks: Vec<_> = matches(PAID)
-            .into_iter()
-            .map(|paid| Check {
+        let mut checks: Vec<_> = work
+            .iter()
+            .zip(matches(PAID))
+            .map(|(item, paid)| FilterCheck {
+                key: item.key,
+                seen: false,
                 paid,
                 recent: false,
-                seen: false,
             })
             .collect();
         // Every provider has a seen set (see `seen_sets`), and needs a current, complete

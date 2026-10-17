@@ -1,11 +1,9 @@
 //! Receiver discovery over a caller-supplied, bounded transport.
 use crate::{
-    check_next, public_bytes, response_bytes, AcceptedCoverage, Client, Error, Manifest,
-    MAX_MANIFEST_BYTES,
+    public_bytes, response_bytes, AcceptedCoverage, Client, Error, Manifest, MAX_MANIFEST_BYTES,
 };
-use receiver_directory::{Payment, RawRecord, ReceiverBytes};
+use receiver_directory::{RawRecord, ReceiverBytes};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
 
 /// Hosts supply their route policy, cancellation, and timeout for every request.
 /// Enforce `limit` while streaming, reject non-success responses, and map HTTP
@@ -38,10 +36,6 @@ pub struct DirectoryClient<T> {
 
 /// The largest common proof file a client downloads.
 pub const MAX_WITNESS_BYTES: usize = 64 * 1024 * 1024;
-
-/// The most pages [`DirectoryClient::lookup`] reads, one query each. A longer history is
-/// read with [`DirectoryClient::page`] from a cursor the caller keeps.
-pub const MAX_LOOKUP_PAGES: u32 = 64;
 
 impl<T: Transport> DirectoryClient<T> {
     /// Use the exact advertised revision whose coverage the caller checked. Reuse the client
@@ -148,43 +142,5 @@ impl<T: Transport> DirectoryClient<T> {
             )
             .await?;
         self.client.decode(query, &body)
-    }
-
-    /// Return every payment to `receiver` in one publication, or an error, reading one page
-    /// at a time (see [`Self::page`]). A history of more than [`MAX_LOOKUP_PAGES`] pages is
-    /// [`Error::TooManyPages`], before any page past the first is read. No partial success or cleartext fallback. This does
-    /// not hide from the directory that a receiver has several payments. Revalidate the
-    /// anchor before crediting results if the wallet's chain changes while awaiting I/O.
-    /// Payments are checked structurally only: the wallet validates their Action fields
-    /// cryptographically before use.
-    pub async fn lookup(
-        &self,
-        receiver: ReceiverBytes,
-        accepted: AcceptedCoverage,
-    ) -> Result<Vec<Payment>, Error> {
-        accepted.check(&self.manifest().directory)?;
-        let mut records: Vec<RawRecord> = Vec::new();
-        let mut outputs = BTreeSet::new();
-        loop {
-            let page = records.len() as u32;
-            let Some(record) = self.page(receiver, page).await? else {
-                // The row decoder permits absence only on page zero.
-                return Ok(Vec::new());
-            };
-            if record.total > MAX_LOOKUP_PAGES {
-                return Err(Error::TooManyPages);
-            }
-            if let Some(previous) = records.last() {
-                check_next(previous, &record)?;
-            }
-            if !outputs.insert((record.payment.txid, record.payment.action_index)) {
-                return Err(Error::Malformed);
-            }
-            let complete = record.page + 1 == record.total;
-            records.push(record);
-            if complete {
-                return Ok(records.into_iter().map(|r| r.payment).collect());
-            }
-        }
     }
 }

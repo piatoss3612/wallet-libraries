@@ -83,13 +83,12 @@ pub struct FilterCheck {
     pub recent: bool,
 }
 
-/// Where a purpose's filter checks resume: `next` is the first unchecked index, and checks
-/// go on while it is below `reach`, which each used key raises.
+/// Where a purpose's filter checks resume.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnumerationCursor {
     /// The first key index not yet checked.
     pub next: u64,
-    /// Checks continue while `next` is below this.
+    /// Checks continue while `next` is below this. Each used key raises it.
     pub reach: u64,
 }
 
@@ -202,13 +201,16 @@ pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
     /// from the directory revision ending at `revision`, and advances its cursor (see
     /// [`LookupWork`]). `page` is the cursor's `applied`, or zero to restart it. `complete`
     /// ends the lookup. A payment whose block the scan has not stored becomes a scan hint;
-    /// one it has becomes a late candidate. Returns false, changing nothing, if the cursor
-    /// moved since it was read or the lookup is not due.
+    /// one it has becomes a late candidate.
+    ///
+    /// Returns false, applying nothing, if the lookup is not due, its cursor moved since it
+    /// was read, or `revision` ends below the cutoff or was rejected. It also returns false
+    /// when it refuses the page, because a record fails authentication or lies above the
+    /// cutoff: that backs the lookup off.
     ///
     /// The store judges `revision` against its chain like a discovery publication. If it
     /// fails, every cursor that read from it restarts and its unadmitted candidates are
-    /// dropped. A record that fails authentication or lies above the cutoff discards the
-    /// call and backs the lookup off.
+    /// dropped.
     #[allow(clippy::too_many_arguments)]
     fn record_one_time_lookup(
         &mut self,
