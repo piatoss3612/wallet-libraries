@@ -188,42 +188,7 @@ pub struct WalletTx<AccountId> {
     #[cfg(feature = "orchard")]
     ironwood_enhancement_plan: IronwoodEnhancementPlan<AccountId>,
     #[cfg(feature = "orchard")]
-    scanned_compact: Option<ScannedCompactTx>,
-}
-
-/// The compact form of a transaction a block scan recognized, kept so that a store can
-/// journal it: every Ironwood nullifier it reveals, matched to a wallet note or not, and
-/// enough to rebuild its details without fetching the block again.
-#[cfg(feature = "orchard")]
-#[derive(Clone, Debug)]
-pub struct ScannedCompactTx {
-    tx: crate::proto::compact_formats::CompactTx,
-    ironwood_start_position: Position,
-}
-
-#[cfg(feature = "orchard")]
-impl ScannedCompactTx {
-    /// Constructs the record of `tx`, whose first Ironwood action has commitment tree
-    /// position `ironwood_start_position`.
-    pub fn new(
-        tx: crate::proto::compact_formats::CompactTx,
-        ironwood_start_position: Position,
-    ) -> Self {
-        Self {
-            tx,
-            ironwood_start_position,
-        }
-    }
-
-    /// Returns the compact transaction, with every pool it carries.
-    pub fn tx(&self) -> &crate::proto::compact_formats::CompactTx {
-        &self.tx
-    }
-
-    /// Returns the Ironwood note commitment tree position of the transaction's first action.
-    pub fn ironwood_start_position(&self) -> Position {
-        self.ironwood_start_position
-    }
+    ironwood_nullifiers: Option<Vec<orchard::note::Nullifier>>,
 }
 
 /// Provisional private-enhancement plan from a complete compact transaction.
@@ -340,21 +305,23 @@ impl<AccountId> WalletTx<AccountId> {
             #[cfg(feature = "orchard")]
             ironwood_enhancement_plan: IronwoodEnhancementPlan::Ineligible,
             #[cfg(feature = "orchard")]
-            scanned_compact: None,
+            ironwood_nullifiers: None,
         }
     }
 
-    /// Attaches the compact transaction a block scan recognized.
+    /// Attaches every Ironwood nullifier the transaction reveals, matched to a wallet note
+    /// or not, as a block scan read them.
     #[cfg(feature = "orchard")]
-    pub fn with_scanned_compact(mut self, scanned: ScannedCompactTx) -> Self {
-        self.scanned_compact = Some(scanned);
+    pub fn with_ironwood_nullifiers(mut self, nullifiers: Vec<orchard::note::Nullifier>) -> Self {
+        self.ironwood_nullifiers = Some(nullifiers);
         self
     }
 
-    /// Returns the compact transaction when a block scan produced this record.
+    /// Returns every Ironwood nullifier the transaction reveals when a block scan produced
+    /// this record, so that a store can journal them.
     #[cfg(feature = "orchard")]
-    pub fn scanned_compact(&self) -> Option<&ScannedCompactTx> {
-        self.scanned_compact.as_ref()
+    pub fn ironwood_nullifiers(&self) -> Option<&[orchard::note::Nullifier]> {
+        self.ironwood_nullifiers.as_deref()
     }
 
     /// Attaches provisional eligibility and outgoing candidates from the complete compact

@@ -17,10 +17,10 @@ and this library adheres to Rust's notion of
   keys for one scan batch, and `chain::scan_cached_blocks_with_one_time_ivks` now uses it.
   Its default is `get_one_time_scanning_keys`, and the early restore methods default to no
   early restore, so it stays opt-in for other stores.
-- `wallet::ScannedCompactTx` (with `orchard`), attached to each transaction a block scan
-  recognizes through `WalletTx::scanned_compact`, carries its compact form and the Ironwood
-  commitment tree position of its first action. `ScannedBlock::scanned_accounts` names the
-  accounts whose ordinary keys scanned the block. A store uses them to journal spends.
+- `WalletTx::ironwood_nullifiers` (with `orchard`) gives every Ironwood nullifier a
+  transaction a block scan recognized reveals, matched to a wallet note or not.
+  `ScannedBlock::scanned_accounts` names the accounts whose ordinary internal keys scanned
+  the block. A store uses them to journal spends.
 - `fees::orchard::InputView::is_one_time` (with `orchard`) marks a one-time-key input. It
   defaults to false. `data_api::error::Error::OneTimeSpendWithoutMarker` reports a one-time
   spend that lacks its marker output.

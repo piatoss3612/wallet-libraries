@@ -1,5 +1,5 @@
 //! The spend journal: every Ironwood nullifier of every transaction the block scan
-//! recognizes, with the compact transaction that revealed it.
+//! recognizes.
 //!
 //! A spend of a one-time-key note always carries an output to the spending account's
 //! internal address (see `zcash_client_backend::fees::orchard::InputView::is_one_time`),
@@ -9,7 +9,6 @@
 
 use std::ops::Range;
 
-use prost::Message;
 use rusqlite::{Connection, named_params};
 use zcash_client_backend::data_api::ScannedBlock;
 use zcash_protocol::consensus::BlockHeight;
@@ -19,11 +18,8 @@ use crate::{AccountUuid, error::SqliteClientError};
 /// One recognized transaction, taken from a scanned block before storage consumes it.
 pub(crate) struct Entry {
     height: BlockHeight,
-    block_hash: [u8; 32],
     tx_index: u16,
     txid: [u8; 32],
-    ironwood_start_position: u64,
-    compact_tx: Vec<u8>,
     nullifiers: Vec<[u8; 32]>,
 }
 
@@ -40,21 +36,14 @@ pub(crate) fn collect(blocks: &[ScannedBlock<AccountUuid>]) -> Batch {
         .iter()
         .flat_map(|block| {
             block.transactions().iter().filter_map(move |tx| {
-                let scanned = tx.scanned_compact()?;
-                let compact = scanned.tx();
                 Some(Entry {
                     height: block.height(),
-                    block_hash: block.block_hash().0,
                     tx_index: tx.block_index().into(),
                     txid: *tx.txid().as_ref(),
-                    ironwood_start_position: scanned.ironwood_start_position().into(),
-                    compact_tx: compact.encode_to_vec(),
-                    // The scanner validated every nullifier before it recognized the
-                    // transaction.
-                    nullifiers: compact
-                        .ironwood_actions
+                    nullifiers: tx
+                        .ironwood_nullifiers()?
                         .iter()
-                        .map(|action| action.nf().expect("validated by the scan").to_bytes())
+                        .map(|nf| nf.to_bytes())
                         .collect(),
                 })
             })
@@ -81,9 +70,8 @@ pub(crate) fn collect(blocks: &[ScannedBlock<AccountUuid>]) -> Batch {
 /// Records `batch` after its blocks are stored, in the same database transaction.
 pub(crate) fn record(conn: &Connection, batch: Batch) -> Result<(), SqliteClientError> {
     let mut entry = conn.prepare_cached(
-        "INSERT OR REPLACE INTO ironwood_spend_journal
-            (block_height, tx_index, block_hash, txid, ironwood_start_position, compact_tx)
-         VALUES (:height, :tx_index, :block_hash, :txid, :start, :compact_tx)",
+        "INSERT OR REPLACE INTO ironwood_spend_journal (block_height, tx_index, txid)
+         VALUES (:height, :tx_index, :txid)",
     )?;
     let mut clear = conn.prepare_cached(
         "DELETE FROM ironwood_spend_journal_nullifiers
@@ -99,10 +87,7 @@ pub(crate) fn record(conn: &Connection, batch: Batch) -> Result<(), SqliteClient
         entry.execute(named_params! {
             ":height": height,
             ":tx_index": e.tx_index,
-            ":block_hash": e.block_hash,
             ":txid": e.txid,
-            ":start": e.ironwood_start_position,
-            ":compact_tx": e.compact_tx,
         })?;
         // A block scanned again replaces its entries.
         clear.execute(named_params! {":height": height, ":tx_index": e.tx_index})?;
