@@ -1183,7 +1183,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                 shielded_inputs
                     .ironwood()
                     .iter()
-                    .map(|i| (*i.internal_note_id(), i.note().value()))
+                    .map(ironwood_input)
                     .collect()
             } else {
                 vec![]
@@ -1195,7 +1195,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                 selected_input_ids.chain(orchard_inputs.iter().map(|(id, _)| id));
             #[cfg(feature = "orchard")]
             let selected_input_ids =
-                selected_input_ids.chain(ironwood_inputs.iter().map(|(id, _)| id));
+                selected_input_ids.chain(ironwood_inputs.iter().map(|(id, ..)| id));
 
             let selected_input_ids = selected_input_ids.cloned().collect::<Vec<_>>();
 
@@ -1414,11 +1414,8 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                                     #[cfg(feature = "orchard")]
                                     let mut candidate_ironwood_inputs = ironwood_inputs.clone();
                                     #[cfg(feature = "orchard")]
-                                    candidate_ironwood_inputs.extend(
-                                        optional.ironwood().iter().map(|note| {
-                                            (*note.internal_note_id(), note.note().value())
-                                        }),
-                                    );
+                                    candidate_ironwood_inputs
+                                        .extend(optional.ironwood().iter().map(ironwood_input));
 
                                     let candidate_input_ids =
                                         candidate_sapling_inputs.iter().map(|(id, _)| id);
@@ -1427,7 +1424,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                                         .chain(candidate_orchard_inputs.iter().map(|(id, _)| id));
                                     #[cfg(feature = "orchard")]
                                     let candidate_input_ids = candidate_input_ids
-                                        .chain(candidate_ironwood_inputs.iter().map(|(id, _)| id));
+                                        .chain(candidate_ironwood_inputs.iter().map(|(id, ..)| id));
                                     let candidate_input_ids =
                                         candidate_input_ids.cloned().collect::<Vec<_>>();
 
@@ -2786,6 +2783,19 @@ where
 
 /// Helper that performs the dust-input retry pattern used by `propose_shielding`.
 ///
+/// `note` as fee and change calculation sees an Ironwood input: its ID, its value, and
+/// whether it is a one-time-key note (see `orchard_fees::InputView::is_one_time`).
+#[cfg(feature = "orchard")]
+fn ironwood_input<NoteRef: Copy>(
+    note: &crate::wallet::ReceivedNote<NoteRef, ::orchard::Note>,
+) -> (NoteRef, ::orchard::value::NoteValue, bool) {
+    (
+        *note.internal_note_id(),
+        note.note().value(),
+        note.one_time_key_id().is_some(),
+    )
+}
+
 /// On the first call to [`ChangeStrategy::compute_balance`], if the strategy
 /// reports [`ChangeError::DustInputs`], those inputs are removed from
 /// `transparent_inputs` and the balance is recomputed. The resulting proposal

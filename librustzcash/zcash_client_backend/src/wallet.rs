@@ -1072,6 +1072,26 @@ impl<NoteRef> orchard_fees::InputView<NoteRef> for (NoteRef, orchard::value::Not
     }
 }
 
+/// An Ironwood input as input selection hands it to fee and change calculation: its ID,
+/// its value, and whether it is a one-time-key note.
+#[cfg(feature = "orchard")]
+impl<NoteRef> orchard_fees::InputView<NoteRef> for (NoteRef, orchard::value::NoteValue, bool) {
+    fn note_id(&self) -> &NoteRef {
+        &self.0
+    }
+
+    fn value(&self) -> Zatoshis {
+        self.1
+            .inner()
+            .try_into()
+            .expect("Orchard note values are indirectly checked by consensus.")
+    }
+
+    fn is_one_time(&self) -> bool {
+        self.2
+    }
+}
+
 #[cfg(feature = "orchard")]
 impl<NoteRef> orchard_fees::InputView<NoteRef> for ReceivedNote<NoteRef, orchard::Note> {
     fn note_id(&self) -> &NoteRef {

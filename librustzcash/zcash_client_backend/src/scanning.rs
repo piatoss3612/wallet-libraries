@@ -382,14 +382,19 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
 
 #[cfg(feature = "orchard")]
 impl<AccountId: Copy + PartialEq, IvkTag> ScanningKeys<AccountId, IvkTag> {
-    /// Returns each account that has an ordinary (not one-time) Ironwood key, once. A
-    /// block scan records them as [`ScannedBlock::scanned_accounts`].
+    /// Returns each account that has an ordinary (not one-time) internal-scope Ironwood key,
+    /// once. A block scan records them as [`ScannedBlock::scanned_accounts`]. Only that key
+    /// decrypts the marker output every one-time spend sends to the account's internal
+    /// address, so a scan without it does not cover the account.
     ///
     /// [`ScannedBlock::scanned_accounts`]: crate::data_api::ScannedBlock::scanned_accounts
     pub(crate) fn ordinary_ironwood_accounts(&self) -> Vec<AccountId> {
         let mut accounts: Vec<AccountId> = vec![];
         for key in self.ironwood.values() {
-            if key.one_time_key_id().is_none() && !accounts.contains(key.account_id()) {
+            if key.one_time_key_id().is_none()
+                && key.key_scope() == Some(Scope::Internal)
+                && !accounts.contains(key.account_id())
+            {
                 accounts.push(*key.account_id());
             }
         }
@@ -1216,5 +1221,44 @@ mod tests {
         spawn(move || {
             let _ = keys.sapling().get(&());
         });
+    }
+    /// A scan covers an account only with its ordinary internal-scope Ironwood key.
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn only_an_internal_ironwood_key_covers_an_account() {
+        use std::collections::HashMap;
+
+        use orchard::keys::{FullViewingKey, SpendingKey};
+        use zip32::Scope;
+
+        use super::{IronwoodDomain, IronwoodNullifier, ScanningKey, ScanningKeyOps};
+
+        let fvk = FullViewingKey::from(&SpendingKey::from_bytes([7; 32]).unwrap());
+        let keys = |scopes: &[Scope]| {
+            let ironwood = scopes
+                .iter()
+                .map(|&scope| {
+                    let key: Box<
+                        dyn ScanningKeyOps<IronwoodDomain, u32, IronwoodNullifier> + Send + Sync,
+                    > = Box::new(ScanningKey {
+                        ivk: fvk.to_ivk(scope),
+                        nk: Some(fvk.clone()),
+                        account_id: 0u32,
+                        key_scope: Some(scope),
+                    });
+                    ((0u32, scope), key)
+                })
+                .collect::<HashMap<_, _>>();
+            ScanningKeys::new(HashMap::new(), HashMap::new(), ironwood)
+        };
+        assert!(
+            keys(&[Scope::External])
+                .ordinary_ironwood_accounts()
+                .is_empty()
+        );
+        assert_eq!(
+            keys(&[Scope::External, Scope::Internal]).ordinary_ironwood_accounts(),
+            [0]
+        );
     }
 }
