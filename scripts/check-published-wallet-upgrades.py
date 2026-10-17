@@ -4,9 +4,8 @@
 Older consumers ingest transaction/UTXO fixtures before the current library upgrades them: the
 published rc5 and rc7 releases (rc7 is the mobile 0.0.50 baseline) and this repository at
 PRE_MIGRATIONS, the last revision before the unconditional ironwood_unsupported_memo_retry,
-ironwood_transparent_output_shape, transparent_txid_enhancement and one_time_ivk migrations. The
-probe verifies
-preserved data, classification values, legacy provenance, that the upgrade queues no private work
+ironwood_transparent_output_shape, transparent_txid_enhancement, one_time_ivk and
+one_time_ivk_discovery migrations. The probe verifies preserved data, classification values, legacy provenance, that the upgrade queues no private work
 for a wallet that never had a private policy, repeat initialization, and how older readers treat
 the upgraded database. The pre-migration fork must refuse unknown migrations without changing it;
 the published releases lack that guard and their successful opens are reported, not qualified.
@@ -32,12 +31,14 @@ UNCONDITIONAL_MIGRATIONS = {
     "ironwood_transparent_output_shape": "8f4c3210-04e1-49eb-9de2-d713ee0a8426",
     "transparent_txid_enhancement": "73d751a3-dbdc-461a-9154-e061903aae4f",
     "one_time_ivk": "57756102-9583-4af5-b411-5eead49fc9f0",
+    "one_time_ivk_discovery": "c5b63b3b-8190-4d0f-b217-3921d7aac225",
 }
-# Tables the one_time_ivk migration creates, which an upgrade must leave empty.
+# One-time IVK tables left after one_time_ivk_discovery, which an upgrade must leave empty.
 ONE_TIME_IVK_TABLES = (
-    "ironwood_one_time_keys", "ironwood_one_time_operations", "ironwood_one_time_sweeps",
-    "ironwood_one_time_payment_recovery", "ironwood_nullifier_scan_blocks",
-    "ironwood_one_time_fresh_accounts", "ironwood_one_time_spend_retention",
+    "ironwood_one_time_keys", "ironwood_one_time_operations", "ironwood_one_time_payment_recovery",
+    "ironwood_one_time_fresh_accounts", "ironwood_one_time_publications",
+    "ironwood_one_time_lookups", "ironwood_one_time_lookup_reads", "ironwood_one_time_discovery",
+    "ironwood_spend_journal", "ironwood_spend_journal_nullifiers", "ironwood_journal_coverage",
 )
 WRITERS = ("rc5", "rc7", "pre-migrations")
 # Writers whose library refuses a database with migrations it does not know.
