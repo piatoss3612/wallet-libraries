@@ -86,7 +86,8 @@ pub struct Discovered<E> {
     pub lookups: usize,
     /// Late payments still waiting for an inclusion path.
     pub witnesses: usize,
-    /// Keys whose lookup failed in this run, already backed off, with why.
+    /// Keys whose lookup failed in this run, with why. A failed read or a page the wallet
+    /// refused backs its lookup off. A page the wallet skipped for another reason does not.
     pub failed: Vec<(KeyId, Error<E>)>,
 }
 

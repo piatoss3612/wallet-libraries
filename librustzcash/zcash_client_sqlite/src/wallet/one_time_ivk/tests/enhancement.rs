@@ -66,7 +66,7 @@ fn refund_keys(st: &State) -> Vec<(u64, u32, bool)> {
     );
     let decode = |i: Vec<u8>| u64::from_be_bytes(i.try_into().unwrap());
     keys.into_iter()
-        .map(|(i, from, swept)| (decode(i), from, swept))
+        .map(|(i, from, looked_up)| (decode(i), from, looked_up))
         .collect()
 }
 
@@ -316,7 +316,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     );
     // Without own-send evidence, though scanning covers the funding block, the inputs
     // predate the birthday or the record is not this wallet's. It no longer holds back
-    // issuance: its key is swept without advancing allocation, which skips its index.
+    // issuance: its key is registered for a lookup without advancing allocation, which skips its index.
     let replace_memo = |st: &State, from: &[u8], to: &[u8]| {
         let sql = "UPDATE ironwood_received_notes SET memo = ?2 WHERE memo = ?1";
         exec(st.wallet().conn(), sql, rusqlite::params![from, to]);

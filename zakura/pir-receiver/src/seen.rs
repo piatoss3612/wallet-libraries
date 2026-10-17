@@ -57,7 +57,7 @@ impl Seen {
 
 /// Downloads the seen sets of the publication `origin` serves, which must commit to
 /// the network's `genesis` ([`MAINNET_GENESIS`](crate::MAINNET_GENESIS) on mainnet), as
-/// for `sweep`, since another network's sets say nothing of this one's quotes. Fails if
+/// for `discover`, since another network's sets say nothing of this one's quotes. Fails if
 /// it declares no seen sets, or unless every provider with a recent or seen set has a
 /// seen set dated with its feed's read times, since receivers a provider without one had
 /// would look unseen.
@@ -67,7 +67,7 @@ pub async fn fetch_seen<T: Transport>(
     genesis: [u8; 32],
 ) -> Result<Seen, DirectoryError> {
     let manifest = DirectoryClient::fetch_manifest(origin, transport).await?;
-    // The error `sweep`'s coverage check gives for another genesis.
+    // The error `discover`'s coverage check gives for another genesis.
     if manifest.directory.genesis != genesis {
         return Err(receiver_directory::Error::Coverage.into());
     }

@@ -272,7 +272,7 @@ fn one_time_ivk_rejects_mismatched_note_metadata() {
     assert!(!key_state(st.wallet().db(), key.key_id()).1);
 }
 
-/// A key registered for a lookup waits for it: unlike activation, registering it replays
+/// A key registered for a lookup waits for it: unlike activation, registering it requeues
 /// no scanned history, and scanning never trial-decrypts with it.
 #[test]
 fn keys_registered_for_lookups_are_looked_up_instead_of_scanned() {

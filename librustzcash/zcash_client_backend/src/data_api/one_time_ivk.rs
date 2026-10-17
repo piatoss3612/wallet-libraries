@@ -32,9 +32,9 @@ pub trait OneTimeIvkRead: WalletRead {
     ) -> Result<Vec<OneTimeScanningKey<Self::AccountId>>, Self::Error>;
 
     /// Returns the one-time keys to trial-decrypt in a scan batch covering `range`: the
-    /// open keys active by its end, and keys whose early-restore payments (see
-    /// [`restore::OneTimeIvkRestoreWrite::record_one_time_early_lookup`]) lie inside it.
-    /// Stores without early restore return [`Self::get_one_time_scanning_keys`].
+    /// open keys active by its end, and keys with a scan hint inside it (see
+    /// [`restore::OneTimeIvkRestoreWrite::record_one_time_lookup`]). Stores without
+    /// discovery return [`Self::get_one_time_scanning_keys`].
     fn get_one_time_scanning_keys_for_range(
         &self,
         range: std::ops::Range<BlockHeight>,

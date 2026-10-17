@@ -1,5 +1,6 @@
-//! Authentication of the notes a restore sweep retrieves, before wallet accounting.
-//! Chain roots and spend-history coverage must come from the wallet independently.
+//! Authentication of the payments discovery looks up, such as late candidates, before
+//! wallet accounting. Chain roots and journal coverage must come from the wallet
+//! independently.
 
 use orchard::{
     keys::{FullViewingKey, Scope},

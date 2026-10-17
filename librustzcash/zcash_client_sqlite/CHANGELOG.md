@@ -40,7 +40,8 @@ and this library adheres to Rust's notion of
 - A rewind repairs one-time IVK state in every build, not only with `orchard`: discovery
   redoes what the rescan may change, and lowering an account's birthday reopens its
   discovery. A key closed without scanning scans again from its first payment above the
-  rewind until that payment is confirmed again.
+  rewind until that payment is confirmed again. An open key that started above the rewind
+  scans from the first rescanned block.
 
 - Operations that can queue transparent lookups now reject caller-owned SQL transactions
   without a wallet-owned session journal with `TransparentSessionTransactionRequired`.

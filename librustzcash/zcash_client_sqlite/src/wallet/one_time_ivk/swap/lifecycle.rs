@@ -84,11 +84,11 @@ pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
             let deadline: Option<i64> = row.get(7)?;
             let expected: i64 = row.get(8)?;
             let received: i64 = row.get(9)?;
-            let swept_at: Option<i64> = row.get(10)?;
+            let looked_up_at: Option<i64> = row.get(10)?;
             let started: bool = row.get(11)?;
             let limit = if restored {
                 registered_at
-                    .max(swept_at.unwrap_or(registered_at))
+                    .max(looked_up_at.unwrap_or(registered_at))
                     .saturating_add(RESTORE_WATCH_SECS)
             } else {
                 deadline

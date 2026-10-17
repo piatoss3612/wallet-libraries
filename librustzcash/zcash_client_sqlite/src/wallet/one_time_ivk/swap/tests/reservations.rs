@@ -997,7 +997,7 @@ fn one_reservation_starts_only_one_accepted_quote() {
 }
 
 /// Refund issuance skips a refund address the provider's seen set holds, such as one an
-/// unfunded quote used before a restore, and registers it for a restore sweep, so a
+/// unfunded quote used before a restore, and registers it for a lookup, so a
 /// later reservation without a set does not issue it either.
 #[test]
 fn refund_issuance_skips_addresses_the_provider_saw() {
@@ -1020,8 +1020,8 @@ fn refund_issuance_skips_addresses_the_provider_saw() {
     let sql = "SELECT k.provider_seen AND l.done_height IS NULL FROM ironwood_one_time_keys k
                JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
                WHERE k.purpose = 0 AND k.key_index = ?1";
-    let seen_and_swept: Vec<bool> = column(&db.conn, sql, [first.index().to_be_bytes()]);
-    assert_eq!(seen_and_swept, [true]);
+    let seen_and_due: Vec<bool> = column(&db.conn, sql, [first.index().to_be_bytes()]);
+    assert_eq!(seen_and_due, [true]);
     let next = db.reserve_refund_key(account, through, None);
     assert_eq!(next.unwrap().unwrap().key_id().index(), 2);
 }

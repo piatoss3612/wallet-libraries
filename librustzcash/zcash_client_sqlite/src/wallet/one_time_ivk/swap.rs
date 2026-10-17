@@ -93,8 +93,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// [`ProviderSeen`] for the addresses never issued and [`RECEIVE_GAP_LIMIT`] for the
     /// window. `seen` is the provider's current set, if the caller could fetch it, and
     /// `tip` the network's chain tip (see [`ISSUANCE_TIP_LAG`]). Issuance waits for the
-    /// restore lookahead's sweeps, which may reveal paid or seen indices, and checks the
-    /// set first, so the lookahead covers any window its hits widen.
+    /// account's discovery to register the indices its filters mark paid or seen (see
+    /// `DiscoveryStatus::complete`), and checks the set first, so the lookahead covers any
+    /// window its hits widen.
     pub fn prepare_receive_reservation(
         &mut self,
         account: AccountUuid,
@@ -175,8 +176,8 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// An observation older than the stored one is ignored, except that its `funded` still
     /// sticks. A refund key this wallet never funded
     /// starts at its issuance point on a refund owed or an inconclusive end, in case the
-    /// deposit was paid from elsewhere, or when its pending restore sweep finishes; a
-    /// closed key stays closed (see [`Self::close_finished_one_time_keys`]).
+    /// deposit was paid from elsewhere; a closed key stays closed (see
+    /// [`Self::close_finished_one_time_keys`]).
     pub fn record_operation_status(
         &mut self,
         account: AccountUuid,
@@ -202,9 +203,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     ///
     /// A key closes once every operation on it has a conclusive final status and its
     /// receipts cover what the provider promised, or `COMPLETION_LIMIT_SECS` after its
-    /// latest deadline (registration without operations); a key only a restore sweep found
-    /// closes `RESTORE_WATCH_SECS` after its sweep's lookup block, or registration if
-    /// later. An open reservation holds its key open, once started only until that limit:
+    /// latest deadline (registration without operations); a key only discovery found
+    /// closes `RESTORE_WATCH_SECS` after the block its lookup finished at, or registration
+    /// if later. An open reservation holds its key open, once started only until that limit:
     /// the address then stays reserved, so it is never reissued. A key stays open while
     /// a receipt is unmined and unexpired or short of the default untrusted
     /// confirmations, so a reorg cannot strand one. Nothing closes unless the stored tip
@@ -213,11 +214,11 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     ///
     /// No provider status reopens a closed key; a rewind does, when it un-mines a receipt
     /// or leaves it short of those confirmations. A later payment to a closed key without
-    /// a known payment is found once a newer publication's paid filter holds it (see
-    /// `OneTimeIvkRestoreWrite::record_paid_filter_check`). One to a closed key that was already
-    /// paid, such as a corrected larger payout, is found only by
-    /// [`Self::recheck_one_time_key_history`], and an incoming index beyond the restored
-    /// lookahead is never swept.
+    /// a known payment is found once a newer publication's paid filter holds it, since
+    /// discovery checks closed keys against it (see `DiscoveryStatus::refresh_due`). One to
+    /// a closed key that was already paid, such as a corrected larger payout, is found only
+    /// by [`Self::recheck_one_time_key_history`], and an incoming index beyond the restored
+    /// lookahead is never checked.
     pub fn close_finished_one_time_keys(
         &mut self,
         account: AccountUuid,

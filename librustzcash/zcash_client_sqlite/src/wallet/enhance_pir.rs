@@ -314,11 +314,11 @@ fn require_lwd(
     Ok(())
 }
 
-/// Settles enhancement for `tx_ref`, which holds a note a one-time IVK restore sweep
-/// retrieved privately. A stored or routed transaction keeps its route (private if it had
-/// none) and retires its enhancement if nothing is left. Otherwise nothing shows whether it
-/// has transparent parts, so it is queued and routed like a scanned transaction whose
-/// compact data does not prove it Ironwood-only.
+/// Settles enhancement for `tx_ref`, which holds a one-time IVK late candidate that
+/// discovery retrieved privately and admitted. A stored or routed transaction keeps its
+/// route (private if it had none) and retires its enhancement if nothing is left. Otherwise
+/// nothing shows whether it has transparent parts, so it is queued and routed like a
+/// scanned transaction whose compact data does not prove it Ironwood-only.
 #[cfg(feature = "orchard")]
 pub(crate) fn finish_private_receipt(
     conn: &Transaction<'_>,
