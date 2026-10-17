@@ -4319,8 +4319,22 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // truncation height.
     #[cfg(feature = "orchard")]
     one_time_ivk::truncate_to_height(conn, rescan_floor)?;
-    #[cfg(feature = "orchard")]
-    one_time_ivk::journal::truncate(conn, rescan_floor)?;
+    // The spend journal's entries and coverage above the floor may describe replaced
+    // blocks. This runs in every build, since an `orchard` build may reopen the wallet and
+    // read them as spend evidence.
+    let floor = u32::from(rescan_floor);
+    conn.execute(
+        "DELETE FROM ironwood_spend_journal WHERE block_height > ?1",
+        [floor],
+    )?;
+    conn.execute(
+        "DELETE FROM ironwood_journal_coverage WHERE start_height > ?1",
+        [floor],
+    )?;
+    conn.execute(
+        "UPDATE ironwood_journal_coverage SET end_height = ?1 + 1 WHERE end_height > ?1 + 1",
+        [floor],
+    )?;
     // Scans take only one-time keys started by each batch's end, and the replacement chain
     // may mine a payment below an open key's old start, so open keys, including any the
     // repair above reopened, start at the first rescanned block at the latest.

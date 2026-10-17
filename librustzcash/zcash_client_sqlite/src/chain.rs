@@ -674,4 +674,52 @@ mod tests {
             st.scan_cached_blocks(h4, 1);
         }
     }
+
+    /// A rewind removes the spend journal above its rescan floor in every build, since an
+    /// `orchard` build may reopen the wallet and read the journal as spend evidence.
+    #[test]
+    fn a_rewind_truncates_the_spend_journal() {
+        use zcash_client_backend::data_api::{
+            WalletWrite,
+            testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(testing::db::TestDbFactory::default())
+            .with_block_cache(testing::BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(5);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        let (h3, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 3);
+        let conn = st.wallet().conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO ironwood_spend_journal
+             VALUES (?1, 0, zeroblob(32), zeroblob(32), 0, x'')",
+            [u32::from(h3)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO ironwood_journal_coverage SELECT id, ?1, ?2 FROM accounts",
+            [u32::from(h1), u32::from(h3) + 1],
+        )
+        .unwrap();
+        st.wallet_mut().truncate_to_height(h1).unwrap();
+        let (journal, past): (i64, i64) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM ironwood_spend_journal WHERE block_height > ?1),
+                    (SELECT COUNT(*) FROM ironwood_journal_coverage WHERE end_height > ?1 + 1)",
+                [u32::from(h1)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((journal, past), (0, 0));
+    }
 }

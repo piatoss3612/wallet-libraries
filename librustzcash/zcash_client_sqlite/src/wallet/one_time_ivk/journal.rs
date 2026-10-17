@@ -6,7 +6,8 @@
 //! so the scan recognizes it. For a block covered for an account, meaning stored by a
 //! scan that used that account's keys, the journal therefore holds every nullifier
 //! that could spend one of the account's one-time notes. Entries and coverage above a
-//! rewind's rescan floor are removed with those blocks (see [`truncate`]).
+//! rewind's rescan floor are removed with those blocks, in every build (see
+//! `wallet::truncate_to_height_internal`).
 
 use std::ops::Range;
 
@@ -205,28 +206,6 @@ fn cover(
                  AND (m.start_height, m.end_height) != (c.start_height, c.end_height)
            )",
         named_params! {":uuid": account.0},
-    )?;
-    Ok(())
-}
-
-/// Removes the entries and coverage above `rescan_floor`, whose blocks a rewind may
-/// replace.
-pub(crate) fn truncate(
-    conn: &Connection,
-    rescan_floor: BlockHeight,
-) -> Result<(), rusqlite::Error> {
-    let floor = u32::from(rescan_floor);
-    conn.execute(
-        "DELETE FROM ironwood_spend_journal WHERE block_height > ?1",
-        [floor],
-    )?;
-    conn.execute(
-        "DELETE FROM ironwood_journal_coverage WHERE start_height > ?1",
-        [floor],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_journal_coverage SET end_height = ?1 + 1 WHERE end_height > ?1 + 1",
-        [floor],
     )?;
     Ok(())
 }
