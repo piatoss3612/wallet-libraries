@@ -2212,23 +2212,19 @@ where
         tr1_fee.map(|fee| (total_to_recipient + fee).expect("overflow already checked"));
 
     #[cfg(feature = "transparent-inputs")]
-    #[allow(unused_mut)]
-    let mut tr0_change: Vec<ChangeValue> = ephemeral_output_value
+    let tr0_change = ephemeral_output_value
         .into_iter()
-        .map(ChangeValue::ephemeral_transparent)
-        .collect();
+        .map(ChangeValue::ephemeral_transparent);
     #[cfg(not(feature = "transparent-inputs"))]
-    #[allow(unused_mut)]
-    let mut tr0_change: Vec<ChangeValue> = vec![];
+    let tr0_change = std::iter::empty::<ChangeValue>();
     #[cfg(feature = "orchard")]
-    if one_time_marker {
-        tr0_change.push(ChangeValue::ironwood(Zatoshis::ZERO, None));
-    }
+    let tr0_change =
+        tr0_change.chain(one_time_marker.then(|| ChangeValue::ironwood(Zatoshis::ZERO, None)));
 
     // The transaction produces no change, unless this is a transaction to a TEX address, whose
     // first transaction produces a single ephemeral change output, or it spends a one-time-key
     // note, which adds the zero-valued Ironwood change output.
-    let tr0_balance = TransactionBalance::new(tr0_change, tr0_fee)
+    let tr0_balance = TransactionBalance::new(tr0_change.collect(), tr0_fee)
         .expect("the sum of an single-element vector of fee values cannot overflow");
 
     let payment = zip321::Payment::new(

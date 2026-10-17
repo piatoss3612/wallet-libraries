@@ -22,9 +22,13 @@ fn journaled_nullifiers(st: &State, height: BlockHeight) -> Vec<[u8; 32]> {
     )
 }
 
-/// The test account's covered ranges as `(start, end)`, end exclusive.
+/// The test account's covered ranges (see [`account_coverage`]).
 fn coverage(st: &State) -> Vec<(u32, u32)> {
-    let account = st.test_account().unwrap().id();
+    account_coverage(st, st.test_account().unwrap().id())
+}
+
+/// The covered ranges of `account` as `(start, end)`, end exclusive.
+fn account_coverage(st: &State, account: AccountUuid) -> Vec<(u32, u32)> {
     rows(
         &st.wallet().db().conn,
         "SELECT c.start_height, c.end_height FROM ironwood_journal_coverage c
@@ -151,16 +155,8 @@ fn coverage_is_per_account() {
     st.generate_empty_block();
     st.scan_cached_blocks(start + 1, 1);
 
-    let ranges = |st: &State, account: AccountUuid| -> Vec<(u32, u32)> {
-        rows(
-            &st.wallet().db().conn,
-            "SELECT c.start_height, c.end_height FROM ironwood_journal_coverage c
-             JOIN accounts a ON a.id = c.account_id WHERE a.uuid = ?1",
-            [account.expose_uuid()],
-        )
-    };
     let next = u32::from(start) + 1;
-    assert_eq!(ranges(&st, added), [(next, next + 1)]);
+    assert_eq!(account_coverage(&st, added), [(next, next + 1)]);
     assert_eq!(coverage(&st), [(u32::from(start), next + 1)]);
 
     st.wallet_mut().db_mut().delete_account(added).unwrap();

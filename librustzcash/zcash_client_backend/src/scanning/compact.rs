@@ -312,19 +312,6 @@ where
     #[cfg(feature = "orchard")]
     let mut ironwood_note_commitments: Vec<(MerkleHashOrchard, Retention<BlockHeight>)> = vec![];
 
-    // The accounts whose ordinary Ironwood keys scan this block, so whose recognized
-    // transactions it journals.
-    #[cfg(feature = "orchard")]
-    let scanned_accounts = {
-        let mut accounts: Vec<AccountId> = vec![];
-        for key in scanning_keys.ironwood.values() {
-            if key.one_time_key_id().is_none() && !accounts.contains(key.account_id()) {
-                accounts.push(*key.account_id());
-            }
-        }
-        accounts
-    };
-
     for tx in block.vtx.into_iter() {
         let txid = tx.txid();
         let tx_index =
@@ -609,18 +596,18 @@ where
                 ironwood_outputs,
             );
             #[cfg(feature = "orchard")]
-            let wallet_tx = wallet_tx
-                .with_ironwood_enhancement_plan(if ironwood_pir_eligible {
-                    crate::wallet::IronwoodEnhancementPlan::Eligible {
-                        outgoing: ironwood_enhance_candidates,
-                    }
-                } else {
-                    crate::wallet::IronwoodEnhancementPlan::Ineligible
-                })
-                .with_scanned_compact(crate::wallet::ScannedCompactTx::new(
-                    tx.clone(),
-                    Position::from(u64::from(pos_tracker.ironwood_tree_position)),
-                ));
+            let wallet_tx = wallet_tx.with_ironwood_enhancement_plan(if ironwood_pir_eligible {
+                crate::wallet::IronwoodEnhancementPlan::Eligible {
+                    outgoing: ironwood_enhance_candidates,
+                }
+            } else {
+                crate::wallet::IronwoodEnhancementPlan::Ineligible
+            });
+            #[cfg(feature = "orchard")]
+            let wallet_tx = wallet_tx.with_scanned_compact(crate::wallet::ScannedCompactTx::new(
+                tx.clone(),
+                Position::from(u64::from(pos_tracker.ironwood_tree_position)),
+            ));
             wtxs.push(wallet_tx);
         }
 
@@ -629,7 +616,7 @@ where
 
     pos_tracker.check_end_of_compact_block_consistency(cur_height, block.chain_metadata)?;
 
-    let scanned = ScannedBlock::from_parts(
+    Ok(ScannedBlock::from_parts(
         cur_height,
         cur_hash,
         block.time,
@@ -651,10 +638,9 @@ where
             ironwood_note_commitments,
             ironwood_nullifier_map,
         ),
-    );
-    #[cfg(feature = "orchard")]
-    let scanned = scanned.with_scanned_accounts(scanned_accounts);
-    Ok(scanned)
+        #[cfg(feature = "orchard")]
+        scanning_keys.ordinary_ironwood_accounts(),
+    ))
 }
 
 impl PositionTracker {

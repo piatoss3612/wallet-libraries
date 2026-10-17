@@ -5,9 +5,8 @@
 //! internal address (see `zcash_client_backend::fees::orchard::InputView::is_one_time`),
 //! so the scan recognizes it. For a block covered for an account, meaning stored by a
 //! scan that used that account's keys, the journal therefore holds every nullifier
-//! that could spend one of the account's one-time notes. Entries and coverage above a
-//! rewind's rescan floor are removed with those blocks, in every build (see
-//! `wallet::one_time_rewind::truncate`).
+//! that could spend one of the account's one-time notes. See
+//! `wallet::one_time_rewind::truncate` for rewinds.
 
 use std::ops::Range;
 
@@ -63,8 +62,7 @@ pub(crate) fn collect(blocks: &[ScannedBlock<AccountUuid>]) -> Batch {
         })
         .collect();
     // Each block names the accounts whose keys scanned it, so one batch can cover different
-    // ranges for different accounts. A block scanned without that record, as the full-block
-    // scanner produces, covers nothing.
+    // ranges for different accounts. A block scanned without that record covers nothing.
     let mut coverage: Vec<(AccountUuid, Range<BlockHeight>)> = vec![];
     for block in blocks {
         for account in block.scanned_accounts() {
