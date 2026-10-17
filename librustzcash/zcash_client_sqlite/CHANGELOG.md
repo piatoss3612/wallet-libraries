@@ -16,9 +16,9 @@ and this library adheres to Rust's notion of
   registered every index its publication marks used, and a fresh account waits for none.
 - `wallet::init::migrations::ids::ONE_TIME_IVK_DISCOVERY`, the migration for discovery and
   the spend journal.
-- A spend journal (with `orchard`): every block scan keeps each recognized transaction's
-  compact form and every Ironwood nullifier it reveals, matched to a wallet note or not, and
-  records which blocks it covered for each account. A rewind drops the entries and coverage
+- A spend journal (with `orchard`): every block scan keeps every Ironwood nullifier each
+  recognized transaction reveals, matched to a wallet note or not, and records which blocks
+  it covered for each account. A rewind drops the entries and coverage
   above its rescan floor.
 - `TransparentPirSession`, with `WalletDb::with_transparent_pir_session`,
   `WalletDb::set_transparent_pir_session` and `WalletDb::transparent_pir_session`: the transparent work an open wallet holds

@@ -496,8 +496,6 @@ where
     let mut ironwood_note_commitments: Vec<(MerkleHashOrchard, Retention<BlockHeight>)> = vec![];
 
     for (tx_index, batch) in vtx.into_iter().enumerate() {
-        #[cfg(feature = "orchard")]
-        let ironwood_start = pos_tracker.ironwood_tree_position;
         let BatchResult {
             tx,
             sapling: sapling_decrypted,
@@ -699,10 +697,13 @@ where
                 ironwood_outputs,
             );
             #[cfg(feature = "orchard")]
-            let wallet_tx = wallet_tx.with_scanned_compact(crate::wallet::ScannedCompactTx::new(
-                compact_tx(&tx, tx_index),
-                incrementalmerkletree::Position::from(u64::from(ironwood_start)),
-            ));
+            let wallet_tx = wallet_tx.with_ironwood_nullifiers(
+                tx.ironwood_bundle()
+                    .iter()
+                    .flat_map(|bundle| bundle.actions().iter())
+                    .map(|action| *action.nullifier())
+                    .collect(),
+            );
             wtxs.push(wallet_tx);
         }
 
@@ -950,61 +951,6 @@ impl PositionTracker {
         assert_eq!(self.ironwood_tree_position, self.ironwood_final_tree_size);
 
         Ok(())
-    }
-}
-
-/// The compact form of `tx`, at `index` in its block, as a light wallet server serves it,
-/// without the fee, which it cannot compute without the transparent inputs' coins.
-#[cfg(feature = "orchard")]
-fn compact_tx(tx: &Transaction, index: TxIndex) -> crate::proto::compact_formats::CompactTx {
-    use crate::proto::compact_formats::{CompactTx, CompactTxIn, TxOut};
-    let sapling = tx.sapling_bundle();
-    CompactTx {
-        index: u16::from(index).into(),
-        txid: tx.txid().as_ref().to_vec(),
-        fee: 0,
-        spends: sapling
-            .iter()
-            .flat_map(|bundle| bundle.shielded_spends())
-            .map(Into::into)
-            .collect(),
-        outputs: sapling
-            .iter()
-            .flat_map(|bundle| bundle.shielded_outputs())
-            .map(Into::into)
-            .collect(),
-        actions: tx
-            .orchard_bundle()
-            .iter()
-            .flat_map(|bundle| bundle.actions().iter())
-            .map(Into::into)
-            .collect(),
-        ironwood_actions: tx
-            .ironwood_bundle()
-            .iter()
-            .flat_map(|bundle| bundle.actions().iter())
-            .map(Into::into)
-            .collect(),
-        // A coinbase transaction's null input is omitted, as in a compact block.
-        vin: tx
-            .transparent_bundle()
-            .filter(|_| u16::from(index) != 0)
-            .iter()
-            .flat_map(|bundle| bundle.vin.iter())
-            .map(|txin| CompactTxIn {
-                prevout_txid: txin.prevout().hash().to_vec(),
-                prevout_index: txin.prevout().n(),
-            })
-            .collect(),
-        vout: tx
-            .transparent_bundle()
-            .iter()
-            .flat_map(|bundle| bundle.vout.iter())
-            .map(|txout| TxOut {
-                value: txout.value().into_u64(),
-                script_pub_key: txout.script_pubkey().0.0.clone(),
-            })
-            .collect(),
     }
 }
 

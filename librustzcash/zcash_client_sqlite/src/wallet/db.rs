@@ -2103,10 +2103,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_FRESH_ACCOUNTS: &str =
 pub(super) const TABLE_IRONWOOD_SPEND_JOURNAL: &str = "CREATE TABLE ironwood_spend_journal (
                 block_height INTEGER NOT NULL CHECK (block_height BETWEEN 0 AND 4294967295),
                 tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
-                block_hash BLOB NOT NULL CHECK (length(block_hash) = 32),
                 txid BLOB NOT NULL CHECK (length(txid) = 32),
-                ironwood_start_position INTEGER NOT NULL CHECK (ironwood_start_position >= 0),
-                compact_tx BLOB NOT NULL,
                 PRIMARY KEY (block_height, tx_index)
             )";
 

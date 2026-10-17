@@ -1,7 +1,5 @@
 use std::{collections::HashSet, convert::TryFrom, hash::Hash};
 
-#[cfg(feature = "orchard")]
-use incrementalmerkletree::Position;
 use incrementalmerkletree::Retention;
 use sapling::note_encryption::{CompactOutputDescription, SaplingDomain};
 use subtle::ConditionallySelectable;
@@ -604,10 +602,12 @@ where
                 crate::wallet::IronwoodEnhancementPlan::Ineligible
             });
             #[cfg(feature = "orchard")]
-            let wallet_tx = wallet_tx.with_scanned_compact(crate::wallet::ScannedCompactTx::new(
-                tx.clone(),
-                Position::from(u64::from(pos_tracker.ironwood_tree_position)),
-            ));
+            let wallet_tx = wallet_tx.with_ironwood_nullifiers(
+                tx.ironwood_actions
+                    .iter()
+                    .map(|action| action.nf().expect("validated above"))
+                    .collect(),
+            );
             wtxs.push(wallet_tx);
         }
 

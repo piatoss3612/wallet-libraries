@@ -1,12 +1,10 @@
-use zcash_client_backend::proto::compact_formats::CompactTx;
-
 use super::*;
 
-/// The journal's entries as `(height, tx_index, txid, ironwood start position)`.
-fn entries(st: &State) -> Vec<(u32, u16, Vec<u8>, u64)> {
+/// The journal's entries as `(height, tx_index, txid)`.
+fn entries(st: &State) -> Vec<(u32, u16, Vec<u8>)> {
     rows(
         &st.wallet().db().conn,
-        "SELECT block_height, tx_index, txid, ironwood_start_position
+        "SELECT block_height, tx_index, txid
          FROM ironwood_spend_journal ORDER BY block_height, tx_index",
         [],
     )
@@ -63,23 +61,8 @@ fn a_recognized_transaction_is_journaled_with_every_nullifier() {
 
     let journaled = entries(&st);
     assert_eq!(journaled.len(), 1);
-    let (entry_height, _, txid, position) = &journaled[0];
-    assert_eq!(*entry_height, u32::from(height));
-    let prior_size: u64 = value(
-        &st.wallet().db().conn,
-        "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
-        [u32::from(height) - 1],
-    );
-    assert_eq!(*position, prior_size);
+    assert_eq!(journaled[0].0, u32::from(height));
     assert_eq!(journaled_nullifiers(&st, height)[0], nf);
-    let compact: Vec<u8> = value(
-        &st.wallet().db().conn,
-        "SELECT compact_tx FROM ironwood_spend_journal WHERE block_height = ?1",
-        [u32::from(height)],
-    );
-    let compact = CompactTx::decode(&compact[..]).unwrap();
-    assert_eq!(compact.txid().as_ref(), &txid[..]);
-    assert_eq!(compact.ironwood_actions[0].nullifier, nf);
     assert_eq!(coverage(&st), [(u32::from(start), u32::from(height) + 1)]);
 }
 
