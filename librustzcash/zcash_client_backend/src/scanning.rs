@@ -380,6 +380,23 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
     }
 }
 
+#[cfg(feature = "orchard")]
+impl<AccountId: Copy + PartialEq, IvkTag> ScanningKeys<AccountId, IvkTag> {
+    /// Returns each account that has an ordinary (not one-time) Ironwood key, once. A
+    /// block scan records them as [`ScannedBlock::scanned_accounts`].
+    ///
+    /// [`ScannedBlock::scanned_accounts`]: crate::data_api::ScannedBlock::scanned_accounts
+    pub(crate) fn ordinary_ironwood_accounts(&self) -> Vec<AccountId> {
+        let mut accounts: Vec<AccountId> = vec![];
+        for key in self.ironwood.values() {
+            if key.one_time_key_id().is_none() && !accounts.contains(key.account_id()) {
+                accounts.push(*key.account_id());
+            }
+        }
+        accounts
+    }
+}
+
 impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
     ScanningKeys<AccountId, (AccountId, Scope)>
 {

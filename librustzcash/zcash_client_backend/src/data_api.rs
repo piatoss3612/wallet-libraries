@@ -2873,6 +2873,7 @@ impl<AccountId> ScannedBlock<AccountId> {
             orchard::tree::MerkleHashOrchard,
             orchard::note::Nullifier,
         >,
+        #[cfg(feature = "orchard")] scanned_accounts: Vec<AccountId>,
     ) -> Self {
         Self {
             block_height,
@@ -2885,15 +2886,8 @@ impl<AccountId> ScannedBlock<AccountId> {
             #[cfg(feature = "orchard")]
             ironwood,
             #[cfg(feature = "orchard")]
-            scanned_accounts: vec![],
+            scanned_accounts,
         }
-    }
-
-    /// Records the accounts whose ordinary Ironwood keys scanned this block.
-    #[cfg(feature = "orchard")]
-    pub(crate) fn with_scanned_accounts(mut self, accounts: Vec<AccountId>) -> Self {
-        self.scanned_accounts = accounts;
-        self
     }
 
     /// Returns the accounts whose ordinary Ironwood keys scanned this block. Every

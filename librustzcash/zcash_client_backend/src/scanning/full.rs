@@ -495,19 +495,6 @@ where
     #[cfg(feature = "orchard")]
     let mut ironwood_note_commitments: Vec<(MerkleHashOrchard, Retention<BlockHeight>)> = vec![];
 
-    // The accounts whose ordinary Ironwood keys scan this block (see
-    // `ScannedBlock::scanned_accounts`).
-    #[cfg(feature = "orchard")]
-    let scanned_accounts = {
-        let mut accounts: Vec<AccountId> = vec![];
-        for key in scanning_keys.ironwood().values() {
-            if key.one_time_key_id().is_none() && !accounts.contains(key.account_id()) {
-                accounts.push(*key.account_id());
-            }
-        }
-        accounts
-    };
-
     for (tx_index, batch) in vtx.into_iter().enumerate() {
         #[cfg(feature = "orchard")]
         let ironwood_start = pos_tracker.ironwood_tree_position;
@@ -724,7 +711,7 @@ where
 
     pos_tracker.check_end_of_block_consistency()?;
 
-    let scanned = ScannedBlock::from_parts(
+    Ok(ScannedBlock::from_parts(
         height,
         cur_hash,
         header.time,
@@ -746,10 +733,9 @@ where
             ironwood_note_commitments,
             ironwood_nullifier_map,
         ),
-    );
-    #[cfg(feature = "orchard")]
-    let scanned = scanned.with_scanned_accounts(scanned_accounts);
-    Ok(scanned)
+        #[cfg(feature = "orchard")]
+        scanning_keys.ordinary_ironwood_accounts(),
+    ))
 }
 
 /// Returns the size of the given shielded protocol's note commitment tree both before and
