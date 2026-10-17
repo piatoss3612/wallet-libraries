@@ -16,7 +16,7 @@ use tempfile::NamedTempFile;
 use zakura_near_intents::{NearStatus, near_observation};
 use zakura_one_time_ivk::{KeyId, Purpose};
 use zakura_one_time_ivk_scenarios::Class;
-use zakura_pir_receiver::{Discovered, discover};
+use zakura_pir_receiver::discover;
 use zcash_client_backend::data_api::{
     AccountBirthday, TransactionStatus, WalletCommitmentTrees, WalletRead as _, WalletWrite as _,
     chain::{error::Error as ChainError, scan_cached_blocks_with_one_time_ivks},
@@ -25,7 +25,7 @@ use zcash_client_backend::data_api::{
     scanning::ScanPriority,
     status::{TransactionStatusMode, TransactionStatusRead as _},
     testing::TestRng,
-    transparent_ledger::{ChainPoint, TransparentLedgerMode},
+    transparent_ledger::TransparentLedgerMode,
     wallet::ConfirmationsPolicy,
     wallet::{
         SpendingKeys, create_proposed_transactions,
@@ -186,8 +186,6 @@ pub struct Reach {
     pub endpoint_faults: Vec<Fault>,
     /// How the publication differs from a faithful index.
     pub publication: Options,
-    /// Discovery runs on each side of a sync's scan.
-    pub discovery_runs_per_sync: usize,
 }
 
 impl Default for Reach {
@@ -197,7 +195,6 @@ impl Default for Reach {
             directory_faults: Vec::new(),
             endpoint_faults: Vec::new(),
             publication: Options::default(),
-            discovery_runs_per_sync: 1,
         }
     }
 }
@@ -227,8 +224,6 @@ pub struct Device {
     pub syncs: u32,
     /// Encrypted directory lookups across every discovery run.
     pub lookups: usize,
-    /// Discovery runs across every sync.
-    pub discovery_runs: usize,
     /// Blocks scanned across every sync and scan.
     pub scanned_blocks: u64,
     /// Reorgs the wallet rewound for, as (conflict height, height rewound to).
@@ -290,7 +285,6 @@ impl Device {
             candidates: BTreeSet::new(),
             syncs: 0,
             lookups: 0,
-            discovery_runs: 0,
             scanned_blocks: 0,
             rewinds: Vec::new(),
             bytes_sent: 0,
@@ -487,10 +481,10 @@ impl Device {
         }
     }
 
-    /// Runs discovery against a fresh publication, `Reach::discovery_runs_per_sync` runs at
-    /// most and fewer once nothing is pending, and returns the lookups made and why any key
-    /// failed or a run stopped. A recheck's first run starts a new pass. An injected fault
-    /// that stops the app ends discovery there, and the app restarts (see [`Self::reopen`]).
+    /// Runs discovery once against a fresh publication, and returns the lookups made and why
+    /// any key failed or the run stopped. A recheck's first run starts a new pass. An
+    /// injected fault that stops the app ends discovery there, and the app restarts (see
+    /// [`Self::reopen`]).
     pub fn discover(&mut self, chain: &Chain, near: &Near) -> (usize, Vec<String>) {
         let now = self.now(chain);
         let reach = self.reach.clone();
@@ -509,52 +503,36 @@ impl Device {
             .expect("a runtime");
         let mut problems = Vec::new();
         let mut stopped = false;
-        let mut refresh = self.phase == Phase::Recheck && !self.refreshed;
-        for _ in 0..self.reach.discovery_runs_per_sync.max(1) {
-            self.discovery_runs += 1;
-            let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                runtime.block_on(discover(
-                    &mut self.db,
-                    &network(),
-                    self.account,
-                    GENESIS,
-                    ORIGIN,
-                    &directory,
-                    &NoLock,
-                    now,
-                    refresh,
-                ))
-            }));
-            let found: Result<Discovered<SqliteClientError>, _> = match run {
-                Ok(found) => found,
-                Err(payload) if stops_the_app(payload.as_ref()) => {
-                    problems.push(format!("{APP_STOPS}; it restarts"));
-                    stopped = true;
-                    break;
-                }
-                Err(payload) => std::panic::resume_unwind(payload),
-            };
-            match found {
-                Ok(found) => {
-                    if refresh {
-                        self.refreshed = true;
-                        refresh = false;
-                    }
-                    for (key, error) in &found.failed {
-                        problems.push(format!(
-                            "failed {key:?}: {error} ({})",
-                            checkpoints(&self.path)
-                        ));
-                    }
-                    if found.lookups == 0 || !found.failed.is_empty() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    problems.push(format!("discovery stopped: {error}"));
-                    break;
+        let refresh = self.phase == Phase::Recheck && !self.refreshed;
+        let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            runtime.block_on(discover(
+                &mut self.db,
+                &network(),
+                self.account,
+                GENESIS,
+                ORIGIN,
+                &directory,
+                &NoLock,
+                now,
+                refresh,
+            ))
+        }));
+        match run {
+            Ok(Ok(found)) => {
+                self.refreshed |= refresh;
+                for (key, error) in &found.failed {
+                    problems.push(format!(
+                        "failed {key:?}: {error} ({})",
+                        checkpoints(&self.path)
+                    ));
                 }
             }
+            Ok(Err(error)) => problems.push(format!("discovery stopped: {error}")),
+            Err(payload) if stops_the_app(payload.as_ref()) => {
+                problems.push(format!("{APP_STOPS}; it restarts"));
+                stopped = true;
+            }
+            Err(payload) => std::panic::resume_unwind(payload),
         }
         let lookups = directory.published().map_or(0, Directory::lookups);
         self.lookups += lookups;
@@ -591,15 +569,6 @@ impl Device {
         let report = self.sync(chain, near);
         self.phase = Phase::Scan;
         report
-    }
-
-    /// The fully scanned tip, if the wallet has scanned anything.
-    fn through(&self) -> Option<ChainPoint> {
-        let block = self.db.block_fully_scanned().expect("a scanned tip")?;
-        Some(ChainPoint {
-            height: block.block_height(),
-            hash: block.block_hash(),
-        })
     }
 
     /// Tags payments credited since the last tag: during a recheck as found after it,
@@ -1219,7 +1188,6 @@ impl Device {
     }
 }
 
-/// The Ironwood outputs a wallet holds, as (txid, action index) and value.
 /// The outputs directory lookups listed as payments (see `harness_candidates`).
 fn candidates(path: &Path) -> BTreeSet<([u8; 32], u32)> {
     let conn = read_only(path);

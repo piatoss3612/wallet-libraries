@@ -187,15 +187,6 @@ impl Directory {
             .count()
     }
 
-    /// Row-file downloads served so far, which replace lookups for large jobs.
-    pub fn row_files(&self) -> usize {
-        let requests = self.requests.lock().unwrap();
-        requests
-            .iter()
-            .filter(|r| r.starts_with("GET /v1/receiver/rows/"))
-            .count()
-    }
-
     async fn send(
         &self,
         method: &str,
@@ -246,7 +237,7 @@ fn publication(manifest: &Manifest) -> Publication {
 }
 
 /// One publication's receiver routes, answered as the receiver service answers them:
-/// its manifest, PIR setup, rows, filters and witnesses, and real PIR evaluation of
+/// its manifest, PIR setup, filters and witnesses, and real PIR evaluation of
 /// each encrypted query. A session it does not serve is gone (410).
 struct Routes {
     server: Server,
@@ -289,7 +280,6 @@ impl Routes {
         }
         match material {
             "public" => (200, self.server.public().to_vec()),
-            "rows" => (200, self.server.rows().to_vec()),
             "filters" => (200, self.server.filters().to_vec()),
             "witness" => match &self.witnesses {
                 Some(bytes) => (200, bytes.clone()),

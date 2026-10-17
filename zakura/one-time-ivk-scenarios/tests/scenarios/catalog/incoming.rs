@@ -50,7 +50,8 @@ pub fn all() -> Vec<Scenario> {
             scenarios.push(restore_in_flight(after, fresh));
         }
     }
-    for unpaid in [5, 29, 30, 40, 100] {
+    // Either side of discovery's first window, and past the gap that follows it.
+    for unpaid in [40, 100, 130] {
         for covered in [true, false] {
             scenarios.push(beyond_lookahead(unpaid, covered));
         }
@@ -362,9 +363,9 @@ fn beyond_lookahead(unpaid: u64, covered: bool) -> Scenario {
             "{unpaid} unpaid incoming quotes, then a paid one; NEAR's seen set {} them",
             if covered { "covers" } else { "misses" }
         ),
-        summary: "A restore finds incoming keys by walking a 30-index lookahead. Payments and seen-set \
-            hits move it; quotes NEAR's feed never recorded do not, so a payment 30 or more indices \
-            past the last known one is never swept."
+        summary: "A restore checks the first 100 incoming keys against the directory's filters, then goes \
+            on until 30 in a row are unused. Payments and seen-set hits count as used; quotes NEAR's \
+            feed never recorded do not, so a payment past both is never found."
             .into(),
         params: vec![
             ("unpaid quotes first".into(), unpaid.to_string()),
