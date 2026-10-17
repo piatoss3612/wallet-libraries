@@ -9,14 +9,14 @@ and this library adheres to Rust's notion of
 
 ### Added
 
-- Early restore (with `orchard`): `data_api::one_time_ivk::restore` adds `PublicationEnd` and
-  `EarlyRestoreKey`, `OneTimeIvkRestoreRead::{one_time_early_restore_start, one_time_receivers}`
-  and `OneTimeIvkRestoreWrite::{begin_one_time_early_restore, record_one_time_early_lookup}`,
-  so a store can find a restored account's one-time payments during its restore scan instead
-  of only by sweeps after it. `OneTimeIvkRead::get_one_time_scanning_keys_for_range` gives the
-  keys for one scan batch, and `chain::scan_cached_blocks_with_one_time_ivks` now uses it.
-  Its default is `get_one_time_scanning_keys`, and the early restore methods default to no
-  early restore, so it stays opt-in for other stores.
+- One-time IVK discovery (with `orchard`): `data_api::one_time_ivk::restore` replaces restore
+  sweeps with discovery. `one_time_discovery` reports the work due, `one_time_receivers`
+  derives an account's receivers without registering them, and
+  `record_one_time_filter_checks`, `record_one_time_lookup`, `defer_one_time_lookup` and
+  `record_one_time_witness` record it. Payments ahead of the scan become scan hints.
+  `OneTimeIvkRead::get_one_time_scanning_keys_for_range` gives one batch's keys, hints
+  included, and `chain::scan_cached_blocks_with_one_time_ivks` uses it. Its default is
+  `get_one_time_scanning_keys`.
 - `WalletTx::ironwood_nullifiers` (with `orchard`) gives every Ironwood nullifier a
   transaction a block scan recognized reveals, matched to a wallet note or not.
   `ScannedBlock::scanned_accounts` names the accounts whose ordinary internal keys scanned
@@ -34,11 +34,18 @@ and this library adheres to Rust's notion of
   `create_pczt_from_proposal` and `extract_and_store_transaction_from_pczt` reject a
   transaction without it. A PCZT created before this change can't be extracted, because its
   proposal metadata lacks the new flag.
-- `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery` may release only part of the
-  retained evidence per call; it returns true once release reaches the tip.
 
 ### Removed
 
+- One-time IVK restore sweeps and nullifier retention: `MAX_PUBLICATION_LAG`, `SweepDeferral`,
+  `PaymentApplication`, and the `OneTimeIvkRestoreRead` and `OneTimeIvkRestoreWrite` methods
+  `directory_publication_anchor`, `one_time_history_pending`, `one_time_keys_to_recheck`,
+  `maintain_one_time_ivks`, `prepare_one_time_sweeps`, `begin_one_time_sweep_attempt`,
+  `queue_directory_lookup`, `apply_one_time_sweep`, `record_paid_filter_check` and
+  `finish_one_time_nullifier_recovery`.
+- `ll::wallet::put_blocks_with_nullifier_retention` and
+  `put_blocks_rows_with_nullifier_retention`: Ironwood nullifiers are tracked like the other
+  pools' again.
 - `EnhancePirWork::Waiting`: newly queued private payload work is eligible through
   the ordinary recovery schedule without a randomized first-query delay.
   Consumers must remove waiting-state handling.

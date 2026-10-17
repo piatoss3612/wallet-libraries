@@ -223,7 +223,12 @@ fn one_time_ivk_rejects_mismatched_note_metadata() {
 
     let mut st = wallet(false);
     let account = st.test_account().unwrap().id();
-    let key = watch(st.wallet_mut().db_mut(), account, 4, start());
+    let (key, lookup) = (KeyId::new(Purpose::Receive, 4), Discovery::Lookup);
+    let key = tx(st.wallet_mut().db_mut(), |c, p| {
+        register(c, p, account, key, start(), false, lookup, 0)
+    })
+    .unwrap()
+    .1;
     let rho = Rho::from_bytes(&[1; 32]).unwrap();
     let seed = RandomSeed::from_bytes([2; 32], &rho).unwrap();
     let value = orchard::value::NoteValue::from_raw(50_000);
@@ -267,23 +272,18 @@ fn one_time_ivk_rejects_mismatched_note_metadata() {
     assert!(!key_state(st.wallet().db(), key.key_id()).1);
 }
 
-/// Lookahead keys wait for a sweep: unlike activation, registering them replays no
-/// scanned history, and scanning never trial-decrypts with them.
+/// A key registered for a lookup waits for it: unlike activation, registering it requeues
+/// no scanned history, and scanning never trial-decrypts with it.
 #[test]
-fn lookahead_keys_are_swept_instead_of_scanned() {
+fn keys_registered_for_lookups_are_looked_up_instead_of_scanned() {
     let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
     let key = KeyId::new(Purpose::Receive, 1);
     let first = mine_payment(&mut st, key, 50_000);
     st.scan_cached_blocks_with_one_time_ivks(first, 1);
-    lookahead(st.wallet_mut().db_mut(), account);
+    recover(st.wallet_mut().db_mut(), account, key, start());
     assert!(queued(&st).is_empty());
     assert!(scanning_keys(&st).is_empty());
-    assert!(
-        st.wallet()
-            .one_time_history_pending(account, first)
-            .unwrap()
-    );
     let later = mine_payment(&mut st, key, 60_000);
     st.scan_cached_blocks_with_one_time_ivks(later, 1);
     assert!(unspent_keys(&st, later).is_empty());
@@ -440,58 +440,21 @@ fn key_activated_mid_batch_is_requeued_for_the_blocks_it_missed() {
 }
 
 /// A rewind below the pruning window truncates at the window's floor but rescans every
-/// block above its target, so one-time state above the target goes too.
+/// block above its target, so the journal's coverage above the target goes too.
 #[test]
 fn rewind_below_the_pruning_window_repairs_one_time_state_from_its_target() {
     let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    retain(st.wallet_mut().db_mut(), account);
     let target = st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(crate::PRUNING_DEPTH as usize + 10);
-    let covered_above = |st: &State| -> u32 {
-        let sql = "SELECT COUNT(*) FROM ironwood_nullifier_scan_blocks WHERE height > ?1";
-        value(st.wallet().conn(), sql, [u32::from(target)])
+    let covered_end = |st: &State| -> u32 {
+        let sql = "SELECT MAX(end_height) FROM ironwood_journal_coverage";
+        value(st.wallet().conn(), sql, [])
     };
-    assert!(covered_above(&st) > crate::PRUNING_DEPTH);
+    assert!(covered_end(&st) > u32::from(target) + crate::PRUNING_DEPTH);
 
     let chain_state = ChainState::empty(target, BlockHash([0; 32]));
     st.wallet_mut()
         .rewind_to_chain_state(chain_state, std::collections::HashSet::new())
         .unwrap();
-    assert_eq!(covered_above(&st), 0);
-}
-
-/// Ordinary scanning keeps no Ironwood spend evidence for restore sweeps until the wallet
-/// holds one-time IVK state, a registered key or a spend retention row, and keeps it for
-/// every block scanned from then on.
-#[test]
-fn spend_evidence_is_kept_only_with_one_time_state() {
-    for registered_key in [true, false] {
-        let mut st = ironwood_wallet();
-        let account = st.test_account().unwrap().id();
-        let covered = |st: &State| -> Vec<u32> {
-            let sql = "SELECT height FROM ironwood_nullifier_scan_blocks ORDER BY height";
-            column(st.wallet().conn(), sql, [])
-        };
-        let scan_empty_block = |st: &mut State| {
-            let (height, _) = st.generate_empty_block();
-            st.scan_cached_blocks(height, 1);
-            u32::from(height)
-        };
-        scan_empty_block(&mut st);
-        scan_empty_block(&mut st);
-        assert!(covered(&st).is_empty(), "{registered_key}");
-        assert_eq!(retention_height(&st), None);
-
-        let db = st.wallet_mut().db_mut();
-        if registered_key {
-            // A sweep-only key is not trial-decrypted, so ordinary scanning continues.
-            let from = db.chain_height().unwrap().unwrap() + 1;
-            watch(db, account, 0, from);
-        } else {
-            retain(db, account);
-        }
-        let scanned = [scan_empty_block(&mut st), scan_empty_block(&mut st)];
-        assert_eq!(covered(&st), scanned, "{registered_key}");
-    }
+    assert_eq!(covered_end(&st), u32::from(target) + 1);
 }

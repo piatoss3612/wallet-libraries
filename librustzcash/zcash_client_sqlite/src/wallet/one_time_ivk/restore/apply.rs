@@ -1,14 +1,10 @@
-//! Apply discovery only after local chain and spend checks, in one transaction.
-use std::borrow::BorrowMut;
-
+//! Admits a late candidate only after local chain, coverage and spend checks, in one
+//! transaction.
 use incrementalmerkletree::{Address, Position, Retention};
 use orchard::tree::{MerkleHashOrchard, MerklePath};
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::{
-    data_api::{
-        one_time_ivk::restore::{PaymentApplication, SweepDeferral},
-        transparent_ledger::{ChainPoint, TransparentLedgerMode},
-    },
+    data_api::transparent_ledger::{ChainPoint, TransparentLedgerMode},
     wallet::{WalletOrchardOutput, WalletTx},
 };
 use zcash_protocol::{
@@ -16,56 +12,36 @@ use zcash_protocol::{
     consensus::{BlockHeight, Parameters},
 };
 
-use super::{
-    PendingPayment, SpendStatus,
-    payments::{authenticate, pending_payments, spend_status},
-    retention::queue_spend_history,
-    sweep,
-};
+use super::{PendingPayment, payments::authenticate};
 use crate::wallet::one_time_ivk::{KeyId, corrupt};
-use crate::{AccountUuid, WalletDb, error::SqliteClientError, wallet};
+use crate::{AccountUuid, error::SqliteClientError, wallet};
 
-/// Implements `OneTimeIvkRestoreWrite::apply_one_time_sweep`, one transaction per payment.
-#[allow(clippy::type_complexity)]
-pub(crate) fn apply_sweep<C: BorrowMut<Connection>, P: Parameters, CL, R>(
-    db: &mut WalletDb<C, P, CL, R>,
-    account: AccountUuid,
-    key: KeyId,
-    through: ChainPoint,
-    publication: ChainPoint,
-    recent: bool,
-    mut witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
-) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-    for candidate in pending_payments(db.conn.borrow(), account, key)? {
-        let path = witness(candidate.position, candidate.encrypted_note.commitment())
-            .and_then(|siblings| merkle_path(candidate.position, siblings));
-        let Some(path) = path else {
-            return Ok(Ok(PaymentApplication::AwaitingWitness));
-        };
-        let configured = db.transparent_ledger_mode;
-        let applied = db.transactionally(|db| {
-            apply_payment(
-                db.conn.0,
-                &db.transparent_pir_session,
-                db.params,
-                configured,
-                &db.enhance_pir_session,
-                account,
-                key,
-                &candidate,
-                through,
-                (publication, &path),
-                Gate::FullyScanned,
-            )
-        })?;
-        match applied {
-            Ok(PaymentApplication::Applied) => {}
-            other => return Ok(other),
-        }
-    }
-    Ok(db
-        .transactionally(|db| sweep::finish(db.conn.0, account, key, recent))?
-        .map(|()| PaymentApplication::Applied))
+/// The handle state that storing a note's transaction routes its enhancement with.
+pub(crate) struct Sessions<'a> {
+    /// The handle's transparent ledger mode.
+    pub(crate) configured: Option<TransparentLedgerMode>,
+    /// The handle's private Enhance session.
+    pub(crate) enhance: &'a wallet::enhance_pir::session::SessionState,
+    /// The handle's transparent PIR session.
+    pub(crate) tpir: &'a wallet::transparent_ledger::session::SessionState,
+}
+
+/// What [`apply_payment`] did with a late candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::wallet::one_time_ivk) enum Admission {
+    /// The note, its witness and any spend were stored, or it already was, or it predates
+    /// the account's birthday and only marks its key used.
+    Admitted,
+    /// The scan has not stored its block or reached its path's anchor yet.
+    Waiting,
+    /// The scan finished blocks from the payment on without covering them for the account,
+    /// so they must be scanned again (see `discovery::admit`).
+    Uncovered,
+    /// Its path's anchor is off the wallet's chain or too old to check, so a new path is
+    /// needed.
+    StaleWitness,
+    /// The directory's claim failed a check against the wallet's own chain.
+    Rejected,
 }
 
 /// The inclusion path at `position`, if every sibling is a valid hash.
@@ -80,42 +56,23 @@ pub(in crate::wallet::one_time_ivk) fn merkle_path(
     Some(MerklePath::from_parts(position, hashes.try_into().ok()?))
 }
 
-/// Which scan coverage [`apply_payment`] requires before it applies a payment.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::wallet::one_time_ivk) enum Gate {
-    /// A restore sweep's: `through` is the wallet's fully scanned chain tip, and missing
-    /// spend evidence queues a replay of the payment's history.
-    FullyScanned,
-    /// An early restore's (see `early`): `through` is the highest block the scan stored,
-    /// and the payment waits until every block from its own on carries spend evidence.
-    /// It never queues a replay, since the scan reaches those blocks anyway.
-    Covered,
-}
-
-/// Applies queued `candidate` with its inclusion path at an anchor on the wallet's chain,
-/// which authenticates the note and position but not its transaction ID. No memo is
-/// stored (see `wallet::one_time_ivk`). `configured` is the handle's transparent ledger
-/// mode, for routing the transaction's enhancement.
+/// Admits late `candidate` with its inclusion path at an anchor on the wallet's chain,
+/// which authenticates the note and its position, so its height, but not its transaction
+/// ID. It waits until the scan covered every block from the payment through `through`, the
+/// highest block the scan stored, for the account: the change rule puts every spend of a
+/// one-time note in a transaction the scan recognizes, so the spend journal then holds the
+/// note's nullifier if it was spent. No memo is stored (see `wallet::one_time_ivk`).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
-    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
+    sessions: &Sessions<'_>,
     params: &P,
-    configured: Option<TransparentLedgerMode>,
-    session: &wallet::enhance_pir::session::SessionState,
     account: AccountUuid,
     key: KeyId,
     candidate: &PendingPayment,
     through: ChainPoint,
     (anchor, path): (ChainPoint, &MerklePath),
-    gate: Gate,
-) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-    if !pending_payments(conn, account, key)?
-        .iter()
-        .any(|p| p == candidate)
-    {
-        return Err(corrupt("one-time-key payment is not queued or changed"));
-    }
+) -> Result<Admission, SqliteClientError> {
     let (key_ref, recovered) = authenticate(conn, params, account, key, candidate)?;
     let dequeue = || {
         conn.execute(
@@ -140,13 +97,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     )?;
     if stored_elsewhere {
         dequeue()?;
-        return Ok(Ok(PaymentApplication::Applied));
-    }
-    if gate == Gate::FullyScanned
-        && (wallet::fully_scanned_height(conn)? != Some(through.height)
-            || wallet::chain_tip_height(conn)? != Some(through.height))
-    {
-        return Ok(Ok(PaymentApplication::AwaitingScan));
+        return Ok(Admission::Admitted);
     }
     let birthday: u32 = conn.query_row(
         "SELECT birthday_height FROM accounts WHERE uuid = ?1",
@@ -171,7 +122,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         )
         .optional()?
     else {
-        return Ok(Ok(PaymentApplication::AwaitingScan));
+        return Ok(Admission::Waiting);
     };
     let position = u64::from(candidate.position);
     let placed = end.checked_sub(count).is_some_and(|start| {
@@ -182,13 +133,15 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         }
     });
     if !placed {
-        return reject(conn, key_ref);
+        return Ok(Admission::Rejected);
     }
-    if anchor.height > through.height
-        || through.height - anchor.height > crate::PRUNING_DEPTH
+    if anchor.height > through.height {
+        return Ok(Admission::Waiting);
+    }
+    if through.height - anchor.height > crate::PRUNING_DEPTH
         || wallet::get_block_hash(conn, anchor.height)? != Some(anchor.hash)
     {
-        return Ok(Ok(PaymentApplication::AwaitingWitness));
+        return Ok(Admission::StaleWitness);
     }
     let oldest = u32::from(through.height).saturating_sub(crate::PRUNING_DEPTH);
     let checkpoint: Option<u32> = conn.query_row(
@@ -198,14 +151,14 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         |r| r.get(0),
     )?;
     let Some(checkpoint) = checkpoint.map(BlockHeight::from) else {
-        return Ok(Ok(PaymentApplication::AwaitingWitness));
+        return Ok(Admission::StaleWitness);
     };
     let mut tree = crate::ironwood_tree(conn)?;
     let Some(root) = tree.root_at_checkpoint_id(&checkpoint)? else {
-        return Ok(Ok(PaymentApplication::AwaitingWitness));
+        return Ok(Admission::StaleWitness);
     };
     if !recovered.verify_position(position, path, root.into()) {
-        return reject(conn, key_ref);
+        return Ok(Admission::Rejected);
     }
     // Like any note before the birthday, it is not tracked; marking its key paid keeps
     // the index from being issued again and moves the recovery bound past it.
@@ -216,7 +169,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
             [key_ref],
         )?;
         dequeue()?;
-        return Ok(Ok(PaymentApplication::Applied));
+        return Ok(Admission::Admitted);
     }
     // An unmined transaction is one a rewind or the mempool left: its note may move to a
     // new position, but a rewound one holding no such note is not this one. One with raw
@@ -265,20 +218,26 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
             })
         });
     if conflict || contradicted {
-        return reject(conn, key_ref);
+        return Ok(Admission::Rejected);
     }
-    let spent = match spend_status(conn, candidate, recovered.nullifier(), through, gate)? {
-        Ok(SpendStatus::Unknown) if gate == Gate::Covered => {
-            return Ok(Ok(PaymentApplication::AwaitingSpendHistory));
-        }
-        Ok(SpendStatus::Unknown) => {
-            // Authenticate inclusion before a directory answer can trigger a replay.
-            queue_spend_history(conn, params, account, candidate.height, through.height)?;
-            return Ok(Ok(PaymentApplication::AwaitingSpendHistory));
-        }
-        Ok(spent) => spent,
-        Err(deferral) => return Ok(Err(deferral)),
-    };
+    if !covered(conn, account, candidate.height, through.height)? {
+        return Ok(Admission::Uncovered);
+    }
+    let spent_in: Option<crate::TxRef> = conn
+        .query_row(
+            "SELECT t.id_tx FROM ironwood_spend_journal_nullifiers n
+             JOIN ironwood_spend_journal j USING (block_height, tx_index)
+             JOIN transactions t ON t.txid = j.txid
+             WHERE n.nf = ?1 AND n.block_height BETWEEN ?2 AND ?3
+             LIMIT 1",
+            params![
+                recovered.nullifier().to_bytes(),
+                u32::from(candidate.height),
+                u32::from(through.height)
+            ],
+            |r| r.get(0).map(crate::TxRef),
+        )
+        .optional()?;
     let anchor_size: u64 = conn.query_row(
         "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
         [u32::from(checkpoint)],
@@ -319,26 +278,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         vec![],
         vec![],
     );
-    let tx_ref = wallet::put_tx_meta(conn, tpir_session, &tx, candidate.height)?;
-    let spent_in = if let SpendStatus::Spent(txid) = spent {
-        // The map also records the spend's canonical height and index on a stored row,
-        // which may be unmined. A linked spend has no map entry (see `spend_status`).
-        let nf = recovered.nullifier().to_bytes();
-        let spending =
-            match wallet::query_nullifier_map(conn, tpir_session, ShieldedPool::Ironwood, &nf)? {
-                Some(id) => Some(id),
-                None => conn
-                    .query_row(
-                        "SELECT id_tx FROM transactions WHERE txid = ?1",
-                        [txid.as_ref()],
-                        |r| r.get(0).map(crate::TxRef),
-                    )
-                    .optional()?,
-            };
-        Some(spending.ok_or_else(|| corrupt("verified one-time-key spend lost its transaction"))?)
-    } else {
-        None
-    };
+    let tx_ref = wallet::put_tx_meta(conn, sessions.tpir, &tx, candidate.height)?;
     let encrypted = candidate.encrypted_note.to_bytes();
     let output = WalletOrchardOutput::from_parts(
         candidate.action_index as usize,
@@ -354,7 +294,7 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     .with_compact_ciphertext(encrypted[96..].try_into().unwrap());
     wallet::orchard::put_received_note(
         conn,
-        tpir_session,
+        sessions.tpir,
         params,
         ShieldedPool::Ironwood,
         &output,
@@ -364,29 +304,29 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     )?;
     wallet::enhance_pir::finish_private_receipt(
         conn,
-        tpir_session,
-        configured,
-        session,
+        sessions.tpir,
+        sessions.configured,
+        sessions.enhance,
         tx_ref,
         candidate.txid,
     )?;
     dequeue()?;
-    Ok(Ok(PaymentApplication::Applied))
+    Ok(Admission::Admitted)
 }
 
-/// Discards key `key_ref`'s queued lookup (see [`PaymentApplication::Rejected`]).
-fn reject(
+/// Whether the scan covered every block from `from` through `through` for `account`, with
+/// its keys while the journal was recording (see `one_time_ivk::journal`).
+fn covered(
     conn: &Connection,
-    key_ref: i64,
-) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-    conn.execute(
-        "DELETE FROM ironwood_one_time_payment_recovery WHERE one_time_key_id = ?1",
-        [key_ref],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_sweeps SET lookup_height = NULL, lookup_hash = NULL,
-            done_height = NULL WHERE one_time_key_id = ?1",
-        [key_ref],
-    )?;
-    Ok(Ok(PaymentApplication::Rejected))
+    account: AccountUuid,
+    from: BlockHeight,
+    through: BlockHeight,
+) -> Result<bool, SqliteClientError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ironwood_journal_coverage c
+             JOIN accounts a ON a.id = c.account_id
+             WHERE a.uuid = ?1 AND c.start_height <= ?2 AND c.end_height > ?3)",
+        params![account.0, u32::from(from), u32::from(through)],
+        |r| r.get(0),
+    )?)
 }

@@ -12,6 +12,8 @@ fn ironwood_funded_wallet() -> (State, BlockHeight) {
     let fvk = parent(&st);
     let first = pay(&mut st, &fvk, 1_000_000);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
+    let account = st.test_account().unwrap().id();
+    discover(&mut st, account, &[]);
     (st, first)
 }
 
@@ -53,18 +55,18 @@ fn recover_memos(st: &mut State, account: AccountUuid) {
     .unwrap()
 }
 
-/// `(index, scan_from, queued for a sweep)` of each registered refund key.
+/// `(index, scan_from, registered for a lookup)` of each registered refund key.
 fn refund_keys(st: &State) -> Vec<(u64, u32, bool)> {
     let keys: Vec<(Vec<u8>, u32, bool)> = rows(
         st.wallet().conn(),
         "SELECT k.key_index, k.scan_from,
-            EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s WHERE s.one_time_key_id = k.id)
+            EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id)
          FROM ironwood_one_time_keys k WHERE k.purpose = 0 ORDER BY k.key_index",
         [],
     );
     let decode = |i: Vec<u8>| u64::from_be_bytes(i.try_into().unwrap());
     keys.into_iter()
-        .map(|(i, from, swept)| (decode(i), from, swept))
+        .map(|(i, from, looked_up)| (decode(i), from, looked_up))
         .collect()
 }
 
@@ -280,6 +282,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     st.wallet_mut().update_chain_tip(mined).unwrap();
     let blocks = u32::from(mined) - u32::from(first) + 1;
     st.scan_cached_blocks_with_one_time_ivks(first, blocks as usize);
+    discover(&mut st, restored, &[]);
     let pending = |st: &State| {
         store::restore::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap()
     };
@@ -313,7 +316,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     );
     // Without own-send evidence, though scanning covers the funding block, the inputs
     // predate the birthday or the record is not this wallet's. It no longer holds back
-    // issuance: its key is swept without advancing allocation, which skips its index.
+    // issuance: its key is registered for a lookup without advancing allocation, which skips its index.
     let replace_memo = |st: &State, from: &[u8], to: &[u8]| {
         let sql = "UPDATE ironwood_received_notes SET memo = ?2 WHERE memo = ?1";
         exec(st.wallet().conn(), sql, rusqlite::params![from, to]);
@@ -353,14 +356,14 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     assert!(refund_keys(&st).is_empty());
 
     // The wallet never scanned this key, so its history comes from a receiver-directory
-    // sweep rather than trial decryption.
+    // lookup rather than trial decryption.
     recover_memos(&mut st, restored);
     let registered = vec![(7, u32::from(mined), true)];
     assert_eq!(refund_keys(&st), registered);
     assert!(!pending(&st));
     assert!(scanning_keys(&st).is_empty());
     let db = st.wallet().db();
-    assert!(db.one_time_history_pending(restored, mined).unwrap());
+    assert!(lookup_pending(db, restored));
 
     // A restored refund key makes no provider lookups. Like a restored incoming key, it
     // is watched for a day from its registration.
@@ -402,6 +405,7 @@ fn refund_funding_refuses_its_memo_on_orchard_change() {
     st.scan_cached_blocks_with_one_time_ivks(funded, 1);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
     let account = st.test_account().unwrap().id();
+    discover(&mut st, account, &[]);
     let tip = st.wallet().chain_height().unwrap().unwrap();
     let deposit = p2pkh(7).encode(st.network());
     let now = clock_now();
@@ -514,10 +518,10 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
 
     let (mined, _) = st.generate_next_block_including(txid.unwrap());
     st.scan_cached_blocks_with_one_time_ivks(mined, 1);
-    // The key already scans from before its funding block, so recovery queues no sweep.
+    // The key already scans from before its funding block, so recovery queues no lookup.
     recover_memos(&mut st, account);
     let db = st.wallet_mut().db_mut();
-    assert!(!db.one_time_history_pending(account, mined).unwrap());
+    assert!(!lookup_pending(db, account));
     assert_eq!(close_at(db, account, now, mined), 0);
     let finished = now + 7_200;
     let no_refund = Terminal(ReceiptExpectation::None);
@@ -556,20 +560,20 @@ fn a_refund_key_starts_scanning_when_its_matching_funding_transaction_is_stored(
     assert_eq!(next.unwrap().unwrap().key_id().index(), key.index() + 1);
 }
 
+/// A restored account recovers a funding memo's refund key as soon as the scan stores the
+/// funding transaction, so issuance never hands the memo's index out again, and the key's
+/// history is due for a lookup.
 #[test]
-fn reissued_refund_key_sweeps_history_before_its_scan_start() {
+fn a_funding_memo_is_recovered_once_its_block_is_stored() {
     let (mut st, _) = ironwood_funded_wallet();
     let account = st.test_account().unwrap().id();
     let pays = vec![payment(&p2pkh(7), 100_000, None)];
     let (_, _, mined) = send(&mut st, pays, &refund_memo(0));
-    // A restored wallet can issue the memo's index again before recovering the memo.
-    let db = st.wallet_mut().db_mut();
-    let key = reserve_key(db, account, Purpose::Refund, mined + 1);
-    assert_eq!(key.key_id().index(), 0);
-    recover_memos(&mut st, account);
     assert_eq!(refund_keys(&st), [(0, u32::from(mined), true)]);
-    let db = st.wallet().db();
-    assert!(db.one_time_history_pending(account, mined).unwrap());
+    let db = st.wallet_mut().db_mut();
+    assert!(lookup_pending(db, account));
+    let key = reserve_key(db, account, Purpose::Refund, mined + 1);
+    assert_eq!(key.key_id().index(), 1);
 }
 
 #[test]
@@ -746,4 +750,16 @@ fn refund_quote_needs_an_open_reserved_refund_key_and_a_canonical_transparent_de
     let sql = "UPDATE ironwood_one_time_keys SET closed_at = ?1 WHERE purpose = 0";
     exec(&db.conn, sql, [now]);
     assert!(db.refund_funding_memo(account, 0, &deposit).is_err());
+}
+
+/// Whether one of `account`'s keys is registered for a lookup not done yet.
+fn lookup_pending(db: &Db, account: AccountUuid) -> bool {
+    value(
+        &db.conn,
+        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
+             JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
+             JOIN accounts a ON a.id = k.account_id
+             WHERE a.uuid = ?1 AND l.done_height IS NULL)",
+        [account.0],
+    )
 }

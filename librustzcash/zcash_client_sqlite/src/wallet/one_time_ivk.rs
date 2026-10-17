@@ -1,12 +1,13 @@
 //! Durable one-time IVKs (see [`zakura_one_time_ivk`]), each trial-decrypted while open.
 //!
 //! This module holds the key registry, scanning, spending and the storage guards.
-//! [`swap`] issues keys for swaps and closes them from provider status, and `restore`
-//! recovers keys from the seed and sweeps them through a receiver directory.
+//! [`swap`] issues keys for swaps and closes them from provider status, `restore` discovers
+//! the keys a restored seed used through a receiver directory, and `journal` keeps the
+//! Ironwood nullifiers of the wallet's own transactions.
 //!
 //! Issued keys scan from issuance, refund keys from their stored funding transaction,
-//! until they close. Keys recovered from the seed are swept once through a receiver
-//! directory, then scanned for a restore watch only while a swap may still pay them (see
+//! until they close. Keys a restore discovers have their history looked up, then are
+//! scanned for a restore watch only while a swap may still pay them (see
 //! [`WalletDb::close_finished_one_time_keys`]). A closed key keeps its notes.
 //! One-time-key notes carry no memo the wallet reads; only internal change carries the
 //! refund marker. So neither a directory nor private Enhance retrieval stores or fetches
@@ -17,9 +18,8 @@
 //! - `scan_cached_blocks_with_one_time_ivks` and
 //!   `decrypt_and_store_transaction_with_one_time_ivks` in place of the ordinary
 //!   scanning and decryption; while a key is open, the others are refused.
-//! - [`OneTimeIvkRestoreWrite::maintain_one_time_ivks`] when each sync starts and again at the
-//!   tip, and [`WalletDb::close_finished_one_time_keys`] once sync reaches a tip it
-//!   confirmed with the network.
+//! - [`WalletDb::close_finished_one_time_keys`] once sync reaches a tip it confirmed with
+//!   the network.
 //! - For an outgoing swap, [`WalletDb::reserve_refund_key`], then
 //!   [`WalletDb::record_refund_operation`] when the quote arrives,
 //!   [`WalletDb::refund_funding_memo`] for the funding transaction and
@@ -28,12 +28,11 @@
 //!   [`WalletDb::begin_receive_operation`], [`WalletDb::finish_receive_operation`] and
 //!   [`WalletDb::start_receive_operation`].
 //! - [`WalletDb::record_operation_status`] for each provider status of either.
-//! - `zakura_pir_receiver::sweep`, over the [`OneTimeIvkRestoreWrite`] steps, for restore
-//!   sweeps, and [`WalletDb::recheck_one_time_key_history`] when the user asks to recheck
-//!   swaps.
+//! - `zakura_pir_receiver::discover`, over the [`OneTimeIvkRestoreWrite`] steps, for a
+//!   restored account's discovery, and [`WalletDb::recheck_one_time_key_history`] when the
+//!   user asks to recheck swaps.
 //!
 //! [`OneTimeIvkRestoreWrite`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite
-//! [`OneTimeIvkRestoreWrite::maintain_one_time_ivks`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite::maintain_one_time_ivks
 
 pub(crate) mod journal;
 pub(crate) mod restore;
@@ -47,7 +46,6 @@ use zcash_client_backend::{
     data_api::{
         Account as _,
         scanning::{ScanPriority, ScanRange},
-        wallet::ConfirmationsPolicy,
     },
     scanning::one_time_ivk::OneTimeScanningKey,
 };
@@ -97,9 +95,10 @@ impl<C: Borrow<Connection>, P: Parameters, CL, R> WalletDb<C, P, CL, R> {
     }
 }
 
-/// SQL condition on key `k`: swept, with no reservation or operation of this wallet's.
+/// SQL condition on key `k`: discovered by a restore, with no reservation or operation of
+/// this wallet's.
 const RESTORED: &str =
-    "EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s WHERE s.one_time_key_id = k.id)
+    "EXISTS(SELECT 1 FROM ironwood_one_time_lookups l WHERE l.one_time_key_id = k.id)
     AND k.reserved_at IS NULL
     AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o WHERE o.one_time_key_id = k.id)";
 
@@ -323,8 +322,8 @@ fn restore_start<P: Parameters>(
 enum Discovery {
     /// Trial-decrypt from `scan_from` until the key closes.
     Scan,
-    /// Sweep the receiver directory once, unless the key is already scanned.
-    Sweep,
+    /// Look its history up in the receiver directory, unless the key is already scanned.
+    Lookup,
     /// Wait for its funding transaction (see [`swap::start_funded_refund_keys`]).
     Funding,
 }
@@ -380,44 +379,43 @@ fn register<P: Parameters>(
             activate(conn, id, scan_from)?;
         }
         // Only a key scanned from its earliest possible payment needs no directory history.
-        Discovery::Sweep if active_from.is_none_or(|start| start > stored_from) => {
+        // The lookup is due in the account's current discovery pass, or the next one.
+        Discovery::Lookup if active_from.is_none_or(|start| start > stored_from) => {
             conn.execute(
-                "INSERT OR IGNORE INTO ironwood_one_time_sweeps (one_time_key_id) VALUES (?1)",
-                [id],
+                "INSERT INTO ironwood_one_time_lookups (one_time_key_id, cutoff_height)
+                 SELECT ?1, d.publication_height FROM accounts a
+                 LEFT JOIN ironwood_one_time_discovery d ON d.account_id = a.id
+                 WHERE a.id = ?2
+                 ON CONFLICT (one_time_key_id) DO UPDATE SET
+                     cutoff_height = COALESCE(cutoff_height, excluded.cutoff_height)",
+                rusqlite::params![id, account_ref.0],
             )?;
         }
-        Discovery::Sweep | Discovery::Funding => {}
+        Discovery::Lookup | Discovery::Funding => {}
     }
     Ok((id, OneTimeKey { scanning_key }))
 }
 
 /// Starts or extends trial decryption of key `id` from `from`, reopening a closed key and
-/// requeuing blocks scanned without it, or returns false while its restore sweep is
-/// pending.
+/// requeuing blocks scanned without it. A pending lookup still covers the history before
+/// `from`.
 fn activate(
     conn: &rusqlite::Transaction<'_>,
     id: i64,
     from: BlockHeight,
-) -> Result<bool, SqliteClientError> {
-    let (active_from, closed, pending): (Option<u32>, bool, bool) = conn.query_row(
-        "SELECT k.active_from, k.closed_at IS NOT NULL,
-                s.one_time_key_id IS NOT NULL AND s.done_height IS NULL
-         FROM ironwood_one_time_keys k
-         LEFT JOIN ironwood_one_time_sweeps s ON s.one_time_key_id = k.id
-         WHERE k.id = ?1",
+) -> Result<(), SqliteClientError> {
+    let (active_from, closed): (Option<u32>, bool) = conn.query_row(
+        "SELECT active_from, closed_at IS NOT NULL FROM ironwood_one_time_keys WHERE id = ?1",
         [id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if active_from.is_none() && pending {
-        return Ok(false);
-    }
     let scanned_end = conn
         .query_row("SELECT MAX(height) FROM blocks", [], |row| {
             row.get::<_, Option<u32>>(0)
         })?
         .map_or(u32::from(from), |h| h.saturating_add(1));
     let rescan_end = match active_from {
-        Some(start) if !closed && start <= u32::from(from) => return Ok(true),
+        Some(start) if !closed && start <= u32::from(from) => return Ok(()),
         // Lowering an open key's start only adds the older blocks.
         Some(start) if !closed => start.min(scanned_end),
         _ => scanned_end,
@@ -426,8 +424,7 @@ fn activate(
         "UPDATE ironwood_one_time_keys SET active_from = ?2, closed_at = NULL WHERE id = ?1",
         rusqlite::params![id, u32::from(from)],
     )?;
-    queue_rescan(conn, from..BlockHeight::from(rescan_end))?;
-    Ok(true)
+    queue_rescan(conn, from..BlockHeight::from(rescan_end))
 }
 
 /// Queues `range` for a forced rescan with historic priority.
@@ -470,119 +467,6 @@ pub(crate) fn rescan_missed_keys(
     if let Some(start) = missed.into_iter().min() {
         queue_rescan(conn, start..range.end)?;
     }
-    Ok(())
-}
-
-/// Repairs one-time IVK state for a rewind that rescans every block above `height`.
-/// Open keys start at the first rescanned block at the latest, which
-/// `wallet::truncate_to_height_internal` sets after this in every build. A closed key that scanned reopens if the rewind leaves one of its receipts short of the
-/// confirmations closing requires (see `WalletDb::close_finished_one_time_keys`), and
-/// closes again once that receipt is confirmed again. A key a sweep closed without
-/// scanning reopens from its first note above `height`, so the rescan finds the note
-/// again, and closes the same way.
-///
-/// A finished sweep stays finished: it records the block it finished at and reruns only if
-/// the rescan stores a different block there (see `restore::sweep::revalidate`), so a
-/// rewind on the same chain, such as adding an account, repeats no lookup. Retained spend
-/// evidence is left alone, since a rerun sweep replays what it needs.
-///
-/// An early restore's provisional keys keep their state, which the scan still verifies
-/// (see `restore::early`): their queued payments above `height` become scan hints. Only
-/// a provisional key whose note the rewind un-mines falls back to a sweep. A publication
-/// already accepted becomes provisional again if the rewind removes its anchor, which
-/// `wallet::truncate_to_height_internal` does in every build.
-pub(crate) fn truncate_to_height(
-    conn: &rusqlite::Transaction<'_>,
-    height: BlockHeight,
-) -> Result<(), SqliteClientError> {
-    let confirmed_below = u32::from(height)
-        .saturating_add(1)
-        .saturating_sub(ConfirmationsPolicy::default().untrusted().get());
-    conn.execute(
-        "UPDATE ironwood_one_time_spend_retention SET replay_through = MIN(replay_through, ?1)",
-        [u32::from(height)],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_keys SET closed_at = NULL
-         WHERE closed_at IS NOT NULL AND active_from IS NOT NULL AND id IN (
-             SELECT n.one_time_key_id FROM ironwood_received_notes n
-             JOIN transactions t ON t.id_tx = n.transaction_id
-             WHERE t.mined_height > ?1)",
-        [confirmed_below],
-    )?;
-    let note_above = "SELECT MIN(t.mined_height) FROM ironwood_received_notes n
-         JOIN transactions t ON t.id_tx = n.transaction_id
-         WHERE n.one_time_key_id = ironwood_one_time_keys.id AND t.mined_height > ?1";
-    conn.execute(
-        &format!(
-            "UPDATE ironwood_one_time_keys SET closed_at = NULL, active_from = ({note_above})
-             WHERE closed_at IS NOT NULL AND active_from IS NULL
-               AND ({note_above}) IS NOT NULL
-               AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s
-                   WHERE s.one_time_key_id = ironwood_one_time_keys.id AND s.provisional = 1)"
-        ),
-        [u32::from(height)],
-    )?;
-    // Closed without scanning, such a key would not find its note again.
-    restore::early::fall_back(
-        conn,
-        "SELECT s.one_time_key_id FROM ironwood_one_time_sweeps s
-         WHERE s.provisional = 1 AND EXISTS(SELECT 1 FROM ironwood_received_notes n
-             JOIN transactions t ON t.id_tx = n.transaction_id
-             WHERE n.one_time_key_id = s.one_time_key_id AND t.mined_height > ?1)",
-        u32::from(height),
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_payment_recovery SET scan_hint = 1
-         WHERE height > ?1 AND one_time_key_id IN (
-             SELECT one_time_key_id FROM ironwood_one_time_sweeps WHERE provisional = 1)",
-        [u32::from(height)],
-    )?;
-    // The finish block's hash commits to every block below it.
-    conn.execute(
-        "UPDATE ironwood_one_time_sweeps SET lookup_height = done_height, next_attempt_at = 0,
-             lookup_hash = COALESCE(
-                 CASE WHEN lookup_height = done_height THEN lookup_hash END,
-                 (SELECT hash FROM blocks WHERE height = done_height))
-         WHERE done_height > ?1 AND provisional = 0",
-        [u32::from(height)],
-    )?;
-    conn.execute(
-        "UPDATE ironwood_one_time_sweeps SET done_height = NULL, next_attempt_at = 0,
-            lookup_height = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_height END,
-            lookup_hash = CASE WHEN lookup_height > ?1 THEN NULL ELSE lookup_hash END
-         WHERE ((done_height > ?1 AND lookup_hash IS NULL)
-             OR (done_height IS NULL AND lookup_height > ?1)) AND provisional = 0",
-        [u32::from(height)],
-    )?;
-    conn.execute(
-        "DELETE FROM ironwood_nullifier_scan_blocks WHERE height > ?1",
-        [u32::from(height)],
-    )?;
-    conn.execute(
-        "DELETE FROM ironwood_one_time_payment_recovery WHERE height > ?1
-           AND one_time_key_id NOT IN (
-               SELECT one_time_key_id FROM ironwood_one_time_sweeps WHERE provisional = 1)",
-        [u32::from(height)],
-    )?;
-    Ok(())
-}
-
-/// Reruns `account`'s finished restore sweeps after a rewind lowers its birthday: one that
-/// finished under the later birthday ignored payments before it, and `truncate_to_height`
-/// otherwise keeps finished sweeps.
-pub(crate) fn rerun_finished_sweeps(
-    conn: &rusqlite::Transaction<'_>,
-    account: AccountUuid,
-) -> Result<(), SqliteClientError> {
-    conn.execute(
-        "UPDATE ironwood_one_time_sweeps SET done_height = NULL, lookup_height = NULL,
-             lookup_hash = NULL, next_attempt_at = 0
-         WHERE provisional = 0 AND one_time_key_id IN (
-             SELECT k.id FROM ironwood_one_time_keys k JOIN accounts a ON a.id = k.account_id
-             WHERE a.uuid = ?1)",
-        [account.0],
-    )?;
     Ok(())
 }
 

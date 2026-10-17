@@ -59,9 +59,9 @@ pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
             (SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
                 JOIN transactions t ON t.id_tx = n.transaction_id
                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :confirmed_below),
-            (SELECT b.time FROM ironwood_one_time_sweeps s
-                JOIN blocks b ON b.height = s.done_height
-                WHERE s.one_time_key_id = k.id),
+            (SELECT b.time FROM ironwood_one_time_lookups l
+                JOIN blocks b ON b.height = l.done_height
+                WHERE l.one_time_key_id = k.id),
             {STARTED}
          FROM ironwood_one_time_keys k
          WHERE k.account_id = :account AND k.active_from IS NOT NULL AND k.closed_at IS NULL",
@@ -84,11 +84,11 @@ pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
             let deadline: Option<i64> = row.get(7)?;
             let expected: i64 = row.get(8)?;
             let received: i64 = row.get(9)?;
-            let swept_at: Option<i64> = row.get(10)?;
+            let looked_up_at: Option<i64> = row.get(10)?;
             let started: bool = row.get(11)?;
             let limit = if restored {
                 registered_at
-                    .max(swept_at.unwrap_or(registered_at))
+                    .max(looked_up_at.unwrap_or(registered_at))
                     .saturating_add(RESTORE_WATCH_SECS)
             } else {
                 deadline

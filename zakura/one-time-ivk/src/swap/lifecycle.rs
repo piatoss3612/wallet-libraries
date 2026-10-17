@@ -5,8 +5,9 @@
 
 use zcash_protocol::value::Zatoshis;
 
-/// Seconds a key found only by a restore sweep keeps scanning, for a payout or
-/// refund from a swap in flight at restore. Like [`COMPLETION_LIMIT_SECS`], a
+/// Seconds a restored wallet keeps scanning a key that discovery found in a provider's
+/// recent set, after the publication it was found in, for a payout or refund from a
+/// swap in flight at restore. Like [`COMPLETION_LIMIT_SECS`], a
 /// wallet convention, not a consensus parameter.
 pub const RESTORE_WATCH_SECS: i64 = 24 * 60 * 60;
 

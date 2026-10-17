@@ -43,13 +43,13 @@ pub struct Meta {
 pub enum Class {
     /// Credited by scanning while its key was open.
     FoundLive,
-    /// Credited by an automatic receiver-directory sweep: the restore of a lookahead or
-    /// refund key, or the paid-filter check of a closed key.
-    FoundBySweep,
+    /// Credited through discovery: a key a restore found in the receiver directory's
+    /// filters or recovered from a funding memo, whose payment the scan found from a hint or
+    /// the late path admitted.
+    FoundByDiscovery,
     /// Credited only after the user's "Check swap history".
     FoundAfterRecheck,
-    /// As an expectation only: credited automatically, live or by sweep. A restored key
-    /// can be found by its sweep or by the rescan the sweep starts.
+    /// As an expectation only: credited automatically, live or through discovery.
     FoundAutomatically,
     /// Not credited, which the library documents.
     MissedDocumented,
@@ -64,7 +64,7 @@ impl Class {
         matches!(
             self,
             Self::FoundLive
-                | Self::FoundBySweep
+                | Self::FoundByDiscovery
                 | Self::FoundAfterRecheck
                 | Self::FoundAutomatically
         )
@@ -74,7 +74,7 @@ impl Class {
     pub fn label(self) -> &'static str {
         match self {
             Self::FoundLive => "found live",
-            Self::FoundBySweep => "found by sweep",
+            Self::FoundByDiscovery => "found by discovery",
             Self::FoundAfterRecheck => "found after recheck",
             Self::FoundAutomatically => "found automatically",
             Self::MissedDocumented => "missed (documented)",
@@ -87,7 +87,7 @@ impl Class {
     pub fn satisfied_by(self, actual: Class) -> bool {
         match self {
             Self::MissedDocumented => !actual.found(),
-            Self::FoundAutomatically => matches!(actual, Self::FoundLive | Self::FoundBySweep),
+            Self::FoundAutomatically => matches!(actual, Self::FoundLive | Self::FoundByDiscovery),
             expected => expected == actual,
         }
     }
@@ -272,8 +272,8 @@ mod tests {
     #[test]
     fn expectations_and_amounts() {
         assert!(Class::MissedDocumented.satisfied_by(Class::Missed));
-        assert!(!Class::MissedDocumented.satisfied_by(Class::FoundBySweep));
-        assert!(!Class::FoundLive.satisfied_by(Class::FoundBySweep));
+        assert!(!Class::MissedDocumented.satisfied_by(Class::FoundByDiscovery));
+        assert!(!Class::FoundLive.satisfied_by(Class::FoundByDiscovery));
         assert!(Class::FoundAfterRecheck.satisfied_by(Class::FoundAfterRecheck));
         assert_eq!(zec(150_000_000), "1.5 ZEC");
         assert_eq!(zec(100_000_000), "1 ZEC");

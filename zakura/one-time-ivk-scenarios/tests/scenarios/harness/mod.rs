@@ -160,12 +160,9 @@ impl Ctx {
     /// Vizor's polling would, until a sync scans nothing new, defers nothing and leaves
     /// nothing pending, at most six more syncs. Logs each.
     pub fn check_swap_history(&mut self, dev: Dev) {
-        let (queued, mut report) = self.devices[dev.0].check_swap_history(&self.chain, &self.near);
+        let mut report = self.devices[dev.0].check_swap_history(&self.chain, &self.near);
         let name = self.name(dev);
-        self.log(
-            &name,
-            format!("runs Check swap history: {queued} closed keys queued"),
-        );
+        self.log(&name, "runs Check swap history");
         self.log_sync(dev, &report);
         for _ in 0..6 {
             let quiet = !report.pending && report.problems.is_empty() && report.scanned_blocks <= 1;
@@ -184,9 +181,9 @@ impl Ctx {
 
     /// Keeps every wallet syncing a block at a time, as Vizor's polling would, until each
     /// is quiet: nothing pending, deferred or left to scan. A wallet that goes 40 syncs
-    /// without finding a payment or finishing a sweep, or 1,000 syncs in all, fails the
-    /// scenario. Runs after every scenario so a find that needs another sync (a
-    /// spend-history replay, a sweep's rescan) counts.
+    /// without finding a payment or making a lookup, or 1,000 syncs in all, fails the
+    /// scenario. Runs after every scenario so a find that needs another sync (a late
+    /// payment waiting for the scan, a rescan of blocks the journal did not cover) counts.
     pub fn settle(&mut self) {
         const STALLED: usize = 40;
         const ROUNDS: usize = 1_000;
@@ -200,7 +197,7 @@ impl Ctx {
                 syncs += 1;
                 let quiet =
                     !report.pending && report.problems.is_empty() && report.scanned_blocks <= 1;
-                let found = report.found_live + report.found_by_sweep;
+                let found = report.found_live + report.found_by_discovery;
                 if found > 0
                     || !report.problems.is_empty()
                     || syncs == 1 && report.scanned_blocks > 1
@@ -210,7 +207,7 @@ impl Ctx {
                 if quiet {
                     break None;
                 }
-                idle = if found + report.sweeps_finished > 0 {
+                idle = if found + report.lookups > 0 {
                     0
                 } else {
                     idle + 1
@@ -232,15 +229,14 @@ impl Ctx {
         }
     }
 
-    /// Logs a sync's outcome and any sweep problems.
+    /// Logs a sync's outcome and any discovery problems.
     fn log_sync(&mut self, dev: Dev, report: &SyncReport) {
         let balance = self.devices[dev.0].balance();
         let text = format!(
-            "syncs: scanned {} blocks, {} found live, {} by sweep, {} sweeps finished, {} lookups, {} keys open, balance {}{}",
+            "syncs: scanned {} blocks, {} found live, {} through discovery, {} lookups, {} keys open, balance {}{}",
             report.scanned_blocks,
             report.found_live,
-            report.found_by_sweep,
-            report.sweeps_finished,
+            report.found_by_discovery,
             report.lookups,
             report.open_keys,
             zec(balance),
@@ -258,8 +254,8 @@ impl Ctx {
     }
 
     /// Quotes an incoming swap on `dev` with a deposit deadline `deadline_in` seconds out.
-    /// Like the app, it answers a refusal by catching up and trying again, at most three
-    /// times: `Gap` by running the restore sweeps it waits for, `Coverage` by syncing.
+    /// Like the app, it answers a `Gap` or `Coverage` refusal by syncing, which runs the
+    /// discovery `Gap` waits for, and trying again, at most three times.
     pub fn quote_incoming(
         &mut self,
         dev: Dev,
@@ -908,13 +904,6 @@ impl Ctx {
                     name: format!("{} directory bytes sent", device.name),
                     value: device.bytes_sent as f64,
                     unit: "bytes".into(),
-                });
-            }
-            if device.row_files > 0 {
-                self.metrics.push(Metric {
-                    name: format!("{} row-file downloads", device.name),
-                    value: device.row_files as f64,
-                    unit: "files".into(),
                 });
             }
         }

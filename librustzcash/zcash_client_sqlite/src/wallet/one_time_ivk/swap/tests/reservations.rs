@@ -22,6 +22,14 @@ const EXPIRED: i64 = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
 
 /// An Ironwood wallet scanned through one block holding an ordinary note.
 fn fixture() -> State {
+    let mut st = undiscovered();
+    let account = st.test_account().unwrap().id();
+    discover(&mut st, account, &[]);
+    st
+}
+
+/// A funded wallet whose discovery has not run, so issuance waits.
+fn undiscovered() -> State {
     let mut st = ironwood_wallet();
     let ordinary = parent(&st);
     pay(&mut st, &ordinary, 100_000);
@@ -237,21 +245,18 @@ fn issue(st: &mut State, seen: Option<(i64, i64, &[u64])>) -> Result<u64, Reserv
     issued.unwrap().map(|k| k.key_id().index())
 }
 
-/// Finishes the test account's pending incoming sweeps after empty lookups at the tip,
-/// as a receiver directory that saw nothing would. Returns how many it finished.
-fn sweep_pending(st: &mut State) -> usize {
+/// Finishes the test account's due lookups with empty histories, as a receiver directory
+/// that saw nothing would. Returns how many it finished.
+fn finish_lookups(st: &mut State) -> usize {
+    use store::restore::tests::discovery::{look_up, status};
     let account = st.test_account().unwrap().id();
-    let through = tip(st);
-    let sql = "SELECT k.key_index FROM ironwood_one_time_sweeps s
-               JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
-               WHERE k.purpose = 1 AND s.done_height IS NULL";
-    let pending: Vec<Vec<u8>> = column(st.wallet().conn(), sql, []);
     let db = st.wallet_mut().db_mut();
-    for index in &pending {
-        let index = u64::from_be_bytes(index.as_slice().try_into().unwrap());
-        finish_sweep(db, account, KeyId::new(Purpose::Receive, index), through);
+    let found = status(db, account);
+    let publication = found.publication.unwrap();
+    for lookup in &found.lookups {
+        assert!(look_up(db, account, lookup.work.key, publication, &[]));
     }
-    pending.len()
+    found.lookups.len()
 }
 
 /// A reservation is reclaimed, without a status if unstarted, once its latest quote
@@ -592,8 +597,8 @@ fn activation_rescan_finds_a_payment_in_already_scanned_blocks() {
 }
 
 /// Neither quoting nor reclamation, by a status or by reaping, runs until scanning
-/// reaches a new tip, nor while a restore sweep's directory payment for the address is
-/// queued but not yet applied.
+/// reaches a new tip, nor while a directory payment for the address is queued but not yet
+/// admitted.
 #[test]
 fn quoting_and_reclamation_wait_for_the_tip_and_queued_candidates() {
     for queued in [false, true] {
@@ -604,7 +609,7 @@ fn quoting_and_reclamation_wait_for_the_tip_and_queued_candidates() {
         let behind = if queued {
             let sql = "INSERT INTO ironwood_one_time_payment_recovery
                        SELECT id, zeroblob(32), id, 100000, zeroblob(32), 1, 0, zeroblob(148),
-                           NULL, 0
+                           100000, zeroblob(32), 0, NULL, NULL, NULL
                        FROM ironwood_one_time_keys";
             exec(st.wallet().conn(), sql, []);
             None
@@ -626,33 +631,38 @@ fn quoting_and_reclamation_wait_for_the_tip_and_queued_candidates() {
     }
 }
 
-/// An unfinished incoming sweep blocks issuance, though a refund one does not. Once it
-/// is done, issuance resumes at the lowest address never quoted, unless a swap issued
-/// before the restore paid that address during the watch.
+/// Issuance waits for discovery. Once it is done, issuance resumes at the lowest address
+/// never quoted, unless a swap issued before the restore paid that address during the
+/// watch. Here the provider's recent sets were missing, so discovery watches every
+/// address without marking it used.
 #[test]
-fn issuance_waits_for_incoming_sweeps_and_skips_addresses_paid_during_the_watch() {
+fn issuance_waits_for_discovery_and_skips_addresses_paid_during_the_watch() {
     for paid in [false, true] {
-        let mut st = fixture();
-        let account = st.test_account().unwrap().id();
-        let through = tip(&st);
-        let db = st.wallet_mut().db_mut();
-        let swept = watch(db, account, 0, through.height);
-        recover(db, account, KeyId::new(Purpose::Refund, 0), through.height);
+        let mut st = undiscovered();
+        let key = KeyId::new(Purpose::Receive, 0);
         assert_eq!(refusal(try_prepare(&mut st, NOW, None)), Some(Gap));
-        finish_sweep(st.wallet_mut().db_mut(), account, swept.key_id(), through);
+        let watched = FilterCheck {
+            key,
+            seen: false,
+            paid: false,
+            recent: true,
+        };
+        let account = st.test_account().unwrap().id();
+        discover(&mut st, account, &[watched]);
         if paid {
-            pay(&mut st, swept.full_viewing_key(), 100_000);
+            let fvk = derive(&st, key);
+            pay(&mut st, &fvk, 100_000);
             confirm(&mut st);
-            assert!(holds_note(&st, swept.key_id()));
+            assert!(holds_note(&st, key));
         }
         let issued = prepare(&mut st, NOW).key_id().index();
         assert_eq!(issued, u64::from(paid), "{paid}");
     }
 }
 
-/// Issuance checks an address past the registered lookahead against the seen set. Seen
-/// hits that widen the window first register and sweep the newly exposed addresses, so
-/// issuance waits rather than issuing one unchecked, then skips one the set holds. Here
+/// Issuance checks an address it has not registered against the seen set. Seen hits that
+/// widen the window are registered and looked up first, so issuance waits rather than
+/// issuing one unchecked, then skips one the set holds. Here
 /// the old device's quotes reached the provider for the first window and the next
 /// address, or only for the next one.
 #[test]
@@ -661,15 +671,12 @@ fn issuance_checks_addresses_past_the_lookahead_against_the_seen_set() {
     for held in [(0..=window).collect(), vec![window]] {
         let mut st = fixture();
         let account = st.test_account().unwrap().id();
-        // Issuance registers the restore lookahead at the tip, then waits for its sweeps.
-        assert_eq!(issue(&mut st, None), Err(Gap));
-        assert_eq!(sweep_pending(&mut st) as u64, window);
         let seen = Some((0, NOW + SEEN_SLACK_SECONDS, &held[..]));
         if held.len() > 1 {
-            for _ in 0..2 {
-                assert_eq!(issue(&mut st, seen), Err(Gap));
-                assert!(sweep_pending(&mut st) > 0);
-            }
+            // The first window's hits wait for their lookups; the next pass registers the
+            // address past it before issuing.
+            assert_eq!(issue(&mut st, seen), Err(Gap));
+            assert!(finish_lookups(&mut st) > 0);
         } else {
             for expected in 0..window {
                 let index = issue(&mut st, seen).unwrap();
@@ -687,18 +694,18 @@ fn issuance_checks_addresses_past_the_lookahead_against_the_seen_set() {
 /// every other address in the window was quoted and abandoned, nor is one accepted here.
 #[test]
 fn issuance_skips_restored_addresses_the_provider_saw() {
-    let mut st = fixture();
-    let account = st.test_account().unwrap().id();
-    let swept_at = tip(&st);
-    let db = st.wallet_mut().db_mut();
-    lookahead(db, account);
+    let mut st = undiscovered();
     // The old device quoted the first three addresses.
-    for index in 0..RECEIVE_GAP_LIMIT {
-        let key = KeyId::new(Purpose::Receive, index);
-        db.begin_one_time_sweep_attempt(account, key, NOW, index < 3)
-            .unwrap();
-        finish_sweep(db, account, key, swept_at);
-    }
+    let seen: Vec<_> = (0..3)
+        .map(|index| FilterCheck {
+            key: KeyId::new(Purpose::Receive, index),
+            seen: true,
+            paid: false,
+            recent: false,
+        })
+        .collect();
+    let account = st.test_account().unwrap().id();
+    discover(&mut st, account, &seen);
     assert_eq!(prepare(&mut st, NOW).key_id().index(), 3);
     abandon_indices(&mut st, 4..RECEIVE_GAP_LIMIT + 3);
     let draft = prepare(&mut st, NOW);
@@ -755,16 +762,14 @@ fn reorg_retains_used_marker_and_seen_addresses_keep_the_bound() {
     assert!(active_from(&st, first.key_id()).is_some());
 }
 
-/// Maintenance registers restore discovery only at the scanned tip, as lookahead keys
-/// that wait for their sweeps without advancing allocation or scanning. Issuance refuses
-/// a tip too far ahead of the scanned one and, unless the account was declared fresh,
-/// waits for the sweeps. It then takes the lowest address never quoted, scanned from
-/// above the scanned tip, while a refund key starts scanning only once its funding
-/// transaction is stored.
+/// Issuance refuses a tip too far ahead of the scanned one and, unless the account was
+/// declared fresh, waits for discovery. It then takes the lowest address never quoted,
+/// scanned from above the scanned tip, while a refund key starts scanning only once its
+/// funding transaction is stored.
 #[test]
-fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
+fn issuance_starts_after_the_scanned_tip_once_discovery_is_done() {
     for fresh in [false, true] {
-        let mut st = fixture();
+        let mut st = undiscovered();
         let account = st.test_account().unwrap().id();
         let (h, _) = st.generate_empty_block();
         st.wallet_mut().update_chain_tip(h).unwrap();
@@ -772,32 +777,22 @@ fn issuance_starts_after_the_scanned_tip_once_the_restore_lookahead_is_swept() {
         if fresh {
             db.mark_one_time_account_fresh(account).unwrap();
         }
-        db.maintain_one_time_ivks(account).unwrap();
-        assert!(all_keys(db, account).unwrap().is_empty());
         st.scan_cached_blocks_with_one_time_ivks(h, 1);
         let through = tip(&st);
         let db = st.wallet_mut().db_mut();
-        db.maintain_one_time_ivks(account).unwrap();
-        let lookahead = all_keys(db, account).unwrap();
-        let window = if fresh { 0 } else { RECEIVE_GAP_LIMIT };
-        assert_eq!(lookahead.len() as u64, window, "fresh={fresh}");
-        assert!(lookahead.iter().all(|k| !key_state(db, k.key_id()).1));
-        assert!(scanning_keys(&st).is_empty());
-        let db = st.wallet_mut().db_mut();
+        assert!(all_keys(db, account).unwrap().is_empty());
         let behind = through.height + ISSUANCE_TIP_LAG + 1;
         let issued = db.prepare_receive_reservation(account, NOW, behind, None);
         assert_eq!(refusal(issued), Some(Coverage));
         let refund = db.reserve_refund_key(account, behind, None);
         assert_eq!(refusal(refund), Some(Coverage));
         let near = through.height + ISSUANCE_TIP_LAG;
-        let db = st.wallet_mut().db_mut();
         if !fresh {
             let issued = db.prepare_receive_reservation(account, NOW, near, None);
             assert_eq!(refusal(issued), Some(Gap));
-            for key in lookahead {
-                finish_sweep(db, account, key.key_id(), through);
-            }
+            discover(&mut st, account, &[]);
         }
+        let db = st.wallet_mut().db_mut();
         let issued = db.prepare_receive_reservation(account, NOW, near, None);
         let r = issued.unwrap().unwrap().key_id();
         assert_eq!(r, KeyId::new(Purpose::Receive, 0), "fresh={fresh}");
@@ -1002,7 +997,7 @@ fn one_reservation_starts_only_one_accepted_quote() {
 }
 
 /// Refund issuance skips a refund address the provider's seen set holds, such as one an
-/// unfunded quote used before a restore, and registers it for a restore sweep, so a
+/// unfunded quote used before a restore, and registers it for a lookup, so a
 /// later reservation without a set does not issue it either.
 #[test]
 fn refund_issuance_skips_addresses_the_provider_saw() {
@@ -1022,11 +1017,11 @@ fn refund_issuance_skips_addresses_the_provider_saw() {
     let db = st.wallet_mut().db_mut();
     let issued = db.reserve_refund_key(account, through, Some(&seen));
     assert_eq!(issued.unwrap().unwrap().key_id().index(), 1);
-    let sql = "SELECT k.provider_seen AND s.done_height IS NULL FROM ironwood_one_time_keys k
-               JOIN ironwood_one_time_sweeps s ON s.one_time_key_id = k.id
+    let sql = "SELECT k.provider_seen AND l.done_height IS NULL FROM ironwood_one_time_keys k
+               JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
                WHERE k.purpose = 0 AND k.key_index = ?1";
-    let seen_and_swept: Vec<bool> = column(&db.conn, sql, [first.index().to_be_bytes()]);
-    assert_eq!(seen_and_swept, [true]);
+    let seen_and_due: Vec<bool> = column(&db.conn, sql, [first.index().to_be_bytes()]);
+    assert_eq!(seen_and_due, [true]);
     let next = db.reserve_refund_key(account, through, None);
     assert_eq!(next.unwrap().unwrap().key_id().index(), 2);
 }
@@ -1055,7 +1050,7 @@ fn refund_issuance_bounds_seen_set_probes() {
     let held = probes.get();
     assert_eq!(held, 100);
     let sql = "SELECT COUNT(*) FROM ironwood_one_time_keys k
-               JOIN ironwood_one_time_sweeps s ON s.one_time_key_id = k.id
+               JOIN ironwood_one_time_lookups l ON l.one_time_key_id = k.id
                WHERE k.purpose = 0 AND k.provider_seen";
     assert_eq!(value::<u64>(&db.conn, sql, []), held);
 
@@ -1121,8 +1116,6 @@ fn single_address_seen_probes_reject_malformed_answers() {
             Some(&seen)
         )));
 
-        assert_eq!(issue(&mut st, None), Err(Gap));
-        assert_eq!(sweep_pending(&mut st) as u64, RECEIVE_GAP_LIMIT);
         for _ in 0..RECEIVE_GAP_LIMIT {
             let index = issue(&mut st, Some((0, NOW + SEEN_SLACK_SECONDS, &[])));
             let key = KeyId::new(Purpose::Receive, index.unwrap());

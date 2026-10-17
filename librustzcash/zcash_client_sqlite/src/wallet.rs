@@ -198,6 +198,7 @@ pub(crate) mod ironwood_hooks;
 pub(crate) mod locking;
 #[cfg(feature = "orchard")]
 pub mod one_time_ivk;
+pub(crate) mod one_time_rewind;
 #[cfg(feature = "orchard")]
 pub(crate) mod orchard;
 pub(crate) mod sapling;
@@ -828,16 +829,6 @@ pub(crate) fn delete_account(
         detach.execute(named_params![":tx": id, ":account_uuid": account_uuid.0])?;
         delete_intent.execute(named_params![":txid": txid])?;
     }
-    // Known wallet spends are omitted from the unlinked nullifier map. Deleting
-    // their account removes that evidence, so absence needs fresh scan coverage,
-    // and replays already recorded must run again.
-    #[cfg(feature = "orchard")]
-    conn.execute_batch(
-        "DELETE FROM ironwood_nullifier_scan_blocks;
-         UPDATE ironwood_one_time_spend_retention
-         SET nullifier_retention_height=0, replay_through=NULL;",
-    )?;
-
     let mut delete_tx = conn.prepare_cached("DELETE FROM transactions WHERE id_tx = :tx")?;
     for (id, _) in exclusive_transactions {
         delete_tx.execute(named_params![":tx": id])?;
@@ -872,14 +863,23 @@ pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientE
     )?)
 }
 
-/// Whether scanned blocks must come with one-time keys: a key is open (see
-/// [`one_time_key_open`]), or an early restore still waits for the scan to judge its
-/// publication or to try a key in a hinted block (see `one_time_ivk::restore::early`).
+/// Whether a build without `orchard` must refuse scanned blocks: a key is open (see
+/// [`one_time_key_open`]), discovery waits for the scan to judge a publication that a pass
+/// in its account's range or a lookup uses, or a payment candidate waits, whether for the
+/// scan to try its key, to cover its blocks or to judge its publication. Only an `orchard`
+/// build's scan does those (see `one_time_ivk::restore::discovery`).
+#[cfg(not(feature = "orchard"))]
 pub(crate) fn one_time_scan_required(conn: &Connection) -> Result<bool, SqliteClientError> {
     Ok(one_time_key_open(conn)?
         || conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_restores WHERE state = 0)
-             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery WHERE scan_hint = 1)",
+            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_publications p WHERE p.state = 0 AND (
+                 EXISTS(SELECT 1 FROM ironwood_one_time_discovery d
+                     JOIN accounts a ON a.id = d.account_id
+                     WHERE d.publication_height = p.height AND d.publication_hash = p.hash
+                       AND p.height >= a.birthday_height)
+                 OR EXISTS(SELECT 1 FROM ironwood_one_time_lookup_reads r
+                     WHERE r.publication_height = p.height AND r.publication_hash = p.hash)))
+             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery)",
             [],
             |row| row.get(0),
         )?)
@@ -4322,20 +4322,9 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // equal to the truncation height + 1. This sets our view of the chain tip back
     // to the retained height.
     trim_scan_queue_to(conn, truncation_height)?;
-    // An early restore accepted against a block the rewind may replace is judged again
-    // when the scan stores it (0 is `one_time_ivk::restore::early`'s provisional), so no
-    // waiting key closes against a removed anchor. This runs in every build: one without
-    // `orchard` cannot scan while a restore is provisional (see `one_time_scan_required`).
-    conn.execute(
-        "UPDATE ironwood_one_time_restores SET state = 0 WHERE state = 1 AND anchor_height > ?1",
-        [u32::from(rescan_floor)],
-    )?;
     // Every block above the rescan floor may be replaced, not only those above the
     // truncation height.
-    #[cfg(feature = "orchard")]
-    one_time_ivk::truncate_to_height(conn, rescan_floor)?;
-    #[cfg(feature = "orchard")]
-    one_time_ivk::journal::truncate(conn, rescan_floor)?;
+    one_time_rewind::truncate(conn, rescan_floor)?;
     // Scans take only one-time keys started by each batch's end, and the replacement chain
     // may mine a payment below an open key's old start, so open keys, including any the
     // repair above reopened, start at the first rescanned block at the latest.
@@ -5055,12 +5044,9 @@ pub(crate) fn rewind_to_chain_state<P: consensus::Parameters>(
                 ],
             )
             .map_err(|e| RewindError::DataSource(e.into()))?;
-        #[cfg(feature = "orchard")]
         if lowered > 0 {
-            one_time_ivk::rerun_finished_sweeps(conn, *uuid).map_err(RewindError::DataSource)?;
+            one_time_rewind::reopen_discovery(conn, *uuid).map_err(RewindError::DataSource)?;
         }
-        #[cfg(not(feature = "orchard"))]
-        let _ = lowered;
     }
 
     Ok(())
@@ -6109,20 +6095,6 @@ pub(crate) fn insert_nullifier_map<N: AsRef<[u8]>>(
         }
     }
 
-    // One-time IVK recovery's spend evidence: record even empty blocks, but only when
-    // their nullifiers were actually retained, and only while the wallet holds one-time
-    // IVK state (see `ONE_TIME_IVK_STATE`).
-    #[cfg(feature = "orchard")]
-    if spend_pool == ShieldedPool::Ironwood {
-        conn.execute(
-            &format!(
-                "INSERT OR IGNORE INTO ironwood_nullifier_scan_blocks (height)
-                 SELECT ?1 WHERE {ONE_TIME_IVK_STATE}"
-            ),
-            [u32::from(block_height)],
-        )?;
-    }
-
     Ok(())
 }
 
@@ -6188,76 +6160,19 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     .map(Some)
 }
 
-/// SQL condition: the wallet holds one-time IVK state, a registered key or a spend
-/// retention row. Without it, scanning keeps none of the spend evidence that restore
-/// sweeps check.
-///
-/// Restore stays sound without earlier evidence: `maintain_one_time_ivks` retains spend
-/// history before the history is scanned, a key issued later can be paid only in blocks
-/// scanned after it, and a payment whose evidence is missing is replayed rather than
-/// treated as unspent.
-#[cfg(feature = "orchard")]
-pub(crate) const ONE_TIME_IVK_STATE: &str = "(EXISTS(SELECT 1 FROM ironwood_one_time_keys)
-    OR EXISTS(SELECT 1 FROM ironwood_one_time_spend_retention))";
-
-/// Whether the wallet holds one-time IVK state (see [`ONE_TIME_IVK_STATE`]).
-#[cfg(feature = "orchard")]
-pub(crate) fn holds_one_time_state(conn: &Connection) -> rusqlite::Result<bool> {
-    conn.query_row(&format!("SELECT {ONE_TIME_IVK_STATE}"), [], |row| {
-        row.get(0)
-    })
-}
-
-/// The height from which Ironwood nullifiers stay tracked for one-time IVK restore
-/// sweeps. Shared retention uses the oldest unfinished account, so a completed account
-/// cannot release another account's spend evidence.
-pub(crate) fn ironwood_nullifier_retention_height(
-    conn: &Connection,
-) -> Result<Option<BlockHeight>, SqliteClientError> {
-    conn.query_row(
-        "SELECT MIN(nullifier_retention_height) FROM ironwood_one_time_spend_retention",
-        [],
-        |row| {
-            row.get::<_, Option<u32>>(0)
-                .map(|h| h.map(BlockHeight::from))
-        },
-    )
-    .map_err(SqliteClientError::from)
-}
-
-/// Deletes from the nullifier map any entries below the pruning height, except Ironwood
-/// ones at or above the one-time IVK retention floor (see
-/// [`ironwood_nullifier_retention_height`]), with the locators and scan marks nothing
-/// retained needs.
+/// Deletes from the nullifier map any entries with a locator referencing a block height
+/// lower than the pruning height.
 pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,
 ) -> Result<(), SqliteClientError> {
-    let ironwood_floor = ironwood_nullifier_retention_height(conn)?
-        .map_or(block_height, |floor| floor.min(block_height));
-    conn.execute(
-        "DELETE FROM nullifier_map WHERE block_height < ?1
-         AND (spend_pool != ?2 OR block_height < ?3)",
-        rusqlite::params![
-            u32::from(block_height),
-            encoding::pool_code(PoolType::IRONWOOD),
-            u32::from(ironwood_floor)
-        ],
+    let mut stmt_delete_locators = conn.prepare_cached(
+        "DELETE FROM tx_locator_map
+        WHERE block_height < :block_height",
     )?;
-    // Locators are shared by pools. Keep one only while some retained nullifier needs it.
-    // Every retained Ironwood nullifier is at or above `ironwood_floor`, so only locators
-    // below it are checked; one there that only held other pools' nullifiers goes once
-    // the floor passes it.
-    conn.execute(
-        "DELETE FROM tx_locator_map WHERE block_height < ?1 AND NOT EXISTS (
-            SELECT 1 FROM nullifier_map n WHERE n.block_height=tx_locator_map.block_height
-            AND n.tx_index=tx_locator_map.tx_index)",
-        [u32::from(ironwood_floor)],
-    )?;
-    conn.execute(
-        "DELETE FROM ironwood_nullifier_scan_blocks WHERE height < ?1",
-        [u32::from(ironwood_floor)],
-    )?;
+
+    stmt_delete_locators.execute(named_params![":block_height": u32::from(block_height)])?;
+
     Ok(())
 }
 
@@ -8180,65 +8095,6 @@ mod tests {
         assert_eq!(table_row_count(st.wallet().conn(), "ironwood_tree_cap"), 1);
     }
 
-    /// A rewind makes an early restore accepted against a removed block provisional again
-    /// in every build, and leaves one anchored below the rewind accepted.
-    #[test]
-    fn a_rewind_reopens_early_restores_anchored_above_it() {
-        let mut st = TestBuilder::new()
-            .with_data_store_factory(TestDbFactory::default())
-            .with_block_cache(BlockCache::new())
-            .with_account_from_sapling_activation(BlockHash([0; 32]))
-            .build();
-        let dfvk = ExtendedSpendingKey::master(&[]).to_diversifiable_full_viewing_key();
-        let value = Zatoshis::const_from_u64(10000);
-        let start = st.sapling_activation_height();
-        st.generate_block_at(
-            start,
-            BlockHash([0; 32]),
-            &[FakeCompactOutput::new(
-                &dfvk,
-                AddressType::DefaultExternal,
-                value,
-            )],
-            0,
-            0,
-            0,
-            false,
-        );
-        for _ in 1..5 {
-            st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-        }
-        st.scan_cached_blocks(start, 5);
-        let seed = SecretVec::new(st.test_seed().unwrap().expose_secret().clone());
-        let birthday = st.test_account().unwrap().birthday().clone();
-        st.wallet_mut()
-            .create_account("other", &seed, &birthday, None)
-            .unwrap();
-        st.scan_cached_blocks(start, 5);
-        let conn = st.wallet().conn();
-        for (account, anchor) in [(1, start + 4), (2, start + 1)] {
-            conn.execute(
-                "INSERT INTO ironwood_one_time_restores
-                    (account_id, restore_from, anchor_height, anchor_hash, anchor_tree_size, state)
-                 VALUES (?1, ?2, ?3, zeroblob(32), 0, 1)",
-                rusqlite::params![account, u32::from(start), u32::from(anchor)],
-            )
-            .unwrap();
-        }
-
-        st.wallet_mut().truncate_to_height(start + 2).unwrap();
-        let states: Vec<(i64, u8)> = st
-            .wallet()
-            .conn()
-            .prepare("SELECT account_id, state FROM ironwood_one_time_restores ORDER BY account_id")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert_eq!(states, [(1, 0), (2, 1)]);
-    }
-
     /// `truncate_to_height` applies the same per-pool truncation tolerances as
     /// `rewind_to_chain_state` (via `select_truncation_height`), so a wallet state that the
     /// rewind path tolerates must not remain wedged when truncating via this entry point.
@@ -8486,63 +8342,6 @@ mod tests {
         assert!(
             !is_change(&tx, pool),
             "an external-scope note must not be reclassified as change"
-        );
-    }
-
-    /// Pruning keeps Ironwood spend evidence at or above the durable restore retention
-    /// floor.
-    #[test]
-    fn nullifier_pruning_keeps_the_one_time_retention_floor() {
-        use zcash_protocol::PoolType;
-        let mut st = TestBuilder::new()
-            .with_data_store_factory(TestDbFactory::default())
-            .with_account_from_sapling_activation(BlockHash([0; 32]))
-            .build();
-        let conn = st.wallet_mut().conn_mut();
-        conn.execute(
-            "INSERT INTO ironwood_one_time_spend_retention (account_id, nullifier_retention_height)
-             SELECT id, 200 FROM accounts",
-            [],
-        )
-        .unwrap();
-        for (height, pool, nf) in [
-            (100u32, PoolType::IRONWOOD, 1u8),
-            (200, PoolType::IRONWOOD, 2),
-            (200, PoolType::SAPLING, 3),
-        ] {
-            conn.execute(
-                "INSERT OR IGNORE INTO tx_locator_map VALUES(?1, 0, ?2)",
-                rusqlite::params![height, [height as u8; 32]],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO nullifier_map VALUES(?1, ?2, ?3, 0)",
-                rusqlite::params![super::encoding::pool_code(pool), [nf; 32], height],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT OR IGNORE INTO ironwood_nullifier_scan_blocks VALUES(?1)",
-                [height],
-            )
-            .unwrap();
-        }
-        let tx = conn.transaction().unwrap();
-        super::prune_nullifier_map(&tx, 300.into()).unwrap();
-        let heights = |sql: &str| -> Vec<u32> {
-            let mut stmt = tx.prepare(sql).unwrap();
-            stmt.query_map([], |r| r.get(0))
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap()
-        };
-        assert_eq!(heights("SELECT block_height FROM nullifier_map"), vec![200]);
-        assert_eq!(
-            heights("SELECT block_height FROM tx_locator_map"),
-            vec![200]
-        );
-        assert_eq!(
-            heights("SELECT height FROM ironwood_nullifier_scan_blocks"),
-            vec![200]
         );
     }
 }

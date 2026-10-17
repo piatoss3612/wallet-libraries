@@ -1,6 +1,5 @@
 pub(super) use std::sync::{Arc, Barrier};
 
-pub(super) use incrementalmerkletree::Hashable;
 pub(super) use orchard::{
     note::Note,
     note_encryption::{CompactAction, IronwoodDomain, IronwoodNoteEncryption},
@@ -15,9 +14,8 @@ pub(super) use zcash_client_backend::{
         one_time_ivk::{
             OneTimeIvkRead as _,
             restore::{
-                DirectoryPayment, DiscoveryWork, MAX_PUBLICATION_LAG, OneTimeIvkRestoreRead as _,
-                OneTimeIvkRestoreWrite as _, PaymentApplication, SweepDeferral,
-                recovery::EncryptedNote,
+                DirectoryPayment, EnumerationCursor, FilterCheck, OneTimeIvkRestoreRead as _,
+                OneTimeIvkRestoreWrite as _, PublicationEnd, recovery::EncryptedNote,
             },
         },
         testing::{AddressType, IronwoodFvk, TestBuilder, TestRng, TestState},
@@ -29,11 +27,7 @@ pub(super) use zcash_note_encryption::{Domain, try_compact_note_decryption};
 pub(super) use zcash_primitives::block::BlockHash;
 pub(super) use zcash_protocol::{local_consensus::LocalNetwork, value::Zatoshis};
 
-pub(super) use super::{
-    restore::payments::{PendingPayment, SpendStatus},
-    swap::*,
-    *,
-};
+pub(super) use super::{restore::payments::PendingPayment, swap::*, *};
 pub(super) use crate::testing::db::{TestDb, TestDbFactory, test_clock, test_rng};
 pub(super) use crate::util::testing::FixedClock;
 /// The module under test, whose submodule names the test modules shadow.
@@ -79,8 +73,19 @@ pub(super) fn ironwood_wallet() -> State {
         .build()
 }
 
-/// An Ironwood wallet scanned through one empty block, so it is at its tip.
+/// An Ironwood wallet scanned through one empty block, so it is at its tip, whose account
+/// was created from a fresh seed, so issuance waits for no discovery.
 pub(super) fn scanned_wallet() -> State {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let db = st.wallet_mut().db_mut();
+    db.mark_one_time_account_fresh(account).unwrap();
+    st
+}
+
+/// An Ironwood wallet scanned through one empty block, whose account was restored, so
+/// issuance waits for its discovery.
+pub(super) fn restored_wallet() -> State {
     let mut st = ironwood_wallet();
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     st
@@ -147,40 +152,38 @@ pub(crate) fn reserve_key(
     reserve(db, account, purpose, from).unwrap()
 }
 
-/// Registers incoming lookahead key `index` for a sweep, expecting payments from `from`.
-pub(super) fn watch(
-    db: &mut Db,
+/// Runs a whole discovery pass for `account` against a publication ending at the scanned
+/// tip, with incoming `checks` and no refund key used, and returns the publication.
+pub(super) fn discover(
+    st: &mut State,
     account: AccountUuid,
-    index: u64,
-    from: BlockHeight,
-) -> OneTimeKey {
-    tx(db, |c, p| {
-        store::restore::recovery::watch_receive_key(c, p, account, index, from, clock_now())
-    })
-    .unwrap()
+    checks: &[FilterCheck],
+) -> PublicationEnd {
+    use store::restore::tests::discovery::{publication_at, run_pass};
+    let publication = publication_at(st, tip(st).height);
+    assert!(run_pass(
+        st.wallet_mut().db_mut(),
+        account,
+        publication,
+        checks
+    ));
+    publication
 }
 
-/// Registers `key` as recovered evidence would, from `from`. A key this wallet never
-/// scanned is queued for a receiver-directory sweep.
+/// Registers `key` as a restore discovers it, from `from`, with its history due for a
+/// lookup unless this wallet scanned it.
 pub(super) fn recover(
     db: &mut Db,
     account: AccountUuid,
     key: KeyId,
     from: BlockHeight,
 ) -> OneTimeKey {
-    let (sweep, now) = (Discovery::Sweep, clock_now());
+    let (lookup, now) = (Discovery::Lookup, clock_now());
     tx(db, |c, p| {
-        register(c, p, account, key, from, true, sweep, now)
+        register(c, p, account, key, from, true, lookup, now)
     })
     .unwrap()
     .1
-}
-
-/// Keeps the incoming lookahead keys.
-pub(super) fn lookahead(db: &mut Db, account: AccountUuid) {
-    use store::restore::recovery::maintain_receive_lookahead as maintain;
-    let now = clock_now();
-    tx(db, |c, p| maintain(c, p, account, now)).unwrap()
 }
 
 /// Reserves like `WalletDb::prepare_receive_reservation`, scanning a new key from `from`,
@@ -201,118 +204,25 @@ pub(super) fn prepare_from(
     })
 }
 
-/// Queues a complete lookup of `key` at `anchor` that found `payments`. A deferral is
-/// an error here.
-pub(super) fn queue_lookup(
-    db: &mut Db,
-    account: AccountUuid,
-    key: KeyId,
-    anchor: ChainPoint,
-    payments: &[PendingPayment],
-) -> Result<(), SqliteClientError> {
-    tx(db, |c, p| {
-        store::restore::planner::queue_lookup(c, p, account, key, anchor, payments)
-    })?
-    .map_err(|deferral| corrupt(&format!("{deferral:?}")))
-}
-
-/// Authenticates and queues `candidate` for `key`.
-pub(super) fn queue_payment(
-    db: &mut Db,
-    account: AccountUuid,
-    key: KeyId,
-    candidate: &PendingPayment,
-) -> Result<(), SqliteClientError> {
-    tx(db, |c, p| {
-        store::restore::payments::queue_payment(c, p, account, key, candidate)
-    })
-}
-
-/// Authenticates `candidate` and checks its spend evidence through `through`.
-pub(super) fn spend_status(
-    db: &mut Db,
-    account: AccountUuid,
-    key: KeyId,
-    candidate: &PendingPayment,
-    through: ChainPoint,
-) -> Result<SpendStatus, SweepDeferral> {
-    tx(db, |c, p| {
-        let (_, note) = store::restore::payments::authenticate(c, p, account, key, candidate)?;
-        store::restore::payments::spend_status(
-            c,
-            candidate,
-            note.nullifier(),
-            through,
-            store::restore::apply::Gate::FullyScanned,
-        )
-    })
-    .unwrap()
-}
-
-/// Retains `account`'s Ironwood spend evidence, as maintenance does.
-pub(super) fn retain(db: &mut Db, account: AccountUuid) {
-    tx(db, |c, p| {
-        store::restore::retention::retain_spend_history(c, p, account)
-    })
-    .unwrap()
-}
-
-/// Releases retained nullifiers at `through`.
-pub(super) fn finish_recovery(
-    db: &mut Db,
-    account: AccountUuid,
-    through: ChainPoint,
-) -> Result<bool, SqliteClientError> {
-    use store::restore::retention::finish_nullifier_recovery as finish;
-    let now = clock_now();
-    tx(db, |c, p| finish(c, p, account, through, now))
-}
-
-/// Starts or extends trial decryption of `key` from `from`, as registration and
-/// finished refund sweeps do.
+/// Starts or extends trial decryption of `key` from `from`, as registration and a stored
+/// refund funding transaction do.
 pub(super) fn activate_key(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) {
-    assert!(tx(db, |c, _| activate(c, key_ref(c, account, key)?, from)).unwrap());
+    tx(db, |c, _| activate(c, key_ref(c, account, key)?, from)).unwrap();
 }
 
-/// `account`'s queued candidates for `key`.
+/// `account`'s queued candidates for `key`, in position order.
 pub(super) fn pending(db: &Db, account: AccountUuid, key: KeyId) -> Vec<PendingPayment> {
-    store::restore::payments::pending_payments(&db.conn, account, key).unwrap()
-}
-
-/// Applies queued `candidate` with `path` at `anchor`.
-pub(super) fn apply_payment(
-    db: &mut Db,
-    account: AccountUuid,
-    key: KeyId,
-    candidate: &PendingPayment,
-    through: ChainPoint,
-    (anchor, path): (ChainPoint, &MerklePath),
-) -> Result<PaymentApplication, SqliteClientError> {
-    use store::restore::apply::apply_payment as apply;
-    let anchored = (anchor, path);
-    db.transactionally(|db| {
-        apply(
-            db.conn.0,
-            &db.transparent_pir_session,
-            db.params,
-            db.transparent_ledger_mode,
-            &db.enhance_pir_session,
-            account,
-            key,
-            candidate,
-            through,
-            anchored,
-            store::restore::apply::Gate::FullyScanned,
+    let id = key_ref(&db.conn, account, key).unwrap();
+    db.conn
+        .prepare(
+            "SELECT txid, action_index, height, block_hash, tx_index, position, encrypted_note
+             FROM ironwood_one_time_payment_recovery WHERE one_time_key_id = ?1 ORDER BY position",
         )
-    })
-    .map(|applied| applied.expect("the payment's blocks are on the wallet's chain"))
-}
-
-/// Finishes `key`'s sweep after an empty lookup at `anchor`.
-pub(super) fn finish_sweep(db: &mut Db, account: AccountUuid, key: KeyId, anchor: ChainPoint) {
-    queue_lookup(db, account, key, anchor, &[]).unwrap();
-    let applied = db.apply_one_time_sweep(account, key, anchor, anchor, WATCHED, |_, _| None);
-    assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
+        .unwrap()
+        .query_map([id], store::restore::payments::payment)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 /// Records `observation` for `key`'s operation `reference` at `now`, adding the
@@ -416,16 +326,6 @@ pub(super) fn key_state(db: &Db, key: KeyId) -> (BlockHeight, bool) {
     (from.into(), advances)
 }
 
-/// `key`'s last queued lookup, if it is still on the wallet's chain.
-pub(super) fn lookup_coverage(db: &Db, account: AccountUuid, key: KeyId) -> Option<ChainPoint> {
-    let id = key_ref(&db.conn, account, key).unwrap();
-    let sql = "SELECT lookup_height, lookup_hash FROM ironwood_one_time_sweeps
-               WHERE one_time_key_id = ?1";
-    let (height, hash) = row(&db.conn, sql, [id]);
-    let lookup = store::restore::planner::anchor(height, hash);
-    store::restore::planner::canonical(&db.conn, lookup).unwrap()
-}
-
 /// An accepted operation outcome with these deposit instructions.
 pub(super) fn accepted(address: &str, memo: Option<&str>, deadline: i64) -> OperationOutcome {
     OperationOutcome::Accepted(ReceiveDeposit {
@@ -450,24 +350,10 @@ pub(super) fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>
     notes.iter().map(|n| n.one_time_key_id()).collect()
 }
 
-/// A sweep's `recent` flag for a receiver a swap may still pay, so its key keeps
-/// scanning.
-pub(super) const WATCHED: bool = true;
-
 /// Keys the scanner trial-decrypts with.
 pub(super) fn scanning_keys(st: &State) -> Vec<KeyId> {
     let keys = st.wallet().get_one_time_scanning_keys().unwrap();
     keys.iter().map(|k| k.key_id()).collect()
-}
-
-/// Pays `key` in a new scanned block and returns the output as a directory
-/// candidate. The output must be the chain's first Ironwood leaf.
-pub(super) fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
-    let fvk = derive(st, key);
-    let height = pay(st, &fvk, 100_000);
-    let candidate = candidate_at(st, height, &fvk);
-    assert_eq!(candidate.position, 0);
-    candidate
 }
 
 /// The first output to `fvk`'s external address in cached block `height`, as a directory
@@ -559,14 +445,6 @@ pub(super) fn encrypt_note(note: Note) -> EncryptedNote {
         orchard::note::ExtractedNoteCommitment::from(note.commitment()).to_bytes(),
         IronwoodDomain::epk_bytes(enc.epk()).0,
         bytes[..52].try_into().unwrap(),
-    )
-}
-
-/// The authentication path of the first leaf in an otherwise empty tree.
-pub(super) fn first_leaf_path() -> MerklePath {
-    MerklePath::from_parts(
-        0,
-        std::array::from_fn(|level| MerkleHashOrchard::empty_root((level as u8).into())),
     )
 }
 
@@ -765,23 +643,6 @@ pub(super) fn notes(
         .unwrap()
 }
 
-/// [`apply_payment`] with `path` at `through`.
-pub(super) fn apply(
-    db: &mut Db,
-    account: AccountUuid,
-    key: KeyId,
-    candidate: &PendingPayment,
-    through: ChainPoint,
-    path: &MerklePath,
-) -> PaymentApplication {
-    apply_payment(db, account, key, candidate, through, (through, path)).unwrap()
-}
-
-/// The wallet's Ironwood nullifier retention height.
-pub(super) fn retention_height(st: &State) -> Option<BlockHeight> {
-    crate::wallet::ironwood_nullifier_retention_height(st.wallet().conn()).unwrap()
-}
-
 mod enhancement;
 mod journal;
 mod key_access;
@@ -848,46 +709,6 @@ fn a_payment_matches_the_key_of_its_own_account() {
                JOIN ironwood_one_time_keys k ON k.id = n.one_time_key_id";
     let stored: Vec<(bool, bool, i64)> = rows(st.wallet().conn(), sql, [other.0]);
     assert_eq!(stored, [(true, true, 10_000)]);
-}
-
-/// Lookahead keys wait for their sweeps without advancing allocation, so issuance never
-/// skips them; recovery evidence promotes a key and only widens its history, and the
-/// lookahead extends only above the highest recovered index.
-#[test]
-fn lookahead_waits_for_sweeps_and_extends_above_recovered_keys() {
-    let mut st = ironwood_wallet();
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    let window = RECEIVE_GAP_LIMIT;
-    lookahead(db, account);
-    lookahead(db, account);
-    let keys = all_keys(db, account).unwrap();
-    assert_eq!(keys.len() as u64, window);
-    assert!(keys.iter().all(|k| !key_state(db, k.key_id()).1));
-    let key_id = KeyId::new(Purpose::Receive, window - 2);
-    recover(db, account, key_id, 80.into());
-    assert!(key_state(db, key_id).1);
-    watch(db, account, window - 2, 120.into());
-    assert_eq!(key_state(db, key_id), (BlockHeight::from_u32(80), true));
-    assert_eq!(all_keys(db, account).unwrap().len() as u64, window);
-    // The unswept lookahead's top index waits for its sweep rather than being skipped.
-    let issued = prepare_from(db, account, clock_now(), start(), None);
-    assert_eq!(issued.unwrap().err(), Some(ReservationPolicy::Gap));
-    let refund = reserve_key(db, account, Purpose::Refund, start());
-    assert_eq!(refund.key_id().index(), 0);
-    recover(
-        db,
-        account,
-        KeyId::new(Purpose::Receive, window - 1),
-        start(),
-    );
-    lookahead(db, account);
-    let keys = all_keys(db, account).unwrap();
-    let incoming = keys
-        .iter()
-        .filter(|k| k.key_id().purpose() == Purpose::Receive);
-    assert_eq!(incoming.count() as u64, 2 * window);
-    assert_eq!(keys.last().unwrap().key_id().index(), 2 * window - 1);
 }
 
 #[test]

@@ -60,15 +60,15 @@ use crate::{
 // The delegated one-time IVK traits' signatures name these.
 #[cfg(feature = "orchard")]
 use {
-    zakura_one_time_ivk::KeyId,
+    zakura_one_time_ivk::{KeyId, Purpose},
     zcash_client_backend::{
         data_api::{
             one_time_ivk::{
                 OneTimeIvkRead, OneTimeIvkWrite, ambassador_impl_OneTimeIvkRead,
                 ambassador_impl_OneTimeIvkWrite,
                 restore::{
-                    DirectoryPayment, DiscoveryWork, EarlyRestoreKey, OneTimeIvkRestoreRead,
-                    OneTimeIvkRestoreWrite, PaymentApplication, PublicationEnd, SweepDeferral,
+                    DirectoryPayment, DiscoveryStatus, DiscoveryWork, EnumerationCursor,
+                    FilterCheck, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, PublicationEnd,
                     ambassador_impl_OneTimeIvkRestoreRead, ambassador_impl_OneTimeIvkRestoreWrite,
                 },
             },

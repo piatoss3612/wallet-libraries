@@ -172,10 +172,11 @@ fn a_refund_owed_starts_an_unfunded_refund_key() {
     }
 }
 
-/// A refund owed while the key's restore sweep is pending starts the key once the sweep
-/// finishes, even when the provider no longer lists its address as recent.
+/// A refund owed while the key's history lookup is pending starts the key at once, even
+/// when the provider no longer lists its address as recent: the lookup still covers the
+/// history before it.
 #[test]
-fn a_refund_owed_during_a_pending_sweep_starts_the_key_after_it() {
+fn a_refund_owed_during_a_pending_lookup_starts_the_key() {
     for owed in [Positive(None), Unknown] {
         let mut st = scanned_wallet();
         let account = st.test_account().unwrap().id();
@@ -190,7 +191,7 @@ fn a_refund_owed_during_a_pending_sweep_starts_the_key_after_it() {
             contains: &contains,
         };
         let through = tip(&st);
-        // The provider saw the first refund address, so it awaits a restore sweep.
+        // The provider saw the first refund address, so it awaits a lookup.
         let db = st.wallet_mut().db_mut();
         let issued = db.reserve_refund_key(account, through.height, Some(&seen));
         assert_eq!(issued.unwrap().unwrap().key_id().index(), 1);
@@ -198,13 +199,6 @@ fn a_refund_owed_during_a_pending_sweep_starts_the_key_after_it() {
         let recorded =
             db.record_operation_status(account, "deposit", None, status(Terminal(owed)), 200);
         assert!(recorded.unwrap());
-        assert!(scanning_keys(&st).is_empty());
-
-        let db = st.wallet_mut().db_mut();
-        queue_lookup(db, account, key, through, &[]).unwrap();
-        let applied =
-            db.apply_one_time_sweep(account, key, through, through, !WATCHED, |_, _| None);
-        assert_eq!(applied.unwrap(), Ok(PaymentApplication::Applied));
         assert_eq!(scanning_keys(&st), vec![key], "{owed:?}");
     }
 }

@@ -1988,11 +1988,9 @@ CREATE TABLE ironwood_enhance_metadata_queue (
     CHECK (compact_bound = 0 OR commitment_tree_position IS NOT NULL)
 )";
 
-pub(super) const TABLE_IRONWOOD_NULLIFIER_SCAN_BLOCKS: &str =
-    "CREATE TABLE ironwood_nullifier_scan_blocks (
-                height INTEGER PRIMARY KEY CHECK (height BETWEEN 0 AND 4294967295)
-            )";
-
+/// A directory payment to a one-time key, not yet a note: a scan hint while its block is
+/// unscanned, else a late candidate waiting for its inclusion path and the scan's coverage
+/// (see `one_time_ivk::restore`). `publication_*` names the publication it came from.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY: &str = "CREATE TABLE ironwood_one_time_payment_recovery (
                 one_time_key_id INTEGER NOT NULL REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
                 txid BLOB NOT NULL CHECK (length(txid) = 32),
@@ -2001,8 +1999,17 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_PAYMENT_RECOVERY: &str = "CREATE TABLE 
                 block_hash BLOB NOT NULL CHECK (length(block_hash) = 32),
                 tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
                 position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 4294967295),
-                encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 148), witness BLOB CHECK (length(witness) = 1024), scan_hint INTEGER NOT NULL DEFAULT 0 CHECK (scan_hint IN (0, 1)),
-                PRIMARY KEY (txid, action_index)
+                encrypted_note BLOB NOT NULL CHECK (length(encrypted_note) = 148),
+                publication_height INTEGER NOT NULL
+                    CHECK (publication_height BETWEEN 0 AND 4294967295),
+                publication_hash BLOB NOT NULL CHECK (length(publication_hash) = 32),
+                scan_hint INTEGER NOT NULL CHECK (scan_hint IN (0, 1)),
+                witness BLOB CHECK (length(witness) = 1024),
+                witness_height INTEGER CHECK (witness_height BETWEEN 0 AND 4294967295),
+                witness_hash BLOB CHECK (length(witness_hash) = 32),
+                PRIMARY KEY (txid, action_index),
+                CHECK ((witness IS NULL) = (witness_height IS NULL)
+                    AND (witness IS NULL) = (witness_hash IS NULL))
             )";
 
 /// One provider operation on a one-time key: an incoming quote request, identified by
@@ -2026,42 +2033,71 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_OPERATIONS: &str = "CREATE TABLE ironwo
                 CHECK (request IS NOT NULL OR reference IS NOT NULL)
             )";
 
-pub(super) const TABLE_IRONWOOD_ONE_TIME_SWEEPS: &str = "CREATE TABLE ironwood_one_time_sweeps (
+/// A key's directory lookup: due while `cutoff_height` is set, and done through
+/// `done_height`. `applied` records are applied, the last of them at `last_position` in block
+/// `last_height` with Action nullifier `last_nullifier` (see `one_time_ivk::restore`).
+pub(super) const TABLE_IRONWOOD_ONE_TIME_LOOKUPS: &str = "CREATE TABLE ironwood_one_time_lookups (
                 one_time_key_id INTEGER PRIMARY KEY REFERENCES ironwood_one_time_keys(id) ON DELETE CASCADE,
-                lookup_height INTEGER CHECK (lookup_height BETWEEN 0 AND 4294967295),
-                lookup_hash BLOB CHECK (length(lookup_hash) = 32),
-                attempts INTEGER NOT NULL DEFAULT 0,
-                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                cutoff_height INTEGER CHECK (cutoff_height BETWEEN 0 AND 4294967295),
                 done_height INTEGER CHECK (done_height BETWEEN 0 AND 4294967295),
-                content_failures INTEGER NOT NULL DEFAULT 0 CHECK (content_failures >= 0)
-            , provisional INTEGER NOT NULL DEFAULT 0 CHECK (provisional IN (0, 1)))";
+                applied INTEGER NOT NULL DEFAULT 0 CHECK (applied BETWEEN 0 AND 4294967295),
+                last_position INTEGER CHECK (last_position >= 0),
+                last_nullifier BLOB CHECK (length(last_nullifier) = 32),
+                last_height INTEGER CHECK (last_height BETWEEN 0 AND 4294967295),
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                CHECK ((applied = 0) = (last_position IS NULL)
+                    AND (last_position IS NULL) = (last_nullifier IS NULL)
+                    AND (last_position IS NULL) = (last_height IS NULL))
+            )";
+
+/// A directory revision a lookup's cursor read records from (see
+/// `one_time_ivk::restore`). If it fails the chain check, the cursor restarts.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_LOOKUP_READS: &str =
+    "CREATE TABLE ironwood_one_time_lookup_reads (
+                one_time_key_id INTEGER NOT NULL
+                    REFERENCES ironwood_one_time_lookups(one_time_key_id) ON DELETE CASCADE,
+                publication_height INTEGER NOT NULL,
+                publication_hash BLOB NOT NULL,
+                PRIMARY KEY (one_time_key_id, publication_height, publication_hash),
+                FOREIGN KEY (publication_height, publication_hash)
+                    REFERENCES ironwood_one_time_publications(height, hash)
+            )";
+
+/// A receiver-directory publication discovery used, by its last block. `state` is 0 until
+/// the scan stores that block, then 1 if it matches the wallet's chain or 2 if not.
+pub(super) const TABLE_IRONWOOD_ONE_TIME_PUBLICATIONS: &str =
+    "CREATE TABLE ironwood_one_time_publications (
+                height INTEGER NOT NULL CHECK (height BETWEEN 0 AND 4294967295),
+                hash BLOB NOT NULL CHECK (length(hash) = 32),
+                tree_size INTEGER NOT NULL CHECK (tree_size >= 0),
+                state INTEGER NOT NULL DEFAULT 0 CHECK (state IN (0, 1, 2)),
+                PRIMARY KEY (height, hash)
+            )";
+
+/// An account's swap history discovery against a publication: how far each purpose's
+/// candidate keys were checked against its filters (see `one_time_ivk::restore`).
+pub(super) const TABLE_IRONWOOD_ONE_TIME_DISCOVERY: &str =
+    "CREATE TABLE ironwood_one_time_discovery (
+                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                publication_height INTEGER NOT NULL
+                    CHECK (publication_height BETWEEN 0 AND 4294967295),
+                publication_hash BLOB NOT NULL CHECK (length(publication_hash) = 32),
+                receive_next INTEGER NOT NULL DEFAULT 0 CHECK (receive_next >= 0),
+                receive_reach INTEGER NOT NULL DEFAULT 0 CHECK (receive_reach >= 0),
+                refund_next INTEGER NOT NULL DEFAULT 0 CHECK (refund_next >= 0),
+                refund_reach INTEGER NOT NULL DEFAULT 0 CHECK (refund_reach >= 0),
+                receive_done INTEGER NOT NULL DEFAULT 0 CHECK (receive_done IN (0, 1)),
+                refund_done INTEGER NOT NULL DEFAULT 0 CHECK (refund_done IN (0, 1)),
+                FOREIGN KEY (publication_height, publication_hash)
+                    REFERENCES ironwood_one_time_publications(height, hash)
+            )";
 
 /// Accounts whose seed has no one-time key history to restore (see
 /// `WalletDb::mark_one_time_account_fresh`).
 pub(super) const TABLE_IRONWOOD_ONE_TIME_FRESH_ACCOUNTS: &str =
     "CREATE TABLE ironwood_one_time_fresh_accounts (
                 account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE
-            )";
-
-/// An account's early restore (see `one_time_ivk::restore::early`): from `restore_from`,
-/// against a receiver-directory publication ending at the anchor. `state` is 0 until the
-/// scan stores the anchor block, then 1 if the block matches or 2 if it does not.
-pub(super) const TABLE_IRONWOOD_ONE_TIME_RESTORES: &str =
-    "CREATE TABLE ironwood_one_time_restores (
-                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-                restore_from INTEGER NOT NULL CHECK (restore_from BETWEEN 0 AND 4294967295),
-                anchor_height INTEGER NOT NULL CHECK (anchor_height BETWEEN 0 AND 4294967295),
-                anchor_hash BLOB NOT NULL CHECK (length(anchor_hash) = 32),
-                anchor_tree_size INTEGER NOT NULL CHECK (anchor_tree_size >= 0),
-                state INTEGER NOT NULL DEFAULT 0 CHECK (state IN (0, 1, 2))
-            )";
-
-pub(super) const TABLE_IRONWOOD_ONE_TIME_SPEND_RETENTION: &str =
-    "CREATE TABLE ironwood_one_time_spend_retention (
-                account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-                nullifier_retention_height INTEGER NOT NULL DEFAULT 0
-                    CHECK (nullifier_retention_height BETWEEN 0 AND 4294967295),
-                replay_through INTEGER CHECK (replay_through BETWEEN 0 AND 4294967295)
             )";
 
 pub(super) const TABLE_IRONWOOD_SPEND_JOURNAL: &str = "CREATE TABLE ironwood_spend_journal (
@@ -2105,8 +2141,6 @@ pub(super) const INDEX_IRONWOOD_ONE_TIME_KEYS_SCANNING: &str =
 pub(super) const INDEX_IRONWOOD_ONE_TIME_OPERATIONS_KEY: &str =
     "CREATE INDEX idx_ironwood_one_time_operations_key
                 ON ironwood_one_time_operations(one_time_key_id)";
-
-pub(super) const INDEX_IRONWOOD_ONE_TIME_SWEEPS_DUE: &str = "CREATE INDEX idx_ironwood_one_time_sweeps_due ON ironwood_one_time_sweeps(done_height, next_attempt_at)";
 
 /// Source-bound transaction facts. No fee is attributed to an account by this table.
 pub(super) const TABLE_TPIR_TRANSACTION_METADATA: &str = r#"

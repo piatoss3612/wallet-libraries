@@ -551,7 +551,8 @@ mod tests {
 
     /// Blocks scanned and transactions decrypted without the wallet's open one-time keys
     /// are refused, leaving the scanned chain unchanged, also in builds without `orchard`,
-    /// which cannot use them. Inactive and closed keys do not block them.
+    /// which cannot use them. Inactive and closed keys do not block them. Without `orchard`,
+    /// a publication discovery waits for the scan to judge does.
     #[test]
     fn scanning_without_one_time_ivks_refuses_open_one_time_keys() {
         use crate::{error::SqliteClientError, testing::db::TestDb};
@@ -645,5 +646,114 @@ mod tests {
             Zatoshis::const_from_u64(5),
         );
         st.scan_cached_blocks(h3, 1);
+        // Without `orchard`, which cannot settle discovery, a pass over a publication the
+        // scan has yet to judge refuses them too, and so does a late candidate, which waits
+        // for the scan to cover its blocks.
+        #[cfg(not(feature = "orchard"))]
+        {
+            let pending = u32::from(h3) + 10;
+            st.wallet()
+                .conn()
+                .execute(
+                    "INSERT INTO ironwood_one_time_publications (height, hash, tree_size)
+                     VALUES (?1, zeroblob(32), 0)",
+                    [pending],
+                )
+                .unwrap();
+            let (h4, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(5),
+            );
+            for (table, waiting) in [
+                (
+                    "ironwood_one_time_discovery",
+                    "INSERT INTO ironwood_one_time_discovery
+                        (account_id, publication_height, publication_hash)
+                     SELECT id, ?1, zeroblob(32) FROM accounts",
+                ),
+                (
+                    "ironwood_one_time_payment_recovery",
+                    "INSERT INTO ironwood_one_time_payment_recovery
+                        (one_time_key_id, txid, action_index, height, block_hash, tx_index,
+                         position, encrypted_note, publication_height, publication_hash,
+                         scan_hint)
+                     SELECT id, zeroblob(32), 0, ?1, zeroblob(32), 0, 0, zeroblob(148), ?1,
+                         zeroblob(32), 0
+                     FROM ironwood_one_time_keys",
+                ),
+            ] {
+                st.wallet().conn().execute(waiting, [pending]).unwrap();
+                assert!(
+                    matches!(
+                        st.try_scan_cached_blocks(h4, 1),
+                        Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
+                    ),
+                    "{table}"
+                );
+                st.wallet()
+                    .conn()
+                    .execute_batch(&format!("DELETE FROM {table}"))
+                    .unwrap();
+            }
+            st.scan_cached_blocks(h4, 1);
+        }
+    }
+
+    /// A rewind removes the spend journal above its rescan floor and has discovery judge a
+    /// publication there again in every build, since an `orchard` build may reopen the
+    /// wallet and read that state.
+    #[test]
+    fn a_rewind_repairs_one_time_state_in_every_build() {
+        use zcash_client_backend::data_api::{
+            WalletWrite,
+            testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(testing::db::TestDbFactory::default())
+            .with_block_cache(testing::BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(5);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        let (h3, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 3);
+        let conn = st.wallet().conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO ironwood_spend_journal VALUES (?1, 0, zeroblob(32))",
+            [u32::from(h3)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO ironwood_journal_coverage SELECT id, ?1, ?2 FROM accounts",
+            [u32::from(h1), u32::from(h3) + 1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ironwood_one_time_publications (height, hash, tree_size, state)
+             VALUES (?1, zeroblob(32), 0, 1), (?1, randomblob(32), 0, 2)",
+            [u32::from(h3)],
+        )
+        .unwrap();
+        st.wallet_mut().truncate_to_height(h1).unwrap();
+        // The publications, accepted or rejected, wait to be judged again, and the journal
+        // holds nothing above the floor.
+        let repaired: (i64, i64, i64) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT (SELECT MAX(state) FROM ironwood_one_time_publications),
+                    (SELECT COUNT(*) FROM ironwood_spend_journal WHERE block_height > ?1),
+                    (SELECT COUNT(*) FROM ironwood_journal_coverage WHERE end_height > ?1 + 1)",
+                [u32::from(h1)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(repaired, (0, 0, 0));
     }
 }

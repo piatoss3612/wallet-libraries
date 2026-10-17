@@ -8015,6 +8015,7 @@ version = "0.0.1-rc0"
 dependencies = [
  "hex",
  "rusqlite",
+ "secrecy",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

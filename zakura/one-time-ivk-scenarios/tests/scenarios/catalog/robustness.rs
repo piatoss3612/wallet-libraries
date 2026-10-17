@@ -27,7 +27,7 @@ pub fn all() -> Vec<Scenario> {
         scenarios.push(directory_errors(status));
     }
     for stops in [false, true] {
-        scenarios.push(directory_fails_after_leasing(stops));
+        scenarios.push(directory_fails_on_a_later_page(stops));
     }
     for (skew, after_deadline) in [(5 * DAY, 29 * DAY), (-2 * DAY, 31 * DAY)] {
         scenarios.push(clock_skew(skew, after_deadline));
@@ -78,8 +78,8 @@ fn directory_down_at_restore() -> Scenario {
         group: RESTORE,
         title: "The receiver directory is down when the seed is restored, and back an hour later"
             .into(),
-        summary: "Without the directory a restore cannot sweep its keys, so it cannot issue new \
-            addresses either (Gap). The sweep runs once the directory answers."
+        summary: "Without the directory a restore's discovery cannot check its keys, so it cannot \
+            issue new addresses either (Gap). Discovery runs once the directory answers."
             .into(),
         params: vec![("outage".into(), "1h".into())],
         slow: false,
@@ -91,7 +91,7 @@ fn directory_down_at_restore() -> Scenario {
             ctx.sync(b);
             let quote = ctx.prepare_incoming(b);
             ctx.check(
-                "B cannot issue an address while its lookahead is unswept",
+                "B cannot issue an address while its discovery is incomplete",
                 quote == Err(ReservationPolicy::Gap),
                 format!("{quote:?}"),
             );
@@ -104,8 +104,8 @@ fn directory_down_at_restore() -> Scenario {
                 "payout",
                 &swap.label(),
                 &payout,
-                Class::FoundBySweep,
-                "The sweep runs once the directory answers.",
+                Class::FoundByDiscovery,
+                "Discovery runs once the directory answers.",
             );
         }),
     }
@@ -120,7 +120,7 @@ fn directory_errors(status: u16) -> Scenario {
         ),
         summary: "409 and 410 mean a new publication; anything else, 429 included, is a retryable \
             transport failure that backs the key off. Either way the payment is found by a later \
-            sweep."
+            discovery run."
             .into(),
         params: vec![("status".into(), status.to_string())],
         slow: false,
@@ -139,19 +139,18 @@ fn directory_errors(status: u16) -> Scenario {
                 "payout",
                 &swap.label(),
                 &payout,
-                Class::FoundBySweep,
-                "A failed sweep backs off and a later one finds the payment.",
+                Class::FoundByDiscovery,
+                "A later discovery run finds the payment after the failures.",
             );
         }),
     }
 }
 
-/// A restore's sweep loses the directory on I1's second payment page, after leasing I1
-/// and finishing I0. The directory answers HTTP 503, or, when `stops`, the app stops
-/// during the request and its next sync's witness download fails too. Every payment must
-/// be credited once in the end, none of I1's before its lookup completes, and I1's retry
-/// must wait out its backoff.
-fn directory_fails_after_leasing(stops: bool) -> Scenario {
+/// A restore's discovery loses the directory on I1's second payment page, after reading
+/// I1's first and finishing I0. The directory answers HTTP 503, or, when `stops`, the app
+/// stops during the request and its next sync's witness download fails too. Every payment
+/// must be credited once in the end, and I1's retry must wait out its backoff.
+fn directory_fails_on_a_later_page(stops: bool) -> Scenario {
     let what = if stops {
         "the app stops during the request, then the witness download fails"
     } else {
@@ -159,17 +158,18 @@ fn directory_fails_after_leasing(stops: bool) -> Scenario {
     };
     Scenario {
         id: if stops {
-            "E7-app-stops-mid-sweep-then-witnesses-fail".into()
+            "E7-app-stops-mid-lookup-then-witnesses-fail".into()
         } else {
-            "E7-directory-fails-a-later-page-after-leasing".into()
+            "E7-directory-fails-a-later-page".into()
         },
         group: RESTORE,
         title: format!("A restore's lookup of a twice-paid key fails on its second page: {what}"),
-        summary: "Each key is leased just before its lookup, and its payments apply only once \
-            every page has arrived. A failure partway through a lookup must credit none of that \
-            key's payments, back the key off, and leave the others to finish. Once retried, every \
-            payment is credited exactly once."
-            .into(),
+        summary:
+            "A lookup keeps each page it reads as its cursor, and a failure partway backs the \
+            key off while the others finish. The pages read are scan hints, and the scan tries \
+            the key on each hinted batch, so it finds the payments meanwhile. Once retried, the \
+            lookup resumes from its cursor, and every payment is credited exactly once."
+                .into(),
         params: vec![("failure".into(), what.into())],
         slow: false,
         run: Box::new(move |ctx| {
@@ -214,16 +214,22 @@ fn directory_fails_after_leasing(stops: bool) -> Scenario {
             };
             let after_failure = receipts(ctx);
             ctx.check(
-                "B credits I0 but none of I1's payments when I1's lookup fails partway",
-                after_failure[..2] == [1, 0],
+                "the scan finds every payment in the hinted batches meanwhile",
+                after_failure == [1, 2, 1],
                 format!("receipts per key {after_failure:?}"),
             );
-            let backoff = ctx.get(b).sweep_state(Purpose::Receive, 1);
-            ctx.check(
-                "I1's failed attempt backs it off for 60 s",
-                backoff.is_some_and(|s| s.attempts == 1 && s.next_attempt_at == failed_at + 60),
-                format!("{backoff:?}, failed at {failed_at}"),
-            );
+            let backoff = ctx.get(b).lookup_state(Purpose::Receive, 1);
+            if !stops {
+                ctx.check(
+                    "I1's failed page backs its lookup off for 60 s",
+                    backoff.is_some_and(|s| {
+                        s.attempts == 1
+                            && s.next_attempt_at == failed_at + 60
+                            && s.done_height.is_none()
+                    }),
+                    format!("{backoff:?}, failed at {failed_at}"),
+                );
+            }
             if stops {
                 ctx.dev(b).reach.endpoint_faults = vec![Fault {
                     request: "GET /v1/receiver/witness",
@@ -234,36 +240,21 @@ fn directory_fails_after_leasing(stops: bool) -> Scenario {
             }
             // Within I1's backoff: the next sync runs at the same chain time.
             ctx.sync(b);
-            let waiting = ctx.get(b).sweep_state(Purpose::Receive, 1);
-            let other = ctx.get(b).sweep_state(Purpose::Receive, 2);
-            let i2 = ctx.get(b).incoming_receipts(2);
-            ctx.check(
-                "I1 is not retried within its backoff",
-                waiting == backoff,
-                format!("{waiting:?}"),
-            );
-            if stops {
+            let waiting = ctx.get(b).lookup_state(Purpose::Receive, 1);
+            if !stops {
                 ctx.check(
-                    "a failed witness download leases no key",
-                    other.is_some_and(|s| s.attempts == 0) && i2 == 0,
-                    format!("I2 {other:?}, {i2} receipts"),
-                );
-            } else {
-                ctx.check(
-                    "the next sync finishes I2 while I1 waits",
-                    other.is_some_and(|s| s.done_height.is_some()) && i2 == 1,
-                    format!("I2 {other:?}, {i2} receipts"),
+                    "I1 is not retried within its backoff",
+                    waiting == backoff,
+                    format!("{waiting:?}"),
                 );
             }
-            ctx.mine(1);
-            ctx.sync(b);
-            let retried = ctx.get(b).sweep_state(Purpose::Receive, 1);
+            keep_syncing(ctx, b, 10 * MINUTE, HOUR);
+            let retried = ctx.get(b).lookup_state(Purpose::Receive, 1);
             ctx.check(
-                "I1 is retried once its backoff passes, and finishes",
-                retried.is_some_and(|s| s.attempts == 2 && s.done_height.is_some()),
+                "I1's lookup resumes once its backoff passes, and finishes",
+                retried.is_some_and(|s| s.done_height.is_some()),
                 format!("{retried:?}"),
             );
-            keep_syncing(ctx, b, 10 * MINUTE, HOUR);
             let settled = receipts(ctx);
             let pending = ctx.get(b).history_pending();
             ctx.check(
@@ -277,8 +268,8 @@ fn directory_fails_after_leasing(stops: bool) -> Scenario {
                     "payout",
                     label,
                     payout,
-                    Class::FoundBySweep,
-                    "A failed lookup backs its key off, and a later sweep finds every page.",
+                    Class::FoundAutomatically,
+                    "Each payment's block is a scan hint or is found by the key a hint makes the scan try.",
                 );
             }
             ctx.check_balance(b, values.iter().sum());
@@ -291,9 +282,9 @@ fn omitted_payment() -> Scenario {
         id: "E7-indexer-omits-then-lists-payment".into(),
         group: RESTORE,
         title: "The directory's first publications omit a payment, later ones list it".into(),
-        summary: "An empty page zero means no indexed payment, not an unused address. A key the \
-            restore closed unpaid is checked against each newer publication's paid filter, which \
-            finds the payment once the indexer lists it."
+        summary: "An empty page zero means no indexed payment, not an unused address. A key \
+            discovery closed unpaid is not rechecked on its own; Check swap history finds the \
+            payment once the indexer lists it."
             .into(),
         params: Vec::new(),
         slow: false,
@@ -308,13 +299,14 @@ fn omitted_payment() -> Scenario {
             ctx.dev(b).reach.publication.omit.clear();
             ctx.log("directory", "publications list the payout again");
             keep_syncing(ctx, b, 10 * MINUTE, HOUR);
+            ctx.check_swap_history(b);
             ctx.expect(
                 b,
                 "payout",
                 &swap.label(),
                 &payout,
-                Class::FoundBySweep,
-                "The restored key closed unpaid; a newer publication's paid filter holds it (record_paid_filter_check).",
+                Class::FoundAfterRecheck,
+                "The restored key closed unpaid, and discovery never refreshes a closed key on its own, so Check swap history looks it up (recheck_one_time_key_history).",
             );
         }),
     }
@@ -325,15 +317,18 @@ fn quiet_chain() -> Scenario {
         id: "E7-quiet-chain-defers-restore".into(),
         group: RESTORE,
         title: "A restore on a chain with no shielded outputs for 300 blocks".into(),
-        summary: "A sweep applies a payment only with a tree checkpoint within 100 blocks of the \
-            publication, and wallets checkpoint only blocks with shielded outputs. On a quiet chain \
-            (regtest, or a quiet period) the payment waits until activity resumes."
+        summary: "Discovery runs before the restore scan, so the payment is a scan hint: the scan \
+            finds the note itself, with no inclusion path. A late payment would need a tree \
+            checkpoint within 100 blocks of its path's anchor, which a quiet chain may lack."
             .into(),
         params: vec![("quiet blocks".into(), "300".into())],
         slow: false,
         run: Box::new(|ctx| {
             let (_, birthday, swap, payout) = paid_swap(ctx);
-            ctx.chain.traffic = Traffic { every: 10, outputs: 0 };
+            ctx.chain.traffic = Traffic {
+                every: 10,
+                outputs: 0,
+            };
             ctx.mine(300);
             ctx.log("chain", "300 blocks without shielded outputs");
             let b = ctx.device("B", SEED, birthday);
@@ -344,11 +339,15 @@ fn quiet_chain() -> Scenario {
             ctx.log("chain", "shielded activity resumes");
             keep_syncing(ctx, b, 10 * MINUTE, HOUR);
             ctx.check(
-                "the payment waited for a checkpoint near the publication",
-                !early,
-                if early { "credited on the quiet chain" } else { "deferred while the chain was quiet" },
+                "the scan finds the hinted payment on the quiet chain",
+                early,
+                if early {
+                    "credited on the quiet chain"
+                } else {
+                    "deferred while the chain was quiet"
+                },
             );
-            ctx.expect(b, "payout", &swap.label(), &payout, Class::FoundBySweep, "The deferred payment is applied once the wallet has a recent checkpoint.");
+            ctx.expect(b, "payout", &swap.label(), &payout, Class::FoundByDiscovery, "The payment's lookup is a scan hint, so the scan finds it without an inclusion path.");
         }),
     }
 }
@@ -404,7 +403,7 @@ fn clock_skew(skew: i64, after_deadline: i64) -> Scenario {
                 )
             } else {
                 (
-                    Class::FoundBySweep,
+                    Class::FoundByDiscovery,
                     "The stored deadline is the earlier of the device's request and NEAR's answer, so a slow clock does not extend scanning in chain time; the key closes unpaid at 30 days and the paid filter finds the payout.",
                 )
             };

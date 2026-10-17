@@ -12,7 +12,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use super::{RESERVED, ReservationPolicy, lifecycle::record};
 use crate::wallet::one_time_ivk::{
     Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, corrupt, decode_index,
-    index_after, invalid, key_by_id, register, restore_start,
+    index_after, invalid, key_by_id, register, restore::discovery, restore_start,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -498,8 +498,6 @@ pub(in crate::wallet::one_time_ivk) fn record_status<P: Parameters>(
     let refund_owed = matches!(observation.status, Terminal(Positive(_) | Unknown));
     for &(id, key, unstarted_refund, scan_from) in &operations {
         if record(conn, id, observation, now)? && unstarted_refund && refund_owed {
-            // A refund key whose restore sweep is pending starts when the sweep finishes
-            // (see `restore::sweep::finish`).
             activate(conn, key, BlockHeight::from(scan_from))?;
         }
     }
@@ -518,14 +516,8 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     seen: Option<&ProviderSeen<'_>>,
 ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
     let (a, parent) = account_key(conn, params, account)?;
-    let sweeping: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_sweeps s
-        JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
-        WHERE k.account_id = ?1 AND k.purpose = 1 AND s.done_height IS NULL)",
-        [a.0],
-        |r| r.get(0),
-    )?;
-    if sweeping {
+    // A restored account's discovery may still reveal used indices.
+    if !discovery::issuance_ready(conn, params, a)? {
         return Ok(Err(ReservationPolicy::Gap));
     }
     let coverage = coverage(seen);
@@ -559,6 +551,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
     // reached it, is reissued only when the gap rule leaves no fresh one.
     let mut abandoned = None;
     let mut fresh = None;
+    let mut widened = false;
     for index in 0..end {
         let row: Option<(bool, bool)> = conn
             .query_row(
@@ -581,7 +574,7 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
             )
             .optional()?;
         // `record_seen` checked every registered key, so check an unregistered one here. A
-        // hit is registered for a restore sweep, since its quote may have been paid.
+        // hit is registered for a lookup, since its quote may have been paid.
         let Some((blocked, quoted)) = row else {
             let key_id = KeyId::new(Purpose::Receive, index);
             let receiver = key_id.derive(&parent)?.address_at(0u32, Scope::External);
@@ -594,10 +587,11 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
                     key_id,
                     from,
                     false,
-                    Discovery::Sweep,
+                    Discovery::Lookup,
                     now,
                 )?;
                 record_provider_seen(conn, id)?;
+                widened = true;
                 continue;
             }
             fresh = Some(index);
@@ -611,6 +605,11 @@ pub(in crate::wallet::one_time_ivk) fn prepare<P: Parameters>(
             break;
         }
         abandoned.get_or_insert(index);
+    }
+    // A seen address registered above moves the recovery bound, so the next attempt may
+    // reach further.
+    if fresh.is_none() && widened {
+        return Ok(Err(ReservationPolicy::Gap));
     }
     let Some(index) = fresh.or(abandoned) else {
         return Ok(Err(ReservationPolicy::Limit));

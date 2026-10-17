@@ -24,7 +24,7 @@ The wallet owns reservation, persistence, coverage, lifecycle, and note selectio
 There is no alternate balance store in this crate.
 
 The SQLite backend implements this contract with its `orchard` feature: durable
-key registration, scanning, completion, and the restore sweeps that
+key registration, scanning, completion, and the discovery that
 `zakura-pir-receiver` runs. Its rustdoc, starting at
 `zcash_client_sqlite::wallet::one_time_ivk`, documents the calls a wallet makes.
 
@@ -74,8 +74,8 @@ index has no valid key, and derivation returns an error.
 | 15 | 497 | Reserved: written as zero, ignored on decode |
 
 The memo does not store the deposit address. A restored refund key needs none: it
-is swept once and, if the provider was given its address in the last day, scans for
-another 24 hours, with no provider lookups. Incoming indices are
+is looked up once in the receiver directory and, if the provider was given its
+address in the last day, scans for another 24 hours, with no provider lookups. Incoming indices are
 recovered through lookahead, not this memo. `RefundMemo::decode` returns `None`
 for any memo that is not a v1 record, and a wallet ignores such a memo even when it
 starts with `swap::REFUND_MEMO_MAGIC`.

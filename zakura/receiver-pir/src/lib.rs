@@ -8,7 +8,6 @@ pub mod transport;
 
 pub use client::{Client, Query};
 use pir_native::{NativeSetup, D};
-use receiver_directory::RawRecord;
 use receiver_directory::{snapshot, Hash};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -165,11 +164,4 @@ pub fn query_bytes(rows: u32) -> Result<usize, Error> {
 pub fn response_bytes(rows: u32) -> Result<usize, Error> {
     validate_rows(rows)?;
     Ok(HEADER_BYTES + pir_native::response_len(COLS))
-}
-
-/// Reject inconsistent continuation pages before exposing a complete history to a
-/// wallet, by the rule publications are built and validated with
-/// ([`snapshot::check_next`]).
-fn check_next(previous: &RawRecord, next: &RawRecord) -> Result<(), Error> {
-    snapshot::check_next(previous, next).map_err(|_| Error::Malformed)
 }
