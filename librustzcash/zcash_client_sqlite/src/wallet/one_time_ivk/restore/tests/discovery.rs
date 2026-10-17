@@ -1,6 +1,5 @@
 use super::*;
 use zakura_one_time_ivk::Purpose;
-use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
 use zcash_client_backend::data_api::one_time_ivk::restore::{DiscoveryStatus, LookupWork};
 
 /// Receive key 8, which the fixtures pay before registering it.
@@ -302,8 +301,8 @@ fn a_rewind_returns_late_payments_to_hints() {
 }
 
 /// A publication ending before the birthday completes discovery without lookups, still
-/// protecting its paid keys from issuance. Its keys close, so a newer publication checks
-/// them for a payment after the birthday.
+/// protecting its paid keys from issuance. Its keys close, so a recheck checks them for a
+/// payment after the birthday.
 #[test]
 fn a_publication_before_the_birthday_needs_no_lookups() {
     let mut st = restored_wallet();
@@ -319,7 +318,6 @@ fn a_publication_before_the_birthday_needs_no_lookups() {
     let found = status(db, account);
     assert!(found.complete);
     assert!(found.lookups.is_empty());
-    assert!(found.refresh_due);
     assert!(key_state(db, key8()).1);
 }
 
@@ -526,7 +524,7 @@ fn an_unknown_accounts_discovery_is_an_error() {
 }
 
 /// A key the filters mark seen but not paid closes even when the publication was accepted
-/// before the pass registered it, so a newer publication can recheck it.
+/// before the pass registered it, so a newer publication rechecks it.
 #[test]
 fn a_seen_key_closes_against_an_accepted_publication() {
     let mut st = restored_wallet();
@@ -609,12 +607,13 @@ fn paging_resumes_from_its_cursor() {
     assert_eq!(found.witnesses.len(), 2);
 }
 
-/// A fresh account needs no discovery until a key it issued closes without a payment; then
-/// a newer publication should check that key. Its discovery stays visible while a lookup
-/// it started is unfinished, even once a payment it found leaves no key closed unpaid, and
-/// again after a recheck. Issuance waits for none of it.
+/// A fresh account needs no discovery, even once a key it issued closes without a payment,
+/// until a recheck asks for it. The recheck's pass looks up the closed key the filters mark
+/// paid, and its discovery stays visible while that lookup is unfinished, even once a
+/// payment it found leaves no key closed unpaid. Issuance waits only for the pass's
+/// registration.
 #[test]
-fn a_fresh_accounts_unfinished_discovery_stays_visible() {
+fn a_fresh_account_rechecks_on_request() {
     let mut st = scanned_wallet();
     let account = st.test_account().unwrap().id();
     // The key starts after its payment, so the scan misses it and discovery finds it late.
@@ -628,12 +627,16 @@ fn a_fresh_accounts_unfinished_discovery_stays_visible() {
     let key = reserve_key(db, account, Purpose::Receive, after).key_id();
     exec(
         &db.conn,
-        "UPDATE ironwood_one_time_keys SET closed_at = ?2 WHERE key_index = ?1",
-        rusqlite::params![key.index().to_be_bytes(), clock_now()],
+        "UPDATE ironwood_one_time_keys SET closed_at = 1 WHERE key_index = ?1",
+        [key.index().to_be_bytes()],
     );
-    let found = status(db, account);
-    assert!(found.complete);
-    assert!(found.refresh_due);
+    assert!(
+        db.one_time_discovery(account, clock_now())
+            .unwrap()
+            .is_none()
+    );
+    db.recheck_one_time_key_history(account).unwrap();
+    assert!(status(db, account).publication.is_none());
     let candidate = pay_candidate(&mut st, key);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let publication = discover(&mut st, account, &[paid(key)]);
@@ -658,47 +661,7 @@ fn a_fresh_accounts_unfinished_discovery_stays_visible() {
         db.record_one_time_lookup(account, key, publication, 1, &[], true, clock_now())
             .unwrap()
     );
-    assert!(
-        db.one_time_discovery(account, clock_now())
-            .unwrap()
-            .is_none()
-    );
-    // A recheck, which finds a later payment to a closed key paid before, starts a pass.
-    db.recheck_one_time_key_history(account).unwrap();
-    assert!(status(db, account).publication.is_none());
-}
-
-/// A key that closed unpaid makes newer publications check keys again only for a day after
-/// it closed, since an older quote can no longer pay. A recheck still looks it up when the
-/// filters mark it paid.
-#[test]
-fn an_unpaid_key_refreshes_only_within_a_day() {
-    let mut st = restored_wallet();
-    let account = st.test_account().unwrap().id();
-    let seen = FilterCheck {
-        paid: false,
-        ..paid(key8())
-    };
-    discover(&mut st, account, &[seen]);
-    let closed_at = |db: &Db, at: i64| {
-        exec(
-            &db.conn,
-            "UPDATE ironwood_one_time_keys SET closed_at = ?2 WHERE key_index = ?1",
-            rusqlite::params![key8().index().to_be_bytes(), at],
-        )
-    };
-    let db = st.wallet_mut().db_mut();
-    closed_at(db, clock_now());
-    assert!(status(db, account).refresh_due);
-    closed_at(db, clock_now() - RESTORE_WATCH_SECS - 1);
-    assert!(!status(db, account).refresh_due);
-
-    db.recheck_one_time_key_history(account).unwrap();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    discover(&mut st, account, &[paid(key8())]);
-    let due = status(st.wallet().db(), account).lookups;
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].work.key, key8());
+    assert!(status(db, account).complete);
 }
 
 /// A late payment whose blocks the scan finished without journal coverage, as before the

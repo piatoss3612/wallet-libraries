@@ -213,12 +213,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     /// uses the earlier of `now` and `tip`'s block time.
     ///
     /// No provider status reopens a closed key; a rewind does, when it un-mines a receipt
-    /// or leaves it short of those confirmations. A later payment to a closed key without
-    /// a known payment is found once a newer publication's paid filter holds it, since
-    /// discovery checks closed keys against it (see `DiscoveryStatus::refresh_due`). One to
-    /// a closed key that was already paid, such as a corrected larger payout, is found only
-    /// by [`Self::recheck_one_time_key_history`], and an incoming index beyond the restored
-    /// lookahead is never checked.
+    /// or leaves it short of those confirmations. A later payment to a closed key is found
+    /// only by [`Self::recheck_one_time_key_history`], and an incoming index beyond the
+    /// restored lookahead is never checked.
     pub fn close_finished_one_time_keys(
         &mut self,
         account: AccountUuid,

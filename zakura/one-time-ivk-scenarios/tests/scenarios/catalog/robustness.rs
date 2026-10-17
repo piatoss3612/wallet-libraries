@@ -283,8 +283,8 @@ fn omitted_payment() -> Scenario {
         group: RESTORE,
         title: "The directory's first publications omit a payment, later ones list it".into(),
         summary: "An empty page zero means no indexed payment, not an unused address. A key \
-            discovery closed unpaid is checked against newer publications' paid filters, which \
-            find the payment once the indexer lists it."
+            discovery closed unpaid is not rechecked on its own; Check swap history finds the \
+            payment once the indexer lists it."
             .into(),
         params: Vec::new(),
         slow: false,
@@ -299,13 +299,14 @@ fn omitted_payment() -> Scenario {
             ctx.dev(b).reach.publication.omit.clear();
             ctx.log("directory", "publications list the payout again");
             keep_syncing(ctx, b, 10 * MINUTE, HOUR);
+            ctx.check_swap_history(b);
             ctx.expect(
                 b,
                 "payout",
                 &swap.label(),
                 &payout,
-                Class::FoundByDiscovery,
-                "The restored key closed unpaid; a newer publication's paid filter holds it, so a new discovery pass looks it up (DiscoveryStatus::refresh_due).",
+                Class::FoundAfterRecheck,
+                "The restored key closed unpaid, and discovery never refreshes a closed key on its own, so Check swap history looks it up (recheck_one_time_key_history).",
             );
         }),
     }

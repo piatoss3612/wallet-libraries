@@ -139,11 +139,6 @@ pub struct DiscoveryStatus {
     /// search stops, so a payment after a key closed is found even past a gap of unused
     /// keys.
     pub closed: Vec<DiscoveryWork>,
-    /// Whether a newer publication's filters should check the account's keys again: some
-    /// key closed without a known payment within the last day (`RESTORE_WATCH_SECS`), so a
-    /// payment after it closed would be found only that way. An older quote can no longer
-    /// pay; a recheck still covers it.
-    pub refresh_due: bool,
     /// Paid keys whose history is due for a lookup.
     pub lookups: Vec<LookupWork>,
     /// Late candidates whose inclusion path is due.

@@ -534,23 +534,23 @@ async fn discovery_imports_every_late_payment() {
     );
 }
 
-/// A closed key far past the first window of unused keys is checked again by a newer
-/// publication, without walking the keys between, so a payment after it closed is found.
+/// A recheck checks a closed key far past the first window of unused keys again, without
+/// walking the keys between, so a payment after it closed is found.
 #[tokio::test]
 async fn a_closed_key_past_a_filter_gap_is_rechecked() {
     closed_key_paid_later(false).await;
 }
 
-/// A fresh account, which needs discovery only for a key that closed unpaid, finds the
-/// payment and completes once its discovery has nothing left to run.
+/// A fresh account asked to recheck finds the payment and completes once its discovery has
+/// nothing left to run.
 #[tokio::test]
 async fn a_fresh_account_completes_once_its_recheck_finishes() {
     closed_key_paid_later(true).await;
 }
 
-/// Closes an incoming key far past the first window unpaid, pays it, and runs discovery,
-/// expecting it to find the payment and complete. A `fresh` account is declared fresh
-/// first.
+/// Closes an incoming key far past the first window unpaid, pays it, rechecks and runs
+/// discovery, expecting it to find the payment and complete. A `fresh` account is declared
+/// fresh first.
 async fn closed_key_paid_later(fresh: bool) {
     let mut st = ironwood_wallet_in(TestDbFactory::default());
     let account = st.test_account().unwrap().id();
@@ -595,22 +595,12 @@ async fn closed_key_paid_later(fresh: bool) {
                 .unwrap()
         );
     }
-    // The mock chain's block times are long past; the key closed just now, so newer
-    // publications check it again.
-    st.wallet()
-        .conn()
-        .execute("UPDATE ironwood_one_time_keys SET closed_at = ?1", [NOW])
-        .unwrap();
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.one_time_discovery(account, NOW)
-            .unwrap()
-            .unwrap()
-            .refresh_due
-    );
 
     let record = pay_restored_key(&mut st, index, 0);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    // Only Check swap history looks for a payment to a closed key.
+    let db = st.wallet_mut().db_mut();
+    db.recheck_one_time_key_history(account).unwrap();
     let directory = serve(&[record], tip(&st));
     let found = run_clean(&mut st, &directory).await;
     assert!(found.complete);

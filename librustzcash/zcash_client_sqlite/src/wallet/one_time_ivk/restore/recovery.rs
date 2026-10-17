@@ -17,6 +17,11 @@ pub(in crate::wallet::one_time_ivk) fn recheck<P: Parameters>(
         "DELETE FROM ironwood_one_time_discovery WHERE account_id = ?1",
         [owner.0],
     )?;
+    // A fresh account asked to recheck runs the pass as a restored one does.
+    conn.execute(
+        "DELETE FROM ironwood_one_time_fresh_accounts WHERE account_id = ?1",
+        [owner.0],
+    )?;
     // The next pass makes the finished lookup of every key with a known payment due again;
     // the cursor keeps what was applied. A key without one is looked up again only if the
     // newer filters mark it paid.

@@ -62,9 +62,8 @@ Simulated:
 ## Reading the outcomes
 
 Every payment to a one-time key gets a class for each wallet that should see it:
-found live (scanning while the key was open), found by discovery (a restore, or a
-newer publication's paid filter holding a closed key), found after recheck (only after Check swap
-history), or missed. Each scenario states the class the documented contract predicts,
+found live (scanning while the key was open), found by discovery (a restore's lookups),
+found after recheck (only after Check swap history), or missed. Each scenario states the class the documented contract predicts,
 with the reason, and fails when the wallet does something else. A miss the library
 documents passes and is listed under the documented gaps, because whether it is
 acceptable is a product decision.

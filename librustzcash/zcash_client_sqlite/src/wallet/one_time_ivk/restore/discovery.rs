@@ -30,8 +30,6 @@ use super::{
     payments::{authenticate, directory_candidate, pending_payment, queue_payment},
     recovery::recover_refund_memos,
 };
-use zakura_one_time_ivk::swap::RESTORE_WATCH_SECS;
-
 use crate::wallet::one_time_ivk::{
     Discovery, KeyId, Purpose, account_key, activate, corrupt, index_after, key_ref, register,
     restore_start, stored_key_id, swap::reservations::record_provider_seen,
@@ -49,9 +47,8 @@ const REJECTED: u8 = 2;
 
 /// SQL condition on account `?1`'s key `k`: closed with no mined payment and none before the
 /// birthday, so only a newer publication's paid filter would show a payment after it closed.
-/// A pass looks such a key up again whenever its filter marks the key paid, but only one
-/// closed within [`RESTORE_WATCH_SECS`] makes a newer publication start a pass (see
-/// `DiscoveryStatus::refresh_due`): a quote that old can no longer pay.
+/// A pass, such as the one a recheck starts, looks such a key up again when its filter marks
+/// it paid.
 const UNPAID_CLOSED: &str = "k.account_id = ?1 AND k.closed_at IS NOT NULL
     AND k.paid_before_birthday = 0
     AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes n
@@ -180,20 +177,10 @@ pub(crate) fn status<P: Parameters>(
         return Ok(None);
     }
     let (owner, _) = account_key(conn, params, account)?;
-    // A fresh account has no restored history, so it needs discovery only once a key it
-    // issued recently closed without a payment, which a newer publication could still show
-    // paid, and until the work that started, or a recheck asked for, finishes.
-    let unpaid_closed: bool = conn.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_keys k
-                 WHERE {UNPAID_CLOSED} AND k.closed_at > ?2)"
-        ),
-        params![owner.0, now.saturating_sub(RESTORE_WATCH_SECS)],
-        |r| r.get(0),
-    )?;
+    // A fresh account has no restored history, so it needs discovery only until work it
+    // started finishes.
     let complete = complete(conn, params, owner)?;
     if fresh(conn, owner.0)?
-        && !unpaid_closed
         && complete
         && !conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
@@ -289,7 +276,6 @@ pub(crate) fn status<P: Parameters>(
     Ok(Some(DiscoveryStatus {
         publication: usable.map(|pass| pass.publication),
         complete,
-        refresh_due: complete && unpaid_closed,
         enumeration,
         closed,
         lookups,
@@ -325,7 +311,6 @@ pub(crate) fn receivers<P: Parameters>(
 fn note_publication(
     conn: &rusqlite::Transaction<'_>,
     publication: PublicationEnd,
-    now: i64,
 ) -> Result<Option<u8>, SqliteClientError> {
     let height = u32::from(publication.height);
     let stored: Option<(u64, u8)> = conn
@@ -361,7 +346,7 @@ fn note_publication(
         }
         Some(_) => return Ok(None),
     }
-    judge(conn, publication.height, now)?;
+    judge(conn, publication.height)?;
     Ok(Some(conn.query_row(
         "SELECT state FROM ironwood_one_time_publications WHERE height = ?1 AND hash = ?2",
         params![height, publication.hash],
@@ -399,7 +384,7 @@ pub(crate) fn record_filter_checks<P: Parameters>(
                 && current.publication.tree_size == publication.tree_size => {}
         Some(current) if publication.height < current.publication.height => return Ok(false),
         _ => {
-            if note_publication(conn, publication, now)?.is_none() {
+            if note_publication(conn, publication)?.is_none() {
                 return Ok(false);
             }
             conn.execute(
@@ -510,7 +495,7 @@ pub(crate) fn record_filter_checks<P: Parameters>(
     // these keys registered if the scan had already stored its block. A publication before
     // the birthday is never judged, so its keys close here.
     if pass(conn, owner.0)?.is_some_and(|pass| pass.state == ACCEPTED || !in_range) {
-        close_looked_up(conn, owner.0, now)?;
+        close_looked_up(conn, owner.0)?;
     }
     Ok(true)
 }
@@ -546,7 +531,7 @@ pub(crate) fn record_lookup<P: Parameters>(
     if (page != applied && page != 0) || u32::from(revision.height) < cutoff {
         return Ok(false);
     }
-    if note_publication(conn, revision, now)?.is_none_or(|state| state == REJECTED) {
+    if note_publication(conn, revision)?.is_none_or(|state| state == REJECTED) {
         return Ok(false);
     }
     if page == 0 && applied > 0 {
@@ -630,7 +615,7 @@ pub(crate) fn record_lookup<P: Parameters>(
             [id],
         )?;
         if pass(conn, owner.0)?.is_some_and(|pass| pass.state == ACCEPTED) {
-            close_looked_up(conn, owner.0, now)?;
+            close_looked_up(conn, owner.0)?;
         }
     }
     admit(conn, params, sessions, account)?;
@@ -721,7 +706,7 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
         )?
         .collect::<Result<_, _>>()?;
     for height in heights {
-        judge(conn, BlockHeight::from(height), now)?;
+        judge(conn, BlockHeight::from(height))?;
     }
     check_hints(conn, keys.unwrap_or(&[]), range)?;
     let accounts: Vec<AccountUuid> = conn
@@ -741,11 +726,7 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
 /// Accepts each provisional publication ending at `height` whose last block and tree size
 /// match the stored block, and rejects any that does not. Nothing changes until the scan
 /// stores that block.
-fn judge(
-    conn: &rusqlite::Transaction<'_>,
-    height: BlockHeight,
-    now: i64,
-) -> Result<(), SqliteClientError> {
+fn judge(conn: &rusqlite::Transaction<'_>, height: BlockHeight) -> Result<(), SqliteClientError> {
     let stored: Option<([u8; 32], Option<u64>)> = conn
         .query_row(
             "SELECT hash, ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
@@ -780,7 +761,7 @@ fn judge(
                 .query_map(params![u32::from(height), claimed], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
             for owner in owners {
-                close_looked_up(conn, owner, now)?;
+                close_looked_up(conn, owner)?;
             }
         } else {
             reject(conn, height, claimed)?;
@@ -822,20 +803,21 @@ fn reject(
 
 /// Closes account `owner`'s keys whose lookups are done and which neither scan nor belong to
 /// a reservation or operation of this wallet, at the time of the block the lookup finished
-/// at, as a found restore key does once its history is known, or at `now` if the wallet
-/// never stores that block, as for a publication before the birthday.
-fn close_looked_up(conn: &Connection, owner: i64, now: i64) -> Result<(), SqliteClientError> {
+/// at, as a found restore key does once its history is known. A key done at a block the
+/// wallet never stores, before the birthday, closes at time zero: discovery reads only
+/// whether a key closed.
+fn close_looked_up(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
     conn.execute(
         "UPDATE ironwood_one_time_keys SET closed_at = COALESCE(closed_at,
              (SELECT b.time FROM ironwood_one_time_lookups l
               JOIN blocks b ON b.height = l.done_height
-              WHERE l.one_time_key_id = ironwood_one_time_keys.id), ?2)
+              WHERE l.one_time_key_id = ironwood_one_time_keys.id), 0)
          WHERE account_id = ?1 AND active_from IS NULL AND reserved_at IS NULL
            AND id IN (SELECT one_time_key_id FROM ironwood_one_time_lookups
                WHERE cutoff_height IS NULL AND done_height IS NOT NULL)
            AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_operations o
                WHERE o.one_time_key_id = ironwood_one_time_keys.id)",
-        params![owner, now],
+        [owner],
     )?;
     Ok(())
 }

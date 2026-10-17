@@ -108,12 +108,15 @@ fn refund_once(delay: i64) -> Scenario {
             ctx.sync(b);
             ctx.sync(b);
             let within = delay < 30 * DAY;
+            if !within {
+                ctx.check_swap_history(f.a);
+            }
             let (class, why) = if within {
                 (Class::FoundLive, REFUND_OPEN)
             } else {
                 (
-                    Class::FoundByDiscovery,
-                    "The key closed unpaid 30 days after the deadline; a newer publication's paid filter holds it, so discovery finds the refund.",
+                    Class::FoundAfterRecheck,
+                    "The key closed unpaid 30 days after the deadline, and discovery never refreshes a closed key on its own, so Check swap history finds the refund.",
                 )
             };
             ctx.expect(f.a, "refund", &f.key, &refund, class, why);
@@ -247,7 +250,7 @@ fn restore_before_refund(delay: i64) -> Scenario {
         summary:
             "A restore recovers the refund key from the funding memo. NEAR was given the refund \
             address within the last day, so the key scans for 24 hours after discovery finds it; \
-            a later refund relies on newer publications' paid filters."
+            a later refund is found only by Check swap history."
                 .into(),
         params: vec![("refund after restore".into(), span(delay))],
         slow: false,
@@ -276,6 +279,9 @@ fn restore_before_refund(delay: i64) -> Scenario {
             ctx.sync(b);
             ctx.wait(HOUR);
             ctx.sync(b);
+            if delay >= 24 * HOUR {
+                ctx.check_swap_history(b);
+            }
             let (class, why) = if delay < 24 * HOUR {
                 (
                     Class::FoundLive,
@@ -283,8 +289,8 @@ fn restore_before_refund(delay: i64) -> Scenario {
                 )
             } else {
                 (
-                    Class::FoundByDiscovery,
-                    "The restored key closed after its 24-hour watch with no payment; a newer publication's paid filter holds it, so discovery finds the refund.",
+                    Class::FoundAfterRecheck,
+                    "The restored key closed after its 24-hour watch with no payment, and discovery never refreshes a closed key on its own, so Check swap history finds the refund.",
                 )
             };
             ctx.expect(b, "refund", &f.key, &refund, class, why);

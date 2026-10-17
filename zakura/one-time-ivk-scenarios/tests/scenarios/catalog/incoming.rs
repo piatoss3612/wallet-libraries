@@ -285,7 +285,7 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
         ),
         summary: "The seed is restored on a new device while NEAR still owes a payout. A restored \
             key that NEAR was given recently scans for 24 hours after discovery finds it; a later \
-            payout relies on newer publications' paid filters."
+            payout is found only by Check swap history."
             .into(),
         params: vec![
             ("payout after restore".into(), span(after)),
@@ -327,6 +327,9 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
             ctx.wait(HOUR);
             ctx.sync(b);
             let within = after < 24 * HOUR;
+            if !within {
+                ctx.check_swap_history(b);
+            }
             let (class, why) = if within {
                 (
                     Class::FoundLive,
@@ -334,8 +337,8 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
                 )
             } else {
                 (
-                    Class::FoundByDiscovery,
-                    "The restored key closed after its 24-hour watch with no payment, so the next publication's paid filter holds it and discovery finds the payment (DiscoveryStatus::refresh_due).",
+                    Class::FoundAfterRecheck,
+                    "The restored key closed after its 24-hour watch with no payment. Discovery never refreshes a closed key on its own, so Check swap history finds the payment (recheck_one_time_key_history).",
                 )
             };
             ctx.expect(b, "payout", &s.key, &payout, class, why);
@@ -443,8 +446,8 @@ fn provider_silent(after_deadline: i64) -> Scenario {
             span(after_deadline)
         ),
         summary: "Without a final status a key scans until 30 days after its deadline \
-            (COMPLETION_LIMIT_SECS). A payout before then is found live; a later one relies on \
-            the paid-filter check of a closed, unpaid key."
+            (COMPLETION_LIMIT_SECS). A payout before then is found live; a later one only by \
+            Check swap history."
             .into(),
         params: vec![("payout after deadline".into(), span(after_deadline))],
         slow: after_deadline > 30 * DAY,
@@ -471,6 +474,9 @@ fn provider_silent(after_deadline: i64) -> Scenario {
             ctx.wait(DAY);
             ctx.sync(a);
             let within = after_deadline < 30 * DAY;
+            if !within {
+                ctx.check_swap_history(a);
+            }
             let (class, why) = if within {
                 (
                     Class::FoundLive,
@@ -478,8 +484,8 @@ fn provider_silent(after_deadline: i64) -> Scenario {
                 )
             } else {
                 (
-                    Class::FoundByDiscovery,
-                    "The key closed unpaid at its 30-day limit; a newer publication's paid filter holds it, so discovery finds the payment (DiscoveryStatus::refresh_due).",
+                    Class::FoundAfterRecheck,
+                    "The key closed unpaid at its 30-day limit, and discovery never refreshes a closed key on its own, so Check swap history finds the payment (recheck_one_time_key_history).",
                 )
             };
             ctx.expect(a, "payout", &key, &payout, class, why);

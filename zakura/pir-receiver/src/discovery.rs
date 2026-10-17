@@ -100,9 +100,11 @@ pub struct Discovered<E> {
 /// on mainnet) and cover history from Ironwood activation on `params`' network. It is
 /// provisional: the wallet judges it once its scan stores the publication's last block.
 /// A run starts a new pass when the account has none, when its pass's publication was
-/// rejected, when `refresh` asks for one, when its pass has keys left to check and the
-/// directory has moved on, or when a newer publication should check keys that closed
-/// without a known payment (see `DiscoveryStatus::refresh_due`). Each purpose's keys are checked against the filters from index
+/// rejected, when `refresh` asks for one, or when its pass has keys left to check and the
+/// directory has moved on. Once discovery is complete, only a recheck
+/// (`recheck_one_time_key_history` in the SQLite store, or `refresh`) starts another, so a
+/// payment to a closed key is found on request. Each purpose's keys are checked against the
+/// filters from index
 /// zero: always the first [`FIRST_WINDOW`], then on until [`GAP`] consecutive keys are in
 /// no seen set and not in the paid filter, and then every closed key past that (see
 /// `DiscoveryStatus::closed`). A provider's recent set counts only if its feed's
@@ -146,13 +148,9 @@ where
     let mut directory = Directory::new(activation, genesis, origin, transport, manifest)?;
     let publication = directory.publication_end();
 
-    let newer = status
-        .publication
-        .is_none_or(|current| current.height < publication.height);
     let new_pass = refresh
         || status.publication.is_none()
-        || (status.enumeration.is_some() && status.publication != Some(publication))
-        || (status.refresh_due && newer);
+        || (status.enumeration.is_some() && status.publication != Some(publication));
     let cursors = if new_pass {
         Some([
             (Purpose::Receive, EnumerationCursor::default()),
