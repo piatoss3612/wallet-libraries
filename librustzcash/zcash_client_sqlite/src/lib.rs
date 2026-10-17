@@ -3419,18 +3419,21 @@ where
 impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P, CL, R> {
     /// Stores scanned blocks for `put_blocks` and, with `one_time_keys`, the one-time key
     /// snapshot that scanned them, for `put_blocks_with_one_time_ivks`. Blocks scanned
-    /// without one-time keys, as every build without `orchard` scans them, are refused while
-    /// `wallet::one_time_scan_required`: storing them would mark a key's payments scanned
-    /// without finding them, or skip an early restore's checks.
+    /// without one-time keys are refused while a key is open: storing them would mark its
+    /// payments scanned without finding them. A build without `orchard`, which scans every
+    /// block that way and cannot settle discovery, also refuses them while discovery waits
+    /// for the scan (see `wallet::one_time_scan_required`).
     fn store_scanned_blocks(
         &mut self,
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountUuid>>,
         #[cfg(feature = "orchard")] one_time_keys: Option<&[(AccountUuid, KeyId)]>,
     ) -> Result<(), SqliteClientError> {
+        #[cfg(feature = "orchard")]
+        let refused = one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)?;
         #[cfg(not(feature = "orchard"))]
-        let one_time_keys: Option<()> = None;
-        if one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)? {
+        let refused = wallet::one_time_scan_required(self.conn.0)?;
+        if refused {
             return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
         // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor

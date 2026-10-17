@@ -862,6 +862,22 @@ pub(crate) fn one_time_key_open(conn: &Connection) -> Result<bool, SqliteClientE
     )?)
 }
 
+/// Whether a build without `orchard` must refuse scanned blocks: a key is open (see
+/// [`one_time_key_open`]), or discovery waits for the scan to judge a publication in an
+/// account's range or to try a key in a hinted block, which only an `orchard` build's
+/// scan does (see `one_time_ivk::restore::discovery`).
+#[cfg(not(feature = "orchard"))]
+pub(crate) fn one_time_scan_required(conn: &Connection) -> Result<bool, SqliteClientError> {
+    Ok(one_time_key_open(conn)?
+        || conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_publications
+                 WHERE state = 0 AND height >= (SELECT MIN(birthday_height) FROM accounts))
+             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery WHERE scan_hint = 1)",
+            [],
+            |row| row.get(0),
+        )?)
+}
+
 /// Returns `true` if `address` (an encoded transparent receiver address) is already recorded
 /// in the `addresses` table, whether as a derived account receiver or as a prior standalone
 /// import.

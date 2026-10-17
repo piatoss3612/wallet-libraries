@@ -34,7 +34,8 @@ and this library adheres to Rust's notion of
   `ironwood_one_time_sweeps`, `ironwood_nullifier_scan_blocks` and
   `ironwood_one_time_spend_retention` tables, which released wallets hold empty.
 - Scanned blocks need one-time keys only while a key is open: a plain scan judges discovery's
-  publications and turns the hints it skips into late candidates.
+  publications and turns the hints it skips into late candidates. Builds without `orchard`,
+  which cannot, also refuse blocks while discovery waits for the scan.
 - `WalletDb::recheck_one_time_key_history` returns nothing. It ends the account's discovery
   pass, so the next one rechecks every key against a newer publication.
 - A rewind on the same chain, such as adding an account with an older birthday, repairs
@@ -83,7 +84,8 @@ and this library adheres to Rust's notion of
   no actions or fee.
 - `wallet::init::migrations::ids::ONE_TIME_IVK`, the one-time IVK migration, which runs in
   every build. Builds without `orchard` refuse blocks and transactions with
-  `SqliteClientError::OneTimeIvksNotUsed` while a one-time key is open.
+  `SqliteClientError::OneTimeIvksNotUsed` while a one-time key is open, and blocks while
+  discovery waits for the scan.
 
 ### Changed
 

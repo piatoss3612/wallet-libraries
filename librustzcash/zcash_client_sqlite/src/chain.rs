@@ -551,7 +551,8 @@ mod tests {
 
     /// Blocks scanned and transactions decrypted without the wallet's open one-time keys
     /// are refused, leaving the scanned chain unchanged, also in builds without `orchard`,
-    /// which cannot use them. Inactive and closed keys do not block them.
+    /// which cannot use them. Inactive and closed keys do not block them. Without `orchard`,
+    /// a publication discovery waits for the scan to judge does.
     #[test]
     fn scanning_without_one_time_ivks_refuses_open_one_time_keys() {
         use crate::{error::SqliteClientError, testing::db::TestDb};
@@ -645,5 +646,32 @@ mod tests {
             Zatoshis::const_from_u64(5),
         );
         st.scan_cached_blocks(h3, 1);
+        // Without `orchard`, which cannot judge it, a publication the scan has yet to judge
+        // refuses them too.
+        #[cfg(not(feature = "orchard"))]
+        {
+            st.wallet()
+                .conn()
+                .execute(
+                    "INSERT INTO ironwood_one_time_publications (height, hash, tree_size)
+                     VALUES (?1, zeroblob(32), 0)",
+                    [u32::from(h3) + 10],
+                )
+                .unwrap();
+            let (h4, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(5),
+            );
+            assert!(matches!(
+                st.try_scan_cached_blocks(h4, 1),
+                Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
+            ));
+            st.wallet()
+                .conn()
+                .execute_batch("UPDATE ironwood_one_time_publications SET state = 1")
+                .unwrap();
+            st.scan_cached_blocks(h4, 1);
+        }
     }
 }
