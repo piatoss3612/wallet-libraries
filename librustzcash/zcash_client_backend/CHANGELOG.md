@@ -30,7 +30,6 @@ and this library adheres to Rust's notion of
   `create_pczt_from_proposal` and `extract_and_store_transaction_from_pczt` reject a
   transaction without it. A PCZT created before this change can't be extracted, because its
   proposal metadata lacks the new flag.
-
 - `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery` may release only part of the
   retained evidence per call; it returns true once release reaches the tip.
 

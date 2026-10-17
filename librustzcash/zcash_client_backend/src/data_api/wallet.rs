@@ -2400,8 +2400,8 @@ where
 }
 
 /// Returns whether one of `tx`'s Ironwood outputs decrypts with `internal_ivk`, the
-/// spending account's internal viewing key. A one-time-key spend must carry such an
-/// output (see [`crate::fees::orchard::InputView::is_one_time`]).
+/// spending account's internal viewing key (see
+/// [`crate::fees::orchard::InputView::is_one_time`]).
 #[cfg(feature = "orchard")]
 fn has_one_time_marker(
     tx: &zcash_primitives::transaction::Transaction,
