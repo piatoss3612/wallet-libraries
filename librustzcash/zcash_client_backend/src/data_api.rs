@@ -2898,9 +2898,8 @@ impl<AccountId> ScannedBlock<AccountId> {
 
     /// Returns the accounts whose ordinary Ironwood keys scanned this block. Every
     /// transaction in the block that one of their keys recognizes is among
-    /// [`Self::transactions`], with its [`WalletTx::scanned_compact`] record. Only the
-    /// compact block scanner records them; a block from the full-block scanner names none,
-    /// so a store must not treat it as journaled for any account.
+    /// [`Self::transactions`], with its [`WalletTx::scanned_compact`] record. Both the
+    /// compact and the full-block scanner record them.
     ///
     /// [`WalletTx::scanned_compact`]: crate::wallet::WalletTx::scanned_compact
     #[cfg(feature = "orchard")]
