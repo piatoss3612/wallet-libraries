@@ -285,25 +285,46 @@ pub(crate) fn receivers<P: Parameters>(
 }
 
 /// Records `publication` if it is new, and judges it at once if the scan stored its block.
+/// Returns its state, or `None` if a claim for the same block with another tree size is
+/// accepted or not judged yet.
 fn note_publication(
     conn: &rusqlite::Transaction<'_>,
     publication: PublicationEnd,
-) -> Result<u8, SqliteClientError> {
-    conn.execute(
-        "INSERT OR IGNORE INTO ironwood_one_time_publications (height, hash, tree_size)
-         VALUES (?1, ?2, ?3)",
-        params![
-            u32::from(publication.height),
-            publication.hash,
-            publication.tree_size
-        ],
-    )?;
+) -> Result<Option<u8>, SqliteClientError> {
+    let height = u32::from(publication.height);
+    let stored: Option<(u64, u8)> = conn
+        .query_row(
+            "SELECT tree_size, state FROM ironwood_one_time_publications
+             WHERE height = ?1 AND hash = ?2",
+            params![height, publication.hash],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match stored {
+        None => {
+            conn.execute(
+                "INSERT INTO ironwood_one_time_publications (height, hash, tree_size)
+                 VALUES (?1, ?2, ?3)",
+                params![height, publication.hash, publication.tree_size],
+            )?;
+        }
+        Some((size, _)) if size == publication.tree_size => {}
+        // A rejected claim for this block gives way to a corrected size, judged afresh.
+        Some((_, REJECTED)) => {
+            conn.execute(
+                "UPDATE ironwood_one_time_publications SET tree_size = ?3, state = ?4
+                 WHERE height = ?1 AND hash = ?2",
+                params![height, publication.hash, publication.tree_size, PROVISIONAL],
+            )?;
+        }
+        Some(_) => return Ok(None),
+    }
     judge(conn, publication.height)?;
-    Ok(conn.query_row(
+    Ok(Some(conn.query_row(
         "SELECT state FROM ironwood_one_time_publications WHERE height = ?1 AND hash = ?2",
-        params![u32::from(publication.height), publication.hash],
+        params![height, publication.hash],
         |r| r.get(0),
-    )?)
+    )?))
 }
 
 /// Implements `OneTimeIvkRestoreWrite::record_one_time_filter_checks`.
@@ -329,10 +350,13 @@ pub(crate) fn record_filter_checks<P: Parameters>(
     match pass(conn, owner.0)? {
         Some(current)
             if current.publication.height == publication.height
-                && current.publication.hash == publication.hash => {}
+                && current.publication.hash == publication.hash
+                && current.publication.tree_size == publication.tree_size => {}
         Some(current) if publication.height < current.publication.height => return Ok(false),
         _ => {
-            note_publication(conn, publication)?;
+            if note_publication(conn, publication)?.is_none() {
+                return Ok(false);
+            }
             conn.execute(
                 "INSERT INTO ironwood_one_time_discovery
                     (account_id, publication_height, publication_hash)
@@ -476,7 +500,7 @@ pub(crate) fn record_lookup<P: Parameters>(
     if (page != applied && page != 0) || u32::from(revision.height) < cutoff {
         return Ok(false);
     }
-    if note_publication(conn, revision)? == REJECTED {
+    if note_publication(conn, revision)?.is_none_or(|state| state == REJECTED) {
         return Ok(false);
     }
     if page == 0 && applied > 0 {

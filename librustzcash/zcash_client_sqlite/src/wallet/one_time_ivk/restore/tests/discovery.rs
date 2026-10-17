@@ -428,6 +428,32 @@ fn a_publication_off_the_wallets_chain_is_rejected() {
     assert!(status(db, account).complete);
 }
 
+/// A publication rejected for its tree size can be corrected at the same block, and a claim
+/// that contradicts an accepted one is refused.
+#[test]
+fn a_rejected_tree_size_can_be_corrected() {
+    let mut st = restored_wallet();
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    let wrong = PublicationEnd {
+        tree_size: publication.tree_size + 1,
+        ..publication
+    };
+    let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, account, wrong, &[paid(key8())]));
+    let found = status(db, account);
+    assert!(found.publication.is_none());
+    assert!(found.lookups.is_empty());
+    assert!(run_pass(db, account, publication, &[paid(key8())]));
+    let found = status(db, account);
+    assert_eq!(found.publication, Some(publication));
+    assert_eq!(found.lookups.len(), 1);
+    assert!(!run_pass(db, account, wrong, &[]));
+    assert!(!look_up(db, account, key8(), wrong, &[]));
+    assert!(look_up(db, account, key8(), publication, &[]));
+    assert!(status(db, account).complete);
+}
+
 /// Paging resumes from the cursor and refuses a page that does not continue it.
 #[test]
 fn paging_resumes_from_its_cursor() {
