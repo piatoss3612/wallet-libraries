@@ -227,6 +227,47 @@ fn a_spent_late_payment_is_admitted_spent_through_the_journal() {
     assert_eq!(one_time_notes(&st), [(100_000, true)]);
 }
 
+/// A late payment whose sibling leaf the wallet already holds unpruned is admitted with
+/// that sibling intact. Here the sibling is the funder's change after it, its block's last
+/// leaf, which the wallet keeps as a reference once a later scan starts after that block.
+/// Inserting the sibling's hash before the marked payment let the pair prune, and
+/// inserting the payment under the pruned node then lost the sibling.
+#[test]
+fn a_late_payment_keeps_a_sibling_the_wallet_already_holds() {
+    let foreign = orchard::keys::FullViewingKey::from(
+        &orchard::keys::SpendingKey::from_bytes([3; 32]).unwrap(),
+    );
+    let receiver = derive(&ironwood_wallet(), key8()).address_at(0u32, Scope::External);
+    // The payment is the first of its bundle's two actions in some attempts.
+    for _ in 0..40 {
+        let tx = external_payment(receiver, &zcash_protocol::memo::MemoBytes::empty());
+        let mut st = ironwood_wallet();
+        let account = st.test_account().unwrap().id();
+        let (height, _) = st.generate_next_block_from_tx(1, &tx);
+        st.scan_cached_blocks_with_one_time_ivks(height, 1);
+        let candidate = candidate_at(&st, height, &derive(&st, key8()));
+        if candidate.position != 0 {
+            continue;
+        }
+        // A later scan starts after the payment's block.
+        pay(&mut st, &foreign, 10_000);
+        let publication = discover(&mut st, account, &[paid(key8())]);
+        let db = st.wallet_mut().db_mut();
+        assert!(look_up(
+            db,
+            account,
+            key8(),
+            publication,
+            &[candidate.clone()]
+        ));
+        send_witness(&mut st, key8(), &candidate);
+        assert_eq!(one_time_notes(&st), [(50_000, false)]);
+        assert_eq!(notes(&st, tip(&st).height).len(), 1);
+        return;
+    }
+    panic!("the payment was never its bundle's first action");
+}
+
 /// A publication above the wallet's chain tip, or older than the current pass's, is
 /// refused.
 #[test]
