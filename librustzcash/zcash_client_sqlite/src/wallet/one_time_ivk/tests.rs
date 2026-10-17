@@ -202,12 +202,22 @@ pub(super) fn prepare_from(
 /// Starts or extends trial decryption of `key` from `from`, as registration and
 /// finished refund sweeps do.
 pub(super) fn activate_key(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) {
-    assert!(tx(db, |c, _| activate(c, key_ref(c, account, key)?, from)).unwrap());
+    tx(db, |c, _| activate(c, key_ref(c, account, key)?, from)).unwrap();
 }
 
-/// `account`'s queued candidates for `key`.
+/// `account`'s queued candidates for `key`, in position order.
 pub(super) fn pending(db: &Db, account: AccountUuid, key: KeyId) -> Vec<PendingPayment> {
-    store::restore::payments::pending_payments(&db.conn, account, key).unwrap()
+    let id = key_ref(&db.conn, account, key).unwrap();
+    db.conn
+        .prepare(
+            "SELECT txid, action_index, height, block_hash, tx_index, position, encrypted_note
+             FROM ironwood_one_time_payment_recovery WHERE one_time_key_id = ?1 ORDER BY position",
+        )
+        .unwrap()
+        .query_map([id], store::restore::payments::payment)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 /// Records `observation` for `key`'s operation `reference` at `now`, adding the

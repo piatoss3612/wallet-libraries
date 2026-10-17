@@ -31,8 +31,8 @@ use super::{
     recovery::recover_refund_memos,
 };
 use crate::wallet::one_time_ivk::{
-    Discovery, KeyId, Purpose, account_key, activate, corrupt, decode_index, index_after, key_ref,
-    register, restore_start, stored_key_id, swap::reservations::record_provider_seen,
+    Discovery, KeyId, Purpose, account_key, activate, corrupt, index_after, key_ref, register,
+    restore_start, stored_key_id, swap::reservations::record_provider_seen,
 };
 use crate::wallet::one_time_rewind::{ACCEPTED, PROVISIONAL, restart_cursor};
 use crate::{
@@ -183,9 +183,10 @@ pub(crate) fn status<P: Parameters>(
         [owner.0],
         |r| r.get(0),
     )?;
+    let complete = complete(conn, params, owner)?;
     if fresh(conn, owner.0)?
         && !unpaid_closed
-        && complete(conn, params, owner)?
+        && complete
         && !conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
                  JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
@@ -211,9 +212,15 @@ pub(crate) fn status<P: Parameters>(
             (Purpose::Refund, pass.refund.0),
         ]),
     };
-    // Nothing is due against a rejected pass until a new publication starts another.
-    let usable = current.as_ref().is_some_and(|pass| pass.state != REJECTED);
-    let lookups = if usable {
+    // A rejected pass's publication is no longer the account's, so the next one starts a new
+    // pass. Nothing is due against it until then.
+    let usable = current.as_ref().filter(|pass| pass.state != REJECTED);
+    let receiver = |r: &rusqlite::Row<'_>| -> Result<[u8; 43], SqliteClientError> {
+        r.get::<_, Vec<u8>>(2)?
+            .try_into()
+            .map_err(|_| corrupt("invalid stored receiver"))
+    };
+    let lookups = if usable.is_some() {
         conn.prepare(
             "SELECT k.purpose, k.key_index, k.receiver, l.cutoff_height, l.applied,
                 l.last_position, l.last_nullifier
@@ -226,10 +233,7 @@ pub(crate) fn status<P: Parameters>(
             Ok::<_, SqliteClientError>(LookupWork {
                 work: DiscoveryWork {
                     key: stored_key_id(r)?,
-                    receiver: r
-                        .get::<_, Vec<u8>>(2)?
-                        .try_into()
-                        .map_err(|_| corrupt("invalid stored receiver"))?,
+                    receiver: receiver(r)?,
                 },
                 cutoff: BlockHeight::from(r.get::<_, u32>(3)?),
                 applied: r.get(4)?,
@@ -270,24 +274,14 @@ pub(crate) fn status<P: Parameters>(
         .query_and_then([owner.0], |r| {
             Ok::<_, SqliteClientError>(DiscoveryWork {
                 key: stored_key_id(r)?,
-                receiver: r
-                    .get::<_, Vec<u8>>(2)?
-                    .try_into()
-                    .map_err(|_| corrupt("invalid stored receiver"))?,
+                receiver: receiver(r)?,
             })
         })?
         .collect::<Result<_, _>>()?;
-    let complete = complete(conn, params, owner)?;
-    let refresh_due = complete && unpaid_closed;
     Ok(Some(DiscoveryStatus {
-        // A rejected pass's publication is no longer the account's, so the next one starts
-        // a new pass.
-        publication: current
-            .as_ref()
-            .filter(|pass| pass.state != REJECTED)
-            .map(|pass| pass.publication),
+        publication: usable.map(|pass| pass.publication),
         complete,
-        refresh_due,
+        refresh_due: complete && unpaid_closed,
         enumeration,
         closed,
         lookups,
@@ -386,6 +380,9 @@ pub(crate) fn record_filter_checks<P: Parameters>(
     }
     let (owner, _) = account_key(conn, params, account)?;
     let start = restore_start(conn, params, owner)?;
+    // A publication ending before the birthday holds no payment in the account's range, so
+    // its paid keys are protected from issuance but not looked up.
+    let in_range = publication.height >= start;
     match pass(conn, owner.0)? {
         Some(current)
             if current.publication.height == publication.height
@@ -410,7 +407,7 @@ pub(crate) fn record_filter_checks<P: Parameters>(
             // A key registered for a lookup before any pass, such as a refund key from a
             // funding memo, is due in this one, and a lookup still due from an earlier pass
             // reads on to this one's end. Each keeps its cursor.
-            if publication.height >= start {
+            if in_range {
                 conn.execute(
                     "UPDATE ironwood_one_time_lookups SET cutoff_height = ?2
                      WHERE ((cutoff_height IS NULL AND done_height IS NULL)
@@ -423,9 +420,6 @@ pub(crate) fn record_filter_checks<P: Parameters>(
             recover_refund_memos(conn, params, account, now)?;
         }
     }
-    // A publication ending before the birthday holds no payment in the account's range, so
-    // its paid keys are protected from issuance but not looked up.
-    let in_range = publication.height >= start;
     for check in checked {
         let used = check.seen || check.paid;
         // Refund issuance skips registered indices, so only a used refund key registers.
@@ -433,19 +427,6 @@ pub(crate) fn record_filter_checks<P: Parameters>(
         if check.key.purpose() != purpose || !(used || watched) {
             continue;
         }
-        // A key an earlier pass discovered already had its watch; another pass that lists
-        // it as recent (as every key is without a current recent set) must not reopen it.
-        let discovered: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
-                 JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
-                 WHERE k.account_id = ?1 AND k.purpose = ?2 AND k.key_index = ?3)",
-            params![
-                owner.0,
-                u8::from(purpose == Purpose::Receive),
-                check.key.index().to_be_bytes()
-            ],
-            |r| r.get(0),
-        )?;
         // Only a key in the searched range advances allocation. One past it is a closed key,
         // so never issued again, checked on its own and maybe at a sparse index, where a
         // filter hit may be a false positive (see `DiscoveryStatus::closed`).
@@ -463,6 +444,13 @@ pub(crate) fn record_filter_checks<P: Parameters>(
         if allocates {
             record_provider_seen(conn, id)?;
         }
+        // A key an earlier pass discovered already had its watch; another pass that lists
+        // it as recent (as every key is without a current recent set) must not reopen it.
+        let discovered: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups WHERE one_time_key_id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?;
         if check.paid && in_range {
             // A later pass reads a paid key's history again only if the key has no known
             // payment: an earlier pass found it unpaid, so the filter is newly positive. The
@@ -577,7 +565,18 @@ pub(crate) fn record_lookup<P: Parameters>(
             |r| r.get(0),
         )?;
         if !found {
-            let hint = candidate.height >= start && !scanned(conn, candidate.height)?;
+            // Whether the scan stored the block since the scan queue last required it.
+            let scanned: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM blocks WHERE height = ?1)
+                 AND EXISTS(SELECT 1 FROM scan_queue WHERE priority = ?2
+                     AND block_range_start <= ?1 AND block_range_end > ?1)",
+                params![
+                    u32::from(candidate.height),
+                    priority_code(&ScanPriority::Scanned)
+                ],
+                |r| r.get(0),
+            )?;
+            let hint = candidate.height >= start && !scanned;
             match queue_payment(conn, params, account, key, &candidate, revision, hint) {
                 Ok(()) => {}
                 Err(SqliteClientError::InvalidOneTimeIvkInput(_)) => {
@@ -896,13 +895,29 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
     sessions: &Sessions<'_>,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
-    let Some(through) = highest_scanned(conn)? else {
+    // The highest block the scan stored that the scan queue no longer requires.
+    let through = conn
+        .query_row(
+            "SELECT b.height, b.hash FROM blocks b WHERE EXISTS(SELECT 1 FROM scan_queue q
+                 WHERE q.priority = ?1 AND b.height >= q.block_range_start
+                   AND b.height < q.block_range_end)
+             ORDER BY b.height DESC LIMIT 1",
+            [priority_code(&ScanPriority::Scanned)],
+            |r| {
+                Ok(ChainPoint {
+                    height: BlockHeight::from(r.get::<_, u32>(0)?),
+                    hash: BlockHash(r.get(1)?),
+                })
+            },
+        )
+        .optional()?;
+    let Some(through) = through else {
         return Ok(());
     };
     let (owner, _) = account_key(conn, params, account)?;
     let waiting: Vec<(i64, KeyId, TxId, u32, Vec<u8>, u32, [u8; 32])> = conn
         .prepare(
-            "SELECT k.id, k.purpose, k.key_index, p.txid, p.action_index, p.witness,
+            "SELECT k.purpose, k.key_index, k.id, p.txid, p.action_index, p.witness,
                  p.witness_height, p.witness_hash
              FROM ironwood_one_time_payment_recovery p
              JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
@@ -913,17 +928,9 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
              ORDER BY p.height, p.position",
         )?
         .query_and_then(params![owner.0, ACCEPTED], |r| {
-            let key = {
-                let purpose = match r.get::<_, u8>(1)? {
-                    0 => Purpose::Refund,
-                    1 => Purpose::Receive,
-                    _ => return Err(corrupt("unsupported one-time key purpose")),
-                };
-                KeyId::new(purpose, decode_index(r.get(2)?)?)
-            };
             Ok::<_, SqliteClientError>((
-                r.get(0)?,
-                key,
+                r.get(2)?,
+                stored_key_id(r)?,
                 TxId::from_bytes(r.get(3)?),
                 r.get(4)?,
                 r.get(5)?,
@@ -940,7 +947,12 @@ pub(in crate::wallet::one_time_ivk) fn admit<P: Parameters>(
             height: BlockHeight::from(anchor_height),
             hash: BlockHash(anchor_hash),
         };
-        let path = siblings(&witness).and_then(|s| merkle_path(candidate.position, s));
+        // A stored witness is the path's 32 sibling hashes.
+        let (chunks, rest) = witness.as_chunks::<32>();
+        let path = <[[u8; 32]; 32]>::try_from(chunks)
+            .ok()
+            .filter(|_| rest.is_empty())
+            .and_then(|siblings| merkle_path(candidate.position, siblings));
         let admission = match path {
             Some(path) => apply_payment(
                 conn,
@@ -1026,40 +1038,4 @@ fn rescan_uncovered(
         }
     }
     Ok(())
-}
-
-/// The highest block the scan stored that the scan queue no longer requires.
-fn highest_scanned(conn: &Connection) -> Result<Option<ChainPoint>, SqliteClientError> {
-    Ok(conn
-        .query_row(
-            "SELECT b.height, b.hash FROM blocks b WHERE EXISTS(SELECT 1 FROM scan_queue q
-                 WHERE q.priority = ?1 AND b.height >= q.block_range_start
-                   AND b.height < q.block_range_end)
-             ORDER BY b.height DESC LIMIT 1",
-            [priority_code(&ScanPriority::Scanned)],
-            |r| {
-                Ok(ChainPoint {
-                    height: BlockHeight::from(r.get::<_, u32>(0)?),
-                    hash: BlockHash(r.get(1)?),
-                })
-            },
-        )
-        .optional()?)
-}
-
-/// Whether the scan stored block `height` since the scan queue last required it.
-fn scanned(conn: &Connection, height: BlockHeight) -> Result<bool, SqliteClientError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM blocks WHERE height = ?1)
-         AND EXISTS(SELECT 1 FROM scan_queue WHERE priority = ?2
-             AND block_range_start <= ?1 AND block_range_end > ?1)",
-        params![u32::from(height), priority_code(&ScanPriority::Scanned)],
-        |r| r.get(0),
-    )?)
-}
-
-/// The 32 sibling hashes a stored witness holds.
-fn siblings(bytes: &[u8]) -> Option<[[u8; 32]; 32]> {
-    let (chunks, rest) = bytes.as_chunks::<32>();
-    rest.is_empty().then(|| chunks.try_into().ok()).flatten()
 }

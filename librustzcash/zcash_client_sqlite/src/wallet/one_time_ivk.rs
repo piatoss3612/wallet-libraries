@@ -403,7 +403,7 @@ fn activate(
     conn: &rusqlite::Transaction<'_>,
     id: i64,
     from: BlockHeight,
-) -> Result<bool, SqliteClientError> {
+) -> Result<(), SqliteClientError> {
     let (active_from, closed): (Option<u32>, bool) = conn.query_row(
         "SELECT active_from, closed_at IS NOT NULL FROM ironwood_one_time_keys WHERE id = ?1",
         [id],
@@ -415,7 +415,7 @@ fn activate(
         })?
         .map_or(u32::from(from), |h| h.saturating_add(1));
     let rescan_end = match active_from {
-        Some(start) if !closed && start <= u32::from(from) => return Ok(true),
+        Some(start) if !closed && start <= u32::from(from) => return Ok(()),
         // Lowering an open key's start only adds the older blocks.
         Some(start) if !closed => start.min(scanned_end),
         _ => scanned_end,
@@ -424,8 +424,7 @@ fn activate(
         "UPDATE ironwood_one_time_keys SET active_from = ?2, closed_at = NULL WHERE id = ?1",
         rusqlite::params![id, u32::from(from)],
     )?;
-    queue_rescan(conn, from..BlockHeight::from(rescan_end))?;
-    Ok(true)
+    queue_rescan(conn, from..BlockHeight::from(rescan_end))
 }
 
 /// Queues `range` for a forced rescan with historic priority.

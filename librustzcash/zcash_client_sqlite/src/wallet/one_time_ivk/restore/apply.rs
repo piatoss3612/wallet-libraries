@@ -12,10 +12,7 @@ use zcash_protocol::{
     consensus::{BlockHeight, Parameters},
 };
 
-use super::{
-    PendingPayment,
-    payments::{authenticate, pending_payments},
-};
+use super::{PendingPayment, payments::authenticate};
 use crate::wallet::one_time_ivk::{KeyId, corrupt};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -76,12 +73,6 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     through: ChainPoint,
     (anchor, path): (ChainPoint, &MerklePath),
 ) -> Result<Admission, SqliteClientError> {
-    if !pending_payments(conn, account, key)?
-        .iter()
-        .any(|p| p == candidate)
-    {
-        return Err(corrupt("one-time-key payment is not queued or changed"));
-    }
     let (key_ref, recovered) = authenticate(conn, params, account, key, candidate)?;
     let dequeue = || {
         conn.execute(

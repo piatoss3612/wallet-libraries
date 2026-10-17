@@ -2701,6 +2701,18 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
 }
 
 #[cfg(feature = "orchard")]
+impl<C, P, CL, R> WalletDb<C, P, CL, R> {
+    /// The handle state that admitting a late one-time payment routes its enhancement with.
+    fn one_time_sessions(&self) -> wallet::one_time_ivk::restore::apply::Sessions<'_> {
+        wallet::one_time_ivk::restore::apply::Sessions {
+            configured: self.transparent_ledger_mode,
+            enhance: &self.enhance_pir_session,
+            tpir: &self.transparent_pir_session,
+        }
+    }
+}
+
+#[cfg(feature = "orchard")]
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIvkRead
     for WalletDb<C, P, CL, R>
 {
@@ -2821,13 +2833,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         complete: bool,
         now: i64,
     ) -> Result<bool, SqliteClientError> {
-        let configured = self.transparent_ledger_mode;
         self.transactionally(|wdb| {
-            let sessions = wallet::one_time_ivk::restore::apply::Sessions {
-                configured,
-                enhance: &wdb.enhance_pir_session,
-                tpir: &wdb.transparent_pir_session,
-            };
+            let sessions = wdb.one_time_sessions();
             wallet::one_time_ivk::restore::discovery::record_lookup(
                 wdb.conn.0, wdb.params, &sessions, account, key, revision, page, records, complete,
                 now,
@@ -2854,13 +2861,8 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         anchor: ChainPoint,
         siblings: [[u8; 32]; 32],
     ) -> Result<(), SqliteClientError> {
-        let configured = self.transparent_ledger_mode;
         self.transactionally(|wdb| {
-            let sessions = wallet::one_time_ivk::restore::apply::Sessions {
-                configured,
-                enhance: &wdb.enhance_pir_session,
-                tpir: &wdb.transparent_pir_session,
-            };
+            let sessions = wdb.one_time_sessions();
             wallet::one_time_ivk::restore::discovery::record_witness(
                 wdb.conn.0, wdb.params, &sessions, account, key, position, anchor, siblings,
             )
@@ -3495,11 +3497,7 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             if let Some(keys) = one_time_keys {
                 wallet::one_time_ivk::rescan_missed_keys(self.conn.0, keys, range.clone())?;
             }
-            let sessions = wallet::one_time_ivk::restore::apply::Sessions {
-                configured: self.transparent_ledger_mode,
-                enhance: &self.enhance_pir_session,
-                tpir: &self.transparent_pir_session,
-            };
+            let sessions = self.one_time_sessions();
             wallet::one_time_ivk::restore::discovery::after_blocks_stored(
                 self.conn.0,
                 &self.params,

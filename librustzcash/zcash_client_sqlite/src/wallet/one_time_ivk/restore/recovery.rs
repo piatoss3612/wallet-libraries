@@ -6,10 +6,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use crate::wallet::one_time_ivk::{Discovery, KeyId, Purpose, account_key, invalid, register};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
-/// See `WalletDb::recheck_one_time_key_history`: ends the account's discovery pass, so
-/// the next publication starts another, which checks every key against its filters and
-/// reads past its cursor the history of every key with a known payment, which the filters
-/// alone would not send to a lookup again.
+/// Implements `WalletDb::recheck_one_time_key_history`.
 pub(in crate::wallet::one_time_ivk) fn recheck<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -89,8 +86,7 @@ pub(in crate::wallet::one_time_ivk) fn refund_memos_pending(
 ///
 /// A marker still lacking that evidence once scanning passed its block was funded before
 /// the birthday or is not this wallet's: its key is looked up without advancing
-/// allocation, so a forged record cannot exhaust the index space. The lookup runs in the
-/// account's current discovery pass, or the next one.
+/// allocation, so a forged record cannot exhaust the index space.
 pub(in crate::wallet::one_time_ivk) fn recover_refund_memos<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,

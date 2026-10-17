@@ -77,7 +77,9 @@ pub(in crate::wallet::one_time_ivk) fn authenticate<P: Parameters>(
 }
 
 /// A queued candidate from a row selecting its columns in declaration order.
-fn payment(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingPayment> {
+pub(in crate::wallet::one_time_ivk) fn payment(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PendingPayment> {
     let bytes: Vec<u8> = row.get(6)?;
     let bytes = bytes
         .try_into()
@@ -91,20 +93,6 @@ fn payment(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingPayment> {
         position: row.get(5)?,
         encrypted_note: EncryptedNote::from_bytes(bytes),
     })
-}
-
-/// `account`'s queued candidates for `key`. Loading does not credit or complete them.
-pub(in crate::wallet::one_time_ivk) fn pending_payments(
-    conn: &Connection,
-    account: AccountUuid,
-    key: KeyId,
-) -> Result<Vec<PendingPayment>, SqliteClientError> {
-    let id = key_ref(conn, account, key)?;
-    let mut stmt = conn.prepare(
-        "SELECT txid, action_index, height, block_hash, tx_index, position, encrypted_note
-         FROM ironwood_one_time_payment_recovery WHERE one_time_key_id = ?1 ORDER BY position",
-    )?;
-    Ok(stmt.query_map([id], payment)?.collect::<Result<_, _>>()?)
 }
 
 /// The queued candidate for output `action` of `txid`, if any.
