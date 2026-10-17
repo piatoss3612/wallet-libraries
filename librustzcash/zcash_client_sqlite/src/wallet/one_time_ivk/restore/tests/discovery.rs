@@ -484,6 +484,21 @@ fn a_fresh_account_rechecks_keys_that_closed_unpaid() {
     let found = status(db, account);
     assert!(found.complete);
     assert!(found.refresh_due);
+    // A pass that finds the key paid keeps discovery incomplete until its lookup is done,
+    // while issuance still waits for nothing.
+    let publication = publication_at(&st, st.latest_cached_block().unwrap().height());
+    let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, account, publication, &[paid(key.key_id())]));
+    let found = status(db, account);
+    assert!(!found.complete);
+    assert_eq!(found.lookups.len(), 1);
+    assert!(
+        prepare_from(db, account, clock_now(), start(), None)
+            .unwrap()
+            .is_ok()
+    );
+    assert!(look_up(db, account, key.key_id(), publication, &[]));
+    assert!(status(db, account).complete);
 }
 
 /// A late payment whose blocks the scan finished without journal coverage, as before the

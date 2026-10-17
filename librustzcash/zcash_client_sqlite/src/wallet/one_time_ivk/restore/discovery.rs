@@ -108,25 +108,16 @@ fn fresh(conn: &Connection, owner: i64) -> Result<bool, SqliteClientError> {
     )?)
 }
 
-/// Whether account `owner`'s discovery is complete (see `DiscoveryStatus::complete`). Every
-/// publication a lookup cursor read from must have matched the wallet's chain too.
+/// Whether account `owner`'s discovery is complete (see `DiscoveryStatus::complete`): no
+/// lookup is due, and every publication a lookup cursor read from matched the wallet's
+/// chain.
 pub(in crate::wallet::one_time_ivk) fn complete<P: Parameters>(
     conn: &Connection,
     params: &P,
     owner: crate::AccountRef,
 ) -> Result<bool, SqliteClientError> {
-    if fresh(conn, owner.0)? {
-        return Ok(true);
-    }
-    let Some(pass) = pass(conn, owner.0)? else {
-        return Ok(false);
-    };
-    let before_birthday = pass.publication.height < restore_start(conn, params, owner)?;
-    let judged = pass.state == ACCEPTED || (pass.state == PROVISIONAL && before_birthday);
-    Ok(judged
-        && pass.receive.1
-        && pass.refund.1
-        && conn.query_row(
+    let settled = |conn: &Connection| -> Result<bool, SqliteClientError> {
+        Ok(conn.query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
                  JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
                  WHERE k.account_id = ?1 AND l.cutoff_height IS NOT NULL)
@@ -138,6 +129,15 @@ pub(in crate::wallet::one_time_ivk) fn complete<P: Parameters>(
             params![owner.0, ACCEPTED],
             |r| r.get(0),
         )?)
+    };
+    // A fresh account has no restored history to discover, but once it starts a pass to
+    // recheck a key it issued, that pass and its lookups must finish too.
+    let Some(pass) = pass(conn, owner.0)? else {
+        return Ok(fresh(conn, owner.0)? && settled(conn)?);
+    };
+    let before_birthday = pass.publication.height < restore_start(conn, params, owner)?;
+    let judged = pass.state == ACCEPTED || (pass.state == PROVISIONAL && before_birthday);
+    Ok(judged && pass.receive.1 && pass.refund.1 && settled(conn)?)
 }
 
 /// Whether `account` may be issued new swap addresses: it was declared fresh, or its pass
