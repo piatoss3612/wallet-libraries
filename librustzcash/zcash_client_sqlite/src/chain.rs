@@ -647,7 +647,7 @@ mod tests {
         );
         st.scan_cached_blocks(h3, 1);
         // Without `orchard`, which cannot judge it, a publication the scan has yet to judge
-        // refuses them too.
+        // refuses them too while a pass uses it, but not once its account is gone.
         #[cfg(not(feature = "orchard"))]
         {
             st.wallet()
@@ -655,6 +655,15 @@ mod tests {
                 .execute(
                     "INSERT INTO ironwood_one_time_publications (height, hash, tree_size)
                      VALUES (?1, zeroblob(32), 0)",
+                    [u32::from(h3) + 10],
+                )
+                .unwrap();
+            st.wallet()
+                .conn()
+                .execute(
+                    "INSERT INTO ironwood_one_time_discovery
+                        (account_id, publication_height, publication_hash)
+                     SELECT id, ?1, zeroblob(32) FROM accounts",
                     [u32::from(h3) + 10],
                 )
                 .unwrap();
@@ -669,7 +678,7 @@ mod tests {
             ));
             st.wallet()
                 .conn()
-                .execute_batch("UPDATE ironwood_one_time_publications SET state = 1")
+                .execute_batch("DELETE FROM ironwood_one_time_discovery")
                 .unwrap();
             st.scan_cached_blocks(h4, 1);
         }
