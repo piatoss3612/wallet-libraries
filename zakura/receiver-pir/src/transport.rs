@@ -39,6 +39,10 @@ pub struct DirectoryClient<T> {
 /// The largest common proof file a client downloads.
 pub const MAX_WITNESS_BYTES: usize = 64 * 1024 * 1024;
 
+/// The most pages [`DirectoryClient::lookup`] reads, one query each. A longer history is
+/// read with [`DirectoryClient::page`] from a cursor the caller keeps.
+pub const MAX_LOOKUP_PAGES: u32 = 64;
+
 impl<T: Transport> DirectoryClient<T> {
     /// Use the exact advertised revision whose coverage the caller checked. Reuse the client
     /// across lookups and reconnect for a new revision.
@@ -147,7 +151,8 @@ impl<T: Transport> DirectoryClient<T> {
     }
 
     /// Return every payment to `receiver` in one publication, or an error, reading one page
-    /// at a time (see [`Self::page`]). No partial success or cleartext fallback. This does
+    /// at a time (see [`Self::page`]). A history of more than [`MAX_LOOKUP_PAGES`] pages is
+    /// [`Error::TooManyPages`], before any page past the first is read. No partial success or cleartext fallback. This does
     /// not hide from the directory that a receiver has several payments. Revalidate the
     /// anchor before crediting results if the wallet's chain changes while awaiting I/O.
     /// Payments are checked structurally only: the wallet validates their Action fields
@@ -166,6 +171,9 @@ impl<T: Transport> DirectoryClient<T> {
                 // The row decoder permits absence only on page zero.
                 return Ok(Vec::new());
             };
+            if record.total > MAX_LOOKUP_PAGES {
+                return Err(Error::TooManyPages);
+            }
             if let Some(previous) = records.last() {
                 check_next(previous, &record)?;
             }

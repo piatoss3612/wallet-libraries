@@ -43,6 +43,8 @@ pub enum Error {
     Pir,
     #[error("receiver publication changed")]
     Revision,
+    #[error("receiver history too long for one lookup")]
+    TooManyPages,
     #[error("receiver transport failed: {0}")]
     Transport(String),
     #[error(transparent)]
