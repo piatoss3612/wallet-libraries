@@ -136,12 +136,7 @@ where
         .one_time_discovery(account, now)
         .map_err(Error::Wallet)?
     else {
-        return Ok(Discovered {
-            complete: true,
-            lookups: 0,
-            witnesses: 0,
-            failed: vec![],
-        });
+        return Ok(nothing_due(vec![]));
     };
     let activation = params
         .activation_height(NetworkUpgrade::Nu6_3)
@@ -183,10 +178,12 @@ where
     }
 
     let mut failed = Vec::new();
-    let status = wallet
+    let Some(status) = wallet
         .one_time_discovery(account, now)
         .map_err(Error::Wallet)?
-        .ok_or(Error::Unavailable("the account has no discovery"))?;
+    else {
+        return Ok(nothing_due(failed));
+    };
     if !status.lookups.is_empty() {
         directory.open_session().await?;
         look_up_due(
@@ -201,10 +198,12 @@ where
         .await?;
     }
 
-    let status = wallet
+    let Some(status) = wallet
         .one_time_discovery(account, now)
         .map_err(Error::Wallet)?
-        .ok_or(Error::Unavailable("the account has no discovery"))?;
+    else {
+        return Ok(nothing_due(failed));
+    };
     if !status.witnesses.is_empty() {
         directory.open_session().await?;
         let witnesses = directory.witnesses().await?;
@@ -229,16 +228,29 @@ where
         }
     }
 
-    let status = wallet
+    let Some(status) = wallet
         .one_time_discovery(account, now)
         .map_err(Error::Wallet)?
-        .ok_or(Error::Unavailable("the account has no discovery"))?;
+    else {
+        return Ok(nothing_due(failed));
+    };
     Ok(Discovered {
         complete: status.complete,
         lookups: status.lookups.len(),
         witnesses: status.witnesses.len(),
         failed,
     })
+}
+
+/// What a run reports once the account has no discovery to run, as a fresh account has
+/// none again when its last work finishes: complete, with nothing due.
+fn nothing_due<E>(failed: Vec<(KeyId, Error<E>)>) -> Discovered<E> {
+    Discovered {
+        complete: true,
+        lookups: 0,
+        witnesses: 0,
+        failed,
+    }
 }
 
 /// Checks `purpose`'s keys from `cursor` against the filters and records each chunk, up to

@@ -560,8 +560,28 @@ async fn discovery_imports_every_late_payment() {
 /// publication, without walking the keys between, so a payment after it closed is found.
 #[tokio::test]
 async fn a_closed_key_past_a_filter_gap_is_rechecked() {
+    closed_key_paid_later(false).await;
+}
+
+/// A fresh account, which needs discovery only for a key that closed unpaid, finds the
+/// payment and completes once its discovery has nothing left to run.
+#[tokio::test]
+async fn a_fresh_account_completes_once_its_recheck_finishes() {
+    closed_key_paid_later(true).await;
+}
+
+/// Closes an incoming key far past the first window unpaid, pays it, and runs discovery,
+/// expecting it to find the payment and complete. A `fresh` account is declared fresh
+/// first.
+async fn closed_key_paid_later(fresh: bool) {
     let mut st = ironwood_wallet_in(TestDbFactory::default());
     let account = st.test_account().unwrap().id();
+    if fresh {
+        st.wallet_mut()
+            .db_mut()
+            .mark_one_time_account_fresh(account)
+            .unwrap();
+    }
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let index = 1_000_000_000;
     // An earlier pass saw the key unpaid, so it closed.
