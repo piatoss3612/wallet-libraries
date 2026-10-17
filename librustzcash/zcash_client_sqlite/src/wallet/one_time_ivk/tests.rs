@@ -152,17 +152,22 @@ pub(crate) fn reserve_key(
     reserve(db, account, purpose, from).unwrap()
 }
 
-/// Runs an empty discovery pass for `account` at the scanned tip, as a restore whose
-/// directory lists nothing for it does, so issuance may proceed.
-pub(super) fn discover_empty(st: &mut State, account: AccountUuid) {
+/// Runs a whole discovery pass for `account` against a publication ending at the scanned
+/// tip, with incoming `checks` and no refund key used, and returns the publication.
+pub(super) fn discover(
+    st: &mut State,
+    account: AccountUuid,
+    checks: &[FilterCheck],
+) -> PublicationEnd {
     use store::restore::tests::discovery::{publication_at, run_pass};
     let publication = publication_at(st, tip(st).height);
     assert!(run_pass(
         st.wallet_mut().db_mut(),
         account,
         publication,
-        &[]
+        checks
     ));
+    publication
 }
 
 /// Registers `key` as a restore discovers it, from `from`, with its history due for a
@@ -199,8 +204,8 @@ pub(super) fn prepare_from(
     })
 }
 
-/// Starts or extends trial decryption of `key` from `from`, as registration and
-/// finished refund sweeps do.
+/// Starts or extends trial decryption of `key` from `from`, as registration and a stored
+/// refund funding transaction do.
 pub(super) fn activate_key(db: &mut Db, account: AccountUuid, key: KeyId, from: BlockHeight) {
     tx(db, |c, _| activate(c, key_ref(c, account, key)?, from)).unwrap();
 }
@@ -349,16 +354,6 @@ pub(super) fn unspent_keys(st: &State, height: BlockHeight) -> Vec<Option<KeyId>
 pub(super) fn scanning_keys(st: &State) -> Vec<KeyId> {
     let keys = st.wallet().get_one_time_scanning_keys().unwrap();
     keys.iter().map(|k| k.key_id()).collect()
-}
-
-/// Pays `key` in a new scanned block and returns the output as a directory
-/// candidate. The output must be the chain's first Ironwood leaf.
-pub(super) fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
-    let fvk = derive(st, key);
-    let height = pay(st, &fvk, 100_000);
-    let candidate = candidate_at(st, height, &fvk);
-    assert_eq!(candidate.position, 0);
-    candidate
 }
 
 /// The first output to `fvk`'s external address in cached block `height`, as a directory

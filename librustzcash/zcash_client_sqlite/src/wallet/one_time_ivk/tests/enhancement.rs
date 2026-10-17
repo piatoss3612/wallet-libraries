@@ -13,7 +13,7 @@ fn ironwood_funded_wallet() -> (State, BlockHeight) {
     let first = pay(&mut st, &fvk, 1_000_000);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
     let account = st.test_account().unwrap().id();
-    discover_empty(&mut st, account);
+    discover(&mut st, account, &[]);
     (st, first)
 }
 
@@ -282,7 +282,7 @@ fn refund_funding_memo_recovers_from_seed_with_zero_change() {
     st.wallet_mut().update_chain_tip(mined).unwrap();
     let blocks = u32::from(mined) - u32::from(first) + 1;
     st.scan_cached_blocks_with_one_time_ivks(first, blocks as usize);
-    discover_empty(&mut st, restored);
+    discover(&mut st, restored, &[]);
     let pending = |st: &State| {
         store::restore::recovery::refund_memos_pending(st.wallet().conn(), restored).unwrap()
     };
@@ -405,7 +405,7 @@ fn refund_funding_refuses_its_memo_on_orchard_change() {
     st.scan_cached_blocks_with_one_time_ivks(funded, 1);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(5);
     let account = st.test_account().unwrap().id();
-    discover_empty(&mut st, account);
+    discover(&mut st, account, &[]);
     let tip = st.wallet().chain_height().unwrap().unwrap();
     let deposit = p2pkh(7).encode(st.network());
     let now = clock_now();

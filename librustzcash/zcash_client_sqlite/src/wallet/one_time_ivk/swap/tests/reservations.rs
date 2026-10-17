@@ -23,7 +23,8 @@ const EXPIRED: i64 = NOW + 61 + RECEIVE_RECLAIM_SECONDS;
 /// An Ironwood wallet scanned through one block holding an ordinary note.
 fn fixture() -> State {
     let mut st = undiscovered();
-    discover(&mut st, &[]);
+    let account = st.test_account().unwrap().id();
+    discover(&mut st, account, &[]);
     st
 }
 
@@ -33,19 +34,6 @@ fn undiscovered() -> State {
     let ordinary = parent(&st);
     pay(&mut st, &ordinary, 100_000);
     st
-}
-
-/// Runs a discovery pass at the tip with incoming `checks` and no refund key used.
-fn discover(st: &mut State, checks: &[FilterCheck]) {
-    use store::restore::tests::discovery::{publication_at, run_pass};
-    let account = st.test_account().unwrap().id();
-    let publication = publication_at(st, tip(st).height);
-    assert!(run_pass(
-        st.wallet_mut().db_mut(),
-        account,
-        publication,
-        checks
-    ));
 }
 
 /// Resumes the draft or reserves the next address, scanned from above the tip.
@@ -659,7 +647,8 @@ fn issuance_waits_for_discovery_and_skips_addresses_paid_during_the_watch() {
             paid: false,
             recent: true,
         };
-        discover(&mut st, &[watched]);
+        let account = st.test_account().unwrap().id();
+        discover(&mut st, account, &[watched]);
         if paid {
             let fvk = derive(&st, key);
             pay(&mut st, &fvk, 100_000);
@@ -715,7 +704,8 @@ fn issuance_skips_restored_addresses_the_provider_saw() {
             recent: false,
         })
         .collect();
-    discover(&mut st, &seen);
+    let account = st.test_account().unwrap().id();
+    discover(&mut st, account, &seen);
     assert_eq!(prepare(&mut st, NOW).key_id().index(), 3);
     abandon_indices(&mut st, 4..RECEIVE_GAP_LIMIT + 3);
     let draft = prepare(&mut st, NOW);
@@ -800,7 +790,7 @@ fn issuance_starts_after_the_scanned_tip_once_discovery_is_done() {
         if !fresh {
             let issued = db.prepare_receive_reservation(account, NOW, near, None);
             assert_eq!(refusal(issued), Some(Gap));
-            discover(&mut st, &[]);
+            discover(&mut st, account, &[]);
         }
         let db = st.wallet_mut().db_mut();
         let issued = db.prepare_receive_reservation(account, NOW, near, None);

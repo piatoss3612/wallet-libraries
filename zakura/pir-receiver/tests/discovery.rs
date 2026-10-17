@@ -3,7 +3,7 @@
 //! it finds only after checking it against its own chain. The service's own HTTP router
 //! is tested against these clients in wallet-pir.
 
-use std::{cell::RefCell, sync::Mutex};
+use std::sync::Mutex;
 
 use orchard::keys::{FullViewingKey, Scope};
 use receiver_directory::{
@@ -271,17 +271,15 @@ fn publish(
     end: ChainPoint,
     provider: &[ProviderSet],
 ) -> Routes {
-    let raw: Vec<_> = records.iter().map(raw_record).collect();
-    publish_raw(&raw, commitments, end, provider)
-}
-
-/// [`publish`]es row slots as given, whether or not a publisher would accept them.
-fn publish_raw(
-    records: &[RawRecord],
-    commitments: &[[u8; 32]],
-    end: ChainPoint,
-    provider: &[ProviderSet],
-) -> Routes {
+    // Each record's row slot, which the publisher writes after validating it.
+    let records: Vec<_> = records
+        .iter()
+        .map(|record| {
+            RawRecord::decode(&record.encode().unwrap())
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
     let manifest = Manifest {
         profile: PROFILE.into(),
         genesis: GENESIS,
@@ -298,7 +296,7 @@ fn publish_raw(
         filters: Vec::new(),
         filters_sha256: [0; 32],
     };
-    let snapshot = Snapshot::build(manifest, records, provider).unwrap();
+    let snapshot = Snapshot::build(manifest, &records, provider).unwrap();
     let positions = records
         .iter()
         .map(|record| u32::try_from(record.payment.position).unwrap())
@@ -310,13 +308,6 @@ fn publish_raw(
             .encode()
     });
     Routes::new(Server::new(snapshot).unwrap(), witnesses)
-}
-
-/// `record`'s row slot, which the publisher writes after validating it.
-fn raw_record(record: &Record) -> RawRecord {
-    RawRecord::decode(&record.encode().unwrap())
-        .unwrap()
-        .unwrap()
 }
 
 /// The fields of `manifest` its witness file binds to.
@@ -333,7 +324,7 @@ fn publication(manifest: &Manifest) -> Publication {
 }
 
 /// One publication's receiver routes, answered as the receiver service answers them:
-/// its manifest, PIR setup, rows, filters and witnesses, and real PIR evaluation of
+/// its manifest, PIR setup, filters and witnesses, and real PIR evaluation of
 /// each encrypted query. A session it does not serve is gone (410).
 struct Routes {
     server: Server,
@@ -375,7 +366,6 @@ impl Routes {
         }
         match material {
             "public" => (200, self.server.public().to_vec()),
-            "rows" => (200, self.server.rows().to_vec()),
             "filters" => (200, self.server.filters().to_vec()),
             "witness" => match &self.witnesses {
                 Some(bytes) => (200, bytes.clone()),
@@ -473,26 +463,13 @@ impl WriteLock for NoLock {
     }
 }
 
-/// Records each write's label.
-#[derive(Default)]
-struct Labels(RefCell<Vec<&'static str>>);
-
-impl WriteLock for Labels {
-    fn write<T>(&self, label: &'static str, write: impl FnOnce() -> T) -> T {
-        self.0.borrow_mut().push(label);
-        write()
-    }
-}
-
-/// Runs discovery for the test account at [`NOW`].
+/// Runs discovery for `account` at [`NOW`].
 async fn run(
     st: &mut State,
+    account: AccountUuid,
     directory: impl Transport,
-    lock: &impl WriteLock,
-    refresh: bool,
 ) -> Result<Discovered<SqliteClientError>, Error<SqliteClientError>> {
     let network = *st.network();
-    let account = st.test_account().unwrap().id();
     discover(
         st.wallet_mut().db_mut(),
         &network,
@@ -500,21 +477,22 @@ async fn run(
         GENESIS,
         ORIGIN,
         directory,
-        lock,
+        &NoLock,
         NOW,
-        refresh,
+        false,
     )
     .await
 }
 
-/// [`run`]s without a lock, expecting no failed key.
+/// [`run`]s for the test account, expecting no failed key.
 async fn run_clean(st: &mut State, directory: impl Transport) -> Discovered<SqliteClientError> {
-    let found = run(st, directory, &NoLock, false).await.unwrap();
+    let account = st.test_account().unwrap().id();
+    let found = run(st, account, directory).await.unwrap();
     assert!(found.failed.is_empty(), "{:?}", found.failed);
     found
 }
 
-/// The incoming key indices registered to the test account.
+/// The `purpose` key indices registered in the wallet, in order.
 fn registered(st: &State, purpose: Purpose) -> Vec<u64> {
     let code = match purpose {
         Purpose::Refund => 0,
@@ -681,13 +659,13 @@ async fn a_forged_payment_is_refused() {
     let mut forged = r.records[0].clone();
     forged.payment.ciphertext_prefix[0] ^= 1;
     let directory = serve(&[forged], r.through);
-    let found = run(&mut r.st, &directory, &NoLock, false).await.unwrap();
+    let found = run(&mut r.st, r.account, &directory).await.unwrap();
     assert!(!found.complete);
     assert_eq!(found.failed.len(), 1);
     assert_eq!(balance(&r.st), 0);
     // Backed off, so an immediate rerun makes no lookup.
     let before = lookups(&directory);
-    run(&mut r.st, &directory, &NoLock, false).await.unwrap();
+    run(&mut r.st, r.account, &directory).await.unwrap();
     assert_eq!(lookups(&directory), before);
 }
 
@@ -700,7 +678,7 @@ async fn a_publication_ahead_of_the_wallet_waits() {
         hash: BlockHash([7; 32]),
     };
     let directory = serve(&[], ahead);
-    let refused = run(&mut r.st, &directory, &NoLock, false).await;
+    let refused = run(&mut r.st, r.account, &directory).await;
     assert_matches!(refused, Err(Error::Unavailable(_)));
 }
 
@@ -741,45 +719,24 @@ async fn two_accounts_discover_independently() {
             .unwrap();
     let other_parent = FullViewingKey::from(usk.orchard());
     let paid = pay_unscanned_to(&mut r.st, &other_parent, 1, 0);
-    let height = BlockHeight::from(paid.payment.height);
-    let tip = r.st.wallet().chain_height().unwrap().unwrap();
-    r.st.scan_cached_blocks_with_one_time_ivks(
-        BlockHeight::from(100_000),
-        (u32::from(height) - 100_000 + 1) as usize,
-    );
-    let _ = tip;
+    // The new account sends the scan back to its birthday, at Ironwood activation.
+    let blocks = paid.payment.height - ACTIVATION + 1;
+    r.st.scan_cached_blocks_with_one_time_ivks(BlockHeight::from(ACTIVATION), blocks as usize);
     r.st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let through = r.st.wallet().block_fully_scanned().unwrap().unwrap();
-    let end = ChainPoint {
-        height: through.block_height(),
-        hash: through.block_hash(),
-    };
-    let directory = serve(&[paid], end);
+    let directory = serve(&[paid], tip(&r.st));
     run_clean(&mut r.st, &directory).await;
-    let network = *r.st.network();
-    let found = discover(
-        r.st.wallet_mut().db_mut(),
-        &network,
-        other,
-        GENESIS,
-        ORIGIN,
-        &directory,
-        &NoLock,
-        NOW,
-        false,
-    )
-    .await
-    .unwrap();
+    let found = run(&mut r.st, other, &directory).await.unwrap();
+    assert!(found.failed.is_empty(), "{:?}", found.failed);
     assert!(found.complete);
     let other_balance = r.st.get_total_balance(other).into_u64();
     assert_eq!(other_balance, VALUE);
     assert_eq!(balance(&r.st), 0);
 }
 
-/// Seen sets must commit to the wallet's genesis, as a sweep's publication must: another
+/// Seen sets must commit to the wallet's genesis, as discovery's publication must: another
 /// network's sets say nothing about this network's quotes. A publication without seen
 /// sets, or with a provider that has a recent set but no seen set, may omit any receiver,
-/// so issuance refuses it as sweeps do. Once every provider has a dated seen set, the
+/// so issuance refuses it as discovery does. Once every provider has a dated seen set, the
 /// sets cover the quote times they all cover, and hold what any of them holds.
 #[tokio::test]
 async fn seen_sets_need_this_network_and_every_provider() {

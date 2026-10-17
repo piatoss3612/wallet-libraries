@@ -646,25 +646,18 @@ mod tests {
             Zatoshis::const_from_u64(5),
         );
         st.scan_cached_blocks(h3, 1);
-        // Without `orchard`, which cannot judge it, a publication the scan has yet to judge
-        // refuses them too while a pass uses it, but not once its account is gone.
+        // Without `orchard`, which cannot settle discovery, a pass over a publication the
+        // scan has yet to judge refuses them too, and so does a late candidate, which waits
+        // for the scan to cover its blocks.
         #[cfg(not(feature = "orchard"))]
         {
+            let pending = u32::from(h3) + 10;
             st.wallet()
                 .conn()
                 .execute(
                     "INSERT INTO ironwood_one_time_publications (height, hash, tree_size)
                      VALUES (?1, zeroblob(32), 0)",
-                    [u32::from(h3) + 10],
-                )
-                .unwrap();
-            st.wallet()
-                .conn()
-                .execute(
-                    "INSERT INTO ironwood_one_time_discovery
-                        (account_id, publication_height, publication_hash)
-                     SELECT id, ?1, zeroblob(32) FROM accounts",
-                    [u32::from(h3) + 10],
+                    [pending],
                 )
                 .unwrap();
             let (h4, _, _) = st.generate_next_block(
@@ -672,18 +665,15 @@ mod tests {
                 AddressType::DefaultExternal,
                 Zatoshis::const_from_u64(5),
             );
-            assert!(matches!(
-                st.try_scan_cached_blocks(h4, 1),
-                Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
-            ));
-            st.wallet()
-                .conn()
-                .execute_batch("DELETE FROM ironwood_one_time_discovery")
-                .unwrap();
-            // So does a late candidate, which waits for the scan to cover its blocks.
-            st.wallet()
-                .conn()
-                .execute(
+            for (table, waiting) in [
+                (
+                    "ironwood_one_time_discovery",
+                    "INSERT INTO ironwood_one_time_discovery
+                        (account_id, publication_height, publication_hash)
+                     SELECT id, ?1, zeroblob(32) FROM accounts",
+                ),
+                (
+                    "ironwood_one_time_payment_recovery",
                     "INSERT INTO ironwood_one_time_payment_recovery
                         (one_time_key_id, txid, action_index, height, block_hash, tx_index,
                          position, encrypted_note, publication_height, publication_hash,
@@ -691,17 +681,21 @@ mod tests {
                      SELECT id, zeroblob(32), 0, ?1, zeroblob(32), 0, 0, zeroblob(148), ?1,
                          zeroblob(32), 0
                      FROM ironwood_one_time_keys",
-                    [u32::from(h3) + 10],
-                )
-                .unwrap();
-            assert!(matches!(
-                st.try_scan_cached_blocks(h4, 1),
-                Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
-            ));
-            st.wallet()
-                .conn()
-                .execute_batch("DELETE FROM ironwood_one_time_payment_recovery")
-                .unwrap();
+                ),
+            ] {
+                st.wallet().conn().execute(waiting, [pending]).unwrap();
+                assert!(
+                    matches!(
+                        st.try_scan_cached_blocks(h4, 1),
+                        Err(Error::Wallet(SqliteClientError::OneTimeIvksNotUsed))
+                    ),
+                    "{table}"
+                );
+                st.wallet()
+                    .conn()
+                    .execute_batch(&format!("DELETE FROM {table}"))
+                    .unwrap();
+            }
             st.scan_cached_blocks(h4, 1);
         }
     }
@@ -748,26 +742,19 @@ mod tests {
         )
         .unwrap();
         st.wallet_mut().truncate_to_height(h1).unwrap();
-        let rejudged: i64 = st
+        // The publication waits to be judged again, and the journal holds nothing above the
+        // floor.
+        let repaired: (i64, i64, i64) = st
             .wallet()
             .conn()
             .query_row(
-                "SELECT state FROM ironwood_one_time_publications",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(rejudged, 0);
-        let (journal, past): (i64, i64) = st
-            .wallet()
-            .conn()
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM ironwood_spend_journal WHERE block_height > ?1),
+                "SELECT (SELECT state FROM ironwood_one_time_publications),
+                    (SELECT COUNT(*) FROM ironwood_spend_journal WHERE block_height > ?1),
                     (SELECT COUNT(*) FROM ironwood_journal_coverage WHERE end_height > ?1 + 1)",
                 [u32::from(h1)],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!((journal, past), (0, 0));
+        assert_eq!(repaired, (0, 0, 0));
     }
 }

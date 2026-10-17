@@ -56,16 +56,7 @@ fn key_lookups_validate_only_the_requested_key() {
     ));
     // Repeated recovery neither replaces the corrupted receiver nor promotes its key.
     let registered = tx(db, |c, p| {
-        register(
-            c,
-            p,
-            account,
-            corrupted,
-            start(),
-            true,
-            Discovery::Lookup,
-            0,
-        )
+        register(c, p, account, corrupted, start(), true, lookup, 0)
     });
     assert!(matches!(
         registered,

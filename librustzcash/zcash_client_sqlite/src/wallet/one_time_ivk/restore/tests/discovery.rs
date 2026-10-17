@@ -17,20 +17,26 @@ pub(in crate::wallet::one_time_ivk) fn paid(key: KeyId) -> FilterCheck {
     }
 }
 
-/// The publication ending at the stored block `height`, as the directory declares it.
+/// The publication ending at cached block `height`, as the directory declares it, whether
+/// or not the wallet stored that block.
 pub(in crate::wallet::one_time_ivk) fn publication_at(
     st: &State,
     height: BlockHeight,
 ) -> PublicationEnd {
-    let (hash, tree_size): ([u8; 32], u64) = row(
-        st.wallet().conn(),
-        "SELECT hash, ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
+    let data: Vec<u8> = value(
+        &st.cache().0,
+        "SELECT data FROM compactblocks WHERE height = ?1",
         [u32::from(height)],
     );
+    let block = CompactBlock::decode(data.as_slice()).unwrap();
     PublicationEnd {
         height,
-        hash,
-        tree_size,
+        hash: block.hash().0,
+        tree_size: block
+            .chain_metadata
+            .unwrap()
+            .ironwood_commitment_tree_size
+            .into(),
     }
 }
 
@@ -130,23 +136,17 @@ pub(in crate::wallet::one_time_ivk) fn send_witness(
         .unwrap();
 }
 
-/// Pays [`key8`] before the wallet knows it and scans past the payment, then runs a pass
-/// that finds the key paid and records its lookup: the payment is a late candidate. Returns
-/// the payment and the publication, which ends at the scanned tip.
+/// Pays [`key8`] in a [`restored_wallet`] before the wallet knows the key and scans past
+/// the payment, then runs a pass that finds the key paid and records its lookup: the
+/// payment is a late candidate. Returns the payment and the publication, which ends at the
+/// scanned tip.
 pub(in crate::wallet::one_time_ivk) fn late_fixture() -> (State, PendingPayment, PublicationEnd) {
-    late_fixture_in(ironwood_wallet())
-}
-
-/// [`late_fixture`] in `st`, an [`ironwood_wallet`] with no blocks.
-pub(in crate::wallet::one_time_ivk) fn late_fixture_in(
-    mut st: State,
-) -> (State, PendingPayment, PublicationEnd) {
+    let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
-    let publication = publication_at(&st, tip(&st).height);
+    let publication = discover(&mut st, account, &[paid(key8())]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key8())]));
     assert!(look_up(
         db,
         account,
@@ -214,9 +214,8 @@ fn a_spent_late_payment_is_admitted_spent_through_the_journal() {
     );
     st.scan_cached_blocks_with_one_time_ivks(height, 1);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
-    let publication = publication_at(&st, tip(&st).height);
+    let publication = discover(&mut st, account, &[paid(key8())]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key8())]));
     assert!(look_up(
         db,
         account,
@@ -226,41 +225,6 @@ fn a_spent_late_payment_is_admitted_spent_through_the_journal() {
     ));
     send_witness(&mut st, key8(), &candidate);
     assert_eq!(one_time_notes(&st), [(100_000, true)]);
-}
-
-/// Issuance waits until a restored account's discovery is complete. A fresh account
-/// needs none.
-#[test]
-fn issuance_waits_for_discovery() {
-    let mut st = restored_wallet();
-    let account = st.test_account().unwrap().id();
-    let publication = publication_at(&st, tip(&st).height);
-    let db = st.wallet_mut().db_mut();
-    let issued = prepare_from(db, account, clock_now(), start(), None);
-    assert_eq!(issued.unwrap().err(), Some(ReservationPolicy::Gap));
-    assert!(!status(db, account).complete);
-    assert!(run_pass(db, account, publication, &[]));
-    assert!(status(db, account).complete);
-    assert!(
-        prepare_from(db, account, clock_now(), start(), None)
-            .unwrap()
-            .is_ok()
-    );
-
-    let mut fresh = restored_wallet();
-    let account = fresh.test_account().unwrap().id();
-    let db = fresh.wallet_mut().db_mut();
-    db.mark_one_time_account_fresh(account).unwrap();
-    assert!(
-        db.one_time_discovery(account, clock_now())
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        prepare_from(db, account, clock_now(), start(), None)
-            .unwrap()
-            .is_ok()
-    );
 }
 
 /// A publication above the wallet's chain tip, or older than the current pass's, is
@@ -276,25 +240,17 @@ fn stale_and_future_publications_are_refused() {
     assert!(!run_pass(db, account, future, &[]));
     assert!(run_pass(db, account, current, &[]));
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let newer = publication_at(&st, tip(&st).height);
+    discover(&mut st, account, &[]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, newer, &[]));
     assert!(!run_pass(db, account, current, &[]));
 }
 
 /// A rewind below a late payment returns it to a hint, which the rescan settles.
 #[test]
 fn a_rewind_returns_late_payments_to_hints() {
-    let mut st = ironwood_wallet();
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let (mut st, candidate, _) = late_fixture_in(st);
+    let (mut st, candidate, _) = late_fixture();
     st.truncate_to_height_retaining_cache(candidate.height - 1);
-    let hint: bool = value(
-        st.wallet().conn(),
-        "SELECT scan_hint FROM ironwood_one_time_payment_recovery",
-        [],
-    );
-    assert!(hint);
+    assert!(scan_hint(&st));
     let tip = st.latest_cached_block().unwrap().height();
     st.scan_cached_blocks_with_one_time_ivks(
         candidate.height,
@@ -325,23 +281,13 @@ fn a_publication_before_the_birthday_needs_no_lookups() {
     assert!(key_state(db, key8()).1);
 }
 
-/// The publication ending at cached block `height`, before the wallet stores it.
-fn cached_publication(st: &State, height: BlockHeight) -> PublicationEnd {
-    let data: Vec<u8> = value(
-        &st.cache().0,
-        "SELECT data FROM compactblocks WHERE height = ?1",
-        [u32::from(height)],
-    );
-    let block = CompactBlock::decode(data.as_slice()).unwrap();
-    PublicationEnd {
-        height,
-        hash: block.hash().0,
-        tree_size: block
-            .chain_metadata
-            .unwrap()
-            .ironwood_commitment_tree_size
-            .into(),
-    }
+/// Whether the wallet's one queued candidate is a scan hint rather than a late candidate.
+fn scan_hint(st: &State) -> bool {
+    value(
+        st.wallet().conn(),
+        "SELECT scan_hint FROM ironwood_one_time_payment_recovery",
+        [],
+    )
 }
 
 /// Mines, without scanning, a block paying [`key8`] above a scanned tip, and runs a pass
@@ -355,7 +301,7 @@ fn hint_fixture() -> (State, PendingPayment) {
     let (height, _, _) = st.generate_next_block(&paid_to, AddressType::DefaultExternal, amount);
     let candidate = candidate_at(&st, height, &fvk);
     st.wallet_mut().update_chain_tip(height).unwrap();
-    let publication = cached_publication(&st, height);
+    let publication = publication_at(&st, height);
     let db = st.wallet_mut().db_mut();
     assert!(run_pass(db, account, publication, &[paid(key8())]));
     assert!(look_up(
@@ -365,12 +311,7 @@ fn hint_fixture() -> (State, PendingPayment) {
         publication,
         &[candidate.clone()]
     ));
-    let hint: bool = value(
-        st.wallet().conn(),
-        "SELECT scan_hint FROM ironwood_one_time_payment_recovery",
-        [],
-    );
-    assert!(hint);
+    assert!(scan_hint(&st));
     (st, candidate)
 }
 
@@ -395,12 +336,7 @@ fn a_hint_a_scan_skips_becomes_late() {
     let (mut st, candidate) = hint_fixture();
     st.scan_cached_blocks(candidate.height, 1);
     assert!(one_time_notes(&st).is_empty());
-    let late: bool = value(
-        st.wallet().conn(),
-        "SELECT scan_hint = 0 FROM ironwood_one_time_payment_recovery",
-        [],
-    );
-    assert!(late);
+    assert!(!scan_hint(&st));
     send_witness(&mut st, key8(), &candidate);
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
@@ -420,9 +356,8 @@ fn a_publication_off_the_wallets_chain_is_rejected() {
     assert!(!found.complete);
     assert!(found.lookups.is_empty());
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let publication = publication_at(&st, tip(&st).height);
+    let publication = discover(&mut st, account, &[]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[]));
     let found = status(db, account);
     assert!(!found.complete);
     assert_eq!(found.lookups.len(), 1);
@@ -483,9 +418,8 @@ fn a_recheck_looks_up_only_keys_with_payments() {
         ..paid(key8())
     };
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let second = publication_at(&st, tip(&st).height);
+    discover(&mut st, account, &[seen(9), seen(10)]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, second, &[seen(9), seen(10)]));
     exec(
         &db.conn,
         "UPDATE ironwood_one_time_keys SET paid_before_birthday = 1 WHERE key_index = ?1",
@@ -493,9 +427,8 @@ fn a_recheck_looks_up_only_keys_with_payments() {
     );
     db.recheck_one_time_key_history(account).unwrap();
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let third = publication_at(&st, tip(&st).height);
+    discover(&mut st, account, &[]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, third, &[]));
     let due: Vec<KeyId> = status(db, account)
         .lookups
         .iter()
@@ -556,13 +489,12 @@ fn an_unknown_accounts_discovery_is_an_error() {
 fn a_seen_key_closes_against_an_accepted_publication() {
     let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
-    let publication = publication_at(&st, tip(&st).height);
     let seen = FilterCheck {
         paid: false,
         ..paid(key8())
     };
+    discover(&mut st, account, &[seen]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[seen]));
     let (closed,): (bool,) = row(
         &db.conn,
         "SELECT closed_at IS NOT NULL FROM ironwood_one_time_keys WHERE key_index = ?1",
@@ -582,9 +514,8 @@ fn a_refused_page_queues_nothing() {
     let account = st.test_account().unwrap().id();
     let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let publication = publication_at(&st, tip(&st).height);
+    let publication = discover(&mut st, account, &[paid(key8())]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key8())]));
     let beyond = DirectoryPayment {
         height: u32::from(publication.height) + 1,
         ..directory_answer(&candidate)
@@ -614,11 +545,10 @@ fn paging_resumes_from_its_cursor() {
     let height = pay(&mut st, &fvk, 50_000);
     let second = candidate_at(&st, height, &fvk);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let publication = publication_at(&st, tip(&st).height);
     // The scan did not know the key, so both payments are late.
-    assert!(unspent_keys(&st, publication.height).is_empty());
+    assert!(unspent_keys(&st, tip(&st).height).is_empty());
+    let publication = discover(&mut st, account, &[paid(key8())]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key8())]));
     let now = clock_now();
     let page = |p: &PendingPayment| [directory_answer(p)];
     let record = |db: &mut Db, from: u32, p: &PendingPayment, done: bool| {
@@ -639,46 +569,10 @@ fn paging_resumes_from_its_cursor() {
     assert_eq!(found.witnesses.len(), 2);
 }
 
-/// A fresh account needs no discovery until a key it issued closes without a payment;
-/// then a newer publication should check that key, and issuance still waits for nothing.
-#[test]
-fn a_fresh_account_rechecks_keys_that_closed_unpaid() {
-    let mut st = scanned_wallet();
-    let account = st.test_account().unwrap().id();
-    let db = st.wallet_mut().db_mut();
-    assert!(
-        db.one_time_discovery(account, clock_now())
-            .unwrap()
-            .is_none()
-    );
-    let key = reserve_key(db, account, Purpose::Receive, start());
-    exec(
-        &db.conn,
-        "UPDATE ironwood_one_time_keys SET closed_at = 1 WHERE key_index = ?1",
-        [key.key_id().index().to_be_bytes()],
-    );
-    let found = status(db, account);
-    assert!(found.complete);
-    assert!(found.refresh_due);
-    // A pass that finds the key paid keeps discovery incomplete until its lookup is done,
-    // while issuance still waits for nothing.
-    let publication = publication_at(&st, st.latest_cached_block().unwrap().height());
-    let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key.key_id())]));
-    let found = status(db, account);
-    assert!(!found.complete);
-    assert_eq!(found.lookups.len(), 1);
-    assert!(
-        prepare_from(db, account, clock_now(), start(), None)
-            .unwrap()
-            .is_ok()
-    );
-    assert!(look_up(db, account, key.key_id(), publication, &[]));
-    assert!(status(db, account).complete);
-}
-
-/// A fresh account's discovery stays visible while a lookup it started is unfinished, even
-/// once a payment it found leaves no key closed unpaid, and again after a recheck.
+/// A fresh account needs no discovery until a key it issued closes without a payment; then
+/// a newer publication should check that key. Its discovery stays visible while a lookup
+/// it started is unfinished, even once a payment it found leaves no key closed unpaid, and
+/// again after a recheck. Issuance waits for none of it.
 #[test]
 fn a_fresh_accounts_unfinished_discovery_stays_visible() {
     let mut st = scanned_wallet();
@@ -686,17 +580,24 @@ fn a_fresh_accounts_unfinished_discovery_stays_visible() {
     // The key starts after its payment, so the scan misses it and discovery finds it late.
     let after = tip(&st).height + 10;
     let db = st.wallet_mut().db_mut();
+    assert!(
+        db.one_time_discovery(account, clock_now())
+            .unwrap()
+            .is_none()
+    );
     let key = reserve_key(db, account, Purpose::Receive, after).key_id();
     exec(
         &db.conn,
         "UPDATE ironwood_one_time_keys SET closed_at = 1 WHERE key_index = ?1",
         [key.index().to_be_bytes()],
     );
-    let candidate = pay_candidate_at(&mut st, key);
+    let found = status(db, account);
+    assert!(found.complete);
+    assert!(found.refresh_due);
+    let candidate = pay_candidate(&mut st, key);
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let publication = publication_at(&st, tip(&st).height);
+    let publication = discover(&mut st, account, &[paid(key)]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key)]));
     let page = [directory_answer(&candidate)];
     assert!(
         db.record_one_time_lookup(account, key, publication, 0, &page, false, clock_now())
@@ -708,6 +609,11 @@ fn a_fresh_accounts_unfinished_discovery_stays_visible() {
     let found = status(db, account);
     assert!(!found.complete);
     assert_eq!(found.lookups.len(), 1);
+    assert!(
+        prepare_from(db, account, clock_now(), after, None)
+            .unwrap()
+            .is_ok()
+    );
     assert!(
         db.record_one_time_lookup(account, key, publication, 1, &[], true, clock_now())
             .unwrap()
@@ -751,46 +657,29 @@ fn a_late_payment_over_uncovered_blocks_is_rescanned() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
-/// A lookup refuses a revision that ends below its cutoff, which cannot show the history
-/// through it.
-#[test]
-fn a_lookup_refuses_a_revision_below_its_cutoff() {
-    let mut st = restored_wallet();
-    let account = st.test_account().unwrap().id();
-    let older = publication_at(&st, tip(&st).height);
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(2);
-    let publication = publication_at(&st, tip(&st).height);
-    let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, publication, &[paid(key8())]));
-    assert!(!look_up(db, account, key8(), older, &[]));
-    assert!(look_up(db, account, key8(), publication, &[]));
-}
-
 /// A lookup still due when a newer pass starts reads on to the newer publication's end,
-/// keeping its cursor, so it finds a payment between the two.
+/// keeping its cursor, so it finds a payment between the two. It refuses a revision ending
+/// below that cutoff, which cannot show the history through it.
 #[test]
 fn a_new_pass_raises_a_due_lookups_cutoff() {
-    let mut st = ironwood_wallet();
+    let mut st = restored_wallet();
     let account = st.test_account().unwrap().id();
+    let first = discover(&mut st, account, &[paid(key8())]);
+    let candidate = pay_candidate(&mut st, key8());
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let first = publication_at(&st, tip(&st).height);
+    let second = discover(&mut st, account, &[paid(key8())]);
     let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, first, &[paid(key8())]));
-    let candidate = pay_candidate_at(&mut st, key8());
-    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let second = publication_at(&st, tip(&st).height);
-    let db = st.wallet_mut().db_mut();
-    assert!(run_pass(db, account, second, &[paid(key8())]));
     let due = status(db, account).lookups;
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].cutoff, second.height);
+    assert!(!look_up(db, account, key8(), first, &[]));
     assert!(look_up(db, account, key8(), second, &[candidate]));
     assert_eq!(status(db, account).witnesses.len(), 1);
 }
 
-/// Pays `key` in a new scanned block before the wallet scans with it, returning the
-/// payment as a directory candidate.
-fn pay_candidate_at(st: &mut State, key: KeyId) -> PendingPayment {
+/// Pays `key` in a new scanned block, before the wallet scans with it, and returns the
+/// output as a directory candidate.
+fn pay_candidate(st: &mut State, key: KeyId) -> PendingPayment {
     let fvk = derive(st, key);
     let height = pay(st, &fvk, 100_000);
     candidate_at(st, height, &fvk)
