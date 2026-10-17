@@ -725,8 +725,7 @@ mod tests {
         st.scan_cached_blocks(h1, 3);
         let conn = st.wallet().conn();
         conn.execute(
-            "INSERT OR IGNORE INTO ironwood_spend_journal
-             VALUES (?1, 0, zeroblob(32), zeroblob(32), 0, x'')",
+            "INSERT OR IGNORE INTO ironwood_spend_journal VALUES (?1, 0, zeroblob(32))",
             [u32::from(h3)],
         )
         .unwrap();

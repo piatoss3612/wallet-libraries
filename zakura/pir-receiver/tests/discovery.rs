@@ -595,6 +595,13 @@ async fn closed_key_paid_later(fresh: bool) {
                 .unwrap()
         );
     }
+    // The mock chain's block times are long past; the key closed just now, so newer
+    // publications check it again.
+    st.wallet()
+        .conn()
+        .execute("UPDATE ironwood_one_time_keys SET closed_at = ?1", [NOW])
+        .unwrap();
+    let db = st.wallet_mut().db_mut();
     assert!(
         db.one_time_discovery(account, NOW)
             .unwrap()
