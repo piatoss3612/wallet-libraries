@@ -8,7 +8,8 @@ use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// See `WalletDb::recheck_one_time_key_history`: ends the account's discovery pass, so
 /// the next publication starts another, which checks every key against its filters and
-/// reads the history of every key it ever looked up past its cursor.
+/// reads past its cursor the history of every key with a known payment, which the filters
+/// alone would not send to a lookup again.
 pub(in crate::wallet::one_time_ivk) fn recheck<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
@@ -19,12 +20,15 @@ pub(in crate::wallet::one_time_ivk) fn recheck<P: Parameters>(
         "DELETE FROM ironwood_one_time_discovery WHERE account_id = ?1",
         [owner.0],
     )?;
-    // The next pass makes every finished lookup due again, payments the scan found or not;
-    // the cursor keeps what was applied.
+    // The next pass makes the finished lookup of every key with a known payment due again;
+    // the cursor keeps what was applied. A key without one is looked up again only if the
+    // newer filters mark it paid.
     conn.execute(
         "UPDATE ironwood_one_time_lookups SET cutoff_height = NULL, done_height = NULL
          WHERE done_height IS NOT NULL AND one_time_key_id IN (
-             SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
+             SELECT k.id FROM ironwood_one_time_keys k
+             WHERE k.account_id = ?1 AND EXISTS(SELECT 1 FROM ironwood_received_notes n
+                 WHERE n.one_time_key_id = k.id))",
         [owner.0],
     )?;
     Ok(())

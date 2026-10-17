@@ -467,6 +467,35 @@ fn a_rejected_tree_size_can_be_corrected() {
     assert!(!found.complete);
 }
 
+/// A recheck reads again the history of a key with a known payment, but not of a key the
+/// filters only marked seen, which waits for newer filters to mark it paid.
+#[test]
+fn a_recheck_looks_up_only_keys_with_payments() {
+    let (mut st, candidate, _) = late_fixture();
+    let account = st.test_account().unwrap().id();
+    send_witness(&mut st, key8(), &candidate);
+    let seen = FilterCheck {
+        key: KeyId::new(Purpose::Receive, 9),
+        paid: false,
+        ..paid(key8())
+    };
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let second = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, account, second, &[seen]));
+    db.recheck_one_time_key_history(account).unwrap();
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let third = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, account, third, &[]));
+    let due: Vec<KeyId> = status(db, account)
+        .lookups
+        .iter()
+        .map(|l| l.work.key)
+        .collect();
+    assert_eq!(due, [key8()]);
+}
+
 /// An unknown account is an error, not an account with no discovery to run.
 #[test]
 fn an_unknown_accounts_discovery_is_an_error() {
