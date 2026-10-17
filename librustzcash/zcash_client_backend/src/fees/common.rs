@@ -368,6 +368,16 @@ where
     // We don't create a fully-transparent transaction if a change memo is used.
     let fully_transparent = net_flows.is_transparent() && change_memo.is_none();
 
+    // Spending a one-time-key note requires Ironwood change, even zero-valued (see
+    // `orchard_fees::InputView::is_one_time`).
+    #[cfg(feature = "orchard")]
+    let one_time_marker = ironwood
+        .inputs()
+        .iter()
+        .any(orchard_fees::InputView::<NoteRefT>::is_one_time);
+    #[cfg(not(feature = "orchard"))]
+    let one_time_marker = false;
+
     // Whether change should be returned to the transparent pool instead of being shielded.
     // Transparent change is only ever produced when the flows of the transaction are fully
     // transparent, so that shielded flows never leak change information to the transparent
@@ -543,13 +553,18 @@ where
 
     // The value that would remain if the transaction paid only the minimum (changeless)
     // fee is an upper bound on the change value: the fee never falls below `min_fee`.
-    let change_pool = select_change_pool(
-        &net_flows,
-        cfg.fallback_change_pool,
-        cfg.params
-            .is_nu_active(NetworkUpgrade::Nu6_3, target_height.into()),
-        (total_in - total_out_with_min_fee).unwrap_or(Zatoshis::ZERO),
-    );
+    let change_pool = if one_time_marker {
+        // Ironwood change never crosses the turnstile, so this is always allowed.
+        ShieldedPool::Ironwood
+    } else {
+        select_change_pool(
+            &net_flows,
+            cfg.fallback_change_pool,
+            cfg.params
+                .is_nu_active(NetworkUpgrade::Nu6_3, target_height.into()),
+            (total_in - total_out_with_min_fee).unwrap_or(Zatoshis::ZERO),
+        )
+    };
 
     let (target_change_count, target_change_counts) = if wants_transparent_change {
         // Transparent change is always emitted as a single output; the note-splitting policy
@@ -604,7 +619,8 @@ where
             // These are the situations where we might not have a change output.
             if fully_transparent
                 || (cfg.dust_output_policy.action() == DustAction::AddDustToFee
-                    && change_memo.is_none())
+                    && change_memo.is_none()
+                    && !one_time_marker)
             {
                 vec![OutputManifest::ZERO, target_change_counts]
             } else {
@@ -804,7 +820,7 @@ where
                             // Defend against losing money by using AddDustToFee with a too-high
                             // dust threshold.
                             simple_case()
-                        } else if change_memo.is_some() {
+                        } else if change_memo.is_some() || one_time_marker {
                             (
                                 vec![ChangeValue::shielded(
                                     change_pool,

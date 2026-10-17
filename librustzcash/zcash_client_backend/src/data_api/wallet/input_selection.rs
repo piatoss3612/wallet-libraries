@@ -3,7 +3,7 @@
 use {
     crate::{
         data_api::CoinbaseFilter,
-        fees::{ChangeValue, StandardFeeRule},
+        fees::StandardFeeRule,
         proposal::{Step, StepOutput, StepOutputIndex},
     },
     std::convert::Infallible,
@@ -43,7 +43,9 @@ use crate::{
         InputSource, MaxSpendMode, ReceivedNotes, SimpleNoteRetention, TargetValue,
         anchor_retention::PoolMigrationParams, wallet::TargetHeight,
     },
-    fees::{ChangeError, ChangeStrategy, EphemeralBalance, TransactionBalance, sapling},
+    fees::{
+        ChangeError, ChangeStrategy, ChangeValue, EphemeralBalance, TransactionBalance, sapling,
+    },
     proposal::{Proposal, ProposalError, ShieldedInputs},
     wallet::WalletTransparentOutput,
 };
@@ -1181,7 +1183,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                 shielded_inputs
                     .ironwood()
                     .iter()
-                    .map(|i| (*i.internal_note_id(), i.note().value()))
+                    .map(ironwood_input)
                     .collect()
             } else {
                 vec![]
@@ -1193,7 +1195,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                 selected_input_ids.chain(orchard_inputs.iter().map(|(id, _)| id));
             #[cfg(feature = "orchard")]
             let selected_input_ids =
-                selected_input_ids.chain(ironwood_inputs.iter().map(|(id, _)| id));
+                selected_input_ids.chain(ironwood_inputs.iter().map(|(id, ..)| id));
 
             let selected_input_ids = selected_input_ids.cloned().collect::<Vec<_>>();
 
@@ -1412,11 +1414,8 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                                     #[cfg(feature = "orchard")]
                                     let mut candidate_ironwood_inputs = ironwood_inputs.clone();
                                     #[cfg(feature = "orchard")]
-                                    candidate_ironwood_inputs.extend(
-                                        optional.ironwood().iter().map(|note| {
-                                            (*note.internal_note_id(), note.note().value())
-                                        }),
-                                    );
+                                    candidate_ironwood_inputs
+                                        .extend(optional.ironwood().iter().map(ironwood_input));
 
                                     let candidate_input_ids =
                                         candidate_sapling_inputs.iter().map(|(id, _)| id);
@@ -1425,7 +1424,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                                         .chain(candidate_orchard_inputs.iter().map(|(id, _)| id));
                                     #[cfg(feature = "orchard")]
                                     let candidate_input_ids = candidate_input_ids
-                                        .chain(candidate_ironwood_inputs.iter().map(|(id, _)| id));
+                                        .chain(candidate_ironwood_inputs.iter().map(|(id, ..)| id));
                                     let candidate_input_ids =
                                         candidate_input_ids.cloned().collect::<Vec<_>>();
 
@@ -2043,12 +2042,21 @@ where
     #[cfg(feature = "orchard")]
     let orchard_bundle_required = orchard_action_count > 0;
 
+    // Spending a one-time-key note adds a zero-valued Ironwood change output (see
+    // `orchard_fees::InputView::is_one_time`).
+    #[cfg(feature = "orchard")]
+    let one_time_marker = spendable_notes
+        .ironwood
+        .iter()
+        .any(|note| note.one_time_key_id().is_some());
+
     #[cfg(feature = "orchard")]
     let ironwood_action_count = orchard_fees::transactional_action_count(
         ::orchard::builder::BundleType::DEFAULT,
         ironwood_bundle_version_for_height(params, target_height),
         spendable_notes.ironwood.len(),
-        usize::from(orchard_receiver_payable && orchard_receivers_fill_ironwood),
+        usize::from(orchard_receiver_payable && orchard_receivers_fill_ironwood)
+            + usize::from(one_time_marker),
     )
     .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?;
     #[cfg(not(feature = "orchard"))]
@@ -2203,14 +2211,17 @@ where
     #[cfg(feature = "transparent-inputs")]
     let tr0_change = ephemeral_output_value
         .into_iter()
-        .map(ChangeValue::ephemeral_transparent)
-        .collect();
+        .map(ChangeValue::ephemeral_transparent);
     #[cfg(not(feature = "transparent-inputs"))]
-    let tr0_change = vec![];
+    let tr0_change = std::iter::empty::<ChangeValue>();
+    #[cfg(feature = "orchard")]
+    let tr0_change =
+        tr0_change.chain(one_time_marker.then(|| ChangeValue::ironwood(Zatoshis::ZERO, None)));
 
-    // The transaction produces no change, unless this is a transaction to a TEX address; in this
-    // case, the first transaction produces a single ephemeral change output.
-    let tr0_balance = TransactionBalance::new(tr0_change, tr0_fee)
+    // The transaction produces no change, unless this is a transaction to a TEX address, whose
+    // first transaction produces a single ephemeral change output, or it spends a one-time-key
+    // note, which adds the zero-valued Ironwood change output.
+    let tr0_balance = TransactionBalance::new(tr0_change.collect(), tr0_fee)
         .expect("the sum of an single-element vector of fee values cannot overflow");
 
     let payment = zip321::Payment::new(
@@ -2772,6 +2783,19 @@ where
 
 /// Helper that performs the dust-input retry pattern used by `propose_shielding`.
 ///
+/// `note` as fee and change calculation sees an Ironwood input: its ID, its value, and
+/// whether it is a one-time-key note (see `orchard_fees::InputView::is_one_time`).
+#[cfg(feature = "orchard")]
+fn ironwood_input<NoteRef: Copy>(
+    note: &crate::wallet::ReceivedNote<NoteRef, ::orchard::Note>,
+) -> (NoteRef, ::orchard::value::NoteValue, bool) {
+    (
+        *note.internal_note_id(),
+        note.note().value(),
+        note.one_time_key_id().is_some(),
+    )
+}
+
 /// On the first call to [`ChangeStrategy::compute_balance`], if the strategy
 /// reports [`ChangeError::DustInputs`], those inputs are removed from
 /// `transparent_inputs` and the balance is recomputed. The resulting proposal

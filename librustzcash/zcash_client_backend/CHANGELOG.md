@@ -17,9 +17,19 @@ and this library adheres to Rust's notion of
   keys for one scan batch, and `chain::scan_cached_blocks_with_one_time_ivks` now uses it.
   Its default is `get_one_time_scanning_keys`, and the early restore methods default to no
   early restore, so it stays opt-in for other stores.
+- `fees::orchard::InputView::is_one_time` (with `orchard`) marks a one-time-key input. It
+  defaults to false. `data_api::error::Error::OneTimeSpendWithoutMarker` reports a one-time
+  spend that lacks its marker output.
 
 ### Changed
 
+- Every transaction that spends a one-time-key note now includes an Ironwood output to the
+  spending account's internal address, zero-valued when there is no other change. A restore
+  can then recognize the spend with the account's ordinary keys. The change strategies and
+  `propose_send_max_transfer` add this output, and `create_proposed_transactions`,
+  `create_pczt_from_proposal` and `extract_and_store_transaction_from_pczt` reject a
+  transaction without it. A PCZT created before this change can't be extracted, because its
+  proposal metadata lacks the new flag.
 - `OneTimeIvkRestoreWrite::finish_one_time_nullifier_recovery` may release only part of the
   retained evidence per call; it returns true once release reaches the tip.
 
