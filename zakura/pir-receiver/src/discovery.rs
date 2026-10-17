@@ -78,8 +78,8 @@ pub trait WriteLock {
 /// What one [`discover`] run left. `E` is the wallet's error type.
 #[derive(Debug)]
 pub struct Discovered<E> {
-    /// Whether the account's discovery is complete, so new swap addresses may be issued
-    /// (see `DiscoveryStatus::complete`). Late payments may still wait for the scan.
+    /// Whether the account's discovery is complete, including every payment it found (see
+    /// `DiscoveryStatus::complete`). Until it is, the app runs discovery again.
     pub complete: bool,
     /// Lookups ready to run again now, for example after a page budget. A lookup backed off
     /// after a failure counts only once its retry is due.

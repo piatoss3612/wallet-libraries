@@ -177,7 +177,8 @@ fn a_late_payment_is_admitted_once_its_path_arrives() {
     let db = st.wallet_mut().db_mut();
     let found = status(db, account);
     assert_eq!(found.publication, Some(publication));
-    assert!(found.complete);
+    // The waiting payment keeps discovery incomplete, so the app keeps running it.
+    assert!(!found.complete);
     assert!(found.lookups.is_empty());
     assert_eq!(found.witnesses.len(), 1);
     assert_eq!(found.witnesses[0].position, candidate.position);
@@ -187,7 +188,9 @@ fn a_late_payment_is_admitted_once_its_path_arrives() {
     assert_eq!(one_time_notes(&st), [(100_000, false)]);
     let db = st.wallet_mut().db_mut();
     assert!(pending(db, account, key8()).is_empty());
-    assert!(status(db, account).witnesses.is_empty());
+    let found = status(db, account);
+    assert!(found.witnesses.is_empty());
+    assert!(found.complete);
     // The same answer again changes nothing.
     assert!(!look_up(db, account, key8(), publication, &[candidate]));
     assert_eq!(one_time_notes(&st), [(100_000, false)]);

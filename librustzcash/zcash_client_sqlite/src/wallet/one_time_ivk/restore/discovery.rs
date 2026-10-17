@@ -110,8 +110,8 @@ fn fresh(conn: &Connection, owner: i64) -> Result<bool, SqliteClientError> {
 }
 
 /// Whether account `owner`'s discovery is complete (see `DiscoveryStatus::complete`): no
-/// lookup is due, and every publication a lookup cursor read from matched the wallet's
-/// chain.
+/// lookup is due, no payment it found waits to be admitted, and every publication a lookup
+/// cursor read from matched the wallet's chain.
 pub(in crate::wallet::one_time_ivk) fn complete<P: Parameters>(
     conn: &Connection,
     params: &P,
@@ -122,6 +122,9 @@ pub(in crate::wallet::one_time_ivk) fn complete<P: Parameters>(
             "SELECT NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
                  JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
                  WHERE k.account_id = ?1 AND l.cutoff_height IS NOT NULL)
+             AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery c
+                 JOIN ironwood_one_time_keys k ON k.id = c.one_time_key_id
+                 WHERE k.account_id = ?1)
              AND NOT EXISTS(SELECT 1 FROM ironwood_one_time_lookup_reads r
                  JOIN ironwood_one_time_keys k ON k.id = r.one_time_key_id
                  JOIN ironwood_one_time_publications p
@@ -185,10 +188,7 @@ pub(crate) fn status<P: Parameters>(
         && !conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM ironwood_one_time_lookups l
                  JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
-                 WHERE k.account_id = ?1 AND l.done_height IS NULL)
-             OR EXISTS(SELECT 1 FROM ironwood_one_time_payment_recovery p
-                 JOIN ironwood_one_time_keys k ON k.id = p.one_time_key_id
-                 WHERE k.account_id = ?1)",
+                 WHERE k.account_id = ?1 AND l.done_height IS NULL)",
             [owner.0],
             |r| r.get::<_, bool>(0),
         )?

@@ -128,10 +128,10 @@ pub struct DiscoveryStatus {
     /// The publication the current pass uses, if one has started and its publication was
     /// not rejected.
     pub publication: Option<PublicationEnd>,
-    /// Whether every key the publication marks used is registered and every paid key's
-    /// history recorded, against a publication that matched the wallet's chain (or ended
-    /// before the account's birthday). New swap addresses wait for the first half, the
-    /// registration. Late candidates may still be waiting.
+    /// Whether every key the publication marks used is registered, every paid key's history
+    /// recorded and every payment found admitted, against a publication that matched the
+    /// wallet's chain (or ended before the account's birthday). New swap addresses wait for
+    /// the first part, the registration.
     pub complete: bool,
     /// Where filter checks resume for each purpose, or `None` once the pass checked both.
     pub enumeration: Option<[(Purpose, EnumerationCursor); 2]>,
