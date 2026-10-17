@@ -429,17 +429,27 @@ fn a_publication_off_the_wallets_chain_is_rejected() {
 }
 
 /// A publication rejected for its tree size can be corrected at the same block, and a claim
-/// that contradicts an accepted one is refused.
+/// that contradicts an accepted one is refused. Another account's pass over the rejected
+/// claim starts over.
 #[test]
 fn a_rejected_tree_size_can_be_corrected() {
-    let mut st = restored_wallet();
+    let mut st = ironwood_wallet();
     let account = st.test_account().unwrap().id();
+    let seed = SecretVec::new(vec![3; 32]);
+    let birthday = st.test_account().unwrap().birthday().clone();
+    let (other, _) = st
+        .wallet_mut()
+        .db_mut()
+        .create_account("other", &seed, &birthday, None)
+        .unwrap();
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
     let publication = publication_at(&st, tip(&st).height);
     let wrong = PublicationEnd {
         tree_size: publication.tree_size + 1,
         ..publication
     };
     let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, other, wrong, &[]));
     assert!(run_pass(db, account, wrong, &[paid(key8())]));
     let found = status(db, account);
     assert!(found.publication.is_none());
@@ -452,6 +462,9 @@ fn a_rejected_tree_size_can_be_corrected() {
     assert!(!look_up(db, account, key8(), wrong, &[]));
     assert!(look_up(db, account, key8(), publication, &[]));
     assert!(status(db, account).complete);
+    let found = status(db, other);
+    assert!(found.publication.is_none());
+    assert!(!found.complete);
 }
 
 /// An unknown account is an error, not an account with no discovery to run.

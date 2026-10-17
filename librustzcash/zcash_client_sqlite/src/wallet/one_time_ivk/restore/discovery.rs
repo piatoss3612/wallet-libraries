@@ -344,8 +344,14 @@ fn note_publication(
             )?;
         }
         Some((size, _)) if size == publication.tree_size => {}
-        // A rejected claim for this block gives way to a corrected size, judged afresh.
+        // A rejected claim for this block gives way to a corrected size, judged afresh. Every
+        // pass that checked the rejected claim's filters starts over.
         Some((_, REJECTED)) => {
+            conn.execute(
+                "DELETE FROM ironwood_one_time_discovery
+                 WHERE publication_height = ?1 AND publication_hash = ?2",
+                params![height, publication.hash],
+            )?;
             conn.execute(
                 "UPDATE ironwood_one_time_publications SET tree_size = ?3, state = ?4
                  WHERE height = ?1 AND hash = ?2",
