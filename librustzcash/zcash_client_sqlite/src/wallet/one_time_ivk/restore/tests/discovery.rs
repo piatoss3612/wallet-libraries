@@ -454,6 +454,17 @@ fn a_rejected_tree_size_can_be_corrected() {
     assert!(status(db, account).complete);
 }
 
+/// An unknown account is an error, not an account with no discovery to run.
+#[test]
+fn an_unknown_accounts_discovery_is_an_error() {
+    let st = restored_wallet();
+    let unknown = AccountUuid::from_uuid(uuid::Uuid::nil());
+    assert!(matches!(
+        st.wallet().db().one_time_discovery(unknown, clock_now()),
+        Err(SqliteClientError::AccountUnknown)
+    ));
+}
+
 /// Paging resumes from the cursor and refuses a page that does not continue it.
 #[test]
 fn paging_resumes_from_its_cursor() {

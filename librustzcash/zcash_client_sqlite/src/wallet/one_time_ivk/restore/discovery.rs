@@ -14,6 +14,7 @@ use std::ops::Range;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use zcash_client_backend::data_api::{
+    Account as _,
     one_time_ivk::restore::{
         DirectoryPayment, DiscoveryStatus, DiscoveryWork, EnumerationCursor, FilterCheck,
         LookupWork, PublicationEnd, WitnessRequest,
@@ -170,9 +171,12 @@ pub(crate) fn status<P: Parameters>(
     if params.activation_height(NetworkUpgrade::Nu6_3).is_none() {
         return Ok(None);
     }
-    let Ok((owner, _)) = account_key(conn, params, account) else {
+    let stored =
+        wallet::get_account(conn, params, account)?.ok_or(SqliteClientError::AccountUnknown)?;
+    if stored.ufvk().and_then(|key| key.orchard()).is_none() {
         return Ok(None);
-    };
+    }
+    let (owner, _) = account_key(conn, params, account)?;
     // A fresh account has no restored history, so it needs discovery only once a key it
     // issued closed without a payment, which a newer publication could still show paid.
     let unpaid_closed: bool = conn.query_row(

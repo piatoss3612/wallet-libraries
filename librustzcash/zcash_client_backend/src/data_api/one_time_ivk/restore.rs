@@ -150,7 +150,8 @@ pub struct DiscoveryStatus {
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait OneTimeIvkRestoreRead: OneTimeIvkRead {
     /// The account's discovery at `now`, or `None` if it has none to run: it was created
-    /// from a fresh seed, it has no Orchard viewing key, or Ironwood is not active.
+    /// from a fresh seed, it has no Orchard viewing key, or Ironwood is not active. An
+    /// unknown account is an error.
     fn one_time_discovery(
         &self,
         account: Self::AccountId,
