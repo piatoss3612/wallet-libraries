@@ -971,9 +971,7 @@ impl PositionTracker {
 /// without the fee, which it cannot compute without the transparent inputs' coins.
 #[cfg(feature = "orchard")]
 fn compact_tx(tx: &Transaction, index: TxIndex) -> crate::proto::compact_formats::CompactTx {
-    use crate::proto::compact_formats::{
-        CompactSaplingOutput, CompactSaplingSpend, CompactTx, CompactTxIn, TxOut,
-    };
+    use crate::proto::compact_formats::{CompactTx, CompactTxIn, TxOut};
     let sapling = tx.sapling_bundle();
     CompactTx {
         index: u16::from(index).into(),
@@ -982,28 +980,24 @@ fn compact_tx(tx: &Transaction, index: TxIndex) -> crate::proto::compact_formats
         spends: sapling
             .iter()
             .flat_map(|bundle| bundle.shielded_spends())
-            .map(|spend| CompactSaplingSpend {
-                nf: spend.nullifier().0.to_vec(),
-            })
+            .map(Into::into)
             .collect(),
         outputs: sapling
             .iter()
             .flat_map(|bundle| bundle.shielded_outputs())
-            .map(|output| CompactSaplingOutput {
-                cmu: output.cmu().to_bytes().to_vec(),
-                ephemeral_key: output.ephemeral_key().0.to_vec(),
-                ciphertext: output.enc_ciphertext()[..52].to_vec(),
-            })
+            .map(Into::into)
             .collect(),
         actions: tx
             .orchard_bundle()
             .iter()
-            .flat_map(|bundle| bundle.actions().iter().map(compact_action))
+            .flat_map(|bundle| bundle.actions().iter())
+            .map(Into::into)
             .collect(),
         ironwood_actions: tx
             .ironwood_bundle()
             .iter()
-            .flat_map(|bundle| bundle.actions().iter().map(compact_action))
+            .flat_map(|bundle| bundle.actions().iter())
+            .map(Into::into)
             .collect(),
         // A coinbase transaction's null input is omitted, as in a compact block.
         vin: tx
@@ -1025,19 +1019,6 @@ fn compact_tx(tx: &Transaction, index: TxIndex) -> crate::proto::compact_formats
                 script_pub_key: txout.script_pubkey().0.0.clone(),
             })
             .collect(),
-    }
-}
-
-/// The compact form of an Orchard-protocol `action`.
-#[cfg(feature = "orchard")]
-fn compact_action<A>(
-    action: &orchard::Action<A>,
-) -> crate::proto::compact_formats::CompactOrchardAction {
-    crate::proto::compact_formats::CompactOrchardAction {
-        nullifier: action.nullifier().to_bytes().to_vec(),
-        cmx: action.cmx().to_bytes().to_vec(),
-        ephemeral_key: action.encrypted_note().epk_bytes.to_vec(),
-        ciphertext: action.encrypted_note().enc_ciphertext[..52].to_vec(),
     }
 }
 
