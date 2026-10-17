@@ -783,6 +783,7 @@ pub(super) fn retention_height(st: &State) -> Option<BlockHeight> {
 }
 
 mod enhancement;
+mod journal;
 mod key_access;
 mod marker;
 mod scanning;

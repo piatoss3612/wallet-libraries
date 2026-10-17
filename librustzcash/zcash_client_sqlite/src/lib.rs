@@ -3546,6 +3546,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             .map(|block| (block.height(), block.block_hash()))
             .collect();
         #[cfg(feature = "orchard")]
+        let journal = wallet::one_time_ivk::journal::collect(&blocks);
+        #[cfg(feature = "orchard")]
         let scanned_range = blocks
             .first()
             .zip(blocks.last())
@@ -3585,6 +3587,8 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             &self.gap_limits,
             &scanned_block_identities,
         )?;
+        #[cfg(feature = "orchard")]
+        wallet::one_time_ivk::journal::record(self.conn.0, journal)?;
         #[cfg(feature = "orchard")]
         if let Some(range) = scanned_range.clone() {
             wallet::one_time_ivk::restore::sweep::revalidate(self.conn.0, range)?;

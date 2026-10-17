@@ -2064,6 +2064,39 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_SPEND_RETENTION: &str =
                 replay_through INTEGER CHECK (replay_through BETWEEN 0 AND 4294967295)
             )";
 
+pub(super) const TABLE_IRONWOOD_SPEND_JOURNAL: &str = "CREATE TABLE ironwood_spend_journal (
+                block_height INTEGER NOT NULL CHECK (block_height BETWEEN 0 AND 4294967295),
+                tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
+                block_hash BLOB NOT NULL CHECK (length(block_hash) = 32),
+                txid BLOB NOT NULL CHECK (length(txid) = 32),
+                ironwood_start_position INTEGER NOT NULL CHECK (ironwood_start_position >= 0),
+                compact_tx BLOB NOT NULL,
+                PRIMARY KEY (block_height, tx_index)
+            )";
+
+pub(super) const TABLE_IRONWOOD_SPEND_JOURNAL_NULLIFIERS: &str =
+    "CREATE TABLE ironwood_spend_journal_nullifiers (
+                block_height INTEGER NOT NULL,
+                tx_index INTEGER NOT NULL,
+                action_index INTEGER NOT NULL CHECK (action_index >= 0),
+                nf BLOB NOT NULL CHECK (length(nf) = 32),
+                PRIMARY KEY (block_height, tx_index, action_index),
+                FOREIGN KEY (block_height, tx_index)
+                    REFERENCES ironwood_spend_journal(block_height, tx_index) ON DELETE CASCADE
+            )";
+
+pub(super) const TABLE_IRONWOOD_JOURNAL_COVERAGE: &str = "CREATE TABLE ironwood_journal_coverage (
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                start_height INTEGER NOT NULL CHECK (start_height BETWEEN 0 AND 4294967295),
+                end_height INTEGER NOT NULL
+                    CHECK (end_height > start_height AND end_height <= 4294967296),
+                PRIMARY KEY (account_id, start_height)
+            )";
+
+pub(super) const INDEX_IRONWOOD_SPEND_JOURNAL_NULLIFIERS_NF: &str =
+    "CREATE INDEX idx_ironwood_spend_journal_nullifiers_nf
+                ON ironwood_spend_journal_nullifiers(nf)";
+
 pub(super) const INDEX_IRONWOOD_ONE_TIME_KEYS_ACCOUNT_RECEIVER: &str =
     "CREATE INDEX idx_ironwood_one_time_keys_account_receiver
                 ON ironwood_one_time_keys(account_id, receiver)";

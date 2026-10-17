@@ -13,7 +13,11 @@ and this library adheres to Rust's notion of
   early restore methods and `get_one_time_scanning_keys_for_range`, so a restored account's
   swap payments appear as its restore scan covers them rather than after restore sweeps.
 - `wallet::init::migrations::ids::ONE_TIME_IVK_EARLY_RESTORE`, an additive migration for early
-  restores.
+  restores and the spend journal.
+- A spend journal (with `orchard`): every block scan keeps each recognized transaction's
+  compact form and every Ironwood nullifier it reveals, matched to a wallet note or not, and
+  records which blocks it covered for each account. It grows with the wallet's own
+  transactions only. A rewind drops the entries and coverage above its rescan floor.
 - `TransparentPirSession`, with `WalletDb::with_transparent_pir_session`,
   `WalletDb::set_transparent_pir_session` and `WalletDb::transparent_pir_session`: the transparent work an open wallet holds
   back until the next chain tip, shared by the wallet's database handles like

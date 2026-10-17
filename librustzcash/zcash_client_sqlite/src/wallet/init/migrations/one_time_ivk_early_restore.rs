@@ -1,7 +1,9 @@
-//! Adds early restore of one-time IVK payments (see `one_time_ivk::restore::early`).
+//! Adds early restore of one-time IVK payments (see `one_time_ivk::restore::early`) and
+//! the spend journal (see `one_time_ivk::journal`).
 //!
 //! Additive: existing queued payments have no witness and are no hints, existing sweeps
-//! are not provisional, and no account has an early restore.
+//! are not provisional, no account has an early restore, and no block is covered by the
+//! journal.
 use std::collections::HashSet;
 
 use schemerz_rusqlite::RusqliteMigration;
@@ -27,7 +29,7 @@ impl schemerz::Migration<Uuid> for Migration {
     }
 
     fn description(&self) -> &'static str {
-        "Adds early restore of one-time IVK payments."
+        "Adds early restore of one-time IVK payments and the spend journal."
     }
 }
 
@@ -49,6 +51,33 @@ impl RusqliteMigration for Migration {
                 anchor_hash BLOB NOT NULL CHECK (length(anchor_hash) = 32),
                 anchor_tree_size INTEGER NOT NULL CHECK (anchor_tree_size >= 0),
                 state INTEGER NOT NULL DEFAULT 0 CHECK (state IN (0, 1, 2))
+            );
+            CREATE TABLE ironwood_spend_journal (
+                block_height INTEGER NOT NULL CHECK (block_height BETWEEN 0 AND 4294967295),
+                tx_index INTEGER NOT NULL CHECK (tx_index BETWEEN 0 AND 65535),
+                block_hash BLOB NOT NULL CHECK (length(block_hash) = 32),
+                txid BLOB NOT NULL CHECK (length(txid) = 32),
+                ironwood_start_position INTEGER NOT NULL CHECK (ironwood_start_position >= 0),
+                compact_tx BLOB NOT NULL,
+                PRIMARY KEY (block_height, tx_index)
+            );
+            CREATE TABLE ironwood_spend_journal_nullifiers (
+                block_height INTEGER NOT NULL,
+                tx_index INTEGER NOT NULL,
+                action_index INTEGER NOT NULL CHECK (action_index >= 0),
+                nf BLOB NOT NULL CHECK (length(nf) = 32),
+                PRIMARY KEY (block_height, tx_index, action_index),
+                FOREIGN KEY (block_height, tx_index)
+                    REFERENCES ironwood_spend_journal(block_height, tx_index) ON DELETE CASCADE
+            );
+            CREATE INDEX idx_ironwood_spend_journal_nullifiers_nf
+                ON ironwood_spend_journal_nullifiers(nf);
+            CREATE TABLE ironwood_journal_coverage (
+                account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                start_height INTEGER NOT NULL CHECK (start_height BETWEEN 0 AND 4294967295),
+                end_height INTEGER NOT NULL
+                    CHECK (end_height > start_height AND end_height <= 4294967296),
+                PRIMARY KEY (account_id, start_height)
             );",
         )?;
         Ok(())
