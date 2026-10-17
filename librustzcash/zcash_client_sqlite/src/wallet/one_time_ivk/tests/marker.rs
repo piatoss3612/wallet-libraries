@@ -6,11 +6,16 @@ use zcash_client_backend::{
         MaxSpendMode,
         error::Error,
         wallet::{
-            ConfirmationsPolicy, input_selection::LockedInputPolicy, propose_send_max_transfer,
+            ConfirmationsPolicy,
+            input_selection::{GreedyInputSelector, LockedInputPolicy},
+            propose_send_max_transfer,
         },
     },
     decrypt_transaction,
-    fees::{ChangeValue, StandardFeeRule, TransactionBalance},
+    fees::{
+        ChangeValue, DustAction, DustOutputPolicy, StandardFeeRule, TransactionBalance,
+        standard::SingleOutputChangeStrategy,
+    },
     wallet::OvkPolicy,
 };
 use zcash_primitives::transaction::TxId;
@@ -121,4 +126,36 @@ fn sending_a_one_time_note_max_carries_a_zero_value_marker() {
         )
         .unwrap()[0];
     assert_eq!(markers(&mut st, txid), [0]);
+}
+
+/// A one-time spend proposed with its dust added to the fee still carries its zero-value
+/// marker. Input selection hands the change strategy whether each input is one-time.
+#[test]
+fn a_one_time_spend_adding_dust_to_the_fee_keeps_its_marker() {
+    let mut st = one_time_funded(2_000_000);
+    let account = st.test_account().cloned().unwrap();
+    let strategy = SingleOutputChangeStrategy::<TestDb>::new(
+        StandardFeeRule::Zip317,
+        None,
+        zcash_protocol::ShieldedPool::Orchard,
+        DustOutputPolicy::new(DustAction::AddDustToFee, None),
+    );
+    // 100 zatoshis are left over, too little for change, so they go to the fee.
+    let to = payment(&unified(foreign_receiver()), 1_989_900, None);
+    let request = zip321::TransactionRequest::new(vec![to]).unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &GreedyInputSelector::new(),
+            &strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let balance = proposal.steps()[0].balance();
+    assert_eq!(
+        balance.proposed_change(),
+        [ChangeValue::ironwood(Zatoshis::ZERO, None)]
+    );
+    assert_eq!(balance.fee_required(), Zatoshis::const_from_u64(10_100));
 }
