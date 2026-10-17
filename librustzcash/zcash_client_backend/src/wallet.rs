@@ -187,6 +187,8 @@ pub struct WalletTx<AccountId> {
     ironwood_outputs: Vec<WalletIronwoodOutput<AccountId>>,
     #[cfg(feature = "orchard")]
     ironwood_enhancement_plan: IronwoodEnhancementPlan<AccountId>,
+    #[cfg(feature = "orchard")]
+    ironwood_nullifiers: Option<Vec<orchard::note::Nullifier>>,
 }
 
 /// Provisional private-enhancement plan from a complete compact transaction.
@@ -302,7 +304,24 @@ impl<AccountId> WalletTx<AccountId> {
             ironwood_outputs,
             #[cfg(feature = "orchard")]
             ironwood_enhancement_plan: IronwoodEnhancementPlan::Ineligible,
+            #[cfg(feature = "orchard")]
+            ironwood_nullifiers: None,
         }
+    }
+
+    /// Attaches every Ironwood nullifier the transaction reveals, matched to a wallet note
+    /// or not, as a block scan read them.
+    #[cfg(feature = "orchard")]
+    pub fn with_ironwood_nullifiers(mut self, nullifiers: Vec<orchard::note::Nullifier>) -> Self {
+        self.ironwood_nullifiers = Some(nullifiers);
+        self
+    }
+
+    /// Returns every Ironwood nullifier the transaction reveals when a block scan produced
+    /// this record, so that a store can journal them.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood_nullifiers(&self) -> Option<&[orchard::note::Nullifier]> {
+        self.ironwood_nullifiers.as_deref()
     }
 
     /// Attaches provisional eligibility and outgoing candidates from the complete compact

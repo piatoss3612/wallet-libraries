@@ -2853,6 +2853,8 @@ pub struct ScannedBlock<AccountId> {
     orchard: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
     #[cfg(feature = "orchard")]
     ironwood: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
+    #[cfg(feature = "orchard")]
+    scanned_accounts: Vec<AccountId>,
 }
 
 impl<AccountId> ScannedBlock<AccountId> {
@@ -2871,6 +2873,7 @@ impl<AccountId> ScannedBlock<AccountId> {
             orchard::tree::MerkleHashOrchard,
             orchard::note::Nullifier,
         >,
+        #[cfg(feature = "orchard")] scanned_accounts: Vec<AccountId>,
     ) -> Self {
         Self {
             block_height,
@@ -2882,7 +2885,20 @@ impl<AccountId> ScannedBlock<AccountId> {
             orchard,
             #[cfg(feature = "orchard")]
             ironwood,
+            #[cfg(feature = "orchard")]
+            scanned_accounts,
         }
+    }
+
+    /// Returns the accounts whose ordinary Ironwood keys scanned this block. Every
+    /// transaction in the block that one of their keys recognizes is among
+    /// [`Self::transactions`], with its [`WalletTx::ironwood_nullifiers`]. Both the
+    /// compact and the full-block scanner record them.
+    ///
+    /// [`WalletTx::ironwood_nullifiers`]: crate::wallet::WalletTx::ironwood_nullifiers
+    #[cfg(feature = "orchard")]
+    pub fn scanned_accounts(&self) -> &[AccountId] {
+        &self.scanned_accounts
     }
 
     /// Returns the height of the block that was scanned.

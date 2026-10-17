@@ -35,6 +35,7 @@
 //! [`OneTimeIvkRestoreWrite`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite
 //! [`OneTimeIvkRestoreWrite::maintain_one_time_ivks`]: zcash_client_backend::data_api::one_time_ivk::restore::OneTimeIvkRestoreWrite::maintain_one_time_ivks
 
+pub(crate) mod journal;
 pub(crate) mod restore;
 pub mod swap;
 

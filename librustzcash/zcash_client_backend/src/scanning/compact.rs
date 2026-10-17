@@ -601,6 +601,13 @@ where
             } else {
                 crate::wallet::IronwoodEnhancementPlan::Ineligible
             });
+            #[cfg(feature = "orchard")]
+            let wallet_tx = wallet_tx.with_ironwood_nullifiers(
+                tx.ironwood_actions
+                    .iter()
+                    .map(|action| action.nf().expect("validated above"))
+                    .collect(),
+            );
             wtxs.push(wallet_tx);
         }
 
@@ -631,6 +638,8 @@ where
             ironwood_note_commitments,
             ironwood_nullifier_map,
         ),
+        #[cfg(feature = "orchard")]
+        scanning_keys.ordinary_ironwood_accounts(),
     ))
 }
 

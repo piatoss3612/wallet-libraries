@@ -681,7 +681,7 @@ where
         let has_ironwood = false;
 
         if has_transparent || has_sapling || has_orchard || has_ironwood {
-            wtxs.push(WalletTx::new(
+            let wallet_tx = WalletTx::new(
                 txid,
                 tx_index,
                 transparent_outputs,
@@ -695,7 +695,16 @@ where
                 ironwood_spends,
                 #[cfg(feature = "orchard")]
                 ironwood_outputs,
-            ));
+            );
+            #[cfg(feature = "orchard")]
+            let wallet_tx = wallet_tx.with_ironwood_nullifiers(
+                tx.ironwood_bundle()
+                    .iter()
+                    .flat_map(|bundle| bundle.actions().iter())
+                    .map(|action| *action.nullifier())
+                    .collect(),
+            );
+            wtxs.push(wallet_tx);
         }
 
         pos_tracker.increment_over_tx(&tx);
@@ -725,6 +734,8 @@ where
             ironwood_note_commitments,
             ironwood_nullifier_map,
         ),
+        #[cfg(feature = "orchard")]
+        scanning_keys.ordinary_ironwood_accounts(),
     ))
 }
 

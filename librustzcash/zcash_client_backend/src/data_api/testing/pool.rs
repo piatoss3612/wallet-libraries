@@ -597,6 +597,8 @@ pub fn scan_full_block_detects_outputs<T: ShieldedPoolTester>(
     }
     .freeze()
     .unwrap();
+    #[cfg(feature = "orchard")]
+    let ironwood_actions = tx.ironwood_bundle().map_or(0, |b| b.actions().len());
     let block = Block::from_parts(header, NonEmpty::singleton(tx), h);
 
     let prior_block_metadata = BlockMetadata::from_parts(
@@ -651,6 +653,18 @@ pub fn scan_full_block_detects_outputs<T: ShieldedPoolTester>(
         })
         .sum();
     assert_eq!(received_outputs, 1);
+
+    // The block names the account that scanned it, and the recognized transaction carries
+    // its Ironwood nullifiers, so a store can journal it as it does compact-scanned blocks.
+    #[cfg(feature = "orchard")]
+    {
+        assert_eq!(scanned.scanned_accounts(), [zip32::AccountId::ZERO]);
+        let wtx = &scanned.transactions()[0];
+        let nullifiers = wtx
+            .ironwood_nullifiers()
+            .expect("the full scanner records them");
+        assert_eq!(nullifiers.len(), ironwood_actions);
+    }
 
     // The note commitment tree should have grown by exactly the two shielded outputs in
     // the block's single transaction (the payment and the change), starting from the

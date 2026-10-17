@@ -4334,6 +4334,8 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
     // truncation height.
     #[cfg(feature = "orchard")]
     one_time_ivk::truncate_to_height(conn, rescan_floor)?;
+    #[cfg(feature = "orchard")]
+    one_time_ivk::journal::truncate(conn, rescan_floor)?;
     // Scans take only one-time keys started by each batch's end, and the replacement chain
     // may mine a payment below an open key's old start, so open keys, including any the
     // repair above reopened, start at the first rescanned block at the latest.
