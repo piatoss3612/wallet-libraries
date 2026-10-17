@@ -101,8 +101,9 @@ pub struct Discovered<E> {
 /// rejected, when `refresh` asks for one, when its pass has keys left to check and the
 /// directory has moved on, or when a newer publication should check keys that closed
 /// without a known payment (see `DiscoveryStatus::refresh_due`). Each purpose's keys are checked against the filters from index
-/// zero: always the first [`FIRST_WINDOW`] and every key the wallet registered, then on
-/// until [`GAP`] consecutive keys are in no seen set and not in the paid filter. A provider's recent set counts only if its feed's
+/// zero: always the first [`FIRST_WINDOW`], then on until [`GAP`] consecutive keys are in
+/// no seen set and not in the paid filter, and then every closed key past that (see
+/// `DiscoveryStatus::closed`). A provider's recent set counts only if its feed's
 /// last read began at most fifteen minutes before `now` and at most a minute after it, and
 /// its window, with the feed running throughout, covers [`RESTORE_WATCH_SECS`]; unless
 /// every provider has one, every key is recent.
@@ -166,16 +167,6 @@ where
     };
     if let Some(cursors) = cursors {
         for (purpose, cursor) in cursors {
-            // Every key the wallet registered is checked, even past a gap in the filters.
-            let registered = status
-                .registered_reach
-                .iter()
-                .find(|(p, _)| *p == purpose)
-                .map_or(0, |(_, reach)| *reach);
-            let cursor = EnumerationCursor {
-                reach: cursor.reach.max(registered),
-                ..cursor
-            };
             check_purpose(
                 wallet,
                 &mut directory,
@@ -183,6 +174,7 @@ where
                 publication,
                 purpose,
                 cursor,
+                &status.closed,
                 lock,
                 now,
             )
@@ -250,7 +242,8 @@ where
 }
 
 /// Checks `purpose`'s keys from `cursor` against the filters and records each chunk, up to
-/// [`KEYS_PER_RUN`] keys.
+/// [`KEYS_PER_RUN`] keys. The last chunk also checks the `closed` keys past where the search
+/// stopped.
 #[allow(clippy::too_many_arguments)]
 async fn check_purpose<W, T, L>(
     wallet: &mut W,
@@ -259,6 +252,7 @@ async fn check_purpose<W, T, L>(
     publication: PublicationEnd,
     purpose: Purpose,
     cursor: EnumerationCursor,
+    closed: &[DiscoveryWork],
     lock: &L,
     now: i64,
 ) -> Result<(), Error<AccountError<W>>>
@@ -291,6 +285,24 @@ where
         }
         from = to;
         let finished = from >= reach;
+        if finished {
+            let rest: Vec<_> = closed
+                .iter()
+                .filter(|item| item.key.purpose() == purpose && item.key.index() >= from)
+                .cloned()
+                .collect();
+            if !rest.is_empty() {
+                let found = directory.check(&rest, now).await?;
+                for (item, check) in rest.into_iter().zip(found) {
+                    checks.push(FilterCheck {
+                        key: item.key,
+                        seen: check.seen,
+                        paid: check.paid,
+                        recent: check.recent,
+                    });
+                }
+            }
+        }
         let next = EnumerationCursor { next: from, reach };
         let took = lock
             .write("one_time_discovery.filters", || {

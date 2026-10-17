@@ -263,21 +263,22 @@ pub(crate) fn status<P: Parameters>(
             })
         })?
         .collect::<Result<_, _>>()?;
-    let registered = |purpose: Purpose| -> Result<(Purpose, u64), SqliteClientError> {
-        let top: Option<Vec<u8>> = conn.query_row(
-            "SELECT MAX(key_index) FROM ironwood_one_time_keys
-             WHERE account_id = ?1 AND purpose = ?2",
-            params![owner.0, u8::from(purpose == Purpose::Receive)],
-            |r| r.get(0),
-        )?;
-        Ok((
-            purpose,
-            top.map(decode_index)
-                .transpose()?
-                .map_or(0, |index| index + 1),
-        ))
-    };
-    let registered_reach = [registered(Purpose::Receive)?, registered(Purpose::Refund)?];
+    let closed = conn
+        .prepare(
+            "SELECT purpose, key_index, receiver FROM ironwood_one_time_keys
+             WHERE account_id = ?1 AND closed_at IS NOT NULL
+             ORDER BY purpose, key_index",
+        )?
+        .query_and_then([owner.0], |r| {
+            Ok::<_, SqliteClientError>(DiscoveryWork {
+                key: stored_key_id(r)?,
+                receiver: r
+                    .get::<_, Vec<u8>>(2)?
+                    .try_into()
+                    .map_err(|_| corrupt("invalid stored receiver"))?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
     let complete = complete(conn, params, owner)?;
     let refresh_due = complete && unpaid_closed;
     Ok(Some(DiscoveryStatus {
@@ -290,7 +291,7 @@ pub(crate) fn status<P: Parameters>(
         complete,
         refresh_due,
         enumeration,
-        registered_reach,
+        closed,
         lookups,
         witnesses,
     }))

@@ -136,10 +136,10 @@ pub struct DiscoveryStatus {
     pub complete: bool,
     /// Where filter checks resume for each purpose, or `None` once the pass checked both.
     pub enumeration: Option<[(Purpose, EnumerationCursor); 2]>,
-    /// One past the highest key index the wallet has registered, for each purpose. A pass
-    /// checks keys at least this far, so it reaches every key the wallet knows even past a
-    /// gap in the filters.
-    pub registered_reach: [(Purpose, u64); 2],
+    /// The account's closed keys. A pass checks each against the filters wherever its
+    /// search stops, so a payment after a key closed is found even past a gap of unused
+    /// keys.
+    pub closed: Vec<DiscoveryWork>,
     /// Whether a newer publication's filters should check the account's keys again: some
     /// key closed without a known payment, so a payment after it closed would be found only
     /// that way.

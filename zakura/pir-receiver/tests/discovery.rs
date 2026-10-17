@@ -556,14 +556,14 @@ async fn discovery_imports_every_late_payment() {
     );
 }
 
-/// A key the wallet registered past the first window of unused keys is checked again by
-/// a newer publication, so a payment after it closed is found.
+/// A closed key far past the first window of unused keys is checked again by a newer
+/// publication, without walking the keys between, so a payment after it closed is found.
 #[tokio::test]
-async fn a_registered_key_past_a_filter_gap_is_rechecked() {
+async fn a_closed_key_past_a_filter_gap_is_rechecked() {
     let mut st = ironwood_wallet_in(TestDbFactory::default());
     let account = st.test_account().unwrap().id();
     st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
-    let index = FIRST_WINDOW + 50;
+    let index = 1_000_000_000;
     // An earlier pass saw the key unpaid, so it closed.
     let end = tip(&st);
     let tree_size: u64 = st
