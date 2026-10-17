@@ -502,6 +502,41 @@ fn a_recheck_looks_up_only_keys_with_payments() {
     assert_eq!(due, [key8(), KeyId::new(Purpose::Receive, 10)]);
 }
 
+/// A filter hit on a closed key past the searched range, maybe a false positive at a sparse
+/// index, does not move refund issuance past it.
+#[test]
+fn a_hit_past_the_search_does_not_advance_allocation() {
+    let mut st = scanned_wallet();
+    let account = st.test_account().unwrap().id();
+    let publication = publication_at(&st, tip(&st).height);
+    let sparse = FilterCheck {
+        key: KeyId::new(Purpose::Refund, 1_000_000),
+        paid: false,
+        ..paid(key8())
+    };
+    let searched = EnumerationCursor {
+        next: 100,
+        reach: 100,
+    };
+    let db = st.wallet_mut().db_mut();
+    for (purpose, checks) in [(Purpose::Receive, vec![]), (Purpose::Refund, vec![sparse])] {
+        assert!(
+            db.record_one_time_filter_checks(
+                account,
+                publication,
+                purpose,
+                &checks,
+                searched,
+                true,
+                clock_now()
+            )
+            .unwrap()
+        );
+    }
+    let next = reserve_key(db, account, Purpose::Refund, start());
+    assert_eq!(next.key_id().index(), 0);
+}
+
 /// An unknown account is an error, not an account with no discovery to run.
 #[test]
 fn an_unknown_accounts_discovery_is_an_error() {

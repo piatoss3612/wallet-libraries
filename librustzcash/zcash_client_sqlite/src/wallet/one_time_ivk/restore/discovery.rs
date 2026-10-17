@@ -446,17 +446,21 @@ pub(crate) fn record_filter_checks<P: Parameters>(
             ],
             |r| r.get(0),
         )?;
+        // Only a key in the searched range advances allocation. One past it is a closed key,
+        // so never issued again, checked on its own and maybe at a sparse index, where a
+        // filter hit may be a false positive (see `DiscoveryStatus::closed`).
+        let allocates = used && check.key.index() < cursor.reach;
         let (id, _) = register(
             conn,
             params,
             account,
             check.key,
             start,
-            used,
+            allocates,
             Discovery::Funding,
             now,
         )?;
-        if used {
+        if allocates {
             record_provider_seen(conn, id)?;
         }
         if check.paid && in_range {
