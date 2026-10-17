@@ -81,7 +81,9 @@ pub struct Discovered<E> {
     /// Whether the account's discovery is complete, so new swap addresses may be issued
     /// (see `DiscoveryStatus::complete`). Late payments may still wait for the scan.
     pub complete: bool,
-    /// Lookups still due, for example after a failure or a page budget.
+    /// Lookups ready to run again now, for example after a page budget. A lookup backed off
+    /// after a failure counts only once its retry is due. `complete` stays false while any
+    /// lookup remains.
     pub lookups: usize,
     /// Late payments still waiting for an inclusion path.
     pub witnesses: usize,
