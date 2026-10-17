@@ -59,9 +59,9 @@ pub(in crate::wallet::one_time_ivk) fn close_finished<P: Parameters>(
             (SELECT COALESCE(SUM(n.value), 0) FROM ironwood_received_notes n
                 JOIN transactions t ON t.id_tx = n.transaction_id
                 WHERE n.one_time_key_id = k.id AND t.mined_height <= :confirmed_below),
-            (SELECT b.time FROM ironwood_one_time_sweeps s
-                JOIN blocks b ON b.height = s.done_height
-                WHERE s.one_time_key_id = k.id),
+            (SELECT b.time FROM ironwood_one_time_lookups l
+                JOIN blocks b ON b.height = l.done_height
+                WHERE l.one_time_key_id = k.id),
             {STARTED}
          FROM ironwood_one_time_keys k
          WHERE k.account_id = :account AND k.active_from IS NOT NULL AND k.closed_at IS NULL",

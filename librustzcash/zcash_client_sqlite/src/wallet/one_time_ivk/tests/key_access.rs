@@ -11,7 +11,12 @@ fn key_lookups_validate_only_the_requested_key() {
     let parent = parent(&st);
     let db = st.wallet_mut().db_mut();
     let wanted = reserve_key(db, account, Purpose::Refund, start());
-    let corrupted = watch(db, account, 0, start()).key_id();
+    let corrupted = KeyId::new(Purpose::Receive, 0);
+    let lookup = Discovery::Lookup;
+    tx(db, |c, p| {
+        register(c, p, account, corrupted, start(), false, lookup, 0)
+    })
+    .unwrap();
     let (account_ref, _) = account_key(db.conn.borrow(), &db.params, account).unwrap();
 
     // Synthetic metadata avoids 10,000 KDFs in the fixture. These invalid receivers
@@ -51,7 +56,16 @@ fn key_lookups_validate_only_the_requested_key() {
     ));
     // Repeated recovery neither replaces the corrupted receiver nor promotes its key.
     let registered = tx(db, |c, p| {
-        register(c, p, account, corrupted, start(), true, Discovery::Sweep, 0)
+        register(
+            c,
+            p,
+            account,
+            corrupted,
+            start(),
+            true,
+            Discovery::Lookup,
+            0,
+        )
     });
     assert!(matches!(
         registered,
@@ -105,17 +119,19 @@ fn transaction_keys_exclude_unscanned_history_and_preserve_self_payments() {
 
 #[test]
 fn unscanned_transaction_keys_follow_pending_and_imported_output_identity() {
-    let (mut st, key, candidate, through, path) = store::restore::tests::apply::fixture();
+    use store::restore::tests::discovery::{key8, late_fixture, send_witness};
+    let (mut st, candidate, publication) = late_fixture();
     let account = st.test_account().unwrap().id();
     let db = st.wallet_mut().db_mut();
     assert!(db.get_one_time_scanning_keys().unwrap().is_empty());
     let keys_for = |db: &Db, txid| {
-        let keys = db.get_one_time_transaction_keys(txid, Some(through.height), &[]);
+        let keys = db.get_one_time_transaction_keys(txid, Some(publication.height), &[]);
         keys.unwrap().iter().map(|k| k.key_id()).collect::<Vec<_>>()
     };
-    assert_eq!(keys_for(db, candidate.txid), [key.key_id()]);
+    assert_eq!(keys_for(db, candidate.txid), [key8()]);
     assert!(keys_for(db, TxId::from_bytes([45; 32])).is_empty());
-    apply(db, account, key.key_id(), &candidate, through, &path);
-    assert!(pending(db, account, key.key_id()).is_empty());
-    assert_eq!(keys_for(db, candidate.txid), [key.key_id()]);
+    send_witness(&mut st, key8(), &candidate);
+    let db = st.wallet_mut().db_mut();
+    assert!(pending(db, account, key8()).is_empty());
+    assert_eq!(keys_for(db, candidate.txid), [key8()]);
 }

@@ -18,8 +18,8 @@ an SQLite database.
 ## One-time IVKs
 
 With the `orchard` feature, `WalletDb` keeps one-time IVKs: a durable registry of
-derived refund and incoming keys, their scanning, seed recovery through
-receiver-directory sweeps, and spending. `WalletDb` implements the backend's
+derived refund and incoming keys, their scanning, discovery of a restored seed's keys
+through a receiver directory, and spending. `WalletDb` implements the backend's
 `OneTimeIvkRead` and `OneTimeIvkWrite`, so a wallet scans with
 `scan_cached_blocks_with_one_time_ivks`, and the restore protocol's
 `OneTimeIvkRestoreRead` and `OneTimeIvkRestoreWrite`. Compact scanning and software
@@ -29,12 +29,14 @@ operations and closing are in `wallet::one_time_ivk::swap`. The
 [`zakura-one-time-ivk` README](../../zakura/one-time-ivk/README.md) describes the
 key derivation and refund memo.
 
-A restore sweep credits a directory-reported payment only after the wallet
-authenticates its ciphertext, verifies its inclusion against its own chain, and
-checks its spend state against locally retained Ironwood nullifiers. Incomplete
-evidence leaves the payment queued without crediting balance, and a directory
-failure never queues a public replay.
-`zakura-pir-receiver` runs these sweeps against a receiver directory.
+Discovery turns each payment a directory reports into a scan hint, so the scan finds
+the note itself, or, if the scan already passed its block, into a late candidate. The
+wallet admits a late candidate only after it authenticates the ciphertext, verifies the
+note's inclusion and position against its own chain, and its scan has covered every
+block from the payment on for the account. The spend journal, which keeps every
+Ironwood nullifier of the wallet's own transactions, then says whether it was spent.
+Until then the payment adds nothing to balance. `zakura-pir-receiver` runs discovery
+against a receiver directory.
 
 ## License
 

@@ -9,11 +9,14 @@ and this library adheres to Rust's notion of
 
 ### Added
 
-- Early restore of one-time IVK payments (with `orchard`): `WalletDb` implements the backend's
-  early restore methods and `get_one_time_scanning_keys_for_range`, so a restored account's
-  swap payments appear as its restore scan covers them rather than after restore sweeps.
-- `wallet::init::migrations::ids::ONE_TIME_IVK_EARLY_RESTORE`, an additive migration for early
-  restores and the spend journal.
+- One-time IVK discovery (with `orchard`): `WalletDb` implements the backend's discovery
+  methods and `get_one_time_scanning_keys_for_range`. A restored account's payments appear
+  as its restore scan covers them, and one found after the scan passed it once the scan
+  covers every later block. Issuance waits until a restored account's discovery has
+  registered every index its publication marks used, and a fresh account waits for none.
+- `wallet::init::migrations::ids::ONE_TIME_IVK_DISCOVERY`, the migration for discovery and
+  the spend journal. It replaces the unreleased early restore migration, so a wallet that ran
+  that one needs a fresh database.
 - A spend journal (with `orchard`): every block scan keeps each recognized transaction's
   compact form and every Ironwood nullifier it reveals, matched to a wallet note or not, and
   records which blocks it covered for each account. It grows with the wallet's own
@@ -25,15 +28,20 @@ and this library adheres to Rust's notion of
 
 ### Changed
 
-- A rewind on the same chain, such as adding an account with an older birthday, keeps finished
-  one-time restore sweeps: each reruns only if the rescan stores a different block where it
-  finished, or if the rewind lowers its account's birthday. A key a sweep closed scans again
-  from its first payment above the rewind until that payment is confirmed again, instead of
-  waiting for a rerun sweep. An open one-time key that started above the rewind scans from the
-  first rescanned block.
-- `finish_one_time_nullifier_recovery` releases at most 50,000 retained Ironwood nullifiers
-  per call, so its prune stays short; later calls continue. Pruning checks only transaction
-  locators below the retention floor.
+- One-time IVK restore no longer retains Ironwood nullifiers: restore sweeps, their
+  retention floors, coverage marks, replays and stepped release are gone, and the nullifier
+  map prunes Ironwood nullifiers like the other pools'. The migration drops the
+  `ironwood_one_time_sweeps`, `ironwood_nullifier_scan_blocks` and
+  `ironwood_one_time_spend_retention` tables, which released wallets hold empty.
+- Scanned blocks need one-time keys only while a key is open: a plain scan judges discovery's
+  publications and turns the hints it skips into late candidates.
+- `WalletDb::recheck_one_time_key_history` returns nothing. It ends the account's discovery
+  pass, so the next one rechecks every key against a newer publication.
+- A rewind on the same chain, such as adding an account with an older birthday, repairs
+  discovery from its rescan floor: a publication ending above it is judged again, a late
+  candidate there becomes a hint again, and a lookup cursor that passed a record there
+  restarts. A key closed without scanning scans again from its first payment above the
+  rewind until that payment is confirmed again. Lowering a birthday reopens discovery.
 
 - Operations that can queue transparent lookups now reject caller-owned SQL transactions
   without a wallet-owned session journal with `TransparentSessionTransactionRequired`.

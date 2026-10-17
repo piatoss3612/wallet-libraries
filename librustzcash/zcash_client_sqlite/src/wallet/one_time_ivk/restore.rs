@@ -1,21 +1,13 @@
-//! Restore of one-time keys from the seed: funding-memo recovery and the incoming
-//! lookahead, receiver-directory sweeps (planning, lookups, applying payments), the
-//! Ironwood spend evidence they need, and the paid-filter backstop for closed keys.
+//! Discovery of one-time keys a restored seed used: checking candidate receivers against a
+//! receiver directory's filters, paging through paid keys' histories, turning payments
+//! into scan hints or late candidates, and recovering refund keys from funding memos.
 
-pub(super) mod apply;
-pub(crate) mod early;
+pub(crate) mod apply;
+pub(crate) mod discovery;
 pub(super) mod payments;
-pub(super) mod planner;
 pub(super) mod recovery;
-pub(super) mod retention;
-pub(crate) mod sweep;
 
-pub(crate) use apply::apply_sweep;
-use payments::{PendingPayment, SpendStatus};
-pub(crate) use planner::{begin_sweep_attempt, history_pending, keys_to_recheck, prepare_sweeps};
-pub(crate) use recovery::{maintain, record_paid_check};
-pub(crate) use retention::finish_nullifier_recovery;
-pub(crate) use sweep::{publication_anchor, queue_directory_lookup};
+use payments::PendingPayment;
 
 use std::borrow::BorrowMut;
 
@@ -26,18 +18,19 @@ use zcash_protocol::consensus::Parameters;
 use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
 
 impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, CL, R> {
-    /// Queues a receiver-directory sweep of each of `account`'s closed keys, as a restore
-    /// does, to find a payment after its key closed, and returns how many were queued.
+    /// Ends `account`'s discovery pass, so the next one checks every key against a newer
+    /// publication's filters and reads each paid key's history past its cursor, to find a
+    /// payment after its key closed.
     pub fn recheck_one_time_key_history(
         &mut self,
         account: AccountUuid,
-    ) -> Result<usize, SqliteClientError> {
+    ) -> Result<(), SqliteClientError> {
         self.transactionally(|db| recovery::recheck(db.conn.0, db.params, account))
     }
 
     /// Declares that `account`'s seed was generated for it and never used elsewhere, so
-    /// it has no one-time key history to restore: incoming issuance then waits for no
-    /// restore sweeps, and needs no receiver directory before the first swap. Issuance
+    /// it has no one-time key history to restore: issuance then waits for no discovery, and
+    /// needs no receiver directory before the first swap. Issuance
     /// still checks the provider's seen set. Call it when creating the account, before any
     /// other one-time IVK call; an account with one-time keys is refused. An account
     /// never declared fresh is treated as restored.

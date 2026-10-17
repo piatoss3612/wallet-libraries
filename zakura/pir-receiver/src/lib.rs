@@ -1,47 +1,40 @@
-//! Restore sweeps of one-time keys through a receiver directory over PIR.
+//! Discovery of a restored seed's one-time keys through a receiver directory over PIR.
 //!
-//! A restored wallet cannot rescan public history for every key its seed may have
-//! used, so each one-time key recovered from the seed is looked up once in a receiver
-//! directory: a public index of Ironwood payments sent with the zero outgoing viewing
-//! key, keyed by receiver. Lookups use PIR, so a lookup does not reveal which receiver
-//! it reads. Whether and when the wallet looks up is not hidden: it follows the
-//! publication's paid filter and retries failed lookups, so a dishonest directory that
-//! changes what it serves can test whether the wallet holds a receiver it chose. A
-//! sweep uses a publication only at a block the wallet scanned, and the wallet
-//! authenticates every payment with its derived key and its own chain before crediting
-//! it.
+//! A restored wallet cannot rescan public history for every key its seed may have used,
+//! so it checks candidate receivers against a receiver directory's public filters and
+//! looks up the paid ones: the directory is a public index of Ironwood payments sent with
+//! the zero outgoing viewing key, keyed by receiver. Lookups use PIR, so a lookup does not
+//! reveal which receiver it reads. Whether and when the wallet looks up is not hidden: it
+//! follows the publication's paid filter and retries failed lookups, so a dishonest
+//! directory that changes what it serves can test whether the wallet holds a receiver it
+//! chose. The wallet judges each publication against its own chain and authenticates every
+//! payment with its derived key before crediting it.
 //!
-//! `begin_early_restore` runs before a restore scan instead, and `EarlyRestore::look_up`
-//! looks up its paid keys while the scan runs. A payment found this way is an ordinary
-//! note from then on: its enhancement, scan priority and any rebroadcast follow as for
-//! any note. So when a directory's answer is wrong, traffic to the wallet's other
-//! services in that sync can differ from an honest answer's, another route to the test
-//! above.
+//! A payment found before the scan reaches it is found by the scan itself, and one found
+//! after is admitted once the scan covers it; either is an ordinary note from then on: its
+//! enhancement, scan priority and any rebroadcast follow as for any note. So when a
+//! directory's answer is wrong, traffic to the wallet's other services can differ from an
+//! honest answer's, another route to the test above.
 //!
-//! `fetch_seen` downloads the swap provider seen sets that a wallet checks before
-//! issuing a swap address. The `wallet` feature adds `sweep`, which runs these lookups
-//! for any wallet store that implements the backend's `OneTimeIvkRestoreWrite`. The
-//! caller supplies transports, which carry its route policy, cancellation and timeouts,
-//! and a `WriteLock` that serializes wallet writes with its other writers. Dropping a
-//! `sweep` future at any await is safe: each wallet step commits on its own, and every
-//! begun attempt is already backed off.
+//! `fetch_seen` downloads the swap provider seen sets that a wallet checks before issuing
+//! a swap address. The `wallet` feature adds `discover`, which runs discovery for any
+//! wallet store that implements the backend's `OneTimeIvkRestoreWrite`. The caller
+//! supplies transports, which carry its route policy, cancellation and timeouts, and a
+//! `WriteLock` that serializes wallet writes with its other writers. Dropping a `discover`
+//! future at any await is safe: each wallet step commits on its own.
 
 #[cfg(feature = "wallet")]
-mod early;
+mod discovery;
 mod seen;
 #[cfg(feature = "wallet")]
-mod sweep;
-#[cfg(feature = "wallet")]
-pub use early::{EarlyRestore, FIRST_WINDOW, GAP, LookedUp, MAX_KEYS, begin_early_restore};
+pub use discovery::{Discovered, Error, FIRST_WINDOW, GAP, KEYS_PER_RUN, WriteLock, discover};
 pub use seen::{Seen, fetch_seen};
-#[cfg(feature = "wallet")]
-pub use sweep::{Error, Swept, WriteLock, sweep};
 
 pub use receiver_pir::{Error as DirectoryError, transport::Transport};
 /// The directory format and client underneath, for callers that need them directly.
 /// They parse records and witness files structurally only: payments from
 /// `DirectoryClient::lookup` and the bytes from `DirectoryClient::witnesses` are
-/// unchecked. Validate them with `zakura-receiver-crypto`, as `sweep` does, before use.
+/// unchecked. Validate them with `zakura-receiver-crypto`, as `discover` does, before use.
 pub use {receiver_directory, receiver_pir};
 
 /// The directory error for data a receiver check refuses: the same error the

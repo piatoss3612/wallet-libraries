@@ -125,8 +125,8 @@ use {
             one_time_ivk::{
                 OneTimeIvkRead, OneTimeIvkWrite,
                 restore::{
-                    DirectoryPayment, DiscoveryWork, EarlyRestoreKey, OneTimeIvkRestoreRead,
-                    OneTimeIvkRestoreWrite, PaymentApplication, PublicationEnd, SweepDeferral,
+                    DirectoryPayment, DiscoveryStatus, DiscoveryWork, EnumerationCursor,
+                    FilterCheck, OneTimeIvkRestoreRead, OneTimeIvkRestoreWrite, PublicationEnd,
                 },
             },
             transparent_ledger::ChainPoint,
@@ -2737,45 +2737,17 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIvkRestoreRead
     for WalletDb<C, P, CL, R>
 {
-    fn directory_publication_anchor(
-        &self,
-        height: BlockHeight,
-        through: ChainPoint,
-    ) -> Result<Result<ChainPoint, SweepDeferral>, Self::Error> {
-        wallet::one_time_ivk::restore::publication_anchor(self.conn.borrow(), height, through)
-    }
-
-    fn one_time_history_pending(
+    fn one_time_discovery(
         &self,
         account: AccountUuid,
-        through: BlockHeight,
-    ) -> Result<bool, Self::Error> {
-        wallet::one_time_ivk::restore::history_pending(
+        now: i64,
+    ) -> Result<Option<DiscoveryStatus>, Self::Error> {
+        wallet::one_time_ivk::restore::discovery::status(
             self.conn.borrow(),
             &self.params,
             account,
-            through,
+            now,
         )
-    }
-
-    fn one_time_keys_to_recheck(
-        &self,
-        account: AccountUuid,
-        height: BlockHeight,
-    ) -> Result<Vec<DiscoveryWork>, Self::Error> {
-        wallet::one_time_ivk::restore::keys_to_recheck(
-            self.conn.borrow(),
-            &self.params,
-            account,
-            height,
-        )
-    }
-
-    fn one_time_early_restore_start(
-        &self,
-        account: AccountUuid,
-    ) -> Result<Option<BlockHeight>, Self::Error> {
-        wallet::one_time_ivk::restore::early::start(self.conn.borrow(), &self.params, account)
     }
 
     fn one_time_receivers(
@@ -2785,7 +2757,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> OneTimeIv
         from: u64,
         count: u32,
     ) -> Result<Vec<DiscoveryWork>, Self::Error> {
-        wallet::one_time_ivk::restore::early::receivers(
+        wallet::one_time_ivk::restore::discovery::receivers(
             self.conn.borrow(),
             &self.params,
             account,
@@ -2814,135 +2786,83 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
 impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R: Rng>
     OneTimeIvkRestoreWrite for WalletDb<C, P, CL, R>
 {
-    fn maintain_one_time_ivks(&mut self, account: AccountUuid) -> Result<(), SqliteClientError> {
-        let now = wallet::one_time_ivk::unix_now(&self.clock);
-        self.transactionally(|wdb| {
-            wallet::one_time_ivk::restore::maintain(wdb.conn.0, wdb.params, account, now)
-        })
-    }
-
-    fn prepare_one_time_sweeps(
+    fn record_one_time_filter_checks(
         &mut self,
         account: AccountUuid,
-        through: ChainPoint,
+        publication: PublicationEnd,
+        purpose: zakura_one_time_ivk::Purpose,
+        checked: &[FilterCheck],
+        cursor: EnumerationCursor,
+        finished: bool,
         now: i64,
-        limit: NonZeroU32,
-    ) -> Result<Result<Vec<DiscoveryWork>, SweepDeferral>, SqliteClientError> {
+    ) -> Result<bool, SqliteClientError> {
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::restore::prepare_sweeps(
-                wdb.conn.0, wdb.params, account, through, now, limit,
-            )
-        })
-    }
-
-    fn begin_one_time_sweep_attempt(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        now: i64,
-        seen: bool,
-    ) -> Result<(), SqliteClientError> {
-        self.transactionally(|wdb| {
-            wallet::one_time_ivk::restore::begin_sweep_attempt(wdb.conn.0, account, key, now, seen)
-        })
-    }
-
-    fn queue_directory_lookup(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        anchor: ChainPoint,
-        payments: &[DirectoryPayment],
-    ) -> Result<Result<(), SweepDeferral>, SqliteClientError> {
-        self.transactionally(|wdb| {
-            wallet::one_time_ivk::restore::queue_directory_lookup(
-                wdb.conn.0, wdb.params, account, key, anchor, payments,
-            )
-        })
-    }
-
-    fn apply_one_time_sweep(
-        &mut self,
-        account: AccountUuid,
-        key: KeyId,
-        through: ChainPoint,
-        publication: ChainPoint,
-        recent: bool,
-        witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
-    ) -> Result<Result<PaymentApplication, SweepDeferral>, SqliteClientError> {
-        wallet::one_time_ivk::restore::apply_sweep(
-            self,
-            account,
-            key,
-            through,
-            publication,
-            recent,
-            witness,
-        )
-    }
-
-    fn record_paid_filter_check(
-        &mut self,
-        account: AccountUuid,
-        publication: ChainPoint,
-        checked: &[(KeyId, bool)],
-    ) -> Result<(), SqliteClientError> {
-        self.transactionally(|wdb| {
-            wallet::one_time_ivk::restore::record_paid_check(
+            wallet::one_time_ivk::restore::discovery::record_filter_checks(
                 wdb.conn.0,
+                wdb.params,
                 account,
                 publication,
+                purpose,
                 checked,
+                cursor,
+                finished,
+                now,
             )
         })
     }
 
-    fn finish_one_time_nullifier_recovery(
-        &mut self,
-        account: AccountUuid,
-        through: ChainPoint,
-    ) -> Result<bool, SqliteClientError> {
-        let now = wallet::one_time_ivk::unix_now(&self.clock);
-        self.transactionally(|wdb| {
-            wallet::one_time_ivk::restore::finish_nullifier_recovery(
-                wdb.conn.0, wdb.params, account, through, now,
-            )
-        })
-    }
-
-    fn begin_one_time_early_restore(
-        &mut self,
-        account: AccountUuid,
-        end: PublicationEnd,
-        keys: &[EarlyRestoreKey],
-    ) -> Result<bool, SqliteClientError> {
-        let now = wallet::one_time_ivk::unix_now(&self.clock);
-        self.transactionally(|wdb| {
-            wallet::one_time_ivk::restore::early::begin(
-                wdb.conn.0, wdb.params, account, end, keys, now,
-            )
-        })
-    }
-
-    fn record_one_time_early_lookup(
+    fn record_one_time_lookup(
         &mut self,
         account: AccountUuid,
         key: KeyId,
-        payments: &[DirectoryPayment],
-        witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
+        revision: PublicationEnd,
+        page: u32,
+        records: &[DirectoryPayment],
+        complete: bool,
+        now: i64,
+    ) -> Result<bool, SqliteClientError> {
+        let configured = self.transparent_ledger_mode;
+        self.transactionally(|wdb| {
+            let sessions = wallet::one_time_ivk::restore::apply::Sessions {
+                configured,
+                enhance: &wdb.enhance_pir_session,
+                tpir: &wdb.transparent_pir_session,
+            };
+            wallet::one_time_ivk::restore::discovery::record_lookup(
+                wdb.conn.0, wdb.params, &sessions, account, key, revision, page, records, complete,
+                now,
+            )
+        })
+    }
+
+    fn defer_one_time_lookup(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        now: i64,
+    ) -> Result<(), SqliteClientError> {
+        self.transactionally(|wdb| {
+            wallet::one_time_ivk::restore::discovery::defer_lookup(wdb.conn.0, account, key, now)
+        })
+    }
+
+    fn record_one_time_witness(
+        &mut self,
+        account: AccountUuid,
+        key: KeyId,
+        position: u32,
+        anchor: ChainPoint,
+        siblings: [[u8; 32]; 32],
     ) -> Result<(), SqliteClientError> {
         let configured = self.transparent_ledger_mode;
         self.transactionally(|wdb| {
-            wallet::one_time_ivk::restore::early::record_lookup(
-                wdb.conn.0,
-                wdb.params,
+            let sessions = wallet::one_time_ivk::restore::apply::Sessions {
                 configured,
-                &wdb.enhance_pir_session,
-                &wdb.transparent_pir_session,
-                account,
-                key,
-                payments,
-                witness,
+                enhance: &wdb.enhance_pir_session,
+                tpir: &wdb.transparent_pir_session,
+            };
+            wallet::one_time_ivk::restore::discovery::record_witness(
+                wdb.conn.0, wdb.params, &sessions, account, key, position, anchor, siblings,
             )
         })
     }
@@ -3510,16 +3430,9 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
     ) -> Result<(), SqliteClientError> {
         #[cfg(not(feature = "orchard"))]
         let one_time_keys: Option<()> = None;
-        if one_time_keys.is_none() && wallet::one_time_scan_required(self.conn.0)? {
+        if one_time_keys.is_none() && wallet::one_time_key_open(self.conn.0)? {
             return Err(SqliteClientError::OneTimeIvksNotUsed);
         }
-        // Without one-time IVK state, nothing needs Ironwood spend evidence kept longer.
-        #[cfg(feature = "orchard")]
-        let ironwood_nullifier_retention = if wallet::holds_one_time_state(self.conn.0)? {
-            wallet::ironwood_nullifier_retention_height(self.conn.0)?
-        } else {
-            None
-        };
         // Once the NU6.3 (Ironwood) activation height is reached, checkpoints on the anchor
         // retention grids are retained as durable anchors. The activation height is `None` (and so
         // anchor retention is inactive) on networks that do not yet have an assigned NU6.3
@@ -3553,7 +3466,6 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             .zip(blocks.last())
             .map(|(first, last)| first.height()..last.height() + 1);
 
-        #[cfg(not(feature = "orchard"))]
         ll::wallet::put_blocks::<_, SqliteClientError, commitment_tree::Error>(
             self,
             #[cfg(feature = "transparent-inputs")]
@@ -3561,21 +3473,6 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             from_state,
             blocks,
             anchor_retention.as_ref(),
-        )
-        .map_err(SqliteClientError::from)?;
-        #[cfg(feature = "orchard")]
-        ll::wallet::put_blocks_with_nullifier_retention::<
-            _,
-            SqliteClientError,
-            commitment_tree::Error,
-        >(
-            self,
-            #[cfg(feature = "transparent-inputs")]
-            self.gap_limits,
-            from_state,
-            blocks,
-            anchor_retention.as_ref(),
-            ironwood_nullifier_retention,
         )
         .map_err(SqliteClientError::from)?;
 
@@ -3588,23 +3485,25 @@ impl<P: consensus::Parameters, CL: Clock, R: Rng> WalletDb<SqlTransaction<'_>, P
             &scanned_block_identities,
         )?;
         #[cfg(feature = "orchard")]
-        wallet::one_time_ivk::journal::record(self.conn.0, journal)?;
-        #[cfg(feature = "orchard")]
-        if let Some(range) = scanned_range.clone() {
-            wallet::one_time_ivk::restore::sweep::revalidate(self.conn.0, range)?;
-        }
+        wallet::one_time_ivk::journal::record(self.conn.0, &self.transparent_pir_session, journal)?;
         // A key activated after the scanner captured its keys missed this batch.
         #[cfg(feature = "orchard")]
-        if let Some((keys, range)) = one_time_keys.zip(scanned_range) {
-            wallet::one_time_ivk::rescan_missed_keys(self.conn.0, keys, range.clone())?;
-            wallet::one_time_ivk::restore::early::after_blocks_stored(
+        if let Some(range) = scanned_range {
+            if let Some(keys) = one_time_keys {
+                wallet::one_time_ivk::rescan_missed_keys(self.conn.0, keys, range.clone())?;
+            }
+            let sessions = wallet::one_time_ivk::restore::apply::Sessions {
+                configured: self.transparent_ledger_mode,
+                enhance: &self.enhance_pir_session,
+                tpir: &self.transparent_pir_session,
+            };
+            wallet::one_time_ivk::restore::discovery::after_blocks_stored(
                 self.conn.0,
                 &self.params,
-                self.transparent_ledger_mode,
-                &self.enhance_pir_session,
-                &self.transparent_pir_session,
-                keys,
+                &sessions,
+                one_time_keys,
                 range,
+                wallet::one_time_ivk::unix_now(&self.clock),
             )?;
         }
         Ok(())

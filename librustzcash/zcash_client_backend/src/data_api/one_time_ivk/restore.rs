@@ -1,26 +1,21 @@
-//! The one-time IVK restore protocol.
+//! Discovery of a restored account's one-time IVK history.
 //!
-//! A restored wallet cannot rescan public history for every key its seed may have
-//! used, so it looks each recovered key up once in a receiver directory instead: a
-//! restore sweep. A store that implements [`OneTimeIvkRestoreWrite`] runs one.
+//! A restored wallet cannot trial-decrypt public history with every key its seed may
+//! have used. Instead it checks candidate receivers against a receiver directory's public
+//! filters, looks the paid ones up over PIR, and turns each answer into a scan hint. A
+//! payment found after the scan passed its block waits as a late candidate until the
+//! scan covers every block from it on, then the spend journal decides whether it was
+//! spent. A store that implements [`OneTimeIvkRestoreWrite`] keeps that state.
 //!
-//! A sweep takes each due [`DiscoveryWork`] item from
-//! [`OneTimeIvkRestoreWrite::prepare_one_time_sweeps`] and leases it with
-//! [`OneTimeIvkRestoreWrite::begin_one_time_sweep_attempt`]. Every attempt looks the
-//! item's receiver up in the directory's current publication, queues the payments
-//! with [`OneTimeIvkRestoreWrite::queue_directory_lookup`], then calls
-//! [`OneTimeIvkRestoreWrite::apply_one_time_sweep`]. Each step commits atomically, so
-//! a caller may stop between any two.
-//!
-//! A wallet that has scanned nothing of an account's history yet can instead run an
-//! early restore (see [`OneTimeIvkRestoreWrite::begin_one_time_early_restore`]), so
-//! payments appear as the scan covers them rather than after it.
-
-use std::num::NonZeroU32;
+//! A client reads [`OneTimeIvkRestoreRead::one_time_discovery`] for the work due, records
+//! filter checks with [`OneTimeIvkRestoreWrite::record_one_time_filter_checks`], each
+//! paid key's history with [`OneTimeIvkRestoreWrite::record_one_time_lookup`], and each
+//! late candidate's inclusion path with [`OneTimeIvkRestoreWrite::record_one_time_witness`].
+//! Each call commits atomically, so a caller may stop between any two.
 
 #[cfg(feature = "test-dependencies")]
 use ambassador::delegatable_trait;
-use zakura_one_time_ivk::KeyId;
+use zakura_one_time_ivk::{KeyId, Purpose};
 use zcash_protocol::consensus::BlockHeight;
 
 use super::{OneTimeIvkRead, OneTimeIvkWrite};
@@ -28,12 +23,9 @@ use crate::data_api::{WalletRead, transparent_ledger::ChainPoint};
 
 pub mod recovery;
 
-/// A directory publication more than this many blocks behind the wallet's scanned tip
-/// is stale: finishing sweeps at it would leave a long rescan behind.
-pub const MAX_PUBLICATION_LAG: u32 = 100;
-
-/// One recovered key's due restore sweep. Public metadata is not note ownership.
-#[derive(Clone, PartialEq, Eq)]
+/// A key whose receiver discovery checks or looks up. Public metadata is not note
+/// ownership.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveryWork {
     /// Derivation identity. Derive only when authenticating returned notes.
     pub key: KeyId,
@@ -66,9 +58,8 @@ pub struct DirectoryPayment {
     pub ciphertext_prefix: [u8; 52],
 }
 
-/// The end of a receiver-directory publication as its manifest declares it, which an
-/// early restore uses before the wallet has scanned that block (see
-/// [`OneTimeIvkRestoreWrite::begin_one_time_early_restore`]).
+/// The end of a receiver-directory publication as its manifest declares it. The store
+/// judges it against its own chain once the scan stores that block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PublicationEnd {
     /// The last block the publication covers.
@@ -79,269 +70,170 @@ pub struct PublicationEnd {
     pub tree_size: u64,
 }
 
-/// What a publication's public filters say about one key an early restore registers.
+/// What a publication's public filters say about one candidate key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EarlyRestoreKey {
+pub struct FilterCheck {
     /// The key.
     pub key: KeyId,
-    /// A swap provider's seen set holds its receiver.
+    /// A swap provider's seen set holds its receiver, so it is never issued again.
     pub seen: bool,
     /// The paid filter holds its receiver, so a lookup may find payments.
     pub paid: bool,
-    /// A swap may still pay it, so it scans the blocks after the publication.
+    /// A swap may still pay it, so the scan watches it after the publication.
     pub recent: bool,
 }
 
-/// Why a restore sweep step must wait for more scanning or a newer publication. The
-/// step changed nothing.
+/// Where a purpose's filter checks resume: `next` is the first unchecked index, and checks
+/// go on while it is below `reach`, which each used key raises.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EnumerationCursor {
+    /// The first key index not yet checked.
+    pub next: u64,
+    /// Checks continue while `next` is below this.
+    pub reach: u64,
+}
+
+/// A paid key whose history is due for a lookup, with where its paging resumes.
+///
+/// A receiver's records are ordered by commitment position. The lookup reads pages from
+/// `applied`, after checking that the record just before it is still `last`, and applies
+/// every record at or below `cutoff`. It is complete once it reads a record above the
+/// cutoff or the last page, or page zero is absent. A record before the cursor that changed
+/// restarts it from page zero.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupWork {
+    /// The key and its receiver.
+    pub work: DiscoveryWork,
+    /// The last block whose records this lookup applies.
+    pub cutoff: BlockHeight,
+    /// How many of the receiver's records are applied.
+    pub applied: u32,
+    /// The commitment position and Action nullifier of the last applied record.
+    pub last: Option<(u64, [u8; 32])>,
+}
+
+/// A late candidate waiting for its inclusion path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SweepDeferral {
-    /// A block the step relies on is not on the wallet's scanned chain.
-    UnknownAnchor,
-    /// The publication is more than [`MAX_PUBLICATION_LAG`] blocks behind the wallet, or
-    /// older than a lookup the wallet already queued from.
-    StalePublication,
+pub struct WitnessRequest {
+    /// The key the payment is to.
+    pub key: KeyId,
+    /// The note commitment's tree position.
+    pub position: u32,
+    /// The note commitment.
+    pub cmx: [u8; 32],
 }
 
-/// Why [`OneTimeIvkRestoreWrite::apply_one_time_sweep`] stopped. Incomplete work stays queued
-/// and never contributes to wallet balance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaymentApplication {
-    /// The wallet must finish scanning its current accepted tip.
-    AwaitingScan,
-    /// No usable inclusion path exists at the accepted anchor.
-    AwaitingWitness,
-    /// Locally retained history cannot establish absence of a spend.
-    AwaitingSpendHistory,
-    /// The directory's claim failed a local check: the note's block or inclusion path,
-    /// or its transaction identity against stored data. The key's queued lookup is
-    /// discarded.
-    Rejected,
-    /// Note, witness, key identity, and any known spend were committed together, or the
-    /// wallet already stored the note under another transaction, or the note predates
-    /// the account's birthday and, as with any such note, is not tracked. No memo is
-    /// stored (see [`EncryptedNote::decrypt`]).
-    ///
-    /// [`EncryptedNote::decrypt`]: recovery::EncryptedNote::decrypt
-    Applied,
+/// An account's discovery: what is done and what is due.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveryStatus {
+    /// The publication the current pass uses, if one has started and its publication was
+    /// not rejected.
+    pub publication: Option<PublicationEnd>,
+    /// Whether every key the publication marks used is registered and every paid key's
+    /// history recorded, against a publication that matched the wallet's chain (or ended
+    /// before the account's birthday). New swap addresses wait for the first half, the
+    /// registration. Late candidates may still be waiting.
+    pub complete: bool,
+    /// Where filter checks resume for each purpose, or `None` once the pass checked both.
+    pub enumeration: Option<[(Purpose, EnumerationCursor); 2]>,
+    /// Whether a newer publication's filters should check the account's keys again: some
+    /// key closed without a known payment, so a payment after it closed would be found only
+    /// that way.
+    pub refresh_due: bool,
+    /// Paid keys whose history is due for a lookup.
+    pub lookups: Vec<LookupWork>,
+    /// Late candidates whose inclusion path is due.
+    pub witnesses: Vec<WitnessRequest>,
 }
 
-/// One-time IVK restore reads: sweep and recheck state.
+/// One-time IVK discovery reads.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait OneTimeIvkRestoreRead: OneTimeIvkRead {
-    /// The anchor of a directory publication covering blocks through `height`, as the
-    /// wallet's own chain records it. `through` is the wallet's fully scanned tip. Defers
-    /// a block the wallet has not scanned, and one more than [`MAX_PUBLICATION_LAG`]
-    /// blocks below `through`.
-    fn directory_publication_anchor(
-        &self,
-        height: BlockHeight,
-        through: ChainPoint,
-    ) -> Result<Result<ChainPoint, SweepDeferral>, Self::Error>;
-
-    /// Whether `account` still has restore sweeps or queued payments through `through`.
-    /// Retry backoff never makes an unfinished restore appear complete.
-    fn one_time_history_pending(
+    /// The account's discovery at `now`, or `None` if it has none to run: it was created
+    /// from a fresh seed, it has no Orchard viewing key, or Ironwood is not active.
+    fn one_time_discovery(
         &self,
         account: Self::AccountId,
-        through: BlockHeight,
-    ) -> Result<bool, Self::Error>;
+        now: i64,
+    ) -> Result<Option<DiscoveryStatus>, Self::Error>;
 
-    /// `account`'s closed keys with no known payment that no paid filter at or above
-    /// `height` has checked, for [`OneTimeIvkRestoreWrite::record_paid_filter_check`].
-    fn one_time_keys_to_recheck(
-        &self,
-        account: Self::AccountId,
-        height: BlockHeight,
-    ) -> Result<Vec<DiscoveryWork>, Self::Error>;
-
-    /// Where `account`'s early restore would start, if it can have one: the account has
-    /// one-time key history to restore, none of the blocks from that height on has been
-    /// scanned since the account was added, it has no early restore yet, and no restore
-    /// sweep of it is pending. Stores without early restore return `None`.
-    fn one_time_early_restore_start(
-        &self,
-        account: Self::AccountId,
-    ) -> Result<Option<BlockHeight>, Self::Error> {
-        let _ = account;
-        Ok(None)
-    }
-
-    /// The receivers of `account`'s keys of `purpose` at `count` indices from `from`,
-    /// without registering them, for an early restore's lookahead. Stores without early
-    /// restore return none.
+    /// The receivers of `account`'s keys `from` through `from + count - 1` for
+    /// `purpose`, without registering them.
     fn one_time_receivers(
         &self,
         account: Self::AccountId,
-        purpose: zakura_one_time_ivk::Purpose,
+        purpose: Purpose,
         from: u64,
         count: u32,
-    ) -> Result<Vec<DiscoveryWork>, Self::Error> {
-        let _ = (account, purpose, from, count);
-        Ok(Vec::new())
-    }
+    ) -> Result<Vec<DiscoveryWork>, Self::Error>;
 }
 
-/// One-time IVK restore writes: key recovery, restore sweeps (see the
-/// [module documentation](self)), and release of the spend evidence they retain.
+/// One-time IVK discovery writes.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait OneTimeIvkRestoreWrite: OneTimeIvkWrite + OneTimeIvkRestoreRead {
-    /// Keeps `account`'s one-time key recovery current. Call when each sync starts,
-    /// before planning scan work, and again once it reaches the tip.
+    /// Records `purpose`'s filter checks against `publication`, which the store saves before
+    /// its first scan batch needs it and judges against its chain once the scan stores
+    /// that block. Seen and paid keys are registered so they are never issued again, each
+    /// paid key's lookup becomes due, and recent incoming keys are watched from the
+    /// publication's end. `cursor` is where checks resume, and `finished` ends the purpose's checks.
     ///
-    /// Retains Ironwood spend evidence from the account's birthday until
-    /// [`Self::finish_one_time_nullifier_recovery`] releases it; evidence pruned before
-    /// the first call cannot be recovered without a rescan. Once scanning reaches the
-    /// chain tip at or above Ironwood activation, it also registers refund keys from
-    /// confirmed funding memos and keeps incoming lookahead keys above the highest
-    /// restored index, each queued for one restore sweep.
-    fn maintain_one_time_ivks(
+    /// A publication newer than the account's current one starts a new pass that checks
+    /// from index zero again; keys whose lookups are done stay done. Returns false, and
+    /// records nothing, for a publication above the wallet's chain tip or older than the
+    /// current one.
+    #[allow(clippy::too_many_arguments)]
+    fn record_one_time_filter_checks(
         &mut self,
         account: <Self as WalletRead>::AccountId,
-    ) -> Result<(), <Self as WalletRead>::Error>;
-
-    /// Selects at most `limit` of `account`'s sweeps due at `now`, in seconds, through
-    /// `through`, the wallet's fully scanned tip, without reconstructing historical keys.
-    /// Selects none unless `through` is still both the wallet's chain tip and its fully
-    /// scanned height, and defers a `through` off its chain. Attempts are leased
-    /// separately just before I/O, so a stopped batch cannot starve its tail.
-    fn prepare_one_time_sweeps(
-        &mut self,
-        account: <Self as WalletRead>::AccountId,
-        through: ChainPoint,
+        publication: PublicationEnd,
+        purpose: Purpose,
+        checked: &[FilterCheck],
+        cursor: EnumerationCursor,
+        finished: bool,
         now: i64,
-        limit: NonZeroU32,
-    ) -> Result<Result<Vec<DiscoveryWork>, SweepDeferral>, <Self as WalletRead>::Error>;
-
-    /// Leases `key`'s sweep for an attempt at `now`, just before its network lookups.
-    /// Every attempt, including one that fails or the process abandons, backs off the
-    /// next.
-    ///
-    /// `seen` is whether a swap provider seen set in the current publication holds the
-    /// key's receiver: the provider was given it as a payout address, so the key is never
-    /// issued again and restore lookahead advances past it. A hit is stored with the
-    /// lease, before any lookup or payment work, and is never cleared; `false` changes
-    /// nothing.
-    fn begin_one_time_sweep_attempt(
-        &mut self,
-        account: <Self as WalletRead>::AccountId,
-        key: KeyId,
-        now: i64,
-        seen: bool,
-    ) -> Result<(), <Self as WalletRead>::Error>;
-
-    /// Queues the new payments in `payments`, the directory's complete lookup of `key` at
-    /// `anchor` (from [`OneTimeIvkRestoreRead::directory_publication_anchor`]). Nothing is
-    /// credited yet. Payments already imported or queued unchanged are skipped; a payment
-    /// that contradicts an imported output is an error. Queued candidates that `payments`
-    /// no longer repeats unchanged, from an earlier answer the directory has since
-    /// corrected, are dropped. A lookup at an anchor below the key's queued lookup, while
-    /// that lookup is still on the wallet's chain, is deferred with
-    /// [`SweepDeferral::StalePublication`] instead, since an older answer cannot correct
-    /// payments above its anchor.
-    fn queue_directory_lookup(
-        &mut self,
-        account: <Self as WalletRead>::AccountId,
-        key: KeyId,
-        anchor: ChainPoint,
-        payments: &[DirectoryPayment],
-    ) -> Result<Result<(), SweepDeferral>, <Self as WalletRead>::Error>;
-
-    /// Applies `key`'s queued payments with inclusion paths at `publication`, then
-    /// finishes its sweep at its lookup's anchor. `witness` returns the 32 sibling hashes
-    /// for a commitment tree position and note commitment, or `None` when the publication
-    /// has none. `through` is the wallet's fully scanned tip. Returns
-    /// [`PaymentApplication::Applied`] once the sweep is finished, or why a payment must
-    /// wait or was rejected; payments applied before it stay applied. A lookup a reorg
-    /// removed defers the sweep to run again.
-    ///
-    /// `recent` is whether a current, complete swap provider recent set holds the key's
-    /// receiver, so a swap may still pay it. A recent key then scans from the block after
-    /// the lookup, rescanning blocks scanned without it, until the store's restore watch
-    /// closes it. Any other key that was not already scanning closes at the lookup; a
-    /// later payment to it is found by [`Self::record_paid_filter_check`].
-    fn apply_one_time_sweep(
-        &mut self,
-        account: <Self as WalletRead>::AccountId,
-        key: KeyId,
-        through: ChainPoint,
-        publication: ChainPoint,
-        recent: bool,
-        witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
-    ) -> Result<Result<PaymentApplication, SweepDeferral>, <Self as WalletRead>::Error>;
-
-    /// Records a newer publication's paid filter against keys from
-    /// [`OneTimeIvkRestoreRead::one_time_keys_to_recheck`]: `checked` pairs each key with whether
-    /// the filter holds its receiver. A key it holds may have been paid after it stopped
-    /// scanning, so a sweep of it is queued; any other has no payment through
-    /// `publication`, which is recorded so the same publication is not checked again.
-    /// Does nothing unless `publication` is on the wallet's chain.
-    fn record_paid_filter_check(
-        &mut self,
-        account: <Self as WalletRead>::AccountId,
-        publication: ChainPoint,
-        checked: &[(KeyId, bool)],
-    ) -> Result<(), <Self as WalletRead>::Error>;
-
-    /// Releases retained Ironwood nullifiers at `through` once no restore sweep needs them,
-    /// and only while `through` is still the wallet's fully scanned chain tip. Missing
-    /// memos, pending sweeps and queued payments protect their evidence. Each call frees a
-    /// bounded span of blocks, so pruning stays short, and later calls continue. Returns
-    /// true when release reaches the tip.
-    ///
-    /// Restore discovery (see [`Self::maintain_one_time_ivks`]) runs first, in the same
-    /// transaction, so a payment at the lookahead's edge cannot race with pruning.
-    fn finish_one_time_nullifier_recovery(
-        &mut self,
-        account: <Self as WalletRead>::AccountId,
-        through: ChainPoint,
     ) -> Result<bool, <Self as WalletRead>::Error>;
 
-    /// Starts `account`'s early restore against the publication ending at `end`, unless
-    /// [`OneTimeIvkRestoreRead::one_time_early_restore_start`] no longer allows one, and
-    /// returns whether it started. It also refuses an `end` below that start, or above the
-    /// wallet's chain tip or with no tip known, since the scan might never store block
-    /// `end.height` to check it.
+    /// Applies `records`, consecutive records of `key`'s history starting at `page`, read
+    /// from the directory revision ending at `revision`, and advances its cursor (see
+    /// [`LookupWork`]). `page` is the cursor's `applied`, or zero to restart it. `complete`
+    /// ends the lookup. A payment whose block the scan has not stored becomes a scan hint;
+    /// one it has becomes a late candidate. Returns false, changing nothing, if the cursor
+    /// moved since it was read or the lookup is not due.
     ///
-    /// Registers each of `keys`, which the caller read from that publication's filters.
-    /// A seen or paid key is never issued again and advances allocation. A recent key
-    /// scans from the block after `end`. A paid key's restore stays pending until
-    /// [`Self::record_one_time_early_lookup`] records its lookup and the scan settles its
-    /// payments; any other is done at `end`. The publication stays provisional until the
-    /// scan stores block `end.height`: a matching hash and tree size accept it, and keys
-    /// that neither scan nor wait for payments close there. A mismatch discards the keys
-    /// it registered that hold no payment and that its filters marked neither seen nor
-    /// paid, and falls back to restore sweeps for the rest.
-    ///
-    /// Stores without early restore return false.
-    fn begin_one_time_early_restore(
-        &mut self,
-        account: <Self as WalletRead>::AccountId,
-        end: PublicationEnd,
-        keys: &[EarlyRestoreKey],
-    ) -> Result<bool, <Self as WalletRead>::Error> {
-        let _ = (account, end, keys);
-        Ok(false)
-    }
-
-    /// Records the payments the early restore's publication lists for paid key `key`,
-    /// authenticating each with the key. A payment whose block the scan has yet to reach
-    /// is found there by trial decryption with `key`; one in a block already scanned is
-    /// inserted with its inclusion path from `witness` once the scan covers every block
-    /// from it on. `witness` returns the 32 sibling hashes for a commitment tree position
-    /// and note commitment, or `None` when the publication has none.
-    ///
-    /// A payment before the account's restore start, one that fails authentication, or
-    /// a key the publication later fails to confirm leaves the key to a restore sweep.
-    /// Stores without early restore ignore the lookup.
-    fn record_one_time_early_lookup(
+    /// The store judges `revision` against its chain like a discovery publication. If it
+    /// fails, every cursor that read from it restarts and its unadmitted candidates are
+    /// dropped. A record that fails authentication or lies above the cutoff discards the
+    /// call and backs the lookup off.
+    #[allow(clippy::too_many_arguments)]
+    fn record_one_time_lookup(
         &mut self,
         account: <Self as WalletRead>::AccountId,
         key: KeyId,
-        payments: &[DirectoryPayment],
-        witness: impl FnMut(u32, [u8; 32]) -> Option<[[u8; 32]; 32]>,
-    ) -> Result<(), <Self as WalletRead>::Error> {
-        let _ = (account, key, payments, witness);
-        Ok(())
-    }
+        revision: PublicationEnd,
+        page: u32,
+        records: &[DirectoryPayment],
+        complete: bool,
+        now: i64,
+    ) -> Result<bool, <Self as WalletRead>::Error>;
+
+    /// Backs `key`'s due lookup off after a failed attempt at `now`.
+    fn defer_one_time_lookup(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        key: KeyId,
+        now: i64,
+    ) -> Result<(), <Self as WalletRead>::Error>;
+
+    /// Records the inclusion path of `key`'s late candidate at `position`, a path to the
+    /// root at `anchor`, and admits it if the scan covers it. A path whose anchor is not on
+    /// the wallet's chain, or more than the pruning depth below its scanned tip, is
+    /// requested again.
+    fn record_one_time_witness(
+        &mut self,
+        account: <Self as WalletRead>::AccountId,
+        key: KeyId,
+        position: u32,
+        anchor: ChainPoint,
+        siblings: [[u8; 32]; 32],
+    ) -> Result<(), <Self as WalletRead>::Error>;
 }

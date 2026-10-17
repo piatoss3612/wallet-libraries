@@ -1,25 +1,26 @@
-# Receiver directory restore sweeps
+# Receiver directory discovery
 
-A restored wallet finds payments to its one-time keys by looking each one up in a
-receiver directory over PIR. `fetch_seen` downloads the swap provider seen sets that
-a wallet checks before issuing a swap address. With the `wallet` feature, `sweep`
-runs one account's restore sweeps for any wallet store that implements the backend's
-restore traits (`zcash_client_backend::data_api::one_time_ivk::restore`, from its
-`orchard` feature), such as `zakura-client-sqlite`. Its rustdoc states which
-publications a run accepts, when it sends requests, which keys keep scanning or are
-checked again, and how failures are retried.
+A restored wallet finds payments to its one-time keys by checking candidate receivers
+against a receiver directory's public filters and looking the paid ones up over PIR.
+`fetch_seen` downloads the swap provider seen sets that a wallet checks before issuing a
+swap address. With the `wallet` feature, `discover` runs one account's discovery for any
+wallet store that implements the backend's restore traits
+(`zcash_client_backend::data_api::one_time_ivk::restore`, from its `orchard` feature),
+such as `zakura-client-sqlite`. Its rustdoc states when a run starts a new pass, which
+keys it checks and watches, how it pages through a history, and how failures are
+retried.
 
 Applications supply:
 
 - the directory's HTTPS origin and a `Transport` for it, which carries the
   application's route policy, timeouts and cancellation; this crate has no HTTP
   client.
-- a `WriteLock` that serializes the sweep's wallet writes with the application's
+- a `WriteLock` that serializes discovery's wallet writes with the application's
   other writers.
 - the wallet's consensus parameters, the network's genesis hash (`MAINNET_GENESIS` on
   mainnet) and the clock.
 
-`tests/sweep.rs` serves a directory in process through the receiver service's own
+`tests/discovery.rs` serves a directory in process through the receiver service's own
 routes and real PIR, and checks each of those rules against restored SQLite wallets.
 
 ## Validation

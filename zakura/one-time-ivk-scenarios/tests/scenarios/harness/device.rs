@@ -16,15 +16,12 @@ use tempfile::NamedTempFile;
 use zakura_near_intents::{NearStatus, near_observation};
 use zakura_one_time_ivk::{KeyId, Purpose};
 use zakura_one_time_ivk_scenarios::Class;
-use zakura_pir_receiver::{Swept, sweep};
+use zakura_pir_receiver::{Discovered, discover};
 use zcash_client_backend::data_api::{
     AccountBirthday, TransactionStatus, WalletCommitmentTrees, WalletRead as _, WalletWrite as _,
     chain::{error::Error as ChainError, scan_cached_blocks_with_one_time_ivks},
     enhance_pir::{EnhancePirRead as _, EnhancementMode, TransactionEnhancementWork},
-    one_time_ivk::{
-        OneTimeIvkRead as _,
-        restore::{OneTimeIvkRestoreRead as _, OneTimeIvkRestoreWrite as _},
-    },
+    one_time_ivk::{OneTimeIvkRead as _, restore::OneTimeIvkRestoreRead as _},
     scanning::ScanPriority,
     status::{TransactionStatusMode, TransactionStatusRead as _},
     testing::TestRng,
@@ -70,7 +67,6 @@ type Wallet = WalletDb<Connection, LocalNetwork, FixedClock, TestRng>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Scan,
-    Sweep,
     Recheck,
 }
 
@@ -147,14 +143,14 @@ pub struct Receipt {
     pub nullifier: Option<[u8; 32]>,
 }
 
-/// A one-time key's restore sweep, as the wallet stored it.
+/// A one-time key's directory lookup, as the wallet stored it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SweepState {
-    /// Attempts leased so far.
+pub struct LookupState {
+    /// Failed attempts so far.
     pub attempts: u32,
-    /// Unix time before which the sweep is not due again.
+    /// Unix time before which the lookup is not due again.
     pub next_attempt_at: i64,
-    /// The height the sweep finished at, if it did.
+    /// The publication height the lookup finished through, if it did.
     pub done_height: Option<u32>,
 }
 
@@ -168,15 +164,14 @@ fn key_label(purpose: u8, index: u64) -> String {
 #[derive(Clone, Debug, Default)]
 pub struct SyncReport {
     pub found_live: usize,
-    pub found_by_sweep: usize,
+    pub found_by_discovery: usize,
     pub lookups: usize,
-    pub sweeps_finished: usize,
     pub open_keys: usize,
-    /// Blocks scanned, rescans and spend-history replays included.
+    /// Blocks scanned, rescans included.
     pub scanned_blocks: u64,
-    /// Whether restore sweeps or queued payments remain after the sync.
+    /// Whether discovery is incomplete or has lookups or late payments left after the sync.
     pub pending: bool,
-    /// Why sweeps deferred keys or stopped, as the library reported it.
+    /// Why discovery failed keys or stopped, as the library reported it.
     pub problems: Vec<String>,
 }
 
@@ -191,9 +186,8 @@ pub struct Reach {
     pub endpoint_faults: Vec<Fault>,
     /// How the publication differs from a faithful index.
     pub publication: Options,
-    /// Sweep runs per sync. Vizor runs one per account per sync and leaves pending work
-    /// for the next sync; each run sweeps at most one batch of 64 keys.
-    pub sweep_runs_per_sync: usize,
+    /// Discovery runs on each side of a sync's scan.
+    pub discovery_runs_per_sync: usize,
 }
 
 impl Default for Reach {
@@ -203,7 +197,7 @@ impl Default for Reach {
             directory_faults: Vec::new(),
             endpoint_faults: Vec::new(),
             publication: Options::default(),
-            sweep_runs_per_sync: 1,
+            discovery_runs_per_sync: 1,
         }
     }
 }
@@ -226,18 +220,20 @@ pub struct Device {
     derived: RefCell<BTreeSet<[u8; 43]>>,
     found: BTreeMap<([u8; 32], u32), Found>,
     phase: Phase,
+    /// Whether the current recheck has started its new discovery pass.
+    refreshed: bool,
+    /// Outputs a directory lookup listed as payments, seen after each discovery run.
+    candidates: BTreeSet<([u8; 32], u32)>,
     pub syncs: u32,
-    /// Encrypted directory lookups across every sweep.
+    /// Encrypted directory lookups across every discovery run.
     pub lookups: usize,
-    /// Sweep runs across every sync.
-    pub sweep_runs: usize,
+    /// Discovery runs across every sync.
+    pub discovery_runs: usize,
     /// Blocks scanned across every sync and scan.
     pub scanned_blocks: u64,
     /// Reorgs the wallet rewound for, as (conflict height, height rewound to).
     pub rewinds: Vec<(u32, u32)>,
-    /// Row-file downloads, which replace lookups for large restores.
-    pub row_files: usize,
-    /// Directory request and response bytes across every sweep.
+    /// Directory request and response bytes across every discovery run.
     pub bytes_sent: u64,
     pub bytes_received: u64,
     pub reach: Reach,
@@ -258,6 +254,20 @@ impl Device {
         let clock = chain.clock(skew);
         let mut db = open(&path, &clock, 0);
         init_wallet_db(&mut db, Some(SecretVec::new(seed.to_vec()))).expect("the schema migrates");
+        // Records every directory candidate, which the wallet deletes once it settles.
+        Connection::open(&path)
+            .and_then(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE harness_candidates (txid BLOB, action_index INTEGER,
+                         PRIMARY KEY (txid, action_index));
+                     CREATE TRIGGER harness_candidate AFTER INSERT
+                         ON ironwood_one_time_payment_recovery BEGIN
+                         INSERT OR IGNORE INTO harness_candidates
+                             VALUES (NEW.txid, NEW.action_index);
+                     END;",
+                )
+            })
+            .expect("the harness records candidates");
         let birthday = AccountBirthday::from_parts(chain.state_below(birthday), None);
         let (account, usk) = db
             .create_account(name, &SecretVec::new(seed.to_vec()), &birthday, None)
@@ -276,12 +286,13 @@ impl Device {
             derived: RefCell::new(BTreeSet::new()),
             found: BTreeMap::new(),
             phase: Phase::Scan,
+            refreshed: false,
+            candidates: BTreeSet::new(),
             syncs: 0,
             lookups: 0,
-            sweep_runs: 0,
+            discovery_runs: 0,
             scanned_blocks: 0,
             rewinds: Vec::new(),
-            row_files: 0,
             bytes_sent: 0,
             bytes_received: 0,
             reach: Reach::default(),
@@ -318,51 +329,42 @@ impl Device {
         self.derived.borrow().clone()
     }
 
-    /// Syncs as Vizor does: recovery maintenance at the start, every suggested range,
-    /// maintenance again at the tip (looping while it queues a rescan), closing finished
-    /// keys at the verified tip, then the restore sweeps.
+    /// Syncs as Vizor does: discovery before the scan, so its lookups become scan hints,
+    /// every suggested range, closing finished keys at the verified tip, then discovery
+    /// again for the late path.
     pub fn sync(&mut self, chain: &Chain, near: &Near) -> SyncReport {
         self.syncs += 1;
         let mut report = SyncReport::default();
-        let scan_phase = if self.phase == Phase::Recheck {
-            Phase::Recheck
-        } else {
-            Phase::Scan
-        };
+        self.db
+            .update_chain_tip(chain.tip())
+            .expect("the tip updates");
+        let (before, mut problems) = self.discover(chain, near);
         report.scanned_blocks = self.scan(chain);
-        report.found_live = self.tag(scan_phase);
-        let sweep_phase = if self.phase == Phase::Recheck {
-            Phase::Recheck
-        } else {
-            Phase::Sweep
-        };
-        let (finished, lookups, problems) = self.sweep(chain, near);
-        report.sweeps_finished = finished;
-        report.lookups = lookups;
+        let (after, late) = self.discover(chain, near);
+        problems.extend(late);
+        report.lookups = before + after;
         report.problems = problems;
-        report.found_by_sweep = self.tag(sweep_phase);
+        let (live, discovered) = self.tag();
+        report.found_live = live;
+        report.found_by_discovery = discovered;
         report.open_keys = self.keys().iter().filter(|k| k.open()).count();
         report.pending = self.history_pending();
         report
     }
 
-    /// Whether the account still has restore sweeps or queued payments.
+    /// Whether the account's discovery is incomplete or has lookups or late payments left.
     pub fn history_pending(&self) -> bool {
-        let Some(through) = self.through() else {
-            return false;
-        };
-        self.db
-            .one_time_history_pending(self.account, through.height)
-            .expect("pending history")
+        let status = self
+            .db
+            .one_time_discovery(self.account, i64::MAX)
+            .expect("the discovery status");
+        status.is_some_and(|s| !s.complete || !s.lookups.is_empty() || !s.witnesses.is_empty())
     }
 
     /// The scanning half of [`Self::sync`]. Returns the blocks it scanned.
     pub fn scan(&mut self, chain: &Chain) -> u64 {
         let mut scanned = 0u64;
         let account = self.account;
-        self.db
-            .maintain_one_time_ivks(account)
-            .expect("maintenance at the sync start");
         let tip = chain.tip();
         self.db.update_chain_tip(tip).expect("the tip updates");
         loop {
@@ -374,9 +376,6 @@ impl Device {
                 .find(|r| r.priority() > ScanPriority::Scanned);
             let Some(range) = next else {
                 self.enhance(chain);
-                self.db
-                    .maintain_one_time_ivks(account)
-                    .expect("maintenance at the tip");
                 let more = self
                     .db
                     .suggest_scan_ranges()
@@ -488,14 +487,14 @@ impl Device {
         }
     }
 
-    /// Runs restore sweeps against a fresh publication, `Reach::sweep_runs_per_sync` runs
-    /// at most and fewer once none is pending, and returns the keys finished, the lookups
-    /// made, and why any key was deferred or a run stopped. An injected fault that stops
-    /// the app ends the sweep there, and the app restarts (see [`Self::reopen`]).
-    pub fn sweep(&mut self, chain: &Chain, near: &Near) -> (usize, usize, Vec<String>) {
+    /// Runs discovery against a fresh publication, `Reach::discovery_runs_per_sync` runs at
+    /// most and fewer once nothing is pending, and returns the lookups made and why any key
+    /// failed or a run stopped. A recheck's first run starts a new pass. An injected fault
+    /// that stops the app ends discovery there, and the app restarts (see [`Self::reopen`]).
+    pub fn discover(&mut self, chain: &Chain, near: &Near) -> (usize, Vec<String>) {
         let now = self.now(chain);
         let reach = self.reach.clone();
-        // Injected failures hit one sync only.
+        // Injected failures hit one discovery run only.
         self.reach.directory_faults.clear();
         self.reach.endpoint_faults.clear();
         let directory = Served::new(reach.directory, move || {
@@ -504,33 +503,30 @@ impl Device {
             directory.fail_at(&reach.endpoint_faults);
             directory
         });
-        let Some(through) = self.through() else {
-            return (0, 0, Vec::new());
-        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("a runtime");
-        let mut finished = 0;
         let mut problems = Vec::new();
         let mut stopped = false;
-        for _ in 0..self.reach.sweep_runs_per_sync.max(1) {
-            self.sweep_runs += 1;
+        let mut refresh = self.phase == Phase::Recheck && !self.refreshed;
+        for _ in 0..self.reach.discovery_runs_per_sync.max(1) {
+            self.discovery_runs += 1;
             let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                runtime.block_on(sweep(
+                runtime.block_on(discover(
                     &mut self.db,
                     &network(),
                     self.account,
-                    through.clone(),
                     GENESIS,
                     ORIGIN,
                     &directory,
                     &NoLock,
                     now,
+                    refresh,
                 ))
             }));
-            let swept: Result<Swept<SqliteClientError>, _> = match run {
-                Ok(swept) => swept,
+            let found: Result<Discovered<SqliteClientError>, _> = match run {
+                Ok(found) => found,
                 Err(payload) if stops_the_app(payload.as_ref()) => {
                     problems.push(format!("{APP_STOPS}; it restarts"));
                     stopped = true;
@@ -538,22 +534,24 @@ impl Device {
                 }
                 Err(payload) => std::panic::resume_unwind(payload),
             };
-            match swept {
-                Ok(swept) => {
-                    finished += swept.finished;
-                    for (key, error) in &swept.deferred {
+            match found {
+                Ok(found) => {
+                    if refresh {
+                        self.refreshed = true;
+                        refresh = false;
+                    }
+                    for (key, error) in &found.failed {
                         problems.push(format!(
-                            "deferred {key:?}: {error} (through {}, {})",
-                            u32::from(through.height),
+                            "failed {key:?}: {error} ({})",
                             checkpoints(&self.path)
                         ));
                     }
-                    if !swept.pending || !swept.deferred.is_empty() {
+                    if found.lookups == 0 || !found.failed.is_empty() {
                         break;
                     }
                 }
                 Err(error) => {
-                    problems.push(format!("sweep stopped: {error}"));
+                    problems.push(format!("discovery stopped: {error}"));
                     break;
                 }
             }
@@ -561,31 +559,29 @@ impl Device {
         let lookups = directory.published().map_or(0, Directory::lookups);
         self.lookups += lookups;
         if let Some(published) = directory.published() {
-            self.row_files += published.row_files();
             let (sent, received) = published.bytes();
             self.bytes_sent += sent;
             self.bytes_received += received;
         }
         drop(directory);
+        self.candidates.extend(candidates(&self.path));
         if stopped {
             self.reopen();
         }
-        (finished, lookups, problems)
+        (lookups, problems)
     }
 
-    /// "Check swap history": queues a sweep of every closed key, then syncs, crediting
-    /// what it finds to the recheck. A late find can queue a spend-history replay and a
-    /// finished sweep a rescan, which later syncs run, so this keeps syncing (the caller
-    /// mines a block between syncs) while history is pending, at most `rounds` syncs.
-    pub fn check_swap_history(&mut self, chain: &Chain, near: &Near) -> (usize, SyncReport) {
-        let queued = self
-            .db
+    /// "Check swap history": ends the account's discovery pass, so the next starts a new
+    /// one against a newer publication, then syncs, crediting what it finds to the recheck.
+    pub fn check_swap_history(&mut self, chain: &Chain, near: &Near) -> SyncReport {
+        self.db
             .recheck_one_time_key_history(self.account)
-            .expect("the recheck queues");
+            .expect("the recheck ends the pass");
         self.phase = Phase::Recheck;
+        self.refreshed = false;
         let report = self.sync(chain, near);
         self.phase = Phase::Scan;
-        (queued, report)
+        report
     }
 
     /// Continues a "Check swap history" begun by [`Self::check_swap_history`]: one more
@@ -606,21 +602,31 @@ impl Device {
         })
     }
 
-    /// Tags payments credited since the last tag with `phase`, returning how many.
-    fn tag(&mut self, phase: Phase) -> usize {
-        let class = match phase {
-            Phase::Scan => Class::FoundLive,
-            Phase::Sweep => Class::FoundBySweep,
-            Phase::Recheck => Class::FoundAfterRecheck,
-        };
-        let mut new = 0;
+    /// Tags payments credited since the last tag: during a recheck as found after it,
+    /// otherwise as found through discovery if a directory lookup listed it, whether the
+    /// scan then found it from a hint or the late path admitted it, or as found live.
+    /// Returns how many were found live and how many otherwise.
+    fn tag(&mut self) -> (usize, usize) {
+        let discovered = &self.candidates;
+        let (mut live, mut other) = (0, 0);
         for (id, _) in credited(&self.path) {
+            let class = if self.phase == Phase::Recheck {
+                Class::FoundAfterRecheck
+            } else if discovered.contains(&id) {
+                Class::FoundByDiscovery
+            } else {
+                Class::FoundLive
+            };
             self.found.entry(id).or_insert_with(|| {
-                new += 1;
+                if class == Class::FoundLive {
+                    live += 1;
+                } else {
+                    other += 1;
+                }
                 Found { class }
             });
         }
-        new
+        (live, other)
     }
 
     /// How this wallet found the output `id`, if it did.
@@ -737,18 +743,18 @@ impl Device {
         .ok()
     }
 
-    /// The restore sweep of the one-time key `purpose`/`index`, if it has one.
-    pub fn sweep_state(&self, purpose: Purpose, index: u64) -> Option<SweepState> {
+    /// The directory lookup of the one-time key `purpose`/`index`, if it has one.
+    pub fn lookup_state(&self, purpose: Purpose, index: u64) -> Option<LookupState> {
         let conn = read_only(&self.path);
         // The stored purpose code, as in `key_label`.
         let code = u8::from(purpose == Purpose::Receive);
         conn.query_row(
-            "SELECT s.attempts, s.next_attempt_at, s.done_height FROM ironwood_one_time_sweeps s
+            "SELECT s.attempts, s.next_attempt_at, s.done_height FROM ironwood_one_time_lookups s
              JOIN ironwood_one_time_keys k ON k.id = s.one_time_key_id
              WHERE k.purpose = ?1 AND k.key_index = ?2",
             rusqlite::params![code, index.to_be_bytes()],
             |row| {
-                Ok(SweepState {
+                Ok(LookupState {
                     attempts: row.get(0)?,
                     next_attempt_at: row.get(1)?,
                     done_height: row.get(2)?,
@@ -1028,7 +1034,8 @@ impl Device {
     pub fn receive_mempool(&mut self, tx: &Transaction) -> usize {
         decrypt_and_store_transaction_with_one_time_ivks(&network(), &mut self.db, tx, None)
             .expect("the mempool transaction stores");
-        self.tag(Phase::Scan)
+        let (live, discovered) = self.tag();
+        live + discovered
     }
 
     /// Sends `value` to `to` as an ordinary payment, selecting notes as Vizor does for
@@ -1213,6 +1220,22 @@ impl Device {
 }
 
 /// The Ironwood outputs a wallet holds, as (txid, action index) and value.
+/// The outputs directory lookups listed as payments (see `harness_candidates`).
+fn candidates(path: &Path) -> BTreeSet<([u8; 32], u32)> {
+    let conn = read_only(path);
+    let mut stmt = conn
+        .prepare("SELECT txid, action_index FROM harness_candidates")
+        .expect("a candidate query");
+    stmt.query_map([], |row| {
+        let txid: Vec<u8> = row.get(0)?;
+        Ok((txid.try_into().expect("32-byte txid"), row.get(1)?))
+    })
+    .expect("candidates")
+    .collect::<Result<_, _>>()
+    .expect("candidates decode")
+}
+
+/// Every Ironwood output the wallet credited, with its value.
 fn credited(path: &Path) -> Vec<(([u8; 32], u32), u64)> {
     let conn = read_only(path);
     let mut stmt = conn
@@ -1282,7 +1305,7 @@ fn stops_the_app(payload: &(dyn std::any::Any + Send)) -> bool {
     message == Some(APP_STOPS)
 }
 
-/// The sweep's write lock. Nothing else writes to a scenario's wallet concurrently.
+/// Discovery's write lock. Nothing else writes to a scenario's wallet concurrently.
 struct NoLock;
 
 impl zakura_pir_receiver::WriteLock for NoLock {

@@ -17,7 +17,9 @@ use super::{
 };
 use crate::wallet::one_time_ivk::{
     Discovery, KeyId, OneTimeKey, Purpose, account_key, activate, decode_index, index_after,
-    invalid, register, restore::recovery, restore_start,
+    invalid, register,
+    restore::{discovery, recovery},
+    restore_start,
 };
 use crate::{AccountUuid, error::SqliteClientError};
 
@@ -37,6 +39,11 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
     recovery::recover_refund_memos(conn, params, account, now)?;
     if recovery::refund_memos_pending(conn, account)? {
         return Ok(Err(ReservationPolicy::Coverage));
+    }
+    // A restored account's discovery may still reveal used refund indices.
+    let (owner, _) = account_key(conn, params, account)?;
+    if !discovery::issuance_ready(conn, params, owner)? {
+        return Ok(Err(ReservationPolicy::Gap));
     }
     let index = match next_refund_index(conn, params, account, seen, now)? {
         Ok(index) => index,
@@ -61,7 +68,7 @@ pub(in crate::wallet::one_time_ivk) fn reserve<P: Parameters>(
 const REFUND_SEEN_PROBES: u32 = 100;
 
 /// The lowest refund index above every allocated one that no key is registered at and
-/// `seen` does not hold. A held index is registered for a restore sweep, since a swap
+/// `seen` does not hold. A held index is registered for a lookup, since a swap
 /// may have paid it, and recorded as seen, so it is never issued. After
 /// [`REFUND_SEEN_PROBES`] held indices this returns [`ReservationPolicy::Gap`]; the keys
 /// registered so far stay, so a later reservation continues past them.
@@ -114,7 +121,7 @@ pub(in crate::wallet::one_time_ivk) fn next_refund_index<P: Parameters>(
                 key,
                 from,
                 false,
-                Discovery::Sweep,
+                Discovery::Lookup,
                 now,
             )?;
             record_provider_seen(conn, id)?;

@@ -1,17 +1,11 @@
 //! Durable ownership-checked candidates. These rows never contribute to balance.
 use rusqlite::{Connection, OptionalExtension, params};
-use zcash_client_backend::data_api::{
-    one_time_ivk::restore::{
-        DirectoryPayment, SweepDeferral,
-        recovery::{EncryptedNote, RecoveredNote},
-    },
-    transparent_ledger::ChainPoint,
+use zcash_client_backend::data_api::one_time_ivk::restore::{
+    DirectoryPayment, PublicationEnd,
+    recovery::{EncryptedNote, RecoveredNote},
 };
 use zcash_primitives::{block::BlockHash, transaction::TxId};
-use zcash_protocol::{
-    PoolType,
-    consensus::{BlockHeight, Parameters},
-};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::wallet::one_time_ivk::{KeyId, account_key, invalid, key_ref};
 use crate::{AccountUuid, error::SqliteClientError, wallet};
@@ -54,17 +48,6 @@ pub(in crate::wallet::one_time_ivk) fn directory_candidate(
             payment.ciphertext_prefix,
         ),
     })
-}
-
-/// Local spend evidence as of one independently checked scan anchor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::wallet::one_time_ivk) enum SpendStatus {
-    /// Scan coverage is missing, pruned, or the requested anchor is not yet scanned.
-    Unknown,
-    /// Every block retains its unlinked nullifiers, and no recorded wallet spend matches.
-    Unspent,
-    /// A retained canonical transaction with this ID reveals the nullifier.
-    Spent(TxId),
 }
 
 /// Authenticates `candidate` with `key` against its registered receiver, returning the
@@ -110,67 +93,6 @@ fn payment(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingPayment> {
     })
 }
 
-/// Checks retained nullifiers through `through` for `nullifier`, authenticated
-/// `candidate`'s, without accepting a service's claim of absence, under `gate`'s scan
-/// requirement.
-pub(in crate::wallet::one_time_ivk) fn spend_status(
-    conn: &Connection,
-    candidate: &PendingPayment,
-    nullifier: &orchard::note::Nullifier,
-    through: ChainPoint,
-    gate: super::apply::Gate,
-) -> Result<Result<SpendStatus, SweepDeferral>, SqliteClientError> {
-    // An early restore relies on the coverage count below alone (see `apply::Gate`).
-    if through.height < candidate.height
-        || (gate == super::apply::Gate::FullyScanned
-            && wallet::fully_scanned_height(conn)?.is_none_or(|h| h < through.height))
-    {
-        return Ok(Ok(SpendStatus::Unknown));
-    }
-    if wallet::get_block_hash(conn, through.height)? != Some(through.hash)
-        || wallet::get_block_hash(conn, candidate.height)? != Some(candidate.block_hash)
-    {
-        return Ok(Err(SweepDeferral::UnknownAnchor));
-    }
-    let spent = conn
-        .query_row(
-            // The scanner removes known wallet spends from the unlinked nullifier map.
-            // Both stores must be checked before interpreting absence as unspent.
-            "SELECT t.txid FROM nullifier_map n
-             JOIN tx_locator_map t USING (block_height, tx_index)
-             WHERE n.spend_pool = ?1 AND n.nf = ?2 AND t.block_height BETWEEN ?3 AND ?4
-             UNION ALL
-             SELECT t.txid FROM ironwood_received_notes n
-             JOIN ironwood_received_note_spends s ON s.ironwood_received_note_id = n.id
-             JOIN transactions t ON t.id_tx = s.transaction_id
-             JOIN blocks b ON b.height = t.block AND b.height = t.mined_height
-             WHERE n.nf = ?2 AND t.mined_height BETWEEN ?3 AND ?4
-             LIMIT 1",
-            params![
-                wallet::encoding::pool_code(PoolType::IRONWOOD),
-                nullifier.to_bytes(),
-                u32::from(candidate.height),
-                u32::from(through.height)
-            ],
-            |r| Ok(SpendStatus::Spent(TxId::from_bytes(r.get(0)?))),
-        )
-        .optional()?;
-    if let Some(spent) = spent {
-        return Ok(Ok(spent));
-    }
-    let covered: u64 = conn.query_row(
-        "SELECT COUNT(*) FROM ironwood_nullifier_scan_blocks WHERE height BETWEEN ?1 AND ?2",
-        params![u32::from(candidate.height), u32::from(through.height)],
-        |r| r.get(0),
-    )?;
-    let blocks = u64::from(u32::from(through.height) - u32::from(candidate.height)) + 1;
-    Ok(Ok(if covered == blocks {
-        SpendStatus::Unspent
-    } else {
-        SpendStatus::Unknown
-    }))
-}
-
 /// `account`'s queued candidates for `key`. Loading does not credit or complete them.
 pub(in crate::wallet::one_time_ivk) fn pending_payments(
     conn: &Connection,
@@ -185,13 +107,33 @@ pub(in crate::wallet::one_time_ivk) fn pending_payments(
     Ok(stmt.query_map([id], payment)?.collect::<Result<_, _>>()?)
 }
 
-/// Authenticates and queues one candidate, idempotently, without crediting it.
+/// The queued candidate for output `action` of `txid`, if any.
+pub(in crate::wallet::one_time_ivk) fn pending_payment(
+    conn: &Connection,
+    txid: TxId,
+    action: u32,
+) -> Result<Option<PendingPayment>, SqliteClientError> {
+    Ok(conn
+        .query_row(
+            "SELECT txid, action_index, height, block_hash, tx_index, position, encrypted_note
+             FROM ironwood_one_time_payment_recovery WHERE txid = ?1 AND action_index = ?2",
+            params![txid.as_ref(), action],
+            payment,
+        )
+        .optional()?)
+}
+
+/// Authenticates and queues one candidate from the directory revision ending at
+/// `publication`, idempotently and without crediting it: a scan hint if `hint`, else a
+/// late candidate.
 pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     key: KeyId,
     candidate: &PendingPayment,
+    publication: PublicationEnd,
+    hint: bool,
 ) -> Result<(), SqliteClientError> {
     let (id, _) = authenticate(conn, params, account, key, candidate)?;
     if wallet::get_block_hash(conn, candidate.height)?
@@ -219,9 +161,9 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
     }
     conn.execute(
         "INSERT INTO ironwood_one_time_payment_recovery (
-            one_time_key_id, txid, action_index, height, block_hash,
-            tx_index, position, encrypted_note
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            one_time_key_id, txid, action_index, height, block_hash, tx_index, position,
+            encrypted_note, publication_height, publication_hash, scan_hint
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             id,
             candidate.txid.as_ref(),
@@ -230,7 +172,10 @@ pub(in crate::wallet::one_time_ivk) fn queue_payment<P: Parameters>(
             candidate.block_hash.0,
             candidate.tx_index,
             candidate.position,
-            candidate.encrypted_note.to_bytes().as_slice()
+            candidate.encrypted_note.to_bytes().as_slice(),
+            u32::from(publication.height),
+            publication.hash,
+            hint
         ],
     )?;
     Ok(())

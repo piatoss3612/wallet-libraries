@@ -80,8 +80,15 @@ pub(crate) fn collect(blocks: &[ScannedBlock<AccountUuid>]) -> Batch {
     Batch { entries, coverage }
 }
 
-/// Records `batch` after its blocks are stored, in the same database transaction.
-pub(crate) fn record(conn: &Connection, batch: Batch) -> Result<(), SqliteClientError> {
+/// Records `batch` after its blocks are stored, in the same database transaction, and links
+/// each stored Ironwood note one of its transactions spends. The scanner matched spends
+/// against the notes it loaded before the batch; a note stored since then, such as a late
+/// discovery payment, is linked here, so it never shows unspent.
+pub(crate) fn record(
+    conn: &rusqlite::Transaction<'_>,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
+    batch: Batch,
+) -> Result<(), SqliteClientError> {
     let mut entry = conn.prepare_cached(
         "INSERT OR REPLACE INTO ironwood_spend_journal
             (block_height, tx_index, block_hash, txid, ironwood_start_position, compact_tx)
@@ -97,6 +104,7 @@ pub(crate) fn record(conn: &Connection, batch: Batch) -> Result<(), SqliteClient
          VALUES (:height, :tx_index, :action_index, :nf)",
     )?;
     for e in batch.entries {
+        link_spends(conn, tpir_session, &e)?;
         let height = u32::from(e.height);
         entry.execute(named_params! {
             ":height": height,
@@ -119,6 +127,44 @@ pub(crate) fn record(conn: &Connection, batch: Batch) -> Result<(), SqliteClient
     }
     for (account, range) in batch.coverage {
         cover(conn, account, range)?;
+    }
+    Ok(())
+}
+
+/// Links each stored Ironwood note whose nullifier `entry` reveals to its transaction.
+fn link_spends(
+    conn: &rusqlite::Transaction<'_>,
+    tpir_session: &crate::wallet::transparent_ledger::session::SessionState,
+    entry: &Entry,
+) -> Result<(), SqliteClientError> {
+    let mut known =
+        conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM ironwood_received_notes WHERE nf = ?1)")?;
+    let spends: Vec<orchard::note::Nullifier> = entry
+        .nullifiers
+        .iter()
+        .filter_map(|nf| match known.query_row([nf], |r| r.get::<_, bool>(0)) {
+            Ok(true) => Option::from(orchard::note::Nullifier::from_bytes(nf)).map(Ok),
+            Ok(false) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<Result<_, _>>()?;
+    if spends.is_empty() {
+        return Ok(());
+    }
+    let tx_ref: crate::TxRef = conn.query_row(
+        "SELECT id_tx FROM transactions WHERE txid = ?1",
+        [entry.txid],
+        |r| r.get(0).map(crate::TxRef),
+    )?;
+    for nf in spends {
+        let inserted = crate::wallet::orchard::mark_ironwood_note_spent(conn, tx_ref, &nf)?;
+        crate::wallet::ironwood_hooks::put_received_note_spend(
+            conn,
+            tpir_session,
+            zcash_protocol::ShieldedPool::Ironwood,
+            tx_ref,
+            usize::from(inserted),
+        )?;
     }
     Ok(())
 }

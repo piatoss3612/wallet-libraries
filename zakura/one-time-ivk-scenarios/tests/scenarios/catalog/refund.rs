@@ -112,12 +112,12 @@ fn refund_once(delay: i64) -> Scenario {
                 (Class::FoundLive, REFUND_OPEN)
             } else {
                 (
-                    Class::FoundBySweep,
+                    Class::FoundByDiscovery,
                     "The key closed unpaid 30 days after the deadline; a newer publication's paid filter holds it, so a sweep imports the refund.",
                 )
             };
             ctx.expect(f.a, "refund", &f.key, &refund, class, why);
-            ctx.expect(b, "refund", &f.key, &refund, Class::FoundBySweep, RESTORE_MEMO);
+            ctx.expect(b, "refund", &f.key, &refund, Class::FoundByDiscovery, RESTORE_MEMO);
             ctx.check_same_balance(f.a, b);
             if delay == 30 * MINUTE {
                 ctx.spend_one_time_notes(f.a);
@@ -218,7 +218,7 @@ fn refunded_twice(gap: Option<i64>) -> Scenario {
                 "refund 1",
                 &f.key,
                 &first,
-                Class::FoundBySweep,
+                Class::FoundByDiscovery,
                 RESTORE_MEMO,
             );
             ctx.expect(
@@ -226,7 +226,7 @@ fn refunded_twice(gap: Option<i64>) -> Scenario {
                 "refund 2",
                 &f.key,
                 &second,
-                Class::FoundBySweep,
+                Class::FoundByDiscovery,
                 RESTORE_MEMO,
             );
             ctx.check_same_balance(f.a, b);
@@ -283,7 +283,7 @@ fn restore_before_refund(delay: i64) -> Scenario {
                 )
             } else {
                 (
-                    Class::FoundBySweep,
+                    Class::FoundByDiscovery,
                     "The restored key closed after its 24-hour watch with no payment; a newer publication's paid filter holds it, so a sweep imports the refund.",
                 )
             };

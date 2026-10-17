@@ -22,7 +22,7 @@ use zcash_protocol::{
     memo::MemoBytes,
 };
 
-use super::{OneTimeKey, account_key, restore::recovery, unix_now};
+use super::{OneTimeKey, account_key, unix_now};
 use crate::{AccountUuid, WalletDb, error::SqliteClientError, util::Clock};
 
 /// Why issuance or an incoming operation must wait. The app owns its wording.
@@ -102,14 +102,12 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
         tip: BlockHeight,
         seen: Option<&ProviderSeen<'_>>,
     ) -> Result<Result<OneTimeKey, ReservationPolicy>, SqliteClientError> {
-        let registered_at = unix_now(&self.clock);
         self.transactionally(|db| {
             let (conn, params) = (db.conn.0, db.params);
             if let Some(seen) = seen {
                 let (account_ref, _) = account_key(conn, params, account)?;
                 reservations::record_seen(conn, account_ref.0, seen)?;
             }
-            recovery::maintain_receive_lookahead(conn, params, account, registered_at)?;
             reservations::reap(conn, params, account, now)?;
             let scan_from = match issuance_start(conn, tip)? {
                 Ok(from) => from,

@@ -50,7 +50,7 @@ pub fn all() -> Vec<Scenario> {
             scenarios.push(restore_in_flight(after, fresh));
         }
     }
-    for unpaid in [5, 29, 30, 40] {
+    for unpaid in [5, 29, 30, 40, 100] {
         for covered in [true, false] {
             scenarios.push(beyond_lookahead(unpaid, covered));
         }
@@ -245,9 +245,22 @@ fn paid_twice(gap: Option<i64>, payer2: Payer, offline: bool) -> Scenario {
                 )
             };
             ctx.expect(a, "payout 2", &key, &p2, a2, why);
-            ctx.expect(b, "payout 1", &key, &p1, Class::FoundBySweep, RESTORE_SWEEP);
+            ctx.expect(
+                b,
+                "payout 1",
+                &key,
+                &p1,
+                Class::FoundByDiscovery,
+                RESTORE_SWEEP,
+            );
             let (b2, why) = match payer2 {
-                Payer::Near => (Class::FoundBySweep, RESTORE_SWEEP),
+                Payer::Near => (Class::FoundByDiscovery, RESTORE_SWEEP),
+                // B's scan tries the key on the whole batch holding payout 1's hint, so it
+                // finds a payment in the same batch, but no other.
+                Payer::Wallet if gap.is_none_or(|g| g <= HOUR) => (
+                    Class::FoundAutomatically,
+                    "Payout 1's lookup is a scan hint, and the scan tries its key on the whole batch holding it, which holds payout 2 too.",
+                ),
                 Payer::Wallet => (Class::MissedDocumented, OWN_OVK),
             };
             ctx.expect(b, "payout 2", &key, &p2, b2, why);
@@ -320,7 +333,7 @@ fn restore_in_flight(after: i64, fresh: bool) -> Scenario {
                 )
             } else {
                 (
-                    Class::FoundBySweep,
+                    Class::FoundByDiscovery,
                     "The restored key closed after its 24-hour watch with no payment, so the next publication's paid filter holds it and the sweep imports it (record_paid_filter_check).",
                 )
             };
@@ -394,19 +407,19 @@ fn beyond_lookahead(unpaid: u64, covered: bool) -> Scenario {
                 ctx.sync(b);
             }
             ctx.expect(a, "payout", &swap.label(), &payout, Class::FoundLive, OPEN_LIVE);
-            let (class, why) = if covered || unpaid < 30 {
+            let (class, why) = if covered || unpaid < zakura_pir_receiver::FIRST_WINDOW {
                 (
-                    Class::FoundBySweep,
+                    Class::FoundByDiscovery,
                     if covered {
-                        "Every unpaid quote is in NEAR's seen set, and seen hits move the restore lookahead like payments, so the walk reaches the paid index."
+                        "Every unpaid quote is in NEAR's seen set, and seen hits move discovery's checks on like payments, so they reach the paid index."
                     } else {
-                        "The paid index is inside the first 30-index lookahead."
+                        "The paid index is among the first 100, which discovery always checks against the paid filter."
                     },
                 )
             } else {
                 (
                     Class::MissedDocumented,
-                    "NEAR's seen set never recorded the unpaid quotes, so the restore lookahead stops 30 indices past the last known one, and an incoming index beyond it is never swept.",
+                    "NEAR's seen set never recorded the unpaid quotes, so discovery's checks stop 30 indices past the last used one beyond the first 100, and an incoming index past that is never checked.",
                 )
             };
             ctx.expect(b, "payout", &swap.label(), &payout, class, why);
@@ -464,7 +477,7 @@ fn provider_silent(after_deadline: i64) -> Scenario {
                 )
             } else {
                 (
-                    Class::FoundBySweep,
+                    Class::FoundByDiscovery,
                     "The key closed unpaid at its 30-day limit; a newer publication's paid filter holds it, so a sweep imports the payment (record_paid_filter_check).",
                 )
             };

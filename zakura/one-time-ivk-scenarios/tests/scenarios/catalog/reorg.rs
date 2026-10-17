@@ -403,7 +403,7 @@ fn restored_key_near_rewind() -> Scenario {
                 "late payout",
                 &key,
                 &first,
-                Class::FoundBySweep,
+                Class::FoundByDiscovery,
                 "A restore sweeps the incoming lookahead through the receiver directory.",
             );
             ctx.expect(

@@ -258,7 +258,7 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                     let right = receipt
                         .as_ref()
                         .is_some_and(|r| r.key.as_ref() == Some(&key) && r.value == VALUE)
-                        && class == Some(Class::FoundBySweep);
+                        && class == Some(Class::FoundByDiscovery);
                     (!right).then(|| format!("{key}: {receipt:?}, {class:?}"))
                 })
                 .collect();
@@ -282,7 +282,7 @@ fn restore_after_swaps(swaps: u64, recent: bool) -> Scenario {
                         &format!("payout to I{i}"),
                         &format!("I{i}"),
                         m,
-                        Class::FoundBySweep,
+                        Class::FoundByDiscovery,
                         "A restore sweeps paid keys through the directory.",
                     );
                 }
