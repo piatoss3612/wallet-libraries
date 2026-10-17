@@ -345,11 +345,13 @@ pub(crate) fn record_filter_checks<P: Parameters>(
                 params![owner.0, u32::from(publication.height), publication.hash],
             )?;
             // A key registered for a lookup before any pass, such as a refund key from a
-            // funding memo, is due in this one.
+            // funding memo, is due in this one, and a lookup still due from an earlier pass
+            // reads on to this one's end. Each keeps its cursor.
             if publication.height >= start {
                 conn.execute(
                     "UPDATE ironwood_one_time_lookups SET cutoff_height = ?2
-                     WHERE cutoff_height IS NULL AND done_height IS NULL
+                     WHERE ((cutoff_height IS NULL AND done_height IS NULL)
+                         OR cutoff_height < ?2)
                        AND one_time_key_id IN (
                            SELECT id FROM ironwood_one_time_keys WHERE account_id = ?1)",
                     params![owner.0, u32::from(publication.height)],
@@ -403,11 +405,11 @@ pub(crate) fn record_filter_checks<P: Parameters>(
                     "INSERT INTO ironwood_one_time_lookups (one_time_key_id, cutoff_height)
                      VALUES (?2, ?3)
                      ON CONFLICT (one_time_key_id) DO UPDATE SET
-                         cutoff_height = excluded.cutoff_height
-                     WHERE cutoff_height IS NULL
-                       AND (done_height IS NULL OR (done_height < excluded.cutoff_height
+                         cutoff_height = MAX(COALESCE(cutoff_height, 0), excluded.cutoff_height)
+                     WHERE cutoff_height IS NOT NULL OR done_height IS NULL
+                       OR (done_height < excluded.cutoff_height
                            AND EXISTS(SELECT 1 FROM ironwood_one_time_keys k
-                               WHERE k.id = ?2 AND {UNPAID_CLOSED})))"
+                               WHERE k.id = ?2 AND {UNPAID_CLOSED}))"
                 ),
                 params![owner.0, id, u32::from(publication.height)],
             )?;

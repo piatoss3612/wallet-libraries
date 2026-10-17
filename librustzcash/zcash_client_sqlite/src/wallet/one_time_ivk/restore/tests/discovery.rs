@@ -544,3 +544,33 @@ fn a_lookup_refuses_a_revision_below_its_cutoff() {
     assert!(!look_up(db, account, key8(), older, &[]));
     assert!(look_up(db, account, key8(), publication, &[]));
 }
+
+/// A lookup still due when a newer pass starts reads on to the newer publication's end,
+/// keeping its cursor, so it finds a payment between the two.
+#[test]
+fn a_new_pass_raises_a_due_lookups_cutoff() {
+    let mut st = ironwood_wallet();
+    let account = st.test_account().unwrap().id();
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let first = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, account, first, &[paid(key8())]));
+    let candidate = pay_candidate_at(&mut st, key8());
+    st.generate_and_scan_empty_blocks_with_one_time_ivks(1);
+    let second = publication_at(&st, tip(&st).height);
+    let db = st.wallet_mut().db_mut();
+    assert!(run_pass(db, account, second, &[paid(key8())]));
+    let due = status(db, account).lookups;
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].cutoff, second.height);
+    assert!(look_up(db, account, key8(), second, &[candidate]));
+    assert_eq!(status(db, account).witnesses.len(), 1);
+}
+
+/// Pays `key` in a new scanned block before the wallet scans with it, returning the
+/// payment as a directory candidate.
+fn pay_candidate_at(st: &mut State, key: KeyId) -> PendingPayment {
+    let fvk = derive(st, key);
+    let height = pay(st, &fvk, 100_000);
+    candidate_at(st, height, &fvk)
+}
