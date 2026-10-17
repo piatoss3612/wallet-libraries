@@ -15,8 +15,7 @@ and this library adheres to Rust's notion of
   covers every later block. Issuance waits until a restored account's discovery has
   registered every index its publication marks used, and a fresh account waits for none.
 - `wallet::init::migrations::ids::ONE_TIME_IVK_DISCOVERY`, the migration for discovery and
-  the spend journal. It replaces the unreleased early restore migration, so a wallet that ran
-  that one needs a fresh database.
+  the spend journal.
 - A spend journal (with `orchard`): every block scan keeps each recognized transaction's
   compact form and every Ironwood nullifier it reveals, matched to a wallet note or not, and
   records which blocks it covered for each account. It grows with the wallet's own
@@ -33,18 +32,15 @@ and this library adheres to Rust's notion of
   map prunes Ironwood nullifiers like the other pools'. The migration drops the
   `ironwood_one_time_sweeps`, `ironwood_nullifier_scan_blocks` and
   `ironwood_one_time_spend_retention` tables, which released wallets hold empty.
-- Scanned blocks need one-time keys only while a key is open: a plain scan judges discovery's
-  publications and turns the hints it skips into late candidates. Builds without `orchard`,
-  which cannot, also refuse blocks while discovery waits for the scan or a payment
-  candidate is pending.
+- Blocks scanned without one-time keys judge discovery's publications and turn the hints
+  they skip into late candidates. Builds without `orchard`, which cannot, also refuse blocks
+  while discovery waits for the scan or a payment candidate is pending.
 - `WalletDb::recheck_one_time_key_history` returns nothing. It ends the account's discovery
   pass, so the next one rechecks every key against a newer publication.
-- A rewind on the same chain, such as adding an account with an older birthday, repairs
-  discovery from its rescan floor: a publication ending above it is judged again, a late
-  candidate there becomes a hint again, and a lookup cursor that passed a record there
-  restarts. A key closed without scanning scans again from its first payment above the
-  rewind until that payment is confirmed again. Lowering a birthday reopens discovery. Builds
-  without `orchard` make the same repairs.
+- A rewind repairs one-time IVK state in every build, not only with `orchard`: discovery
+  redoes what the rescan may change, and lowering an account's birthday reopens its
+  discovery. A key closed without scanning scans again from its first payment above the
+  rewind until that payment is confirmed again.
 
 - Operations that can queue transparent lookups now reject caller-owned SQL transactions
   without a wallet-owned session journal with `TransparentSessionTransactionRequired`.
@@ -86,8 +82,7 @@ and this library adheres to Rust's notion of
   no actions or fee.
 - `wallet::init::migrations::ids::ONE_TIME_IVK`, the one-time IVK migration, which runs in
   every build. Builds without `orchard` refuse blocks and transactions with
-  `SqliteClientError::OneTimeIvksNotUsed` while a one-time key is open, and blocks while
-  discovery waits for the scan.
+  `SqliteClientError::OneTimeIvksNotUsed` while a one-time key is open.
 
 ### Changed
 

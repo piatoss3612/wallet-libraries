@@ -10,18 +10,12 @@ and this library adheres to Rust's notion of
 ### Added
 
 - One-time IVK discovery (with `orchard`): `data_api::one_time_ivk::restore` replaces restore
-  sweeps. `OneTimeIvkRestoreRead::one_time_discovery` returns a `DiscoveryStatus`: whether
-  discovery is complete, where filter checks resume (`EnumerationCursor`), the lookups due
-  with each one's paging cursor (`LookupWork`), the late payments waiting for an inclusion
-  path (`WitnessRequest`), the closed keys a pass checks wherever its search stops, and
-  whether a newer publication should check keys again.
-  `OneTimeIvkRestoreWrite::record_one_time_filter_checks` records `FilterCheck`s against a
-  `PublicationEnd`, `record_one_time_lookup` applies pages of a paid key's history,
-  `defer_one_time_lookup` backs a lookup off, and `record_one_time_witness` gives a late
-  payment its inclusion path. A payment ahead of the scan becomes a scan hint, and one behind
-  it is admitted once the scan covers it. `OneTimeIvkRead::get_one_time_scanning_keys_for_range`
-  gives the keys for one scan batch, hints included, and
-  `chain::scan_cached_blocks_with_one_time_ivks` now uses it.
+  sweeps with discovery. `one_time_discovery` reports the work due, and
+  `record_one_time_filter_checks`, `record_one_time_lookup`, `defer_one_time_lookup` and
+  `record_one_time_witness` record it. Payments ahead of the scan become scan hints.
+  `OneTimeIvkRead::get_one_time_scanning_keys_for_range` gives one batch's keys, hints
+  included, and `chain::scan_cached_blocks_with_one_time_ivks` uses it. Its default is
+  `get_one_time_scanning_keys`.
 - `wallet::ScannedCompactTx` (with `orchard`), attached to each transaction a block scan
   recognizes through `WalletTx::scanned_compact`, carries its compact form and the Ironwood
   commitment tree position of its first action. `ScannedBlock::scanned_accounts` names the
@@ -51,7 +45,6 @@ and this library adheres to Rust's notion of
 - `ll::wallet::put_blocks_with_nullifier_retention` and
   `put_blocks_rows_with_nullifier_retention`: Ironwood nullifiers are tracked like the other
   pools' again.
-
 - `EnhancePirWork::Waiting`: newly queued private payload work is eligible through
   the ordinary recovery schedule without a randomized first-query delay.
   Consumers must remove waiting-state handling.
