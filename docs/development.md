@@ -29,6 +29,8 @@ python3 scripts/dev.py verify
 | `enhance` | Enhance PIR; default features |
 | `enhance-testing` | Enhance PIR; `testing` (the synthetic Ironwood output fixture service tests authenticate PIR-returned records with) |
 | `transparent-filter-client` | Transparent filter with its wallet HTTP `client` (profile validation and bounded streaming responses) |
+| `transparent-recovery-types` | Shared recovery records and byte-preserving hash conversions |
+| `transparent-recovery` | Transparent recovery, companion storage and txid lookup through caller transports, without the wallet backend or proving stack |
 | `transparent-pir` | Transparent PIR adapter; `wallet` |
 | `transparent-pir-sqlite` | Transparent PIR adapter; `sqlite` (`wallet` plus the SQLite apply-and-acknowledge integration and the in-process end-to-end tests) |
 | `transparent-pir-testing` | Transparent PIR adapter; `sqlite`, `testing` and `reqwest` (the test support applications build their recovery and txid display tests on; the private recovery and discovery tests go through the HTTP transport) |
@@ -138,7 +140,7 @@ proving-key caches and the cargo test runner.
 ### GitHub Actions
 
 Use **Publish crates** from `main` in `zakura-core/wallet-libraries`. The workflow
-uses the exact commit selected by the dispatch, and reads versions from all twenty-one
+uses the exact commit selected by the dispatch, and reads versions from all twenty-two
 crate manifests. It does not create tags, change versions, or publish wallet-pir.
 Successful **Verify wallet libraries** CI for that exact main commit is required;
 wait for it to finish before dispatching the release workflow.
@@ -152,7 +154,7 @@ that each crate has the right publisher configuration.
 
 Before the first run, a repository administrator must create the `crates-io`
 GitHub Environment, allow only the `main` branch, and require approval by `ebfull`
-(self-approval is allowed, matching Zakura). An owner of **each of the twenty-one crates**
+(self-approval is allowed, matching Zakura). An owner of **each of the twenty-two crates**
 must configure this Trusted Publisher on crates.io:
 
 | Setting | Value |
@@ -162,13 +164,13 @@ must configure this Trusted Publisher on crates.io:
 | Workflow filename | `publish-crates.yml` |
 | Environment | `crates-io` |
 
-Use `python3 scripts/publish-crates.py --plan` to list the twenty-one names and versions.
+Use `python3 scripts/publish-crates.py --plan` to list the twenty-two names and versions.
 Check every crate's publisher settings, including names already reserved by a
 placeholder release. Trusted Publishing needs existing crate names.
 Check that the five `zakura-transparent-{native,events,filter,shard,txid-client}`
 names and the three receiver names, `zakura-receiver-crypto`,
 `zakura-receiver-directory`, and `zakura-receiver-pir`, are reserved. Reserve
-`zakura-filters` as well. Reserve any missing names and configure each crate's Trusted Publisher before the first run
+`zakura-filters` and `zakura-transparent-recovery-types` as well. Reserve any missing names and configure each crate's Trusted Publisher before the first run
 that includes it. No permanent API token or new Infisical secret is required.
 
 Choose **publish** for an actual release. It repeats verification for the dispatch
@@ -243,3 +245,24 @@ recompiling only after checking a successful receipt against the clean checkout,
 commit, selection, and ordered versions. Ordinary `--publish` retains its dry-run
 checks before uploads. Every packaging command uses `--locked`; release commands
 must not rewrite the workspace lockfile.
+
+### Standalone transparent recovery
+
+The `zakura-pir-transparent` feature `recovery` opens the companion, runs recovery
+and returns candidate batches using `zakura-transparent-recovery-types`. It does
+not depend on the wallet backend, PCZT or shielded circuits. The existing `wallet`
+feature adds `WalletChain` and wallet txid-detail orchestration; `sqlite` also adds
+settlement. Standalone batches can be inspected or discarded, never acknowledged
+through a new public operation. Wallet validation and durable settlement remain
+required before candidate facts can affect financial state.
+
+`RecoveryBlockHash` holds internal-order bytes. The wallet boundary converts
+hashes explicitly and preserves explorer display order. The backend re-exports
+the shared records with its existing hash type, so its database interface keeps
+one record definition without requiring a Common change. The contract package
+has not been released; no publishing or downstream adoption is implied.
+
+The `recovery-without-backend` example opens and reopens a companion using caller
+chain information and no wallet backend. Dependency-graph verification builds
+and runs it as a fresh external consumer, where workspace test features cannot
+supply a missing production dependency.
