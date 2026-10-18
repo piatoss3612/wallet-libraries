@@ -23,7 +23,8 @@ CONFIGS = {
     "pczt": (["-p", "zakura-pczt"], ["internal-tests"]),
     "sqlite": (["-p", "zakura-client-sqlite"], ["test-dependencies"]),
     "enhance-wallet": (["-p", "zakura-pir-enhance"], ["wallet"]),
-    "enhance": (["-p", "zakura-pir-enhance"], []),
+    # Select the shared types too so its opt-in endpoint tests run with the client.
+    "enhance": (["-p", "zakura-pir-enhance", "-p", "zakura-pir-enhance-types"], []),
     "enhance-testing": (["-p", "zakura-pir-enhance"], ["testing"]),
     # The recovery engine alone, and with its SQLite store, the store suite and
     # the reference HTTP adapters, without the wallet.
@@ -41,7 +42,8 @@ CONFIGS = {
     "one-time-ivk-scenarios": (["-p", "zakura-one-time-ivk-scenarios"], []),
     # The separate zakura/pir-chain workspace has its own lockfile. Its opt-in
     # RocksDB reader is tested here; fresh consumers check the feature off.
-    "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "rocksdb"]),
+    "server-rpc": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "transparent", "enhance", "status", "receiver"]),
+    "server": (["--manifest-path", "zakura/pir-chain/Cargo.toml", "--workspace"], ["testing", "rocksdb", "enhance", "status", "receiver"]),
 }
 VERIFY = ("server-graph", "zakura-graph", "wallet-lib-modes", "vendor-ancestry", "dependency-graph")
 

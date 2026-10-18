@@ -7,6 +7,7 @@
 //! state, and no block is covered by the journal. The retained nullifiers' coverage marks
 //! and floors are dropped; `nullifier_map` keeps its rows until ordinary pruning. Existing
 //! reservations get no operation floor, so every operation on their keys counts as theirs.
+//! No key has a pass's recent watch, since no pass ran.
 use std::collections::HashSet;
 
 use schemerz_rusqlite::RusqliteMigration;
@@ -133,7 +134,10 @@ impl RusqliteMigration for Migration {
                     CHECK (end_height > start_height AND end_height <= 4294967296),
                 PRIMARY KEY (account_id, start_height)
             );
-            ALTER TABLE ironwood_one_time_keys ADD COLUMN reservation_floor INTEGER;",
+            ALTER TABLE ironwood_one_time_keys ADD COLUMN reservation_floor INTEGER;
+
+            ALTER TABLE ironwood_one_time_keys ADD COLUMN pass_watch_height INTEGER
+                CHECK (pass_watch_height BETWEEN 0 AND 4294967295);",
         )?;
         Ok(())
     }

@@ -36,13 +36,25 @@ def main():
     # Check both feature-off libraries and real consumer capabilities. The
     # proving consumer also ensures the real fixture remains available.
     pczt_macros = {"serde_with_macros", "darling", "darling_core", "darling_macro", "ident_case", "strsim"}
+    endpoint_stack = {"url", "idna", "idna_adapter", "icu_provider", "icu_normalizer", "icu_properties"}
     cases = [
+        ("record-types", "zakura/pir-enhance-types", [], endpoint_stack | {"http", "bytes"}, set()),
+        ("endpoint", "zakura/pir-enhance-types", ["http-endpoint"], endpoint_stack, {"http"}),
+        ("enhance", "zakura/pir-enhance", [], endpoint_stack, {"zakura-pir-enhance-types"}),
+        ("transparent-wallet", "zakura/pir-transparent", ["wallet"],
+         endpoint_stack, {"zakura-pir-enhance-types"}),
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"],
-         {"prost-build", "tonic-prost-build", "which"} | pczt_macros, set()),
+         {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, set()),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
         ("pir", "zakura/pir-native", [], {"clap", "env_logger"}, {"ipir-sp"}),
         ("filter", "zakura/transparent-filter", [], {"bitcoin", "secp256k1", "secp256k1-sys"},
          {"bitcoin_hashes"}),
+        ("filters", "zakura/filters", [], {"bitcoin", "secp256k1", "secp256k1-sys"},
+         {"bitcoin_hashes"}),
+        ("receiver-directory", "zakura/receiver-directory", [],
+         {"bitcoin", "secp256k1", "secp256k1-sys"}, {"zakura-filters", "bitcoin_hashes"}),
+        ("receiver-wallet", "zakura/pir-receiver", ["wallet"],
+         {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"}, {"zakura-filters"}),
         ("engine", "zakura/pir-transparent", ["engine"],
          {"url", "idna", "icu_provider", "bitcoin", "clap", "env_logger"}, set()),
         ("test-support", "librustzcash/zcash_client_sqlite", ["test-dependencies"],

@@ -10,6 +10,46 @@ graph = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(graph)
 
 
+class RpcDependencyTests(unittest.TestCase):
+    def graph(self, active=False, kind=None):
+        return {
+            "packages": [{"id": "consumer", "name": "consumer"}, {"id": "node", "name": "zakura-chain"}],
+            "resolve": {"root": "consumer", "nodes": [
+                {"id": "consumer", "deps": [{"pkg": "node", "dep_kinds": [{"kind": kind}]}] if active else []},
+                {"id": "node", "deps": []},
+            ]},
+        }
+
+    def test_inactive_node_dependency_is_allowed(self):
+        self.assertEqual(graph.rpc_dependency_problems(self.graph(), {"zakura-chain"}), [])
+
+    def test_runtime_or_build_node_dependency_is_rejected(self):
+        for kind in (None, "build"):
+            self.assertTrue(graph.rpc_dependency_problems(self.graph(True, kind), {"zakura-chain"}))
+
+    def test_fixture_dependency_does_not_enter_rpc_build(self):
+        self.assertEqual(graph.rpc_dependency_problems(self.graph(True, "dev"), {"zakura-chain"}), [])
+
+
+
+class ProductDependencyTests(unittest.TestCase):
+    def graph(self, features, receiver=False):
+        packages = [{"id": "adapter", "name": "zakura-server-chain"}]
+        if receiver:
+            packages.append({"id": "receiver", "name": "zakura-receiver-crypto"})
+        return {"packages": packages, "resolve": {"nodes": [{"id": "adapter", "features": features}]}}
+
+    def test_each_product_is_isolated_and_receiver_recovery_is_optional(self):
+        for product in ("transparent", "enhance", "status", "receiver"):
+            self.assertEqual(graph.product_dependency_problems(self.graph([product], product == "receiver"), product), [])
+        self.assertTrue(graph.product_dependency_problems(self.graph(["transparent"], True), "transparent"))
+
+    def test_testing_cannot_activate_another_product(self):
+        self.assertEqual(graph.product_dependency_problems(self.graph(["testing"]), None), [])
+        self.assertTrue(graph.product_dependency_problems(self.graph(["testing", "receiver"]), None))
+        self.assertTrue(graph.product_dependency_problems(self.graph(["transparent", "receiver"]), "transparent"))
+
+
 class ServerBoundaryTests(unittest.TestCase):
     def package(self, name="library-owned", **fields):
         return {"name": name, "source": None, "repository": "https://github.com/zakura-core/wallet-libraries", "dependencies": [], **fields}
@@ -105,7 +145,21 @@ class ServerBoundaryTests(unittest.TestCase):
             consumers[manifest.parent.name] = manifest.read_text()
             packages = [self.package("future-wire", repository="ssh://git@ssh.github.com:443/valargroup/wallet-pir") if ownership
                         else self.package("zakura-chain")] if manifest.parent.name == contaminated else []
-            return {"packages": packages}
+            for package in packages:
+                package["id"] = package["name"]
+            if manifest.parent.name.startswith("product-"):
+                product = manifest.parent.name.removeprefix("product-").removesuffix("-testing")
+                packages.append(self.package("zakura-server-chain", id="adapter"))
+            if manifest.parent.name in {"server-production", "server-fixtures"}:
+                product = None
+                packages.append(self.package("zakura-server-chain", id="adapter"))
+            consumer = self.package("consumer", id="consumer")
+            return {"packages": [consumer, *packages], "resolve": {
+                "root": "consumer", "nodes": [
+                    {"id": "consumer", "deps": [{"pkg": p["id"], "dep_kinds": [{"kind": None}]} for p in packages]},
+                    *[{"id": p["id"], "deps": [], "features": [product] if p["id"] == "adapter" and product else []} for p in packages],
+                ],
+            }}
         def lock_problems(lockfile, owned):
             return [f"{lockfile.name}: resolves wallet-pir package receiver-pir"] if lockfile.relative_to(graph.ROOT).as_posix() in locked else []
         with patch.object(graph, "metadata", side_effect=metadata), patch.object(graph, "lock_problems", side_effect=lock_problems), \
@@ -127,7 +181,11 @@ class ServerBoundaryTests(unittest.TestCase):
         consumers = self.run_probes()
         self.assertIn("server-production", consumers)
         self.assertNotIn('features = ["testing"]', consumers["server-production"])
-        self.assertIn('features = ["testing"]', consumers["server"])
+        self.assertIn('"receiver"', consumers["server"])
+        self.assertIn('features = ["testing"]', consumers["server-fixtures"])
+        for product in ("transparent", "enhance", "status", "receiver"):
+            self.assertIn(f'features = ["{product}"]', consumers["product-" + product])
+            self.assertIn(f'features = ["{product}", "testing"]', consumers["product-" + product + "-testing"])
         # The opt-in RocksDB reader is resolved and type-checked on its own.
         self.assertIn('features = ["rocksdb"]', consumers["server-rocksdb"])
         self.assertNotIn("rocksdb", consumers["server-production"] + consumers["server"])
