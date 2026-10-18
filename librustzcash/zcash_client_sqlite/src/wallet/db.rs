@@ -529,7 +529,9 @@ CREATE INDEX idx_orchard_received_note_spends_transaction_id ON orchard_received
 )"#;
 
 /// Registered one-time keys, each with at most one incoming reservation. Empty lookahead
-/// entries do not advance allocation.
+/// entries do not advance allocation. `reservation_floor` is the highest operation ID on
+/// the key when its current reservation was made, so only later operations belong to it;
+/// it is NULL on a reservation made before the column existed.
 pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one_time_keys (
                 id INTEGER PRIMARY KEY,
                 account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -547,6 +549,7 @@ pub(super) const TABLE_IRONWOOD_ONE_TIME_KEYS: &str = "CREATE TABLE ironwood_one
                 released_at INTEGER,
                 active_from INTEGER CHECK (active_from BETWEEN 0 AND 4294967295),
                 closed_at INTEGER,
+                reservation_floor INTEGER,
                 UNIQUE (account_id, purpose, key_index)
             )";
 
