@@ -7943,7 +7943,6 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
- "url",
  "zakura-client-backend",
  "zakura-client-sqlite",
  "zakura-note-encryption",
@@ -7957,6 +7956,10 @@ dependencies = [
 [[package]]
 name = "zakura-pir-enhance-types"
 version = "0.0.1-rc1"
+dependencies = [
+ "http",
+ "url",
+]
 
 [[package]]
 name = "zakura-pir-native"
@@ -8025,10 +8028,10 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tower",
- "url",
  "zakura-client-backend",
  "zakura-client-sqlite",
  "zakura-keys",
+ "zakura-pir-enhance-types",
  "zakura-primitives",
  "zakura-protocol",
  "zakura-transparent",
