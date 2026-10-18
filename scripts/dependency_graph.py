@@ -42,12 +42,15 @@ def main():
         "zakura-orchard", "zakura-orchard-legacy", "zakura-sapling-crypto",
         "zakura-halo2-proofs", "zakura-halo2-gadgets", "zakura-bellman",
     }
+    # Full wallets also need SHA-1 through zcash_script; only protocol-only
+    # consumers can forbid it independently of the IPIR evaluator boundary.
+    native_evaluators = {"ipir-sp", "simplepir-kernel", "clap", "env_logger"}
     cases = [
         ("record-types", "zakura/pir-enhance-types", [], endpoint_stack | {"http", "bytes"}, set()),
         ("endpoint", "zakura/pir-enhance-types", ["http-endpoint"], endpoint_stack, {"http"}),
         ("enhance", "zakura/pir-enhance", [], endpoint_stack, {"zakura-pir-enhance-types"}),
         ("transparent-wallet", "zakura/pir-transparent", ["wallet"],
-         endpoint_stack, {"zakura-pir-enhance-types"}),
+         endpoint_stack | native_evaluators, {"zakura-pir-enhance-types", "ipir-native-client"}),
         ("recovery-types", "zakura/transparent-recovery-types", ["transparent-inputs"],
          recovery_forbidden, {"zakura-protocol"}),
         ("recovery", "zakura/pir-transparent", ["recovery"],
@@ -55,7 +58,10 @@ def main():
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"],
          {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, set()),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
-        ("pir", "zakura/pir-native", [], {"clap", "env_logger"}, {"ipir-sp"}),
+        ("pir", "zakura/pir-native", [], native_evaluators | {"sha1"}, {"ipir-native-client"}),
+        ("status-client", "zakura/pir-status", [], native_evaluators | {"sha1"}, {"ipir-native-client"}),
+        ("receiver-client", "zakura/receiver-pir", [], native_evaluators | {"sha1"}, {"ipir-native-client"}),
+        ("receiver-server", "zakura/receiver-pir", ["server"], set(), {"ipir-sp", "simplepir-kernel"}),
         ("filter", "zakura/transparent-filter", [], {"bitcoin", "secp256k1", "secp256k1-sys"},
          {"bitcoin_hashes"}),
         ("filters", "zakura/filters", [], {"bitcoin", "secp256k1", "secp256k1-sys"},
@@ -63,9 +69,10 @@ def main():
         ("receiver-directory", "zakura/receiver-directory", [],
          {"bitcoin", "secp256k1", "secp256k1-sys"}, {"zakura-filters", "bitcoin_hashes"}),
         ("receiver-wallet", "zakura/pir-receiver", ["wallet"],
-         {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"}, {"zakura-filters"}),
+         {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"} | native_evaluators,
+         {"zakura-filters", "ipir-native-client"}),
         ("engine", "zakura/pir-transparent", ["engine"],
-         {"url", "idna", "icu_provider", "bitcoin", "clap", "env_logger"}, set()),
+         {"url", "idna", "icu_provider", "bitcoin", "sha1"} | native_evaluators, {"ipir-native-client"}),
         ("test-support", "librustzcash/zcash_client_sqlite", ["test-dependencies"],
          {"wagyu-zcash-parameters"}, set()),
         ("proving", "librustzcash/zcash_client_sqlite", ["pczt-tests"],
