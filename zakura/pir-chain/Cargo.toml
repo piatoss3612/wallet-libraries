@@ -12,10 +12,10 @@ readme = "README.md"
 [features]
 ## Synthetic chain fixtures for service tests: raw blocks and transactions built
 ## with the node's own encoders.
-testing = ["dep:axum", "tokio/net", "tokio/time"]
+testing = ["dep:axum", "dep:zakura-chain", "tokio/net", "tokio/time"]
 ## Reading the node's RocksDB directly, as a secondary instance; see
 ## `transparent::state`.
-rocksdb = ["dep:zakura-state"]
+rocksdb = ["dep:zakura-state", "dep:zakura-chain"]
 
 [dependencies]
 axum = { version = "0.7", optional = true }
@@ -26,7 +26,13 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
-zakura-chain.workspace = true
+zakura-chain = { workspace = true, optional = true }
+sha2 = "0.10"
+zcash_script = "0.6"
+zcash_primitives = { package = "zakura-primitives", version = "=4.0.0-rc0", default-features = false, features = ["std", "backend-halo2"] }
+zcash_protocol = { package = "zakura-protocol", version = "=4.0.0-rc0" }
+transparent = { package = "zakura-transparent", version = "=4.0.0-rc0", default-features = false, features = ["std"] }
+orchard = { package = "zakura-orchard", version = "=4.0.0-rc0", default-features = false, features = ["std", "backend-halo2"] }
 zakura-state = { workspace = true, optional = true }
 zakura-receiver-crypto = { path = "../receiver-crypto" }
 
@@ -36,8 +42,8 @@ chrono = { version = "0.4", default-features = false }
 hex = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-# A primary database for the RocksDB reader's tests, and the public genesis block.
-zakura-state.workspace = true
+# Independent node decoding and historical block vectors for RPC compatibility tests.
+zakura-chain.workspace = true
 zakura-test.workspace = true
 
 [[test]]
@@ -77,12 +83,12 @@ repository = "https://github.com/zakura-core/wallet-libraries"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# The Common 3 node revision the PIR services read. Changing it does not upgrade a
+# The Common 4 node revision the PIR services read. Changing it does not upgrade a
 # deployed node; a direct database reader must match the running node's format.
-zakura-chain = { git = "https://github.com/zakura-core/zakura.git", rev = "83738c07468bee30a7db8a8d678cb27bf60094f4" }
+zakura-chain = { git = "https://github.com/zakura-core/zakura.git", rev = "7f306cc00b901173ad1b5f8de61b25c00783479a" }
 # Pinned to the same revision as `zakura-chain`, and it must stay that way: the
 # `rocksdb` reader opens the node's database directly, so its format must match
 # the running node's.
-zakura-state = { git = "https://github.com/zakura-core/zakura.git", rev = "83738c07468bee30a7db8a8d678cb27bf60094f4" }
+zakura-state = { git = "https://github.com/zakura-core/zakura.git", rev = "7f306cc00b901173ad1b5f8de61b25c00783479a" }
 # Test vectors from the same node revision.
-zakura-test = { git = "https://github.com/zakura-core/zakura.git", rev = "83738c07468bee30a7db8a8d678cb27bf60094f4" }
+zakura-test = { git = "https://github.com/zakura-core/zakura.git", rev = "7f306cc00b901173ad1b5f8de61b25c00783479a" }

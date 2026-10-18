@@ -38,11 +38,17 @@ def main():
     pczt_macros = {"serde_with_macros", "darling", "darling_core", "darling_macro", "ident_case", "strsim"}
     cases = [
         ("wallet", "librustzcash/zcash_client_sqlite", ["orchard", "transparent-inputs"],
-         {"prost-build", "tonic-prost-build", "which"} | pczt_macros, set()),
+         {"prost-build", "tonic-prost-build", "which", "regex", "regex-automata", "regex-syntax"} | pczt_macros, set()),
         ("pczt", "librustzcash/pczt", [], pczt_macros, {"serde_with"}),
         ("pir", "zakura/pir-native", [], {"clap", "env_logger"}, {"ipir-sp"}),
         ("filter", "zakura/transparent-filter", [], {"bitcoin", "secp256k1", "secp256k1-sys"},
          {"bitcoin_hashes"}),
+        ("filters", "zakura/filters", [], {"bitcoin", "secp256k1", "secp256k1-sys"},
+         {"bitcoin_hashes"}),
+        ("receiver-directory", "zakura/receiver-directory", [],
+         {"bitcoin", "secp256k1", "secp256k1-sys"}, {"zakura-filters", "bitcoin_hashes"}),
+        ("receiver-wallet", "zakura/pir-receiver", ["wallet"],
+         {"bitcoin", "base58ck", "bitcoin-units", "hex_lit"}, {"zakura-filters"}),
         ("engine", "zakura/pir-transparent", ["engine"],
          {"url", "idna", "icu_provider", "bitcoin", "clap", "env_logger"}, set()),
         ("test-support", "librustzcash/zcash_client_sqlite", ["test-dependencies"],
