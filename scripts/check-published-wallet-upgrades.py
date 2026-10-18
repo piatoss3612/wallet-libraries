@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Verify upgrades from disposable published rc5/rc7 wallets and the last pre-migration revision.
+"""Verify upgrades from disposable published rc5/rc7/rc9 wallets and the last pre-migration revision.
 
 Older consumers ingest transaction/UTXO fixtures before the current library upgrades them: the
-published rc5 and rc7 releases (rc7 is the mobile 0.0.50 baseline) and this repository at
+published rc5, rc7 (the mobile 0.0.50 baseline) and rc9 releases, and this repository at
 PRE_MIGRATIONS, the last revision before the unconditional ironwood_unsupported_memo_retry,
 ironwood_transparent_output_shape, transparent_txid_enhancement, one_time_ivk and
-one_time_ivk_discovery migrations. The probe verifies preserved data, classification values, legacy provenance, that the upgrade queues no private work
-for a wallet that never had a private policy, repeat initialization, and how older readers treat
-the upgraded database. The pre-migration fork must refuse unknown migrations without changing it;
-the published releases lack that guard and their successful opens are reported, not qualified.
-Separate consumers retain their own dependency families; no user wallet is accepted.
+one_time_ivk_discovery migrations. rc9, which shipped one_time_ivk, also starts an incoming swap
+and reserves a refund key, which the current library must keep and be able to use. The probe
+verifies preserved data, classification values, legacy provenance, that the upgrade queues no
+private work for a wallet that never had a private policy, repeat initialization, and how older
+readers treat the upgraded database. rc9 and the pre-migration fork must refuse unknown
+migrations without changing it; rc5 and rc7 lack that guard and their successful opens are
+reported, not qualified. Separate consumers retain their own dependency families; no user wallet
+is accepted.
 """
 import argparse
 import fcntl
@@ -34,16 +37,20 @@ UNCONDITIONAL_MIGRATIONS = {
     "one_time_ivk": "57756102-9583-4af5-b411-5eead49fc9f0",
     "one_time_ivk_discovery": "c5b63b3b-8190-4d0f-b217-3921d7aac225",
 }
-# One-time IVK tables left after one_time_ivk_discovery, which an upgrade must leave empty.
+# One-time IVK tables left after one_time_ivk_discovery, which an upgrade must leave empty
+# unless the writer stored one-time IVK data.
 ONE_TIME_IVK_TABLES = (
     "ironwood_one_time_keys", "ironwood_one_time_operations", "ironwood_one_time_payment_recovery",
     "ironwood_one_time_fresh_accounts", "ironwood_one_time_publications",
     "ironwood_one_time_lookups", "ironwood_one_time_lookup_reads", "ironwood_one_time_discovery",
     "ironwood_spend_journal", "ironwood_spend_journal_nullifiers", "ironwood_journal_coverage",
 )
-WRITERS = ("rc5", "rc7", "pre-migrations")
+WRITERS = ("rc5", "rc7", "rc9", "pre-migrations")
 # Writers whose library refuses a database with migrations it does not know.
-REFUSING_READERS = ("pre-migrations",)
+REFUSING_READERS = ("rc9", "pre-migrations")
+# Writers that also store one-time IVK keys and operations, and the tables holding them.
+ONE_TIME_WRITERS = ("rc9",)
+ONE_TIME_SEEDED_TABLES = ("ironwood_one_time_keys", "ironwood_one_time_operations", "ironwood_one_time_fresh_accounts")
 
 
 def source_tree(root, rev):
@@ -73,8 +80,9 @@ def consumer(root, version):
     dest = root / version
     (dest / "src").mkdir(parents=True)
     (dest / "src/main.rs").write_text((ROOT / "scripts/probes/published_wallet_upgrades.rs").read_text())
-    # `ledger` marks a library with explicit transparent ledger modes; `current` is this tree.
-    manifest = f'[package]\nname = "legacy-writers-probe-{version}"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[features]\nledger = []\ncurrent = ["ledger"]\n[dependencies]\nhex = "0.4"\nsecrecy = "0.8"\n'
+    # `ledger` marks a library with explicit transparent ledger modes, `one-time` a published
+    # writer that stores one-time IVK data, and `current` this tree.
+    manifest = f'[package]\nname = "legacy-writers-probe-{version}"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[features]\nledger = []\none-time = ["ledger"]\ncurrent = ["ledger"]\n[dependencies]\nhex = "0.4"\nsecrecy = "0.8"\n'
     tree = {"current": ROOT, "pre-migrations": root / f"source-{PRE_MIGRATIONS}"}.get(version)
     for alias, package, directory in [
         ("zcash_client_sqlite", "zakura-client-sqlite", "zcash_client_sqlite"),
@@ -86,13 +94,14 @@ def consumer(root, version):
         manifest += 'zcash_primitives = { package = "zakura-primitives", version = "=1.2.0" }\nzcash_protocol = "=0.10.4"\n'
         manifest += 'transparent = { package = "zcash_transparent", version = "=0.10.0" }\n'
     else:
-        # The current tree uses the workspace's Zakura Common family; rc7 and pre-migrations use 2.0.0.
+        # The current tree uses the workspace's Zakura Common family; rc9 uses 3.0.0, and rc7
+        # and pre-migrations use 2.0.0.
         for alias, package in [
             ("zcash_primitives", "zakura-primitives"),
             ("zcash_protocol", "zakura-protocol"),
             ("transparent", "zakura-transparent"),
         ]:
-            common = workspace_version(package) if version == "current" else "2.0.0"
+            common = workspace_version(package) if version == "current" else {"rc9": "3.0.0"}.get(version, "2.0.0")
             manifest += f'{alias} = {{ package = "{package}", version = "={common}" }}\n'
     # Pin the PCZT prerelease used by Vizor: caret prerelease resolution otherwise selects
     # rc4's newer dependency family while testing rc5's published writer.
@@ -100,6 +109,8 @@ def consumer(root, version):
         manifest += 'pczt = { package = "zakura-pczt", version = "=0.1.0-rc3", default-features = false, features = ["io-finalizer"] }\n'
     elif version == "rc7":
         manifest += 'pczt = { package = "zakura-pczt", version = "=0.1.0-rc4", features = ["io-finalizer"] }\n'
+    elif version == "rc9":
+        manifest += 'pczt = { package = "zakura-pczt", version = "=0.1.0-rc6", features = ["io-finalizer"] }\n'
     (dest / "Cargo.toml").write_text(manifest)
     # Retain the writer's locked common dependency versions instead of floating to a
     # newer minor release. Cargo adjusts only the legacy families absent from this lockfile.
@@ -116,7 +127,10 @@ def dump(path):
 
 
 def assert_no_private_work(path, version):
-    """A wallet that never had a private policy gets no private obligations from the upgrade."""
+    """A wallet that never had a private policy gets no private obligations from the upgrade.
+
+    One-time IVK tables must be empty, except the ones a one-time writer seeded.
+    """
     with sqlite3.connect(path) as conn:
         applied = {row[0] for row in conn.execute("SELECT id FROM schemer_migrations")}
         for name, migration in UNCONDITIONAL_MIGRATIONS.items():
@@ -126,15 +140,32 @@ def assert_no_private_work(path, version):
             count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             assert count == 0, f"{version}: the upgrade queued {count} rows in {table}"
         assert conn.execute("SELECT count(*) FROM ironwood_enhance_routing WHERE route = 2").fetchone()[0] == 0
-        for table in ONE_TIME_IVK_TABLES:
+        seeded = ONE_TIME_SEEDED_TABLES if version in ONE_TIME_WRITERS else ()
+        for table in (t for t in ONE_TIME_IVK_TABLES if t not in seeded):
             count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             assert count == 0, f"{version}: the upgrade left {count} rows in {table}"
         assert conn.execute("SELECT count(*) FROM ironwood_received_notes WHERE one_time_key_id IS NOT NULL").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM tx_retrieval_queue WHERE policy_generation != 0").fetchone()[0] == 0
 
 
+def columns(conn, relation):
+    """`relation`'s column names, in order."""
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({relation})")]
+
+
+def one_time_rows(path, kept=None):
+    """Each seeded one-time IVK table's rows, restricted to the columns in `kept` if given."""
+    with sqlite3.connect(path) as conn:
+        rows = {}
+        for table in ONE_TIME_SEEDED_TABLES:
+            names = kept[table][0] if kept else columns(conn, table)
+            select = ", ".join(f'"{name}"' for name in names)
+            rows[table] = (names, conn.execute(f'SELECT {select} FROM "{table}" ORDER BY rowid').fetchall())
+        return rows
+
+
 def has_column(conn, relation, column):
-    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({relation})"))
+    return column in columns(conn, relation)
 
 
 def snapshot(path):
@@ -153,13 +184,16 @@ def main():
         root = Path(tmp)
         source_tree(root, PRE_MIGRATIONS)
         consumers = {v: consumer(root, v) for v in ("current", *WRITERS)}
-        def run(version, command, db, check=True):
+        def run(version, command, db, *extra, capture=False):
             argv = ["cargo", "run", "--manifest-path", str(consumers[version] / "Cargo.toml"), "--target-dir", str(args.target_dir)]
             if version == "current":
                 argv += ["--features", "current"]
+            elif version in ONE_TIME_WRITERS:
+                argv += ["--features", "one-time"]
             elif version == "pre-migrations":
                 argv += ["--features", "ledger"]
-            return subprocess.run(argv + ["--", command, str(db), str(FIXTURE)], cwd=ROOT, check=check)
+            argv += ["--", command, str(db), str(FIXTURE), *extra]
+            return subprocess.run(argv, cwd=ROOT, check=True, stdout=subprocess.PIPE if capture else None, text=True)
         downgrade = {}
         for version in WRITERS:
             db = root / f"{version}.sqlite"
@@ -172,6 +206,11 @@ def main():
                 assert len(accounts) == 1
                 assert len(old_rows) == 2
                 assert len(old_outputs) == 2
+            one_time = version in ONE_TIME_WRITERS
+            if one_time:
+                seeded = run(version, "one-time", db, capture=True).stdout.split()
+                old_one_time = one_time_rows(db)
+                assert [len(old_one_time[t][1]) for t in ONE_TIME_SEEDED_TABLES] == [2, 2, 1], old_one_time
             run("current", "init", db)
             after_upgrade = snapshot(db)
             run("current", "init", db)
@@ -187,9 +226,16 @@ def main():
             assert snapshot(db) == after_upgrade
             assert_no_private_work(db, version)
             print(f"PASS {version}: ingestion before upgrade; current upgrade preserved accounts, transactions, classification values and UTXOs; legacy provenance grants no coverage; the unconditional migrations queued no private work; repeat initialization preserved journal", flush=True)
+            if one_time:
+                assert one_time_rows(db, old_one_time) == old_one_time, f"{version}: the upgrade changed one-time IVK rows"
+                with sqlite3.connect(db) as conn:
+                    floors = conn.execute("SELECT reservation_floor, pass_watch_height FROM ironwood_one_time_keys").fetchall()
+                assert floors == [(None, None)] * 2, f"{version}: upgraded keys got {floors}"
+                run("current", "one-time-use", db, *seeded)
+                print(f"PASS {version} one-time IVK data: the upgrade preserved its keys, operations and fresh account with no reservation floor or pass watch; the current wallet resumed the started incoming swap, built the refund funding memo and kept both keys open", flush=True)
             # The writer, now a prior reader, opens the upgraded database. A build that checks
-            # for unknown migrations refuses it and changes nothing; the published releases
-            # predate that check, which is reported rather than assumed.
+            # for unknown migrations refuses it and changes nothing; rc5 and rc7 predate that
+            # check, which is reported rather than assumed.
             upgraded = dump(db)
             # A nonzero exit alone is not evidence of the downgrade guard: a
             # schema, seed or build error could cause it. The guarded reader
