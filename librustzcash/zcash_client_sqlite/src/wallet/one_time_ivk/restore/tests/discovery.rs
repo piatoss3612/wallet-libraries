@@ -712,9 +712,15 @@ fn a_fresh_account_rechecks_on_request() {
     assert!(!found.complete);
     assert_eq!(found.lookups.len(), 1);
     assert!(
-        prepare_from(db, account, clock_now(), after, None)
-            .unwrap()
-            .is_ok()
+        prepare_from(
+            db,
+            account,
+            clock_now(),
+            after,
+            Some(&empty_seen(clock_now()))
+        )
+        .unwrap()
+        .is_ok()
     );
     assert!(
         db.record_one_time_lookup(account, key, publication, 1, &[], true, clock_now())
@@ -1004,7 +1010,7 @@ fn issuance_waits_for_both_purposes_against_a_judged_publication() {
     let unjudged = unscanned_publication(&mut st);
     let gap = |db: &mut Db, tip| {
         matches!(
-            db.reserve_refund_key(account, tip, None),
+            reserve_refund(db, account, tip),
             Ok(Err(ReservationPolicy::Gap))
         )
     };
@@ -1026,7 +1032,7 @@ fn issuance_waits_for_both_purposes_against_a_judged_publication() {
     assert!(check(db, Purpose::Receive));
     assert!(gap(db, newer.height));
     assert!(check(db, Purpose::Refund));
-    let key = db.reserve_refund_key(account, newer.height, None).unwrap();
+    let key = reserve_refund(db, account, newer.height).unwrap();
     assert_eq!(key.unwrap().key_id(), KeyId::new(Purpose::Refund, 0));
 }
 
