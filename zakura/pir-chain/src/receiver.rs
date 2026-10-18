@@ -1,13 +1,10 @@
 //! The receiver directory's chain reads: Ironwood blocks checked against their
 //! headers and the node's tree sizes, every Action's note position, and the payments
 //! recoverable with the zero outgoing viewing key.
+use crate::chain::Block;
 use crate::{Network, NodeClient, NodeError};
 use serde::Deserialize;
 use serde_json::json;
-use zakura_chain::{
-    block::{Block, merkle},
-    serialization::ZcashDeserialize,
-};
 use zakura_receiver_crypto::recovery::Action;
 
 /// Bounds retained block memory and the amount of work before an anchor check.
@@ -134,8 +131,9 @@ impl NodeClient {
         let root: [u8; 32] = hex::decode(root)?
             .try_into()
             .map_err(|_| NodeError::Block("Ironwood root is not 32 bytes".into()))?;
-        zakura_chain::orchard::tree::Root::try_from(root)
-            .map_err(|e| NodeError::Block(e.to_string()))?;
+        if !bool::from(orchard::Anchor::from_bytes(root).is_some()) {
+            return Err(NodeError::Block("non-canonical Ironwood root".into()));
+        }
         Ok(root)
     }
 
@@ -248,7 +246,7 @@ fn decode_block(bytes: &[u8]) -> Result<Block, NodeError> {
 /// transaction ID and their order. A v5 ID covers every Action field the indexer reads,
 /// so a node cannot alter them under a real header.
 fn check_transactions(block: &Block) -> Result<(), NodeError> {
-    if block.transactions.iter().collect::<merkle::Root>() != block.header.merkle_root {
+    if block.merkle_root() != block.header.merkle_root {
         return Err(NodeError::Block(
             "receiver block transactions do not match its header".into(),
         ));
@@ -291,17 +289,17 @@ fn extract(block: &Block, height: u32, end_position: u64) -> Result<ReceiverBloc
         let coinbase = tx.is_coinbase();
         let txid = tx.hash().0;
         for (action_index, a) in tx.ironwood_actions().enumerate() {
-            indexed.commitments.push(a.cm_x.into());
+            indexed.commitments.push(a.cm_x);
             if coinbase {
                 indexed.coinbase_actions += 1;
             } else {
                 let action = Action {
-                    cv: a.cv.into(),
-                    nullifier: a.nullifier.into(),
-                    cmx: a.cm_x.into(),
-                    ephemeral_key: a.ephemeral_key.into(),
-                    enc_ciphertext: a.enc_ciphertext.into(),
-                    out_ciphertext: a.out_ciphertext.into(),
+                    cv: a.cv,
+                    nullifier: a.nullifier,
+                    cmx: a.cm_x,
+                    ephemeral_key: a.ephemeral_key,
+                    enc_ciphertext: a.enc_ciphertext,
+                    out_ciphertext: a.out_ciphertext,
                 };
                 if let Some(receiver) = action
                     .recover_receiver()
@@ -348,6 +346,7 @@ mod tests {
     use super::*;
     use axum::{Json, Router, routing::post};
     use serde_json::Value;
+    use zakura_chain::serialization::ZcashDeserialize;
 
     #[test]
     fn ironwood_activates_where_enhance_expects() {
