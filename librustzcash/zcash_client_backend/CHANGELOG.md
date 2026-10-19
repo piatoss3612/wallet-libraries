@@ -17,6 +17,32 @@ and this library adheres to Rust's notion of
   height another pool checkpointed. Only checkpoints of an empty tree state are
   removed this way.
 
+### Added
+
+- `data_api::ll::wallet::stored_root_mismatches`, the number of shards whose
+  computed root differed from the stored one since the process started.
+
+### Changed
+
+- `data_api::ll::wallet::put_blocks` inserts a range's note commitments without
+  block checkpoints when every pool's tree would prune those checkpoints in the
+  same call: the tree already holds `max_checkpoints` newer checkpoints that are
+  not retained, and none of the range's heights is retained. This is the case
+  for history scanned after the chain tip. The trees end in the same state, and
+  the update no longer adds and then prunes a checkpoint for every block.
+- Without those checkpoints, `put_blocks` also leaves out of the tree update
+  each shard that lies wholly inside the range, holds no wallet note, and is
+  already stored as its root alone, as `put_*_subtree_roots` stores a completed
+  shard. Inserting such a shard would collapse it back to that root, so the
+  trees end in the same state without hashing its note commitments. Inserting
+  a shard never checked the computed root against the stored one, so this
+  trusts the stored root no more than before.
+- `put_blocks` now checks stored roots where it builds a shard that has one: a
+  random sample of about one in 16 of the shards it could leave out, and every
+  shard holding a wallet note. A mismatch is logged and counted, without failing
+  the scan or replacing the stored root, and stops shards being left out for
+  the rest of the process.
+
 ## [0.1.0-rc9.1] - 2026-10-19
 
 ### Added
