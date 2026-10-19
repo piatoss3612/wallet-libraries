@@ -1,5 +1,5 @@
 //! Pruning for a note commitment tree that [`update_tree`](super::update_tree) inserts nothing
-//! into, such as Ironwood's before its activation.
+//! into: an empty tree, or Ironwood's before its activation.
 
 use incrementalmerkletree::Hashable;
 use shardtree::{ShardTree, error::ShardTreeError, store::ShardStore};
@@ -50,9 +50,44 @@ where
 mod tests {
     use zcash_protocol::consensus::BlockHeight;
 
-    /// A tree a call inserts nothing into, such as Ironwood's before its activation, still gets a
-    /// checkpoint at the frontier and at each height another pool checkpoints. Only `insert_tree`
-    /// pruned, so those piled up; they are now kept to `max_checkpoints`.
+    /// An empty tree gains a checkpoint at each frontier height, whatever the features. Only
+    /// `insert_tree` pruned, so a tree that stayed empty kept every one of them.
+    #[test]
+    fn checkpoints_of_an_empty_tree_stay_bounded() {
+        use incrementalmerkletree::frontier::Frontier;
+        use shardtree::{
+            ShardTree,
+            store::{ShardStore, memory::MemoryShardStore},
+        };
+
+        let max_checkpoints = 3;
+        let mut tree: ShardTree<MemoryShardStore<sapling::Node, BlockHeight>, 32, 16> =
+            ShardTree::new(MemoryShardStore::empty(), max_checkpoints);
+        for batch in 0..10u32 {
+            super::super::update_tree(
+                "test",
+                &Frontier::empty(),
+                BlockHeight::from(1_000 + 100 * batch),
+                &mut tree,
+                None,
+                core::iter::empty(),
+                #[cfg(feature = "orchard")]
+                core::iter::empty(),
+            )
+            .unwrap();
+        }
+        assert_eq!(tree.store().checkpoint_count().unwrap(), max_checkpoints);
+        assert_eq!(
+            tree.store().min_checkpoint_id().unwrap(),
+            Some(BlockHeight::from(1_700)),
+            "the newest checkpoints are the ones kept"
+        );
+    }
+
+    /// A tree a call inserts nothing into, such as Ironwood's before its activation, also gets a
+    /// checkpoint at each height another pool checkpoints. Those are kept to `max_checkpoints`
+    /// too.
+    #[cfg(feature = "orchard")]
     #[test]
     fn checkpoints_of_a_tree_without_inserts_stay_bounded() {
         use incrementalmerkletree::frontier::Frontier;

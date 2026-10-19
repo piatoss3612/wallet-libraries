@@ -34,9 +34,7 @@ use crate::{
 
 use super::{LowLevelWalletRead, LowLevelWalletWrite, TxMeta};
 
-#[cfg(feature = "orchard")]
 mod positionless_checkpoints;
-#[cfg(feature = "orchard")]
 use positionless_checkpoints::prune_positionless_checkpoints;
 
 #[cfg(feature = "transparent-inputs")]
@@ -1753,13 +1751,9 @@ where
     )?;
     retain_anchor_checkpoint(tree, anchor_retention, frontier_height)?;
 
-    #[cfg(feature = "orchard")]
     let mut inserted_subtrees = false;
     for (subtree, checkpoints) in subtrees {
-        #[cfg(feature = "orchard")]
-        {
-            inserted_subtrees = true;
-        }
+        inserted_subtrees = true;
         // Register anchor retention for this batch's checkpoint heights *before* `insert_tree`,
         // which prunes down to `max_checkpoints` during insertion. A batch larger than the
         // checkpoint budget would otherwise prune an anchor before it could be retained, so
@@ -1795,13 +1789,13 @@ where
                 retain_anchor_checkpoint(tree, anchor_retention, height)?;
             }
         }
+    }
 
-        // `insert_tree` is what prunes excess checkpoints, so a tree this call inserted nothing into
-        // keeps every checkpoint ensured for it: Ironwood's tree, before its activation, would gain
-        // one at every height another pool checkpoints and never lose them.
-        if !inserted_subtrees {
-            prune_positionless_checkpoints(tree)?;
-        }
+    // `insert_tree` is what prunes excess checkpoints, so a tree this call inserted nothing into
+    // keeps every checkpoint added for it: an empty tree gains one at each frontier height, and
+    // Ironwood's tree, before its activation, one at every height another pool checkpoints.
+    if !inserted_subtrees {
+        prune_positionless_checkpoints(tree)?;
     }
 
     Ok(())
