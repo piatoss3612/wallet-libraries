@@ -151,12 +151,15 @@
 //! # }
 //! ```
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use incrementalmerkletree::frontier::Frontier;
 use subtle::ConditionallySelectable;
+use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{self, BlockHeight};
+use zip32::Scope;
 
 use crate::{
     data_api::{ScannedBlock, WalletWrite},
@@ -657,6 +660,176 @@ where
     Ok(scan_summary)
 }
 
+/// Trial decryption of a range of cached blocks, started by [`decrypt_cached_blocks`]
+/// before the range is scanned with [`scan_decrypted_blocks`].
+///
+/// Its work runs on the rayon thread pool that was current when it was started, so a
+/// caller can let it run while it writes the previous range.
+pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync + 'static> {
+    from_height: BlockHeight,
+    limit: usize,
+    /// The hash of each decrypted block, in order. Decryption results are looked up by
+    /// block hash and txid, and a missing result reads as "no notes", so the scanned
+    /// blocks must be exactly these.
+    block_hashes: Vec<BlockHash>,
+    /// The encoded viewing keys the decryption used, so that a scan after an account
+    /// change decrypts again.
+    encoded_ufvks: HashMap<AccountId, String>,
+    scanning_keys: ScanningKeys<AccountId, (AccountId, Scope)>,
+    runners: BatchRunners<(AccountId, Scope), (), (), ()>,
+}
+
+/// Starts trial decryption of at most `limit` cached blocks from `from_height` with the
+/// viewing keys `data_db` tracks, for a later [`scan_decrypted_blocks`] of the same blocks.
+///
+/// It reads the blocks once to queue their outputs, and returns while the decryption
+/// still runs on the current rayon thread pool. It reads `data_db` but does not write it.
+///
+/// ## Errors
+///
+/// - [`Error::BlockSource`] if the requested blocks cannot be read from `block_source`.
+/// - [`Error::Wallet`] if the tracked viewing keys cannot be read.
+#[tracing::instrument(skip(params, block_source, data_db))]
+#[allow(clippy::type_complexity)]
+pub fn decrypt_cached_blocks<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+) -> Result<
+    BlockDecryption<<DbT as WalletRead>::AccountId>,
+    Error<<DbT as WalletRead>::Error, BlockSourceT::Error>,
+>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletRead,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    let account_ufvks = data_db
+        .get_unified_full_viewing_keys()
+        .map_err(Error::Wallet)?;
+    let encoded_ufvks = encode_ufvks(params, &account_ufvks);
+    let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
+    let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
+    let mut block_hashes = vec![];
+    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
+        Some(from_height),
+        Some(limit),
+        |block| {
+            block_hashes.push(block.hash());
+            runners.add_block(params, block).map_err(|e| e.into())
+        },
+    )?;
+    runners.flush();
+
+    Ok(BlockDecryption {
+        from_height,
+        limit,
+        block_hashes,
+        encoded_ufvks,
+        scanning_keys,
+        runners,
+    })
+}
+
+/// Scans at most `limit` cached blocks from `from_height` and stores them, as
+/// [`scan_cached_blocks`] does, using the trial decryption `decryption` that
+/// [`decrypt_cached_blocks`] started.
+///
+/// `decryption` is used only if it covers the same range, the same blocks and the viewing
+/// keys `data_db` tracks now. Otherwise the blocks are decrypted again first, so the
+/// result never depends on what changed since the decryption started.
+///
+/// ## Errors
+///
+/// As for [`scan_cached_blocks`].
+///
+/// ## Panics
+///
+/// This method will panic if `from_height != from_state.block_height() + 1`.
+#[tracing::instrument(skip(params, block_source, data_db, from_state, decryption))]
+#[allow(clippy::type_complexity)]
+pub fn scan_decrypted_blocks<ParamsT, DbT, BlockSourceT>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &mut DbT,
+    from_height: BlockHeight,
+    from_state: &ChainState,
+    limit: usize,
+    decryption: BlockDecryption<<DbT as WalletRead>::AccountId>,
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletWrite,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+{
+    assert_eq!(from_height, from_state.block_height + 1);
+
+    let current_ufvks = data_db
+        .get_unified_full_viewing_keys()
+        .map_err(Error::Wallet)?;
+    let decryption = if decryption.from_height == from_height
+        && decryption.limit == limit
+        && decryption.encoded_ufvks == encode_ufvks(params, &current_ufvks)
+        && blocks_have_hashes(block_source, from_height, limit, &decryption.block_hashes)?
+    {
+        decryption
+    } else {
+        decrypt_cached_blocks(params, block_source, data_db, from_height, limit)?
+    };
+
+    let BlockDecryption {
+        scanning_keys,
+        runners,
+        ..
+    } = decryption;
+    let (scan_summary, scanned_blocks) = scan_with_runners(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        limit,
+        &scanning_keys,
+        runners,
+    )?;
+
+    data_db
+        .put_blocks(from_state, scanned_blocks)
+        .map_err(Error::Wallet)?;
+    Ok(scan_summary)
+}
+
+fn encode_ufvks<ParamsT: consensus::Parameters, AccountId: Copy + Eq + std::hash::Hash>(
+    params: &ParamsT,
+    account_ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
+) -> HashMap<AccountId, String> {
+    account_ufvks
+        .iter()
+        .map(|(account, ufvk)| (*account, ufvk.encode(params)))
+        .collect()
+}
+
+/// Whether the cached blocks from `from_height`, at most `limit` of them, are exactly the
+/// blocks with `hashes`, in order.
+fn blocks_have_hashes<BlockSourceT: BlockSource, WalletErrT>(
+    block_source: &BlockSourceT,
+    from_height: BlockHeight,
+    limit: usize,
+    hashes: &[BlockHash],
+) -> Result<bool, Error<WalletErrT, BlockSourceT::Error>> {
+    let mut read = 0;
+    let mut matches = true;
+    block_source.with_blocks::<_, WalletErrT>(Some(from_height), Some(limit), |block| {
+        matches &= hashes.get(read) == Some(&block.hash());
+        read += 1;
+        Ok(())
+    })?;
+    Ok(matches && read == hashes.len())
+}
+
 /// [`scan_cached_blocks`], also trial-decrypting with the wallet's one-time keys.
 ///
 /// The keys come from [`OneTimeIvkRead::get_one_time_scanning_keys_for_range`] for the
@@ -745,6 +918,42 @@ where
     )?;
     runners.flush();
 
+    scan_with_runners(
+        params,
+        block_source,
+        data_db,
+        from_height,
+        limit,
+        scanning_keys,
+        runners,
+    )
+}
+
+/// The scanning half of [`scan_blocks`], with the blocks' trial decryption already queued
+/// on `runners`.
+#[allow(clippy::type_complexity)]
+fn scan_with_runners<ParamsT, DbT, BlockSourceT, IvkTag>(
+    params: &ParamsT,
+    block_source: &BlockSourceT,
+    data_db: &DbT,
+    from_height: BlockHeight,
+    limit: usize,
+    scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
+    mut runners: BatchRunners<IvkTag, (), (), ()>,
+) -> Result<
+    (
+        ScanSummary,
+        Vec<ScannedBlock<<DbT as WalletRead>::AccountId>>,
+    ),
+    Error<<DbT as WalletRead>::Error, BlockSourceT::Error>,
+>
+where
+    ParamsT: consensus::Parameters + Send + 'static,
+    BlockSourceT: BlockSource,
+    DbT: WalletRead,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
+    IvkTag: Copy + std::hash::Hash + Eq + Send + 'static,
+{
     let mut prior_block_metadata = if from_height > BlockHeight::from(0) {
         data_db
             .block_metadata(from_height - 1)

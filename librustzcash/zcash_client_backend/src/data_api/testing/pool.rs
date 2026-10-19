@@ -6821,6 +6821,71 @@ pub fn scan_cached_blocks_finds_received_notes<T: ShieldedPoolTester, Dsf>(
     );
 }
 
+/// A range decrypted ahead of its scan finds the notes [`scan_cached_blocks`] would.
+///
+/// [`scan_cached_blocks`]: crate::data_api::chain::scan_cached_blocks
+pub fn scan_decrypted_blocks_finds_received_notes<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+
+    let account = st.test_account().cloned().unwrap();
+    let dfvk = T::test_account_fvk(&st);
+
+    let value = Zatoshis::const_from_u64(50000);
+    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    let value2 = Zatoshis::const_from_u64(70000);
+    st.generate_next_block(&dfvk, AddressType::DefaultExternal, value2);
+
+    let decryption = st.decrypt_cached_blocks(h1, 2);
+    let summary = st.scan_decrypted_blocks(h1, 2, decryption);
+    assert_eq!(summary.scanned_range(), h1..h1 + 2);
+    assert_eq!(T::received_note_count(&summary), 2);
+    assert_eq!(
+        st.get_total_balance(account.id()),
+        (value + value2).unwrap()
+    );
+}
+
+/// A decryption that no longer matches its scan, because it covers another range or
+/// predates an account, is decrypted again rather than hiding the notes it missed.
+pub fn scan_decrypted_blocks_decrypts_again_when_stale<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    use secrecy::ExposeSecret;
+
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+    let dfvk = T::test_account_fvk(&st);
+    let value = Zatoshis::const_from_u64(50000);
+
+    // Decrypted for one block, scanned for two.
+    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    let decryption = st.decrypt_cached_blocks(h1, 1);
+    let summary = st.scan_decrypted_blocks(h1, 2, decryption);
+    assert_eq!(T::received_note_count(&summary), 2);
+
+    // Decrypted before the account the block pays was added. The next account under
+    // the test seed takes ZIP 32 index 1, so its key can be derived beforehand.
+    let seed = st.test_seed().unwrap().expose_secret().clone();
+    let index = zip32::AccountId::ZERO.next().unwrap();
+    let usk2 = UnifiedSpendingKey::from_seed(st.network(), &seed, index).unwrap();
+    let dfvk2 = T::sk_to_fvk(T::usk_to_sk(&usk2));
+    let (h3, _, _) = st.generate_next_block(&dfvk2, AddressType::DefaultExternal, value);
+    let decryption = st.decrypt_cached_blocks(h3, 1);
+    st.create_account_from_test_seed("account2");
+    let summary = st.scan_decrypted_blocks(h3, 1, decryption);
+    assert_eq!(T::received_note_count(&summary), 1);
+}
+
 pub fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
