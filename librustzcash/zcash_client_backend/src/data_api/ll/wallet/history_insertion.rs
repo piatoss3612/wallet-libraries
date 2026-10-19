@@ -1,7 +1,8 @@
-//! The `put_blocks` work that history scanned after the chain tip does not need: checkpoints its
-//! trees would prune in the same call, and note-free shards already stored as their downloaded
-//! roots, with a sampled check of those roots. `put_blocks` calls into this module only where it
-//! decides what to insert and after the update.
+//! Inserting a history range scanned after the chain tip. Most of the tree work `put_blocks` would
+//! do there leaves nothing behind: checkpoints its trees prune in the same call, and note-free
+//! shards already stored as their downloaded roots. This module decides what to leave out and
+//! checks a sample of those roots; `put_blocks` calls into it where it decides what to insert and
+//! after the update.
 
 use std::{
     collections::hash_map::RandomState,
