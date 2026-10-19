@@ -1,7 +1,11 @@
 use std::{
-    collections::BTreeMap,
-    hash::Hash,
+    collections::{BTreeMap, hash_map::RandomState},
+    hash::{BuildHasher, Hash},
     ops::{Range, RangeInclusive},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 #[cfg(feature = "orchard")]
 use {
@@ -688,26 +692,40 @@ where
         // Without checkpoints, a shard that lies wholly inside the range and holds no wallet note
         // collapses to its root once inserted. When the tree already stores the shard as that root
         // alone, as `put_*_subtree_roots` stores a completed shard, its commitments are left out
-        // of the subtrees below, which spares hashing them.
+        // of the subtrees below, which spares hashing them. A sample of such shards, and those
+        // holding a note, are built anyway and their stored roots checked after the update.
+        let leave_out_allowed = stored_root_mismatches() == 0;
         let sapling_start = Position::from(from_state.final_sapling_tree().tree_size());
         let sapling_stored = if checkpoints_dropped {
             wallet_db.with_sapling_tree_mut(|tree| {
-                leave_out_shards_stored_as_root(tree, sapling_start, &sapling_commitments)
-                    .map_err(PutBlocksError::ShardTree)
+                leave_out_shards_stored_as_root(
+                    tree,
+                    sapling_start,
+                    &sapling_commitments,
+                    leave_out_allowed,
+                    audit_sample,
+                )
+                .map_err(PutBlocksError::ShardTree)
             })?
         } else {
-            vec![]
+            StoredRootShards::default()
         };
         #[cfg(feature = "orchard")]
         let orchard_start = Position::from(from_state.final_orchard_tree().tree_size());
         #[cfg(feature = "orchard")]
         let orchard_stored = if checkpoints_dropped {
             wallet_db.with_orchard_tree_mut(|tree| {
-                leave_out_shards_stored_as_root(tree, orchard_start, &orchard_commitments)
-                    .map_err(PutBlocksError::ShardTree)
+                leave_out_shards_stored_as_root(
+                    tree,
+                    orchard_start,
+                    &orchard_commitments,
+                    leave_out_allowed,
+                    audit_sample,
+                )
+                .map_err(PutBlocksError::ShardTree)
             })?
         } else {
-            vec![]
+            StoredRootShards::default()
         };
         #[cfg(feature = "orchard")]
         let ironwood_start = Position::from(from_state.final_ironwood_tree().tree_size());
@@ -715,12 +733,18 @@ where
         let ironwood_stored = if checkpoints_dropped {
             wallet_db
                 .with_ironwood_tree_mut(|tree| {
-                    leave_out_shards_stored_as_root(tree, ironwood_start, &ironwood_commitments)
-                        .map_err(PutBlocksError::ShardTree)
+                    leave_out_shards_stored_as_root(
+                        tree,
+                        ironwood_start,
+                        &ironwood_commitments,
+                        leave_out_allowed,
+                        audit_sample,
+                    )
+                    .map_err(PutBlocksError::ShardTree)
                 })?
                 .unwrap_or_default()
         } else {
-            vec![]
+            StoredRootShards::default()
         };
 
         // Create subtrees from the note commitments in parallel.
@@ -729,7 +753,7 @@ where
             sapling_start,
             &mut sapling_commitments,
             CHUNK_SIZE,
-            &sapling_stored,
+            &sapling_stored.left_out,
         );
 
         #[cfg(feature = "orchard")]
@@ -737,7 +761,7 @@ where
             orchard_start,
             &mut orchard_commitments,
             CHUNK_SIZE,
-            &orchard_stored,
+            &orchard_stored.left_out,
         );
 
         // The Ironwood note commitment tree is Orchard-shaped and so uses the Orchard shard
@@ -747,7 +771,7 @@ where
             ironwood_start,
             &mut ironwood_commitments,
             CHUNK_SIZE,
-            &ironwood_stored,
+            &ironwood_stored.left_out,
         );
 
         // Ensure that we have the same set of checkpoints across all trees. Each tree must gain a
@@ -865,6 +889,27 @@ where
                     block_range: from_state.block_height()..(last_scanned_height + 1),
                     error,
                 })
+            })?;
+        }
+
+        // Check the stored roots of the shards built in place of being left out.
+        wallet_db.with_sapling_tree_mut(|tree| {
+            count_stored_root_mismatches(tree, &sapling_stored.audited, &STORED_ROOT_MISMATCHES)
+                .map_err(PutBlocksError::ShardTree)
+        })?;
+        #[cfg(feature = "orchard")]
+        {
+            wallet_db.with_orchard_tree_mut(|tree| {
+                count_stored_root_mismatches(tree, &orchard_stored.audited, &STORED_ROOT_MISMATCHES)
+                    .map_err(PutBlocksError::ShardTree)
+            })?;
+            wallet_db.with_ironwood_tree_mut(|tree| {
+                count_stored_root_mismatches(
+                    tree,
+                    &ironwood_stored.audited,
+                    &STORED_ROOT_MISMATCHES,
+                )
+                .map_err(PutBlocksError::ShardTree)
             })?;
         }
 
@@ -1781,8 +1826,53 @@ where
     Ok(newer >= tree.max_checkpoints())
 }
 
+/// How often [`put_blocks`] builds a shard it could leave out, to check the root stored for it:
+/// about one shard in this many.
+const STORED_ROOT_AUDIT_RATE: u64 = 16;
+
+/// See [`stored_root_mismatches`].
+static STORED_ROOT_MISMATCHES: AtomicU64 = AtomicU64::new(0);
+
+/// The number of shards, since the process started, whose root computed from scanned note
+/// commitments differed from the root the tree stored for them, such as a downloaded subtree root.
+///
+/// Once this is nonzero, [`put_blocks`] leaves no more shards out of the tree update for the rest
+/// of the process, for every wallet database, and builds them as it otherwise would. A mismatch
+/// neither fails the scan nor replaces the stored root.
+pub fn stored_root_mismatches() -> u64 {
+    STORED_ROOT_MISMATCHES.load(Ordering::Relaxed)
+}
+
+/// Whether [`put_blocks`] builds and checks the shard at `index` although it could leave it out:
+/// about one shard in [`STORED_ROOT_AUDIT_RATE`], chosen with a key drawn once per process, so that
+/// a server cannot tell which shards will be checked.
+fn audit_sample(index: u64) -> bool {
+    static KEY: OnceLock<RandomState> = OnceLock::new();
+    KEY.get_or_init(RandomState::new)
+        .hash_one(index)
+        .is_multiple_of(STORED_ROOT_AUDIT_RATE)
+}
+
+/// The shards of a range that the tree stores as their roots alone; see [`shards_stored_as_root`].
+struct StoredRootShards<H> {
+    /// Indices of the shards left out of the insertion.
+    left_out: Vec<u64>,
+    /// The shards built anyway, each with the root stored for it, to check once they are inserted.
+    audited: Vec<(u64, H)>,
+}
+
+impl<H> Default for StoredRootShards<H> {
+    fn default() -> Self {
+        Self {
+            left_out: vec![],
+            audited: vec![],
+        }
+    }
+}
+
 /// Finds the shards that [`shards_stored_as_root`] allows to be left out of inserting
-/// `commitments`, writes each back to the store unchanged, and returns their indices.
+/// `commitments`, writes each back to the store unchanged, and returns them with the shards to
+/// check after the insertion.
 ///
 /// Inserting such a shard would write it as the same single leaf, and a store may record that
 /// write; the SQLite store, for one, keeps a separate root hash only for a shard whose root is a
@@ -1791,34 +1881,49 @@ fn leave_out_shards_stored_as_root<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<S, DEPTH, SHARD_HEIGHT>,
     start: Position,
     commitments: &[Option<(S::H, Retention<BlockHeight>)>],
-) -> Result<Vec<u64>, ShardTreeError<S::Error>>
+    leave_out_allowed: bool,
+    audited: impl Fn(u64) -> bool,
+) -> Result<StoredRootShards<S::H>, ShardTreeError<S::Error>>
 where
     S: ShardStore<CheckpointId = BlockHeight>,
     S::H: Clone + PartialEq + Hashable,
 {
-    let shards = shards_stored_as_root(tree, start, commitments)?;
-    let mut indices = Vec::with_capacity(shards.len());
-    for shard in shards {
+    let (left_out, audited) =
+        shards_stored_as_root(tree, start, commitments, leave_out_allowed, audited)?;
+    let mut indices = Vec::with_capacity(left_out.len());
+    for shard in left_out {
         indices.push(shard.root_addr().index());
         tree.store_mut()
             .put_shard(shard)
             .map_err(ShardTreeError::Storage)?;
     }
-    Ok(indices)
+    Ok(StoredRootShards {
+        left_out: indices,
+        audited,
+    })
 }
 
-/// The shards that lie wholly inside `commitments`, which start at `start`, hold only `Ephemeral`
-/// leaves, and are stored in `tree` as a single ephemeral leaf: their root alone.
+/// The shards that lie wholly inside `commitments`, which start at `start`, and are stored in
+/// `tree` as a single ephemeral leaf: their root alone. Returns the shards that can be left out of
+/// the insertion, and the others with their stored roots.
 ///
-/// Inserting such a shard's commitments would compute its root, check it against the stored one,
-/// and leave the shard collapsed to that root again, so the shard can be left out of the insertion.
-/// Leaving it out also leaves out that check, which is the same trust a wallet places in a
-/// downloaded subtree root for a shard it has not scanned.
+/// A shard holding only `Ephemeral` leaves can be left out: inserting its commitments would
+/// compute its root and leave the shard collapsed to a single leaf again. Insertion does not check
+/// the computed root against the stored one, and the tree computes its root above the shards from
+/// the roots `put_*_subtree_roots` caches there either way, so leaving the shard out trusts the
+/// stored root no more than inserting it does.
+///
+/// The others are built: shards holding a leaf to keep, the shards for which `audited` returns
+/// true, and every shard unless `leave_out_allowed`. [`count_stored_root_mismatches`] checks their
+/// stored roots after the insertion.
+#[allow(clippy::type_complexity)]
 fn shards_stored_as_root<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &ShardTree<S, DEPTH, SHARD_HEIGHT>,
     start: Position,
     commitments: &[Option<(S::H, Retention<BlockHeight>)>],
-) -> Result<Vec<LocatedPrunableTree<S::H>>, ShardTreeError<S::Error>>
+    leave_out_allowed: bool,
+    audited: impl Fn(u64) -> bool,
+) -> Result<(Vec<LocatedPrunableTree<S::H>>, Vec<(u64, S::H)>), ShardTreeError<S::Error>>
 where
     S: ShardStore<CheckpointId = BlockHeight>,
     S::H: Clone + PartialEq + Hashable,
@@ -1826,30 +1931,67 @@ where
     let shard_size = 1u64 << SHARD_HEIGHT;
     let start = u64::from(start);
     let end = start + commitments.len() as u64;
-    let mut stored = vec![];
+    let mut left_out = vec![];
+    let mut checked = vec![];
     for index in start.div_ceil(shard_size)..end / shard_size {
-        let first = usize::try_from(index * shard_size - start).expect("within commitments");
-        let leaves = &commitments[first..first + shard_size as usize];
-        if !leaves
-            .iter()
-            .all(|leaf| matches!(leaf, Some((_, Retention::Ephemeral))))
-        {
-            continue;
-        }
-        let shard = tree
+        let Some(shard) = tree
             .store()
             .get_shard(Address::from_parts(Level::from(SHARD_HEIGHT), index))
-            .map_err(ShardTreeError::Storage)?;
-        if let Some(shard) = shard.filter(|shard| {
-            matches!(
-                (**shard.root()).leaf_value(),
-                Some((_, flags)) if *flags == RetentionFlags::EPHEMERAL
-            )
-        }) {
-            stored.push(shard);
+            .map_err(ShardTreeError::Storage)?
+        else {
+            continue;
+        };
+        let stored_root = match (**shard.root()).leaf_value() {
+            Some((root, flags)) if *flags == RetentionFlags::EPHEMERAL => root.clone(),
+            _ => continue,
+        };
+        let first = usize::try_from(index * shard_size - start).expect("within commitments");
+        let note_free = commitments[first..first + shard_size as usize]
+            .iter()
+            .all(|leaf| matches!(leaf, Some((_, Retention::Ephemeral))));
+        if note_free && leave_out_allowed && !audited(index) {
+            left_out.push(shard);
+        } else {
+            checked.push((index, stored_root));
         }
     }
-    Ok(stored)
+    Ok((left_out, checked))
+}
+
+/// Compares each shard's root, computed from the commitments just inserted, with the root that was
+/// stored for it, and counts a mismatch in `mismatches`.
+///
+/// Insertion keeps a stored root as the annotation of a shard that does not collapse to a leaf, so
+/// the root is computed without it.
+fn count_stored_root_mismatches<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
+    tree: &ShardTree<S, DEPTH, SHARD_HEIGHT>,
+    shards: &[(u64, S::H)],
+    mismatches: &AtomicU64,
+) -> Result<(), ShardTreeError<S::Error>>
+where
+    S: ShardStore<CheckpointId = BlockHeight>,
+    S::H: Clone + PartialEq + Hashable,
+{
+    for (index, stored_root) in shards {
+        let shard = tree
+            .store()
+            .get_shard(Address::from_parts(Level::from(SHARD_HEIGHT), *index))
+            .map_err(ShardTreeError::Storage)?;
+        let computed = shard.and_then(|shard| {
+            shard
+                .reannotate_root(None)
+                .root_hash(Position::from((index + 1) << SHARD_HEIGHT))
+                .ok()
+        });
+        if computed.is_some_and(|computed| &computed != stored_root) {
+            mismatches.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                "The root of shard {index} computed from scanned note commitments differs from the \
+                 root stored for it; no more shards will be left out of note commitment tree updates"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// [`build_subtrees`] for the commitments outside the shards in `left_out`: ascending indices of
@@ -2336,9 +2478,12 @@ mod tests {
         };
         use zcash_protocol::consensus::BlockHeight;
 
+        use std::sync::atomic::{AtomicU64, Ordering};
+
         use super::super::{
             build_subtrees, build_subtrees_except, checkpoints_pruned_on_insert,
-            drop_checkpoint_retention, leave_out_shards_stored_as_root, shards_stored_as_root,
+            count_stored_root_mismatches, drop_checkpoint_retention,
+            leave_out_shards_stored_as_root, shards_stored_as_root,
         };
 
         const MAX_CHECKPOINTS: usize = 3;
@@ -2484,15 +2629,35 @@ mod tests {
             assert!(checkpoints_pruned_on_insert(&skipping, &heights).unwrap());
             let mut downgraded = history();
             drop_checkpoint_retention(&mut downgraded);
-            let stored =
-                leave_out_shards_stored_as_root(&mut skipping, Position::from(2), &downgraded)
-                    .unwrap();
-            assert_eq!(stored, vec![2, 3]);
-            for (subtree, checkpoints) in
-                build_subtrees_except::<_, 3>(Position::from(2), &mut downgraded, 4, &stored)
-            {
+            let stored = leave_out_shards_stored_as_root(
+                &mut skipping,
+                Position::from(2),
+                &downgraded,
+                true,
+                |_| false,
+            )
+            .unwrap();
+            assert_eq!(stored.left_out, vec![2, 3]);
+            // Shard 1 holds the note, so it is built and its stored root checked.
+            assert_eq!(
+                stored
+                    .audited
+                    .iter()
+                    .map(|(index, _)| *index)
+                    .collect::<Vec<_>>(),
+                vec![1]
+            );
+            for (subtree, checkpoints) in build_subtrees_except::<_, 3>(
+                Position::from(2),
+                &mut downgraded,
+                4,
+                &stored.left_out,
+            ) {
                 skipping.insert_tree(subtree, checkpoints).unwrap();
             }
+            let mismatches = AtomicU64::new(0);
+            count_stored_root_mismatches(&skipping, &stored.audited, &mismatches).unwrap();
+            assert_eq!(mismatches.load(Ordering::Relaxed), 0);
 
             assert_eq!(checkpoints(&skipping), checkpoints(&full));
             for index in 0..6 {
@@ -2521,13 +2686,19 @@ mod tests {
             let mut commitments = leaves(0, 32, 10, None);
             drop_checkpoint_retention(&mut commitments);
 
+            let left_out =
+                |tree: &Tree, commitments, allowed: bool, audited: &dyn Fn(u64) -> bool| {
+                    shards_stored_as_root(tree, Position::from(0), commitments, allowed, audited)
+                        .unwrap()
+                        .0
+                        .iter()
+                        .map(|shard| shard.root_addr().index())
+                        .collect::<Vec<_>>()
+                };
+
             // No downloaded roots: every shard is built.
             let tree = tip_first();
-            assert!(
-                shards_stored_as_root(&tree, Position::from(0), &commitments)
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(left_out(&tree, &commitments, true, &|_| false).is_empty());
 
             // A shard holding a leaf to keep is built even when its root is stored.
             let mut tree = tip_first();
@@ -2538,19 +2709,97 @@ mod tests {
                 marking: Marking::None,
             };
             assert_eq!(
-                shards_stored_as_root(&tree, Position::from(0), &with_checkpoint)
-                    .unwrap()
-                    .iter()
-                    .map(|shard| shard.root_addr().index())
-                    .collect::<Vec<_>>(),
-                vec![0, 2, 3],
+                left_out(&tree, &with_checkpoint, true, &|_| false),
+                vec![0, 2, 3]
             );
+
+            // Sampled shards are built, and nothing is left out once a mismatch was found.
+            assert_eq!(
+                left_out(&tree, &commitments, true, &|index| index == 2),
+                vec![0, 1, 3]
+            );
+            assert!(left_out(&tree, &commitments, false, &|_| false).is_empty());
 
             // Leaving nothing out builds what build_subtrees builds.
             assert_eq!(
                 build_subtrees_except::<_, 3>(Position::from(0), &mut commitments.clone(), 4, &[]),
                 build_subtrees::<_, 3>(Position::from(0), &mut commitments, 4),
             );
+        }
+
+        /// Inserts history positions 2..32 over stored roots, leaving out the shards that may be
+        /// left out, and returns the tree with the number of stored roots found wrong.
+        fn insert_over_stored_roots(
+            wrong_root_at: Option<u64>,
+            audited: impl Fn(u64) -> bool,
+        ) -> (Tree, Vec<u64>, u64) {
+            let mut tree = tip_first();
+            store_roots(&mut tree, 0..4);
+            if let Some(index) = wrong_root_at {
+                tree.store_mut()
+                    .put_shard(
+                        LocatedTree::from_parts(
+                            Address::from_parts(Level::from(3), index),
+                            PrunableTree::leaf(("wrong".to_string(), RetentionFlags::EPHEMERAL)),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            let mut commitments = leaves(2, 32, 10, Some(13));
+            drop_checkpoint_retention(&mut commitments);
+            let stored = leave_out_shards_stored_as_root(
+                &mut tree,
+                Position::from(2),
+                &commitments,
+                true,
+                audited,
+            )
+            .unwrap();
+            for (subtree, checkpoints) in build_subtrees_except::<_, 3>(
+                Position::from(2),
+                &mut commitments,
+                4,
+                &stored.left_out,
+            ) {
+                tree.insert_tree(subtree, checkpoints).unwrap();
+            }
+            let mismatches = AtomicU64::new(0);
+            count_stored_root_mismatches(&tree, &stored.audited, &mismatches).unwrap();
+            (tree, stored.left_out, mismatches.load(Ordering::Relaxed))
+        }
+
+        #[test]
+        fn sampled_shards_are_built_and_match_the_full_insertion() {
+            let (sampled, left_out, mismatches) =
+                insert_over_stored_roots(None, |index| index == 2);
+            assert_eq!(left_out, vec![3]);
+            assert_eq!(mismatches, 0);
+
+            let mut full = tip_first();
+            store_roots(&mut full, 0..4);
+            insert(&mut full, 2, leaves(2, 32, 10, Some(13)));
+            for index in 0..6 {
+                let addr = Address::from_parts(Level::from(3), index);
+                assert_eq!(
+                    sampled.store().get_shard(addr).unwrap(),
+                    full.store().get_shard(addr).unwrap(),
+                    "shard {index}",
+                );
+            }
+        }
+
+        #[test]
+        fn a_wrong_stored_root_is_counted_without_failing() {
+            // A sampled note-free shard.
+            let (_, _, mismatches) = insert_over_stored_roots(Some(2), |index| index == 2);
+            assert_eq!(mismatches, 1);
+            // The shard holding the note is always checked.
+            let (_, _, mismatches) = insert_over_stored_roots(Some(1), |_| false);
+            assert_eq!(mismatches, 1);
+            // A shard left out goes unchecked.
+            let (_, left_out, mismatches) = insert_over_stored_roots(Some(3), |_| false);
+            assert_eq!((left_out, mismatches), (vec![2, 3], 0));
         }
 
         #[test]
