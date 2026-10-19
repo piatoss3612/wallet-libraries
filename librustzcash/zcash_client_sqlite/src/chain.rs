@@ -528,6 +528,28 @@ mod tests {
     }
 
     #[test]
+    fn scan_decrypted_blocks_finds_received_notes_sapling() {
+        testing::pool::scan_decrypted_blocks_finds_received_notes::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn scan_decrypted_blocks_finds_received_notes_orchard() {
+        testing::pool::scan_decrypted_blocks_finds_received_notes::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn scan_decrypted_blocks_decrypts_again_when_stale_sapling() {
+        testing::pool::scan_decrypted_blocks_decrypts_again_when_stale::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn scan_decrypted_blocks_decrypts_again_when_stale_orchard() {
+        testing::pool::scan_decrypted_blocks_decrypts_again_when_stale::<OrchardPoolTester>()
+    }
+
+    #[test]
     fn scan_cached_blocks_finds_change_notes_sapling() {
         testing::pool::scan_cached_blocks_finds_change_notes::<SaplingPoolTester>()
     }
