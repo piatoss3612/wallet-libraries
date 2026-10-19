@@ -34,9 +34,9 @@ use crate::{
 
 use super::{LowLevelWalletRead, LowLevelWalletWrite, TxMeta};
 
-mod history_skip;
-pub use history_skip::stored_root_mismatches;
-use history_skip::{
+mod history_insertion;
+pub use history_insertion::stored_root_mismatches;
+use history_insertion::{
     STORED_ROOT_MISMATCHES, StoredRootShards, audit_sample, build_subtrees_except,
     checkpoints_pruned_on_insert_in_all_pools, count_stored_root_mismatches,
     drop_checkpoint_retention, leave_out_shards_stored_as_root,
