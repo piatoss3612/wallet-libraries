@@ -7,6 +7,8 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.1] - 2026-10-19
+
 ### Added
 
 - One-time IVK discovery (with `orchard`): `WalletDb` implements the backend's discovery
@@ -80,6 +82,13 @@ and this library adheres to Rust's notion of
 
 - `WalletDb::set_enhance_pir_max_delay` and the session's in-memory query deadlines.
   No database migration is required.
+
+### Fixed
+
+- Deleting an account removes spend-journal entries for transactions owned only
+  by that account, while retaining transactions shared with another account.
+- Block scans skip spend-journal entries for transactions without Ironwood
+  nullifiers while still recording that the block was scanned.
 
 ## [0.1.0-rc9] - 2026-10-14
 
