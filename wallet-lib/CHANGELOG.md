@@ -7,6 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the published Zakura Common dependency family to `4.0.0-rc3`.
+  Compatible newer releases are allowed so consumers can share Common packages
+  with the node libraries without matching exact dependency pins.
+
 ## [0.1.0-rc9] - 2026-10-19
 
 ### Changed
