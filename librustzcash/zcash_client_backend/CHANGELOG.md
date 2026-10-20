@@ -7,6 +7,16 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Fixed
+
+- `data_api::ll::wallet::update_tree` (and so `put_blocks`) keeps a tree it
+  inserts no note commitments into to `max_checkpoints` unretained checkpoints.
+  Only inserting a subtree pruned, so such a tree kept every checkpoint added
+  for it: an empty tree one at each frontier height, with or without the
+  `orchard` feature, and Ironwood's tree before its activation one at every
+  height another pool checkpointed. Only checkpoints of an empty tree state are
+  removed this way.
+
 ## [0.1.0-rc9.1] - 2026-10-19
 
 ### Added
