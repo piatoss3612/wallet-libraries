@@ -1,3 +1,4 @@
+use incrementalmerkletree::frontier::Frontier;
 use incrementalmerkletree::{Address, Level, Marking, Position, Retention};
 use shardtree::{
     LocatedTree, PrunableTree, RetentionFlags, ShardTree,
@@ -7,7 +8,7 @@ use zcash_protocol::consensus::BlockHeight;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::super::build_subtrees;
+use super::super::{build_subtrees, update_tree};
 use super::{
     build_subtrees_except, checkpoints_pruned_on_insert, count_stored_root_mismatches,
     drop_checkpoint_retention, leave_out_shards_stored_as_root, shards_stored_as_root,
@@ -380,4 +381,65 @@ fn dropping_checkpoint_retention_keeps_marks() {
             Retention::Marked,
         ],
     );
+}
+
+#[test]
+fn omitting_all_history_shards_prunes_the_empty_starting_checkpoint() {
+    let mut full = tip_first();
+    store_roots(&mut full, 0..4);
+    let mut skipping = tip_first();
+    store_roots(&mut skipping, 0..4);
+    let mut commitments = leaves(0, 32, 10, None);
+    let full_subtrees = build_subtrees::<_, 3>(Position::from(0), &mut commitments.clone(), 4);
+
+    assert!(checkpoints_pruned_on_insert(&skipping, &(h(10)..=h(25))).unwrap());
+    drop_checkpoint_retention(&mut commitments);
+    let stored = leave_out_shards_stored_as_root(
+        &mut skipping,
+        Position::from(0),
+        &commitments,
+        true,
+        |_| false,
+    )
+    .unwrap();
+    assert_eq!(stored.left_out, vec![0, 1, 2, 3]);
+    let skipped_subtrees =
+        build_subtrees_except::<_, 3>(Position::from(0), &mut commitments, 4, &stored.left_out);
+
+    for (tree, subtrees) in [
+        (&mut full, full_subtrees),
+        (&mut skipping, skipped_subtrees),
+    ] {
+        update_tree(
+            "test",
+            &Frontier::empty(),
+            h(9),
+            tree,
+            None,
+            subtrees.into_iter(),
+            #[cfg(feature = "orchard")]
+            std::iter::empty(),
+        )
+        .unwrap();
+    }
+
+    // An obsolete checkpoint below the scanned history makes SQLite treat a rewind into
+    // that history as straddling checkpoints, rather than resetting to downloaded roots.
+    assert_eq!(checkpoints(&skipping), checkpoints(&full));
+    assert_eq!(checkpoints(&skipping).len(), MAX_CHECKPOINTS);
+    assert!(
+        checkpoints(&skipping)
+            .iter()
+            .all(|(height, _)| *height > h(25))
+    );
+    assert_eq!(
+        skipping.root_at_checkpoint_depth(Some(0)).unwrap(),
+        full.root_at_checkpoint_depth(Some(0)).unwrap(),
+    );
+}
+
+#[test]
+fn an_empty_history_batch_builds_no_subtrees() {
+    let mut commitments: Commitments = vec![];
+    assert!(build_subtrees_except::<_, 3>(Position::from(0), &mut commitments, 4, &[]).is_empty());
 }

@@ -261,6 +261,9 @@ where
 
 /// [`build_subtrees`] for the commitments outside the shards in `left_out`: ascending indices of
 /// shards that lie wholly inside `commitments`, which start at `start`.
+///
+/// When every shard is left out, returns one empty subtree so that [`update_tree`] still calls
+/// [`ShardTree::insert_tree`] to prune the checkpoint it adds for an empty starting frontier.
 pub(super) fn build_subtrees_except<H, const SHARD_HEIGHT: u8>(
     start: Position,
     commitments: &mut [Option<(H, Retention<BlockHeight>)>],
@@ -280,7 +283,7 @@ where
         from = (index + 1) * shard_size;
     }
     segments.push(from..end);
-    segments
+    let mut subtrees: Vec<_> = segments
         .into_iter()
         .filter(|segment| !segment.is_empty())
         .flat_map(|segment| {
@@ -292,7 +295,14 @@ where
                 chunk_size,
             )
         })
-        .collect()
+        .collect();
+    if subtrees.is_empty() && !left_out.is_empty() {
+        subtrees.push((
+            LocatedPrunableTree::empty(Address::from_parts(Level::from(SHARD_HEIGHT), left_out[0])),
+            BTreeMap::new(),
+        ));
+    }
+    subtrees
 }
 
 /// Replaces `Checkpoint` retention with the retention the leaf has once its checkpoint is removed.
