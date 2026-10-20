@@ -6853,8 +6853,9 @@ pub fn scan_decrypted_blocks_finds_received_notes<T: ShieldedPoolTester, Dsf>(
     );
 }
 
-/// A decryption that no longer matches its scan, because it covers another range or
-/// predates an account, is decrypted again rather than hiding the notes it missed.
+/// A decryption that no longer matches its scan, because it covers another range,
+/// predates an account or used consensus parameters that give its blocks another ZIP 212
+/// enforcement, is decrypted again rather than hiding the notes it missed.
 pub fn scan_decrypted_blocks_decrypts_again_when_stale<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -6885,6 +6886,20 @@ pub fn scan_decrypted_blocks_decrypts_again_when_stale<T: ShieldedPoolTester, Ds
     let decryption = st.decrypt_cached_blocks(h3, 1);
     st.create_account_from_test_seed("account2");
     let summary = st.scan_decrypted_blocks(h3, 1, decryption);
+    assert_eq!(T::received_note_count(&summary), 1);
+
+    // Decrypted under parameters of the same network type that activate Canopy after the
+    // block, so its Sapling outputs were decrypted without ZIP 212; the scan's parameters
+    // put the block in the ZIP 212 grace period, under which the note was made. Only
+    // Sapling decryption depends on this.
+    let (h4, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    let pre_canopy = LocalNetwork {
+        canopy: Some(h4 + 1),
+        ..*st.network()
+    };
+    let decryption =
+        chain::decrypt_cached_blocks(&pre_canopy, st.cache(), st.wallet(), h4, 1).unwrap();
+    let summary = st.scan_decrypted_blocks(h4, 1, decryption);
     assert_eq!(T::received_note_count(&summary), 1);
 }
 

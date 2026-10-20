@@ -26,8 +26,8 @@ and this library adheres to Rust's notion of
   blocks and returns a `BlockDecryption` while the work still runs on the current rayon
   pool; `data_api::chain::scan_decrypted_blocks` then scans and stores the range as
   `scan_cached_blocks` does. A caller can decrypt the next range while it stores the
-  previous one. The decryption is used only if it covers the same range, blocks and
-  viewing keys, and the range is decrypted again otherwise.
+  previous one. The decryption is used only if it covers the same range, blocks, viewing
+  keys and ZIP 212 enforcement, and the range is decrypted again otherwise.
   `testing::TestState::decrypt_cached_blocks` and `scan_decrypted_blocks` call them.
 
 ### Changed
