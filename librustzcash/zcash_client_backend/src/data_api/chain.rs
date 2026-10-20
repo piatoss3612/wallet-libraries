@@ -155,9 +155,10 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use incrementalmerkletree::frontier::Frontier;
+use sapling::note_encryption::Zip212Enforcement;
 use subtle::ConditionallySelectable;
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_primitives::block::BlockHash;
+use zcash_primitives::{block::BlockHash, transaction::components::sapling::zip212_enforcement};
 use zcash_protocol::consensus::{self, BlockHeight};
 use zip32::Scope;
 
@@ -668,11 +669,11 @@ where
 pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync + 'static> {
     from_height: BlockHeight,
     limit: usize,
-    /// The hash of each decrypted block, in order. Decryption results are looked up by
-    /// block hash and txid, and a missing result reads as "no notes", so the scan checks
-    /// each block it reads against these hashes and uses the decryption only if the
-    /// blocks are exactly these.
-    block_hashes: Vec<BlockHash>,
+    /// Each decrypted block, in order. Decryption results are looked up by block hash and
+    /// txid, and a missing result reads as "no notes", so the scan checks each block it
+    /// reads against these and uses the decryption only if the blocks, and the ZIP 212
+    /// enforcement the scan's parameters give them, are exactly these.
+    blocks: Vec<DecryptedBlock>,
     /// The encoded viewing keys the decryption used, so that a scan after an account
     /// change decrypts again.
     encoded_ufvks: HashMap<AccountId, String>,
@@ -714,12 +715,12 @@ where
     let encoded_ufvks = encode_ufvks(params, &account_ufvks);
     let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
     let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
-    let mut block_hashes = vec![];
+    let mut blocks = vec![];
     block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
         Some(from_height),
         Some(limit),
         |block| {
-            block_hashes.push(block.hash());
+            blocks.push(DecryptedBlock::new(params, &block));
             runners.add_block(params, block).map_err(|e| e.into())
         },
     )?;
@@ -728,7 +729,7 @@ where
     Ok(BlockDecryption {
         from_height,
         limit,
-        block_hashes,
+        blocks,
         encoded_ufvks,
         scanning_keys,
         runners,
@@ -740,12 +741,14 @@ where
 /// [`decrypt_cached_blocks`] started.
 ///
 /// `decryption` is used only if it covers the same `from_height` and `limit` and the
-/// viewing keys `data_db` tracks now, and only for the blocks it decrypted: the scan
-/// compares each block it reads with the decrypted block at the same position. If a
-/// block differs, or the scan reads a different number of blocks, the blocks scanned so
+/// viewing keys `data_db` tracks now, and only for the blocks it decrypted under the
+/// ZIP 212 enforcement that `params` gives them: the scan compares each block it reads,
+/// and that enforcement at its height, with the decrypted block at the same position. If
+/// either differs, or the scan reads a different number of blocks, the blocks scanned so
 /// far are discarded before anything is stored, and the range is scanned as
 /// [`scan_cached_blocks`] scans it, with the viewing keys read at the start of this call.
-/// A decryption of other blocks or keys therefore never decides which notes are found.
+/// A decryption of other blocks, under other keys or under another ZIP 212 enforcement
+/// therefore never decides which notes are found.
 ///
 /// ## Errors
 ///
@@ -781,7 +784,7 @@ where
         && decryption.encoded_ufvks == encode_ufvks(params, &current_ufvks)
     {
         let BlockDecryption {
-            block_hashes,
+            blocks,
             scanning_keys,
             runners,
             ..
@@ -794,7 +797,7 @@ where
             limit,
             &scanning_keys,
             runners,
-            Some(&block_hashes),
+            Some(&blocks),
         )?
     } else {
         ScanPass::Stale
@@ -826,6 +829,25 @@ fn encode_ufvks<ParamsT: consensus::Parameters, AccountId: Copy + Eq + std::hash
         .iter()
         .map(|(account, ufvk)| (*account, ufvk.encode(params)))
         .collect()
+}
+
+/// What the trial decryption of a block depends on besides the viewing keys.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DecryptedBlock {
+    /// The block's hash, by which its decryption results are looked up.
+    hash: BlockHash,
+    /// The ZIP 212 enforcement under which its Sapling outputs are decrypted, which the
+    /// consensus parameters decide.
+    zip212_enforcement: Zip212Enforcement,
+}
+
+impl DecryptedBlock {
+    fn new<ParamsT: consensus::Parameters>(params: &ParamsT, block: &CompactBlock) -> Self {
+        DecryptedBlock {
+            hash: block.hash(),
+            zip212_enforcement: zip212_enforcement(params, block.height()),
+        }
+    }
 }
 
 /// [`scan_cached_blocks`], also trial-decrypting with the wallet's one-time keys.
@@ -925,7 +947,7 @@ where
         None,
     )? {
         ScanPass::Scanned(scan_summary, scanned_blocks) => Ok((scan_summary, scanned_blocks)),
-        ScanPass::Stale => unreachable!("a scan pass without decrypted hashes is never stale"),
+        ScanPass::Stale => unreachable!("a scan pass without decrypted blocks is never stale"),
     }
 }
 
@@ -933,7 +955,8 @@ where
 enum ScanPass<AccountId> {
     /// The blocks were scanned and are ready to store.
     Scanned(ScanSummary, Vec<ScannedBlock<AccountId>>),
-    /// The blocks read are not the blocks whose decryption the runners hold.
+    /// The blocks read, or their ZIP 212 enforcement, are not those of the decryption the
+    /// runners hold.
     Stale,
 }
 
@@ -944,10 +967,11 @@ struct StaleDecryption;
 /// The scanning half of [`scan_blocks`], with the blocks' trial decryption already queued
 /// on `runners`.
 ///
-/// If `decrypted_hashes` is given, `runners` hold the decryption of the blocks with these
-/// hashes, in order. The pass then compares each block it reads with the hash at the same
-/// position before scanning it, and returns [`ScanPass::Stale`] at the first block that
-/// differs, or at the end if it read fewer blocks.
+/// If `decrypted_blocks` is given, `runners` hold the decryption of these blocks, in order.
+/// The pass then compares each block it reads, with its ZIP 212 enforcement under
+/// `params`, with the decrypted block at the same position before scanning it, and
+/// returns [`ScanPass::Stale`] at the first block that differs, or at the end if it read
+/// fewer blocks.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn scan_with_runners<ParamsT, DbT, BlockSourceT, IvkTag>(
     params: &ParamsT,
@@ -957,7 +981,7 @@ fn scan_with_runners<ParamsT, DbT, BlockSourceT, IvkTag>(
     limit: usize,
     scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
     mut runners: BatchRunners<IvkTag, (), (), ()>,
-    decrypted_hashes: Option<&[BlockHash]>,
+    decrypted_blocks: Option<&[DecryptedBlock]>,
 ) -> Result<
     ScanPass<<DbT as WalletRead>::AccountId>,
     Error<<DbT as WalletRead>::Error, BlockSourceT::Error>,
@@ -986,9 +1010,9 @@ where
         Some(from_height),
         Some(limit),
         |block: CompactBlock| {
-            if decrypted_hashes
-                .is_some_and(|hashes| hashes.get(scanned_blocks.len()) != Some(&block.hash()))
-            {
+            if decrypted_blocks.is_some_and(|decrypted| {
+                decrypted.get(scanned_blocks.len()) != Some(&DecryptedBlock::new(params, &block))
+            }) {
                 return Err(Error::Wallet(StaleDecryption));
             }
 
@@ -1026,7 +1050,7 @@ where
         Err(Error::BlockSource(e)) => return Err(Error::BlockSource(e)),
         Err(Error::Scan(e)) => return Err(Error::Scan(e)),
     }
-    if decrypted_hashes.is_some_and(|hashes| hashes.len() != scanned_blocks.len()) {
+    if decrypted_blocks.is_some_and(|decrypted| decrypted.len() != scanned_blocks.len()) {
         return Ok(ScanPass::Stale);
     }
 
