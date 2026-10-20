@@ -669,8 +669,9 @@ pub struct BlockDecryption<AccountId: Copy + Eq + std::hash::Hash + Send + Sync 
     from_height: BlockHeight,
     limit: usize,
     /// The hash of each decrypted block, in order. Decryption results are looked up by
-    /// block hash and txid, and a missing result reads as "no notes", so the scanned
-    /// blocks must be exactly these.
+    /// block hash and txid, and a missing result reads as "no notes", so the scan checks
+    /// each block it reads against these hashes and uses the decryption only if the
+    /// blocks are exactly these.
     block_hashes: Vec<BlockHash>,
     /// The encoded viewing keys the decryption used, so that a scan after an account
     /// change decrypts again.
@@ -738,9 +739,13 @@ where
 /// [`scan_cached_blocks`] does, using the trial decryption `decryption` that
 /// [`decrypt_cached_blocks`] started.
 ///
-/// `decryption` is used only if it covers the same range, the same blocks and the viewing
-/// keys `data_db` tracks now. Otherwise the blocks are decrypted again first, so the
-/// result never depends on what changed since the decryption started.
+/// `decryption` is used only if it covers the same `from_height` and `limit` and the
+/// viewing keys `data_db` tracks now, and only for the blocks it decrypted: the scan
+/// compares each block it reads with the decrypted block at the same position. If a
+/// block differs, or the scan reads a different number of blocks, the blocks scanned so
+/// far are discarded before anything is stored, and the range is scanned as
+/// [`scan_cached_blocks`] scans it, with the viewing keys read at the start of this call.
+/// A decryption of other blocks or keys therefore never decides which notes are found.
 ///
 /// ## Errors
 ///
@@ -771,30 +776,41 @@ where
     let current_ufvks = data_db
         .get_unified_full_viewing_keys()
         .map_err(Error::Wallet)?;
-    let decryption = if decryption.from_height == from_height
+    let scan_pass = if decryption.from_height == from_height
         && decryption.limit == limit
         && decryption.encoded_ufvks == encode_ufvks(params, &current_ufvks)
-        && blocks_have_hashes(block_source, from_height, limit, &decryption.block_hashes)?
     {
-        decryption
+        let BlockDecryption {
+            block_hashes,
+            scanning_keys,
+            runners,
+            ..
+        } = decryption;
+        scan_with_runners(
+            params,
+            block_source,
+            data_db,
+            from_height,
+            limit,
+            &scanning_keys,
+            runners,
+            Some(&block_hashes),
+        )?
     } else {
-        decrypt_cached_blocks(params, block_source, data_db, from_height, limit)?
+        ScanPass::Stale
     };
-
-    let BlockDecryption {
-        scanning_keys,
-        runners,
-        ..
-    } = decryption;
-    let (scan_summary, scanned_blocks) = scan_with_runners(
-        params,
-        block_source,
-        data_db,
-        from_height,
-        limit,
-        &scanning_keys,
-        runners,
-    )?;
+    let (scan_summary, scanned_blocks) = match scan_pass {
+        ScanPass::Scanned(scan_summary, scanned_blocks) => (scan_summary, scanned_blocks),
+        // Nothing has been stored, so the range is scanned as `scan_cached_blocks` scans it.
+        ScanPass::Stale => scan_blocks(
+            params,
+            block_source,
+            data_db,
+            from_height,
+            limit,
+            &ScanningKeys::from_account_ufvks(current_ufvks),
+        )?,
+    };
 
     data_db
         .put_blocks(from_state, scanned_blocks)
@@ -810,24 +826,6 @@ fn encode_ufvks<ParamsT: consensus::Parameters, AccountId: Copy + Eq + std::hash
         .iter()
         .map(|(account, ufvk)| (*account, ufvk.encode(params)))
         .collect()
-}
-
-/// Whether the cached blocks from `from_height`, at most `limit` of them, are exactly the
-/// blocks with `hashes`, in order.
-fn blocks_have_hashes<BlockSourceT: BlockSource, WalletErrT>(
-    block_source: &BlockSourceT,
-    from_height: BlockHeight,
-    limit: usize,
-    hashes: &[BlockHash],
-) -> Result<bool, Error<WalletErrT, BlockSourceT::Error>> {
-    let mut read = 0;
-    let mut matches = true;
-    block_source.with_blocks::<_, WalletErrT>(Some(from_height), Some(limit), |block| {
-        matches &= hashes.get(read) == Some(&block.hash());
-        read += 1;
-        Ok(())
-    })?;
-    Ok(matches && read == hashes.len())
 }
 
 /// [`scan_cached_blocks`], also trial-decrypting with the wallet's one-time keys.
@@ -916,7 +914,7 @@ where
     )?;
     runners.flush();
 
-    scan_with_runners(
+    match scan_with_runners(
         params,
         block_source,
         data_db,
@@ -924,12 +922,33 @@ where
         limit,
         scanning_keys,
         runners,
-    )
+        None,
+    )? {
+        ScanPass::Scanned(scan_summary, scanned_blocks) => Ok((scan_summary, scanned_blocks)),
+        ScanPass::Stale => unreachable!("a scan pass without decrypted hashes is never stale"),
+    }
 }
+
+/// The outcome of [`scan_with_runners`].
+enum ScanPass<AccountId> {
+    /// The blocks were scanned and are ready to store.
+    Scanned(ScanSummary, Vec<ScannedBlock<AccountId>>),
+    /// The blocks read are not the blocks whose decryption the runners hold.
+    Stale,
+}
+
+/// The wallet error with which [`scan_with_runners`] stops reading the block source at a
+/// block whose decryption the runners do not hold.
+struct StaleDecryption;
 
 /// The scanning half of [`scan_blocks`], with the blocks' trial decryption already queued
 /// on `runners`.
-#[allow(clippy::type_complexity)]
+///
+/// If `decrypted_hashes` is given, `runners` hold the decryption of the blocks with these
+/// hashes, in order. The pass then compares each block it reads with the hash at the same
+/// position before scanning it, and returns [`ScanPass::Stale`] at the first block that
+/// differs, or at the end if it read fewer blocks.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn scan_with_runners<ParamsT, DbT, BlockSourceT, IvkTag>(
     params: &ParamsT,
     block_source: &BlockSourceT,
@@ -938,11 +957,9 @@ fn scan_with_runners<ParamsT, DbT, BlockSourceT, IvkTag>(
     limit: usize,
     scanning_keys: &ScanningKeys<<DbT as WalletRead>::AccountId, IvkTag>,
     mut runners: BatchRunners<IvkTag, (), (), ()>,
+    decrypted_hashes: Option<&[BlockHash]>,
 ) -> Result<
-    (
-        ScanSummary,
-        Vec<ScannedBlock<<DbT as WalletRead>::AccountId>>,
-    ),
+    ScanPass<<DbT as WalletRead>::AccountId>,
     Error<<DbT as WalletRead>::Error, BlockSourceT::Error>,
 >
 where
@@ -965,10 +982,16 @@ where
 
     let mut scanned_blocks = vec![];
     let mut scan_summary = ScanSummary::for_range(from_height..from_height);
-    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
+    let read = block_source.with_blocks::<_, StaleDecryption>(
         Some(from_height),
         Some(limit),
         |block: CompactBlock| {
+            if decrypted_hashes
+                .is_some_and(|hashes| hashes.get(scanned_blocks.len()) != Some(&block.hash()))
+            {
+                return Err(Error::Wallet(StaleDecryption));
+            }
+
             scan_summary.scanned_range.end = block.height() + 1;
             let scanned_block = scan_block_with_runners::<_, _, _, (), (), ()>(
                 params,
@@ -996,9 +1019,18 @@ where
 
             Ok(())
         },
-    )?;
+    );
+    match read {
+        Ok(()) => {}
+        Err(Error::Wallet(StaleDecryption)) => return Ok(ScanPass::Stale),
+        Err(Error::BlockSource(e)) => return Err(Error::BlockSource(e)),
+        Err(Error::Scan(e)) => return Err(Error::Scan(e)),
+    }
+    if decrypted_hashes.is_some_and(|hashes| hashes.len() != scanned_blocks.len()) {
+        return Ok(ScanPass::Stale);
+    }
 
-    Ok((scan_summary, scanned_blocks))
+    Ok(ScanPass::Scanned(scan_summary, scanned_blocks))
 }
 
 #[cfg(feature = "test-dependencies")]
