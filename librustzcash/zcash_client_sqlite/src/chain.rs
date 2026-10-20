@@ -550,6 +550,17 @@ mod tests {
     }
 
     #[test]
+    fn scan_decrypted_blocks_scans_replaced_blocks_sapling() {
+        testing::pool::scan_decrypted_blocks_scans_replaced_blocks::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn scan_decrypted_blocks_scans_replaced_blocks_orchard() {
+        testing::pool::scan_decrypted_blocks_scans_replaced_blocks::<OrchardPoolTester>()
+    }
+
+    #[test]
     fn scan_cached_blocks_finds_change_notes_sapling() {
         testing::pool::scan_cached_blocks_finds_change_notes::<SaplingPoolTester>()
     }
