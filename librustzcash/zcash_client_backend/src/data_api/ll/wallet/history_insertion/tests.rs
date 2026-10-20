@@ -443,3 +443,53 @@ fn an_empty_history_batch_builds_no_subtrees() {
     let mut commitments: Commitments = vec![];
     assert!(build_subtrees_except::<_, 3>(Position::from(0), &mut commitments, 4, &[]).is_empty());
 }
+
+#[test]
+fn an_empty_pool_prunes_old_checkpoints_but_keeps_retained_ones() {
+    let mut tree = Tree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+    tree.ensure_retained(h(5)).unwrap();
+    for height in std::iter::once(5).chain(10..20) {
+        update_tree(
+            "test",
+            &Frontier::empty(),
+            h(height),
+            &mut tree,
+            None,
+            std::iter::empty(),
+            #[cfg(feature = "orchard")]
+            std::iter::empty(),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        checkpoints(&tree),
+        vec![(h(5), None), (h(17), None), (h(18), None), (h(19), None)],
+    );
+}
+
+#[cfg(feature = "orchard")]
+#[test]
+fn an_empty_pool_prunes_checkpoints_added_for_other_pools() {
+    let mut tree = Tree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+    for start in [100, 110, 120] {
+        update_tree(
+            "test",
+            &Frontier::empty(),
+            h(start),
+            &mut tree,
+            None,
+            std::iter::empty(),
+            (1..=5).map(|offset| {
+                (
+                    h(start + offset),
+                    shardtree::store::Checkpoint::tree_empty(),
+                )
+            }),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        checkpoints(&tree),
+        vec![(h(123), None), (h(124), None), (h(125), None)],
+    );
+}

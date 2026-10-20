@@ -37,8 +37,9 @@ and this library adheres to Rust's notion of
   trees end in the same state without hashing its note commitments. Inserting
   a shard never checked the computed root against the stored one, so this
   trusts the stored root no more than before.
-  When every shard is left out, an empty insertion still prunes the obsolete
-  checkpoint added for an empty starting frontier, preserving rewind behavior.
+  Tree updates with no subtrees still prune obsolete checkpoints, including
+  pools receiving no commitments and batches whose shards are all left out,
+  preserving rewind behavior. Explicitly retained checkpoints remain pinned.
 - `put_blocks` now checks stored roots where it builds a shard that has one: a
   random sample of about one in 16 of the shards it could leave out, and every
   shard holding a wallet note. A mismatch is logged and counted, without failing
