@@ -48,7 +48,8 @@ use super::{InputSource, locking::lock_proposal_inputs};
 use crate::{
     data_api::{
         Account, MaxSpendMode, NoteCommitmentTree, SentTransaction, SentTransactionOutput,
-        WalletCommitmentTrees, WalletRead, WalletWrite, error::Error,
+        WalletCommitmentTrees, WalletRead, WalletWrite,
+        error::{AcceptanceError, Error},
         wallet::input_selection::propose_send_max,
     },
     decrypt_transaction,
@@ -121,6 +122,10 @@ use {
     zcash_protocol::{consensus::NetworkConstants, value::BalanceError},
 };
 
+mod acceptance;
+#[cfg(feature = "pczt")]
+pub use acceptance::validate_pczt_for_target;
+pub use acceptance::validate_transaction_for_target;
 pub mod input_selection;
 use input_selection::{
     GreedyInputSelector, GreedyInputSelectorError, InputSelector, InputSelectorError,
@@ -623,13 +628,16 @@ impl ConfirmationsPolicy {
     }
 
     /// Returns the shielded anchor height to use for a transaction targeting `target_height` under
-    /// this policy: `target_height` less the number of required trusted confirmations.
+    /// this policy: chain tip (`target_height - 1`) less the trusted anchor depth.
+    /// Spend confirmation thresholds still count from the target height independently.
     ///
     /// This is the anchor used to interpret a proposal step that carries no explicit anchor height —
     /// a purely transparent step, whose anchor is unused (see
     /// [`crate::proposal::Step::anchor_height`]).
     pub fn anchor_height(&self, target_height: TargetHeight) -> BlockHeight {
-        target_height.saturating_sub(u32::from(self.trusted()))
+        target_height
+            .saturating_sub(1)
+            .saturating_sub(u32::from(self.trusted()))
     }
 
     /// Returns whether or not transparent inputs may be spent with zero confirmations in shielding
@@ -641,6 +649,10 @@ impl ConfirmationsPolicy {
 
     /// Returns the number of confirmations until a transaction output is considered spendable,
     /// given information about the output and the inputs to the transaction that produced it.
+    ///
+    /// A result of zero only satisfies the confirmation policy. Shielded outputs must also be
+    /// included in the selected anchor and have a usable witness, and locked outputs remain
+    /// unavailable for selection.
     ///
     /// # Parameters
     /// - `target_height`: The minimum height at which the output will be potentially spent.
@@ -807,6 +819,7 @@ where
         spend_policy,
         proposed_version,
     )?;
+    proposal.validate_shielded_budget(params)?;
     if let Some(request) = lock_inputs {
         let lock_expiry_height = target_height + request.for_blocks();
         lock_proposal_inputs(wallet_db, &proposal, request.owner(), lock_expiry_height)?;
@@ -815,6 +828,56 @@ where
     // Record the requested version on the proposal so that it is carried through to transaction
     // building; when `None`, building falls back to the version implied by the target height.
     Ok(proposal.with_proposed_version(proposed_version))
+}
+
+/// Rejects a saved proposal whose transactions would already be expired at
+/// `current_target`, before any proving or signing.
+///
+/// Each step's expiry is resolved as the builder will resolve it: the ZIP 318 rolling expiry
+/// for a canonical crossing, otherwise `expiry_override`, otherwise the default expiry from the
+/// proposal's own target height. The proposal's target is not moved, so a stale expiry is
+/// refused rather than extended. An expiry of zero disables expiry, and an expiry equal to
+/// `current_target` can still be mined.
+fn check_proposal_expiry<ParamsT, FeeRuleT, N>(
+    params: &ParamsT,
+    proposal: &Proposal<FeeRuleT, N>,
+    expiry_override: Option<BlockHeight>,
+    current_target: BlockHeight,
+) -> Result<(), AcceptanceError>
+where
+    ParamsT: consensus::Parameters,
+{
+    let target = proposal.min_target_height();
+    for step in proposal.steps() {
+        #[cfg(feature = "orchard")]
+        let canonical = step_is_canonical_crossing(params, step, target);
+        #[cfg(not(feature = "orchard"))]
+        let canonical = {
+            let _ = step;
+            false
+        };
+        let expiry_height = if canonical {
+            zcash_protocol::zip318::expiry_height(
+                &zcash_protocol::zip318::BlockSpacing::for_network(params),
+                target.into(),
+            )
+        } else {
+            expiry_override.unwrap_or_else(|| {
+                BlockHeight::from(target)
+                    + zcash_primitives::transaction::builder::default_tx_expiry_delta(
+                        params,
+                        target.into(),
+                    )
+            })
+        };
+        if expiry_height != consensus::H0 && expiry_height < current_target {
+            return Err(AcceptanceError::Expired {
+                expiry_height,
+                target_height: current_target,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Returns whether `step` must be built as a canonical ZIP 318 crossing: its Ironwood bundle was
@@ -1029,6 +1092,7 @@ where
         locked_input_policy,
     )?;
 
+    proposal.validate_shielded_budget(params)?;
     if let Some(request) = lock_inputs {
         let lock_expiry_height = target_height + request.for_blocks();
         lock_proposal_inputs(wallet_db, &proposal, request.owner(), lock_expiry_height)?;
@@ -1091,6 +1155,7 @@ where
         )
         .map_err(Error::from)?;
 
+    proposal.validate_shielded_budget(params)?;
     if let Some(request) = lock_inputs {
         let lock_expiry_height = target_height + request.for_blocks();
         lock_proposal_inputs(wallet_db, &proposal, request.owner(), lock_expiry_height)?;
@@ -1188,6 +1253,7 @@ where
         )
         .map_err(Error::from)?;
 
+    proposal.validate_shielded_budget(params)?;
     if let Some(request) = lock_inputs {
         let lock_expiry_height = target_height + request.for_blocks();
         lock_proposal_inputs(wallet_db, &proposal, request.owner(), lock_expiry_height)?;
@@ -1280,6 +1346,12 @@ where
 {
     // The transaction version is carried on the proposal, chosen when the proposal was
     // constructed; `None` builds at the version implied by the target height.
+    let current_target = wallet_db
+        .chain_height()
+        .map_err(Error::DataSource)?
+        .ok_or(Error::ScanRequired)?
+        + 1;
+    proposal.validate_for_current_target(params, current_target)?;
     let proposed_version = proposal.proposed_version();
 
     if let Some(expiry_height) = expiry_height {
@@ -1291,6 +1363,7 @@ where
             });
         }
     }
+    check_proposal_expiry(params, proposal, expiry_height, current_target)?;
 
     // The set of transparent `StepOutput`s available and unused from prior steps.
     // When a transparent `StepOutput` is created, it is added to the map. When it
@@ -2783,6 +2856,13 @@ where
     // Build at the version the proposal requested, falling back to the version implied by the
     // target height (version 6 from NU6.3 onward). Both the version 6 format and its Ironwood
     // bundle are fully representable as a PCZT.
+    let current_target = wallet_db
+        .chain_height()
+        .map_err(Error::DataSource)?
+        .ok_or(Error::ScanRequired)?
+        + 1;
+    proposal.validate_for_current_target(params, current_target)?;
+    check_proposal_expiry(params, proposal, expiry_height, current_target)?;
     let proposed_version = proposal.proposed_version();
 
     let build_state = build_proposed_transaction::<_, _, _, FeeRuleT, _, _>(
@@ -3358,12 +3438,21 @@ pub fn redact_pczt_for_batch_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
         .finish()
 }
 
-/// Finalizes the given PCZT, and persists the transaction to the wallet database.
+/// Finalizes the given PCZT, and persists the transaction to the wallet database as a
+/// transaction to be sent.
 ///
 /// The PCZT should have been created via [`create_pczt_from_proposal`], which adds
 /// metadata necessary for the wallet backend.
 ///
 /// Returns the transaction ID for the resulting transaction.
+///
+/// `params` must identify this wallet's network. Synchronize the wallet's chain tip
+/// before calling: the PCZT is checked with [`validate_pczt_for_target`] at tip + 1 before
+/// any cryptographic work, and a refusal is returned as [`Error::Acceptance`]. Rebuild and
+/// re-sign a refused transaction. On success the transaction is stored with
+/// [`WalletWrite::store_transactions_to_be_sent`], its inputs are marked spent, and their
+/// locks are released. Applications own broadcast and must recheck against a fresh tip
+/// immediately before submission, for example with [`validate_transaction_for_target`].
 ///
 /// - `sapling_vk` is optional to allow the caller to check whether a PCZT has Sapling
 ///   with [`pczt::roles::prover::Prover::requires_sapling_proofs`], and avoid downloading
@@ -3374,6 +3463,38 @@ pub fn redact_pczt_for_batch_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
 ///   bundle, an Orchard verifying key will be generated on the fly.
 #[cfg(feature = "pczt")]
 pub fn extract_and_store_transaction_from_pczt<DbT, N>(
+    wallet_db: &mut DbT,
+    params: &impl consensus::Parameters,
+    pczt: pczt::Pczt,
+    sapling_vk: Option<(
+        &sapling::circuit::SpendVerifyingKey,
+        &sapling::circuit::OutputVerifyingKey,
+    )>,
+    #[cfg(feature = "orchard")] orchard_vk: Option<&orchard::circuit::VerifyingKey>,
+) -> Result<TxId, ExtractErrT<DbT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    <DbT as WalletRead>::AccountId: serde::de::DeserializeOwned,
+{
+    let target = wallet_db
+        .chain_height()
+        .map_err(Error::DataSource)?
+        .ok_or(Error::ScanRequired)?
+        + 1;
+    validate_pczt_for_target(params, target, &pczt)?;
+    finalize_and_store_outgoing_pczt(
+        wallet_db,
+        pczt,
+        sapling_vk,
+        #[cfg(feature = "orchard")]
+        orchard_vk,
+    )
+}
+
+/// Finalizes, extracts and stores a PCZT already accepted for sending; see
+/// [`extract_and_store_transaction_from_pczt`] for the stored effects.
+#[cfg(feature = "pczt")]
+fn finalize_and_store_outgoing_pczt<DbT, N>(
     wallet_db: &mut DbT,
     pczt: pczt::Pczt,
     sapling_vk: Option<(
@@ -3953,4 +4074,69 @@ where
         &proposal,
         None,
     )
+}
+
+#[cfg(test)]
+mod nu7_policy_tests {
+    use super::*;
+    #[cfg(feature = "pczt")]
+    use zcash_protocol::consensus::{BranchId, NetworkUpgrade, Parameters, TEST_NETWORK};
+
+    #[test]
+    fn nu7_anchor_depth_is_from_tip_and_confirmations_stay_from_target() {
+        let policy = ConfirmationsPolicy::default();
+        let target = TargetHeight::from(BlockHeight::from_u32(4_465_026));
+        assert_eq!(policy.trusted().get(), 3);
+        assert_eq!(
+            policy.anchor_height(target),
+            BlockHeight::from_u32(4_465_022)
+        );
+        // A trusted output mined target-3 has its three confirmations even though
+        // an anchor three behind the tip is one block older.
+        assert_eq!(
+            policy.confirmations_until_spendable(
+                target,
+                PoolType::SAPLING,
+                None,
+                Some(BlockHeight::from_u32(4_465_023)),
+                true,
+                None,
+                false
+            ),
+            0
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "pczt")]
+    fn nu7_saved_authorization_requires_current_branch_and_unexpired_target() {
+        use pczt::roles::creator::Creator;
+        let activation = TEST_NETWORK.activation_height(NetworkUpgrade::Nu7).unwrap();
+        let saved = Creator::new(
+            BranchId::Nu6_3.into(),
+            u32::from(activation + 120),
+            1,
+            None,
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation - 1, &saved).is_ok());
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation, &saved).is_err());
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation + 1, &saved).is_err());
+        let rebuilt = Creator::new(
+            BranchId::Nu7.into(),
+            u32::from(activation + 120),
+            1,
+            None,
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation, &rebuilt).is_ok());
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation + 120, &rebuilt).is_ok());
+        assert!(validate_pczt_for_target(&TEST_NETWORK, activation + 121, &rebuilt).is_err());
+    }
 }
