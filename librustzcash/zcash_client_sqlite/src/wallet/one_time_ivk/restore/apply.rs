@@ -3,8 +3,9 @@
 use incrementalmerkletree::{Address, Position, Retention};
 use orchard::tree::{MerkleHashOrchard, MerklePath};
 use rusqlite::{Connection, OptionalExtension, params};
+use shardtree::error::ShardTreeError;
 use zcash_client_backend::{
-    data_api::transparent_ledger::{ChainPoint, TransparentLedgerMode},
+    data_api::{one_time_ivk::restore::recovery::RecoveredNote, transparent_ledger::ChainPoint},
     wallet::{WalletOrchardOutput, WalletTx},
 };
 use zcash_protocol::{
@@ -12,14 +13,15 @@ use zcash_protocol::{
     consensus::{BlockHeight, Parameters},
 };
 
-use super::{PendingPayment, payments::authenticate};
-use crate::wallet::one_time_ivk::{KeyId, corrupt};
+use super::{
+    PendingPayment,
+    payments::{action_holds, authenticate},
+};
+use crate::wallet::one_time_ivk::KeyId;
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
 /// The handle state that storing a note's transaction routes its enhancement with.
 pub(crate) struct Sessions<'a> {
-    /// The handle's transparent ledger mode.
-    pub(crate) configured: Option<TransparentLedgerMode>,
     /// The handle's private Enhance session.
     pub(crate) enhance: &'a wallet::enhance_pir::session::SessionState,
     /// The handle's transparent PIR session.
@@ -35,13 +37,19 @@ pub(in crate::wallet::one_time_ivk) enum Admission {
     /// The scan has not stored its block or reached its path's anchor yet.
     Waiting,
     /// The scan finished blocks from the payment on without covering them for the account,
-    /// so they must be scanned again (see `discovery::admit`).
+    /// so they must be scanned again (see `queue::admit`).
     Uncovered,
-    /// Its path's anchor is off the wallet's chain or too old to check, so a new path is
-    /// needed.
+    /// Its path's anchor is off the wallet's chain, too old to check, or no longer
+    /// reconstructible in the local tree, so a new path is needed.
     StaleWitness,
     /// The directory's claim failed a check against the wallet's own chain.
     Rejected,
+}
+
+/// Whether `error` means the local tree lacks or conflicts with material, rather than a
+/// storage failure that must abort the transaction.
+fn tree_data(error: &ShardTreeError<crate::wallet::commitment_tree::Error>) -> bool {
+    !matches!(error, ShardTreeError::Storage(_))
 }
 
 /// The inclusion path at `position`, if every sibling is a valid hash.
@@ -81,24 +89,34 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
             params![key_ref, candidate.txid.as_ref(), candidate.action_index],
         )
     };
-    // Scanning stores a note under the transaction it is found in, which no directory
-    // claim overrides (see `adopt_found_note`), so a copy stored under another
-    // transaction makes this answer redundant.
-    let stored_elsewhere: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ironwood_received_notes n
+    // The proof authenticates the note but not the transaction label a record claims. An
+    // earlier admission of the same note under another label already owns it, and
+    // relabeling it could drop that label's spend state, so this answer is redundant. Only
+    // a label raw bytes disputed (see `queue::check_raw_receipts`) moves, in place, to this
+    // one once it passes every check below.
+    let elsewhere: Option<(i64, bool)> = conn
+        .query_row(
+            "SELECT n.id, EXISTS(SELECT 1 FROM ironwood_one_time_disputed_receipts d
+                 WHERE d.note_id = n.id)
+             FROM ironwood_received_notes n
              JOIN transactions t ON t.id_tx = n.transaction_id
-             WHERE n.nf = ?1 AND (t.txid != ?2 OR n.action_index != ?3))",
-        params![
-            recovered.nullifier().to_bytes(),
-            candidate.txid.as_ref(),
-            candidate.action_index
-        ],
-        |r| r.get(0),
-    )?;
-    if stored_elsewhere {
-        dequeue()?;
-        return Ok(Admission::Admitted);
-    }
+             WHERE n.nf = ?1 AND (t.txid != ?2 OR n.action_index != ?3)",
+            params![
+                recovered.nullifier().to_bytes(),
+                candidate.txid.as_ref(),
+                candidate.action_index
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let relabel = match elsewhere {
+        Some((_, false)) => {
+            dequeue()?;
+            return Ok(Admission::Admitted);
+        }
+        Some((note, true)) => Some(note),
+        None => None,
+    };
     let birthday: u32 = conn.query_row(
         "SELECT birthday_height FROM accounts WHERE uuid = ?1",
         [account.0],
@@ -143,19 +161,25 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     {
         return Ok(Admission::StaleWitness);
     }
-    let oldest = u32::from(through.height).saturating_sub(crate::PRUNING_DEPTH);
+    // Quiet blocks do not create tree checkpoints. An older checkpoint is usable only
+    // when it represents exactly the anchor's tree, never a preceding smaller tree.
     let checkpoint: Option<u32> = conn.query_row(
-        "SELECT MAX(checkpoint_id) FROM ironwood_tree_checkpoints
-         WHERE checkpoint_id BETWEEN ?1 AND ?2",
-        params![oldest, u32::from(anchor.height)],
+        "SELECT MAX(c.checkpoint_id) FROM ironwood_tree_checkpoints c
+         JOIN blocks b ON b.height = ?1
+         WHERE c.checkpoint_id <= b.height
+           AND COALESCE(c.position + 1, 0) = b.ironwood_commitment_tree_size",
+        [u32::from(anchor.height)],
         |r| r.get(0),
     )?;
     let Some(checkpoint) = checkpoint.map(BlockHeight::from) else {
         return Ok(Admission::StaleWitness);
     };
     let mut tree = crate::ironwood_tree(conn)?;
-    let Some(root) = tree.root_at_checkpoint_id(&checkpoint)? else {
-        return Ok(Admission::StaleWitness);
+    let root = match tree.root_at_checkpoint_id(&checkpoint) {
+        Ok(Some(root)) => root,
+        Ok(None) => return Ok(Admission::StaleWitness),
+        Err(e) if tree_data(&e) => return Ok(Admission::StaleWitness),
+        Err(e) => return Err(e.into()),
     };
     if !recovered.verify_position(position, path, root.into()) {
         return Ok(Admission::Rejected);
@@ -165,8 +189,8 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     if before_birthday {
         conn.execute(
             "UPDATE ironwood_one_time_keys
-             SET advances_allocation = 1, used = 1, paid_before_birthday = 1 WHERE id = ?1",
-            [key_ref],
+             SET used = 1, prebirthday_height = MIN(COALESCE(prebirthday_height, ?2), ?2) WHERE id = ?1",
+            params![key_ref, birthday],
         )?;
         dequeue()?;
         return Ok(Admission::Admitted);
@@ -199,23 +223,12 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         ],
         |r| r.get(0),
     )?;
-    // A stored raw transaction must hold the claimed action. Without raw bytes only the label
-    // is unverified (value, position and nullifier are authenticated); relabeling once raw
-    // arrives could drop spend state.
+    // A stored raw transaction must hold the claimed action (see `action_holds`). Without
+    // raw bytes only the label is unverified (value, position and nullifier are
+    // authenticated); the raw check runs again when the transaction is fetched.
     let contradicted =
         wallet::get_transaction(conn, params, candidate.txid)?.is_some_and(|(_, tx)| {
-            let action = tx.ironwood_bundle().and_then(|b| {
-                b.actions()
-                    .get(usize::try_from(candidate.action_index).ok()?)
-            });
-            !action.is_some_and(|a| {
-                candidate.encrypted_note.matches_compact(
-                    a.nullifier().to_bytes(),
-                    a.cmx().to_bytes(),
-                    a.encrypted_note().epk_bytes,
-                    a.encrypted_note().enc_ciphertext[..52].try_into().unwrap(),
-                )
-            })
+            !action_holds(&tx, candidate.action_index, &candidate.encrypted_note)
         });
     if conflict || contradicted {
         return Ok(Admission::Rejected);
@@ -240,33 +253,31 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
         .optional()?;
     let anchor_size: u64 = conn.query_row(
         "SELECT ironwood_commitment_tree_size FROM blocks WHERE height = ?1",
-        [u32::from(checkpoint)],
+        [u32::from(anchor.height)],
         |r| r.get(0),
     )?;
-    // The marked leaf goes in before its siblings, since it keeps its pair from pruning.
-    // A sibling inserted first can strip a reference that held the pair unpruned, and the
-    // leaf's insertion under the pruned node would then drop that sibling.
-    tree.batch_insert(
-        Position::from(position),
-        std::iter::once((
-            MerkleHashOrchard::from_cmx(&recovered.note().commitment().into()),
-            Retention::Marked,
-        )),
-    )?;
-    // Persist only complete sibling subtrees. A partial right subtree includes empty
-    // future leaves and must not become a fixed hash for future appends.
-    for (level, hash) in path.auth_path().into_iter().enumerate() {
-        let address = Address::from_parts((level as u8).into(), (position >> level) ^ 1);
-        if u64::from(address.position_range_end()) <= anchor_size {
-            tree.insert(address, hash)?;
-        }
+    // Tree material the scan stored only as roots, or left without checkpoints, can make
+    // insertion fail even though the path reached the accepted root. That condemns the
+    // anchor, not the payment, so the insertion is undone and a newer path requested.
+    conn.execute_batch("SAVEPOINT one_time_witness")?;
+    let kept = match insert_path(
+        &mut tree,
+        position,
+        &recovered,
+        path,
+        anchor_size,
+        checkpoint,
+        root,
+    ) {
+        Ok(kept) => kept,
+        Err(e) if tree_data(&e) => false,
+        Err(e) => return Err(e.into()),
+    };
+    if !kept {
+        conn.execute_batch("ROLLBACK TO one_time_witness; RELEASE one_time_witness")?;
+        return Ok(Admission::StaleWitness);
     }
-    let stored_path = tree
-        .witness_at_checkpoint_id(Position::from(position), &checkpoint)?
-        .ok_or_else(|| corrupt("stored one-time-key witness missing"))?;
-    if !recovered.verify_position(position, &stored_path.into(), root.into()) {
-        return Err(corrupt("stored one-time-key witness changed"));
-    }
+    conn.execute_batch("RELEASE one_time_witness")?;
     let tx = WalletTx::new(
         candidate.txid,
         candidate.tx_index.into(),
@@ -292,26 +303,79 @@ pub(in crate::wallet::one_time_ivk) fn apply_payment<P: Parameters>(
     )
     .with_one_time_key_id(Some(key))
     .with_compact_ciphertext(encrypted[96..].try_into().unwrap());
-    wallet::orchard::put_received_note(
-        conn,
-        sessions.tpir,
-        params,
-        ShieldedPool::Ironwood,
-        &output,
-        tx_ref,
-        Some(candidate.height),
-        spent_in,
-    )?;
-    wallet::enhance_pir::finish_private_receipt(
-        conn,
-        sessions.tpir,
-        sessions.configured,
-        sessions.enhance,
-        tx_ref,
-        candidate.txid,
-    )?;
+    match relabel {
+        // The disputed receipt moves to its true transaction in place, so its spends,
+        // including any unmined one, and its witness stay with it.
+        Some(note) => {
+            conn.execute(
+                "UPDATE ironwood_received_notes SET transaction_id = ?2, action_index = ?3,
+                 commitment_tree_position = ?4 WHERE id = ?1",
+                params![note, tx_ref.0, candidate.action_index, position],
+            )?;
+            if let Some(spent) = spent_in {
+                conn.execute(
+                    "INSERT OR IGNORE INTO ironwood_received_note_spends
+                     (ironwood_received_note_id, transaction_id) VALUES (?1, ?2)",
+                    params![note, spent.0],
+                )?;
+            }
+            conn.execute(
+                "DELETE FROM ironwood_one_time_disputed_receipts WHERE note_id = ?1",
+                [note],
+            )?;
+        }
+        None => {
+            wallet::orchard::put_received_note(
+                conn,
+                sessions.tpir,
+                params,
+                ShieldedPool::Ironwood,
+                &output,
+                tx_ref,
+                Some(candidate.height),
+                spent_in,
+            )?;
+        }
+    }
+    wallet::enhance_pir::finish_private_receipt(conn, sessions.enhance, tx_ref)?;
     dequeue()?;
     Ok(Admission::Admitted)
+}
+
+/// Inserts the recovered note as a marked leaf with the path's siblings complete at
+/// `anchor_size`, and reports whether the tree's own witness at `checkpoint` then reaches
+/// `root`.
+///
+/// The marked leaf goes in before its siblings, since it keeps its pair from pruning. A
+/// sibling inserted first can strip a reference that held the pair unpruned, and the
+/// leaf's insertion under the pruned node would then drop that sibling. A partial right
+/// subtree includes empty future leaves and must not become a fixed hash for future
+/// appends, so only complete ones are kept.
+fn insert_path<'a>(
+    tree: &mut crate::IronwoodCommitmentTree<&'a rusqlite::Transaction<'a>>,
+    position: u64,
+    recovered: &RecoveredNote,
+    path: &MerklePath,
+    anchor_size: u64,
+    checkpoint: BlockHeight,
+    root: MerkleHashOrchard,
+) -> Result<bool, ShardTreeError<crate::wallet::commitment_tree::Error>> {
+    tree.batch_insert(
+        Position::from(position),
+        std::iter::once((
+            MerkleHashOrchard::from_cmx(&recovered.note().commitment().into()),
+            Retention::Marked,
+        )),
+    )?;
+    for (level, hash) in path.auth_path().into_iter().enumerate() {
+        let address = Address::from_parts((level as u8).into(), (position >> level) ^ 1);
+        if u64::from(address.position_range_end()) <= anchor_size {
+            tree.insert(address, hash)?;
+        }
+    }
+    Ok(tree
+        .witness_at_checkpoint_id(Position::from(position), &checkpoint)?
+        .is_some_and(|stored| recovered.verify_position(position, &stored.into(), root.into())))
 }
 
 /// Whether the scan covered every block from `from` through `through` for `account`, with

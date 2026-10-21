@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `swap::Observation` has `receipts`, the Zcash transactions the provider reports as the operation's payouts or refunds, and no longer implements `Copy`.
+
+### Removed
+
+- Provider-read freshness and scan-watch completion limits: `provider_read_is_current`, `PROVIDER_READ_MAX_AGE_SECS`, `PROVIDER_READ_CLOCK_SKEW_SECS`, `COMPLETION_LIMIT_SECS` and `RESTORE_WATCH_SECS`. Quote ownership and receipt expectations remain independent of PIR discovery scheduling.
+
 ## [0.0.1-rc3] - 2026-10-20
 
 ### Changed
