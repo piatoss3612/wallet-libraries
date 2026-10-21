@@ -7,6 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+
+- `WalletDb::get_wallet_summary` computes scan and recovery progress without looking up
+  each scanned block in the scan queue, which made it slow on wallets with millions of
+  scanned blocks. The reported progress is unchanged.
+
 ## [0.1.0-rc9.2] - 2026-10-20
 
 ### Changed
