@@ -538,12 +538,7 @@ fn a_new_account_issues_once_the_index_history_completes() {
         .expect("index 0 is queued")
         .clone();
     assert!(state.lookups.len() > 1, "the rest of the window is unread");
-    let empty = zcash_client_backend::data_api::one_time_ivk::restore::LookupPage {
-        publication,
-        previous: None,
-        records: vec![],
-        complete: true,
-    };
+    let empty = store::restore::tests::discovery::whole(publication, vec![]);
     assert!(
         st.wallet_mut()
             .db_mut()
