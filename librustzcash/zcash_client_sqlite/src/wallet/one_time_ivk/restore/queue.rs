@@ -22,8 +22,8 @@ use super::{
     recovery::recover_refund_memos,
 };
 use crate::wallet::one_time_ivk::{
-    KeyId, Purpose, account_key, corrupt, decode_index, index_after, invalid, key_ref, register,
-    stored_key_id,
+    KeyId, Purpose, account_key, corrupt, decode_index, index_after, invalid, key_ref,
+    one_time_account, register, stored_key_id,
 };
 use crate::{AccountUuid, error::SqliteClientError, wallet};
 
@@ -242,7 +242,10 @@ fn can_lookup(
             )?))
 }
 
-/// Ensures account progress exists without enabling network work.
+/// Ensures account progress exists without enabling network work. Only enabling recovery
+/// and the flows it starts (registering keys, widening the receive window) create it, and
+/// [`begin`] for an account that already holds receipts needing repair, so an account that
+/// never used the feature has no row and costs no per-batch work.
 pub(crate) fn ensure_account(conn: &Connection, owner: i64) -> Result<(), SqliteClientError> {
     conn.execute(
         "INSERT OR IGNORE INTO ironwood_one_time_recovery(account_id) VALUES (?1)",
@@ -251,11 +254,21 @@ pub(crate) fn ensure_account(conn: &Connection, owner: i64) -> Result<(), Sqlite
     Ok(())
 }
 
-/// Reads the cancellation fence and feature setting in the current transaction.
+/// The fence of an account that never enabled one-time recovery, which has no progress row.
+const NO_RECOVERY: RecoveryToken = RecoveryToken {
+    generation: 0,
+    history_revision: 0,
+};
+
+/// Reads the cancellation fence and feature setting in the current transaction. An account
+/// with no progress row never enabled recovery, so it is disabled at [`NO_RECOVERY`].
 fn token(conn: &Connection, owner: i64) -> Result<(bool, RecoveryToken), SqliteClientError> {
-    let (enabled, generation, revision): (bool, u64, Vec<u8>) = conn.query_row(
+    let Some((enabled, generation, revision)): Option<(bool, u64, Vec<u8>)> = conn.query_row(
         "SELECT enabled, generation, history_revision FROM ironwood_one_time_recovery WHERE account_id = ?1",
-        [owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        [owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?
+    else {
+        return Ok((false, NO_RECOVERY));
+    };
     Ok((
         enabled,
         RecoveryToken {
@@ -464,12 +477,24 @@ pub(crate) fn funded(
 }
 
 /// Pauses work and invalidates in-flight responses without deleting notes or pending requests.
+/// Pausing never creates state: an account without an Orchard key or a progress row is
+/// already disabled, so it is left untouched.
 pub(crate) fn set_enabled<P: Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
     account: AccountUuid,
     enabled: bool,
 ) -> Result<(), SqliteClientError> {
+    if !enabled {
+        if let Some(owner) = one_time_account(conn, params, account)? {
+            conn.execute(
+                "UPDATE ironwood_one_time_recovery SET enabled = 0, generation = generation + 1
+                WHERE account_id = ?1 AND enabled != 0",
+                [owner.0],
+            )?;
+        }
+        return Ok(());
+    }
     let (owner, _) = account_key(conn, params, account)?;
     ensure_account(conn, owner.0)?;
     let changed = conn.execute(
@@ -531,8 +556,10 @@ pub(crate) fn begin<P: Parameters>(
     publication: RecoveryPublication,
     direct: bool,
 ) -> Result<bool, SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    ensure_account(conn, owner.0)?;
+    // An account without an Orchard key holds no one-time keys, so it has nothing to do.
+    let Some(owner) = one_time_account(conn, params, account)? else {
+        return Ok(false);
+    };
     let (enabled, current) = token(conn, owner.0)?;
     let repair: bool = conn.query_row(
         &format!(
@@ -548,6 +575,9 @@ pub(crate) fn begin<P: Parameters>(
     {
         return Ok(false);
     }
+    // Repairing receipts an earlier release or an earlier enable left needs progress even
+    // while disabled. An account with no one-time state never gets here.
+    ensure_account(conn, owner.0)?;
     // This client captured the publication, so the service speaks a format it supports.
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET upgrade_required = 0 WHERE account_id = ?1",
@@ -743,7 +773,9 @@ pub(crate) fn receivers<P: Parameters>(
     params: &P,
     account: AccountUuid,
 ) -> Result<(RecoveryToken, Vec<DiscoveryWork>), SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
+    let Some(owner) = one_time_account(conn, params, account)? else {
+        return Ok((NO_RECOVERY, vec![]));
+    };
     let (enabled, token) = token(conn, owner.0)?;
     let work = if enabled {
         conn.prepare(&format!(
@@ -922,8 +954,10 @@ pub(crate) fn manual<P: Parameters>(
     publication: RecoveryPublication,
     receive_end: Option<u64>,
 ) -> Result<bool, SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    ensure_account(conn, owner.0)?;
+    // Like any disabled account, one without an Orchard key or progress searches nothing.
+    let Some(owner) = one_time_account(conn, params, account)? else {
+        return Ok(false);
+    };
     if !token(conn, owner.0)?.0 || !begin(conn, params, account, publication, false)? {
         return Ok(false);
     }
@@ -1158,6 +1192,24 @@ fn progress_of(
     Ok((BlockHeight::from(from), cursor))
 }
 
+/// The status of an account that never enabled recovery: disabled, with no progress and no
+/// work.
+fn disabled() -> RecoveryStatus {
+    RecoveryStatus {
+        enabled: false,
+        upgrade_required: false,
+        token: NO_RECOVERY,
+        filter_frontier: None,
+        skipped_through: None,
+        restore_next: 0,
+        restore_gap: 0,
+        restore_complete: false,
+        manual: None,
+        lookups: vec![],
+        witnesses: vec![],
+    }
+}
+
 /// Exposes bounded due work. Disabled accounts expose only repair of already-owned receipts.
 pub(crate) fn status<P: Parameters>(
     conn: &Connection,
@@ -1165,10 +1217,12 @@ pub(crate) fn status<P: Parameters>(
     account: AccountUuid,
     now: i64,
 ) -> Result<RecoveryStatus, SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    ensure_account(conn, owner.0)?;
+    // A pure read: an account without an Orchard key or a progress row is disabled.
+    let Some(owner) = one_time_account(conn, params, account)? else {
+        return Ok(disabled());
+    };
     let (enabled, token) = token(conn, owner.0)?;
-    let mut status = conn.query_row("SELECT filter_height, filter_hash, skipped_height,
+    let Some(mut status) = conn.query_row("SELECT filter_height, filter_hash, skipped_height,
         restore_next, restore_gap, restore_done, manual_active, manual_purpose, manual_next, manual_end,
         upgrade_required
         FROM ironwood_one_time_recovery WHERE account_id = ?1", [owner.0], |r| {
@@ -1184,7 +1238,9 @@ pub(crate) fn status<P: Parameters>(
             manual: manual_end.map(|end| Ok::<_, rusqlite::Error>(ManualProgress { active: r.get(6)?,
                 refunds_done: r.get::<_, u8>(7)? == 1, next: u64::from_be_bytes(manual_next),
                 receive_end: u64::from_be_bytes(end) })).transpose()?, lookups: vec![], witnesses: vec![] })
-    })?;
+    }).optional()? else {
+        return Ok(disabled());
+    };
     status.lookups = conn.prepare(&format!("SELECT k.purpose, k.key_index, k.receiver, l.target_height, {PROGRESS}
         FROM ironwood_one_time_lookups l JOIN ironwood_one_time_keys k ON k.id = l.one_time_key_id
         WHERE k.account_id = ?1 AND l.target_height IS NOT NULL AND l.reasons & 3 != 0
@@ -1417,8 +1473,10 @@ pub(crate) fn require_upgrade<P: Parameters>(
     params: &P,
     account: AccountUuid,
 ) -> Result<(), SqliteClientError> {
-    let (owner, _) = account_key(conn, params, account)?;
-    ensure_account(conn, owner.0)?;
+    // An account without progress has no work to hold back.
+    let Some(owner) = one_time_account(conn, params, account)? else {
+        return Ok(());
+    };
     conn.execute(
         "UPDATE ironwood_one_time_recovery SET upgrade_required = 1 WHERE account_id = ?1",
         [owner.0],
@@ -1617,6 +1675,13 @@ pub(crate) fn after_blocks_stored<P: Parameters>(
     Ok(())
 }
 
+/// The deferred raw receipt checks and their transaction IDs. Every scan batch runs this,
+/// so the queue, almost always empty, drives the join: SQLite would otherwise walk the
+/// whole transaction index probing it once per row.
+pub(in crate::wallet::one_time_ivk) const DEFERRED_RECEIPTS: &str =
+    "SELECT u.transaction_id, t.txid FROM ironwood_one_time_unchecked_raw u
+     CROSS JOIN transactions t ON t.id_tx = u.transaction_id";
+
 /// Checks the raw bytes a build without Orchard stored for a private receipt's transaction
 /// (see `ironwood_hooks::defer_receipt_check`), as fetching them here would, then clears the
 /// private enhancement work they supersede.
@@ -1625,10 +1690,7 @@ fn check_deferred_receipts<P: Parameters>(
     params: &P,
 ) -> Result<(), SqliteClientError> {
     let deferred: Vec<(i64, TxId)> = conn
-        .prepare(
-            "SELECT u.transaction_id, t.txid FROM ironwood_one_time_unchecked_raw u
-             JOIN transactions t ON t.id_tx = u.transaction_id",
-        )?
+        .prepare(DEFERRED_RECEIPTS)?
         .query_map([], |r| Ok((r.get(0)?, TxId::from_bytes(r.get(1)?))))?
         .collect::<Result<_, _>>()?;
     for (id, txid) in deferred {
