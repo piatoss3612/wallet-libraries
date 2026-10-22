@@ -2,7 +2,7 @@
 name = "zakura-pir-receiver"
 version = "0.0.1-rc0"
 publish = false
-description = "Discovery of a restored seed's one-time IVKs through a receiver directory over PIR"
+description = "Private receiver lookups that recover one-time IVK payments from a receiver directory over PIR"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,7 +19,7 @@ zcash_client_backend = { workspace = true, features = ["orchard"], optional = tr
 zcash_protocol = { workspace = true, optional = true }
 receiver-directory = { package = "zakura-receiver-directory", path = "../receiver-directory" }
 receiver-pir = { package = "zakura-receiver-pir", path = "../receiver-pir" }
-# Receiver validation and the common witness file discovery checks payments against.
+# Validates the receiver a lookup queries.
 zakura-receiver-crypto = { path = "../receiver-crypto" }
 
 [dev-dependencies]
@@ -27,8 +27,6 @@ hex.workspace = true
 orchard.workspace = true
 # The evaluator answers the tests' encrypted queries in process.
 receiver-pir = { package = "zakura-receiver-pir", path = "../receiver-pir", features = ["server"] }
-rusqlite = { workspace = true, features = ["hooks"] }
-secrecy.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 zcash_client_backend = { workspace = true, features = ["orchard", "test-dependencies"] }
