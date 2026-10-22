@@ -7586,7 +7586,6 @@ dependencies = [
  "zakura-primitives",
  "zakura-proofs",
  "zakura-protocol",
- "zakura-receiver-crypto",
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zakura-zip321",
@@ -7811,12 +7810,11 @@ dependencies = [
  "zakura-note-encryption",
  "zakura-one-time-ivk",
  "zakura-orchard",
- "zakura-pir-receiver",
+ "zakura-pir-client",
+ "zakura-pir-publisher",
+ "zakura-pir-query-server",
  "zakura-primitives",
  "zakura-protocol",
- "zakura-receiver-crypto",
- "zakura-receiver-directory",
- "zakura-receiver-pir",
  "zakura-sapling-crypto",
  "zakura-transparent",
  "zakura-zip321",
@@ -7943,6 +7941,7 @@ dependencies = [
  "incrementalmerkletree 0.8.2",
  "inspiring",
  "ipir-native-client",
+ "ipir-sp",
  "rand 0.10.3",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
@@ -7983,6 +7982,7 @@ dependencies = [
  "bitcoin_hashes",
  "hex",
  "http",
+ "incrementalmerkletree 0.8.2",
  "ipir-native-client",
  "ipir-sp",
  "rand 0.8.8",
@@ -7993,7 +7993,10 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "url",
+ "zakura-address",
  "zakura-filters",
+ "zakura-note-encryption",
+ "zakura-orchard",
  "zakura-protocol",
  "zakura-transparent",
 ]
@@ -8006,6 +8009,7 @@ dependencies = [
  "bitcoin",
  "bitcoin_hashes",
  "hex",
+ "incrementalmerkletree 0.8.2",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "serde",
@@ -8013,6 +8017,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "zakura-filters",
+ "zakura-orchard",
  "zakura-pir-protocol",
  "zakura-pir-server-core",
 ]
@@ -8023,6 +8028,7 @@ version = "0.0.1-rc2"
 dependencies = [
  "bitcoin",
  "hex",
+ "ipir-sp",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
  "rayon",
@@ -8030,23 +8036,6 @@ dependencies = [
  "sha2 0.10.9",
  "zakura-pir-protocol",
  "zakura-pir-server-core",
-]
-
-[[package]]
-name = "zakura-pir-receiver"
-version = "0.0.1-rc0"
-dependencies = [
- "hex",
- "serde_json",
- "tokio",
- "zakura-client-backend",
- "zakura-client-sqlite",
- "zakura-orchard",
- "zakura-primitives",
- "zakura-protocol",
- "zakura-receiver-crypto",
- "zakura-receiver-directory",
- "zakura-receiver-pir",
 ]
 
 [[package]]
@@ -8120,53 +8109,6 @@ dependencies = [
  "incrementalmerkletree-testing",
  "nonempty",
  "proptest",
-]
-
-[[package]]
-name = "zakura-receiver-crypto"
-version = "0.0.1-rc2"
-dependencies = [
- "hex",
- "incrementalmerkletree 0.8.2",
- "serde_json",
- "thiserror 2.0.21",
- "zakura-address",
- "zakura-note-encryption",
- "zakura-orchard",
- "zakura-protocol",
-]
-
-[[package]]
-name = "zakura-receiver-directory"
-version = "0.0.1-rc2"
-dependencies = [
- "bitcoin",
- "bitcoin_hashes",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "zakura-filters",
- "zakura-receiver-crypto",
-]
-
-[[package]]
-name = "zakura-receiver-pir"
-version = "0.0.1-rc2"
-dependencies = [
- "hex",
- "ipir-sp",
- "rand 0.8.8",
- "rand_chacha 0.3.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "zakura-pir-client",
- "zakura-pir-query-server",
- "zakura-pir-server-core",
- "zakura-receiver-directory",
 ]
 
 [[package]]
