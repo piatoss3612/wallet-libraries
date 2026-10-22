@@ -6,6 +6,9 @@
 
 - Records are 289 bytes with a witness ordinal. Snapshots require ordinals to rank records
   by note position; `snapshot::assign_ordinals` sets them.
+- A payment or witness manifest profile, or a record or payment version tag, that a newer
+  client may read is the new `Error::Unsupported` rather than `Error::Malformed`, so a host
+  can ask for an upgrade. Corrupted data stays `Malformed`.
 
 ### Removed
 
@@ -17,7 +20,8 @@
   from block hints and streaming, bounded-memory decoding and matching.
 
 - Add `witness`: companion witness tables of 512-byte lower paths addressed by ordinal,
-  with a manifest bound to its payment table and construction tree.
+  with a manifest bound to its payment table and construction tree. `witness::is_final`
+  tells whether a position's payload can still change on its chain.
 
 - Bind the required history correction generation into PIR publication identity so unfinished work can fence older answers after a same-chain correction.
 

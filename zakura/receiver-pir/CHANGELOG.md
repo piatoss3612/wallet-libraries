@@ -9,9 +9,17 @@
   `/v1/receiver/inventory` serves the `inventory::Head` and
   `/v1/receiver/inventory/{inventory}/{chunk}` its bounded chunks. `Client::new` no
   longer takes an anchor: the wallet accepts the whole inventory with `Inventory::accept`.
+- A directory format a newer client reads converts to `Error::Unsupported`, as an
+  unsupported protocol does, so captures, pages and witness sessions reach one upgrade
+  outcome. A cached descriptor that fails any check, `Unsupported` included, recaptures
+  every chunk instead.
 
 ### Added
 
+- `Inventories::capture_cached` and `capture_cached_within` reuse settled shard descriptors
+  (`Shard::settled`) saved in a host `transport::DescriptorStore` and download only new
+  shards, sealed shards with provisional witnesses and the recent tier. The full inventory
+  identity is still checked, and any mismatch recaptures every chunk.
 - `WitnessClient`, `WitnessQuery`, `server::WitnessServer` and `InventoryClient::witness`:
   one PIR query per witness payload, by ordinal, under its own session ID.
 - `inventory::{Inventory, Head, Chunk, Shard, FilterRef}`, `transport::Inventories` and

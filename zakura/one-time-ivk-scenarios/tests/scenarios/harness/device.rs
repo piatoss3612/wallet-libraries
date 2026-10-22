@@ -207,7 +207,11 @@ impl Device {
                 "a reserved receiver is held with no work to release it"
             );
         }
-        if !state.enabled || !state.lookups.is_empty() || !state.witnesses.is_empty() {
+        if !state.enabled
+            || state.upgrade_required
+            || !state.lookups.is_empty()
+            || !state.witnesses.is_empty()
+        {
             return;
         }
         let (unstarted, syncing, hidden): (bool, bool, bool) = self

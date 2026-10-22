@@ -60,6 +60,9 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
     }
 
     /// Accepts a chain-compatible publication and optionally queues unfinished direct catch-up.
+    /// Direct catch-up skips paid keys whose history is complete: a repeat payment to one is
+    /// found automatically only inside the rolling filter window (see
+    /// `record_one_time_filters`), and otherwise only by [`Self::check_one_time_history`].
     pub fn begin_one_time_recovery(
         &mut self,
         account: AccountUuid,
@@ -104,6 +107,19 @@ impl<C: BorrowMut<Connection>, P: Parameters, CL: Clock, R: Rng> WalletDb<C, P, 
                 now,
             )
         })
+    }
+
+    /// Records that the receiver service needs a newer client, after any step returned
+    /// `Unsupported` for its inventory, session or record format. Show the user that the
+    /// app needs an update; do not defer the work. `one_time_recovery` then exposes no
+    /// lookups or witness requests, while every pending lookup, candidate and obligation is
+    /// kept. A later `begin_one_time_recovery` with a publication this client captured
+    /// resumes the work.
+    pub fn require_one_time_upgrade(
+        &mut self,
+        account: AccountUuid,
+    ) -> Result<(), SqliteClientError> {
+        self.transactionally(|db| queue::require_upgrade(db.conn.0, db.params, account))
     }
 
     /// Delays a failed request without recording an empty result.

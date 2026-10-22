@@ -9,7 +9,7 @@ use crate::{snapshot, Error, Hash};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use zakura_receiver_crypto::wire::PAYLOAD_BYTES;
+pub use zakura_receiver_crypto::wire::{is_final, PAYLOAD_BYTES};
 
 /// The witness table format a manifest commits to.
 pub const PROFILE: &str = "ironwood-zero-ovk-witness-v1";
@@ -51,9 +51,12 @@ pub struct Manifest {
 
 impl Manifest {
     /// Checks the profile, tree bound and geometry, at most [`snapshot::MAX_ROWS`] rows.
+    /// Another profile is [`Error::Unsupported`]: a newer client may read it.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.profile != PROFILE
-            || self.tree_size > snapshot::TREE_SIZE
+        if self.profile != PROFILE {
+            return Err(Error::Unsupported);
+        }
+        if self.tree_size > snapshot::TREE_SIZE
             || !capacity(self.rows).is_ok_and(|slots| self.payloads <= slots)
         {
             return Err(Error::Malformed);

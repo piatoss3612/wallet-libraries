@@ -245,8 +245,8 @@ fn oracle(st: &State, receiver: [u8; 43], fvk: &FullViewingKey) -> Vec<Directory
 /// The no-stall invariant, checked after every recovery step and mutation. Recovery must be
 /// complete, expose a lookup or witness, or wait only on time (a backoff, made due here by
 /// a far-future clock), a publication or ordinary sync, or the user (feature or manual
-/// search paused, which leaves a cancelled search's lookups without a reason). Anything
-/// else waits on a mutation nothing will make.
+/// search paused, which leaves a cancelled search's lookups without a reason, or an app
+/// update the service requires). Anything else waits on a mutation nothing will make.
 ///
 /// Shard-local state must also stay consistent: no settled request keeps a target nothing
 /// would clear, a completed read keeps no segment cursor, and a candidate whose witness
@@ -304,7 +304,11 @@ pub(in crate::wallet::one_time_ivk) fn assert_no_stall(db: &Db, account: Account
             "a reserved receiver is held with no work to release it"
         );
     }
-    if !state.enabled || !state.lookups.is_empty() || !state.witnesses.is_empty() {
+    if !state.enabled
+        || state.upgrade_required
+        || !state.lookups.is_empty()
+        || !state.witnesses.is_empty()
+    {
         return;
     }
     // Restore before any publication, or a proven payment waiting for ordinary sync.
@@ -2977,6 +2981,59 @@ fn a_disputed_label_keeps_the_receipts_pending_spend() {
         );
         assert_eq!(outputs_of(&st, candidate.txid), [50_000]);
     }
+}
+
+/// A service format this client does not support makes recovery wait for an app update:
+/// no work is exposed or backed off, every pending lookup and candidate is kept through a
+/// restart, and a publication this client captured resumes it.
+#[test]
+fn an_unsupported_service_waits_for_an_upgrade_and_keeps_its_work() {
+    let (mut st, _, publication) = late_fixture();
+    let account = st.test_account().unwrap().id();
+    let pending = status(st.wallet().db(), account);
+    assert!(!pending.witnesses.is_empty());
+    let snapshot = |st: &State| -> (Vec<(i64, Option<u32>, u8, u32, i64, bool)>, u32) {
+        (
+            rows(
+                st.wallet().conn(),
+                "SELECT one_time_key_id, target_height, reasons, attempts, next_attempt_at,
+                     read_complete FROM ironwood_one_time_lookups ORDER BY one_time_key_id",
+                [],
+            ),
+            value(
+                st.wallet().conn(),
+                "SELECT COUNT(*) FROM ironwood_one_time_payment_recovery
+                 WHERE payments IS NOT NULL",
+                [],
+            ),
+        )
+    };
+    let before = snapshot(&st);
+    st.wallet_mut()
+        .db_mut()
+        .require_one_time_upgrade(account)
+        .unwrap();
+    reopen(&mut st);
+    let waiting = status(st.wallet().db(), account);
+    assert!(waiting.upgrade_required);
+    assert!(waiting.lookups.is_empty() && waiting.witnesses.is_empty());
+    assert_eq!(
+        snapshot(&st),
+        before,
+        "nothing pending is dropped or backed off"
+    );
+
+    assert!(
+        st.wallet_mut()
+            .db_mut()
+            .begin_one_time_recovery(account, publication, true)
+            .unwrap()
+    );
+    let resumed = status(st.wallet().db(), account);
+    assert!(!resumed.upgrade_required);
+    assert_eq!(resumed.witnesses, pending.witnesses);
+    drain(&mut st, account, publication);
+    assert_eq!(one_time_notes(&st), [(100_000, false)]);
 }
 
 /// A final lookup step that does not prove coverage through the inventory's end, by an
