@@ -15,8 +15,9 @@ issuing live addresses.
 3. Register the receiver identity for PIR and retain its purpose/index with authenticated received notes.
 4. For a refund, encode `swap::RefundMemo` in an ordinary internal note in the
    funding transaction, whose only transparent output pays the P2PKH or P2SH
-   deposit. Decode only after note authentication and verification that the
-   transaction was the wallet's own send, including zero-value and spent notes.
+   deposit. Decode only memos on ordinary notes the wallet decrypts with its
+   internal key, including zero-value and spent notes. Only the wallet can create
+   such an output, so the funding inputs need not be known.
 5. Reconstruct inputs with their derived FVKs. Use the account's spending key to
    sign, and its ordinary internal key for change.
 
@@ -77,7 +78,7 @@ is queried through receiver PIR until a payment is authenticated. A funded key
 leaves automatic monitoring only once every local operation on it is conclusive:
 the provider reported that no refund is coming, or the expected refund was received
 and settled. A key restored from its memo alone has no local operation, so it stays
-monitored. Further payments after completion are found by retained block filters or an explicit
+monitored until its funding is seven days old in chain time. Further payments after completion are found by retained block filters or an explicit
 history check. Incoming indices are recovered through four-index lookahead. `RefundMemo::decode` returns `None`
 for any memo that is not a v1 record, and a wallet ignores such a memo even when it
 starts with `swap::REFUND_MEMO_MAGIC`.
