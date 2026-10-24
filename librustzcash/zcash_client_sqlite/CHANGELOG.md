@@ -7,6 +7,8 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+## [0.1.0-rc9.4] - 2026-10-23
+
 ### Changed
 
 - Read transaction history outputs and received/spent amounts in batches to avoid repeatedly scanning the entire wallet for each transaction.
@@ -26,6 +28,7 @@ and this library adheres to Rust's notion of
 - `WalletDb::get_wallet_summary` computes scan and recovery progress without looking up
   each scanned block in the scan queue, which made it slow on wallets with millions of
   scanned blocks. The reported progress is unchanged.
+- Use backend `0.1.0-rc9.4` and one-time IVK `0.0.1-rc4`.
 
 ### Removed
 
@@ -34,6 +37,14 @@ and this library adheres to Rust's notion of
 - `ReservationPolicy::Coverage`, `ReservationPolicy::SeenUnavailable`, `ProviderSeen`, `ISSUANCE_TIP_LAG`, `RECEIVE_GAP_LIMIT`, `RECEIVE_RECLAIM_SECONDS` and `SEEN_SLACK_SECONDS`.
 - `WalletDb::close_finished_one_time_keys`, `WalletDb::mark_one_time_account_fresh` and `WalletDb::recheck_one_time_key_history`. `WalletDb::check_one_time_history` replaces the recheck.
 - The unused `now` argument of `WalletDb::set_one_time_recovery_enabled`, `WalletDb::begin_one_time_recovery`, `WalletDb::check_one_time_history` and `WalletDb::reserve_refund_key`, and the write-only `registered_at` key column.
+
+### Fixed
+
+- Refund recovery trusts a refund memo on any of the account's internal Ironwood notes, without requiring the funding transaction to spend a note the wallet knows. A second device or a restore that has not recovered the one-time notes a swap spent, or whose birthday falls after them, now registers the funded refund key instead of ignoring the memo and issuing the same refund index again. `WalletDb::reserve_refund_key` waits only while an internal note's memo has not been retrieved. Since a viewing key can also pay internal addresses, a memo registers its index only within 100 of the highest refund index the account knows, or when its transaction spends a note the account owns, so a forged memo cannot exhaust the index space. A memo beyond the gap without that spend is recovered only once the gap closes.
+- A refund key with no local operation, such as one recovered from its funding memo, leaves automatic monitoring once filters have checked seven days of chain time past its funding block, instead of being looked up on every catch-up forever. A key recovered after that still has its history read once, an explicit history check still covers it, and its index is never issued again.
+- A one-time receipt that a reorg displaced no longer keeps its key in repair, and so in automatic monitoring, forever. Once the key's history has been read past its transaction's expiry height, and filters have passed the pruning depth (100 blocks) beyond it, the current chain does not hold it and no reorg the wallet follows can mine it again, so the key can retire, for example after a replacement transaction paid the same refund. A paused account keeps repairing.
+- A reorg shortly after a wallet starts scanning no longer leaves it unable to rewind. `WalletDb::truncate_to_height` can now rewind to the tree state the wallet started scanning from, at `birthday - 1`, which is also the safe rewind height it reports. Before, a rewind past every scanned block with a shielded output was refused, and so was the retry at the reported safe height.
+- A started incoming quote that never gets a fresh conclusive provider status no longer holds its receive slot forever. If its address is unpaid with no payment pending, the slot is released 24 hours after the quote's deadline, measured by the earlier of the device clock and the latest block time, so a fast device clock cannot release it early. A paid address still needs a fresh status, since a reorg can make it unpaid again. A quote seen funded, or whose last status was active, still keeps its slot. The released address stays monitored, so a late payment to it is still recovered.
 
 ## [0.1.0-rc9.3] - 2026-10-20
 

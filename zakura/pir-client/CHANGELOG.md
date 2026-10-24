@@ -4,11 +4,23 @@
 
 ### Added
 
+- `receiver::lookup_pages`, a one-time IVK lookup step that reads at most a caller-chosen
+  number of pages. A wallet on a slow transport can record progress through an address
+  with many payments in one segment instead of timing out and starting over.
+
+## [0.0.1-rc3] - 2026-10-23
+
+### Added
+
 - The `receiver` product: `receiver::{Client, WitnessClient}` and `receiver::transport`,
   which read payment rows, witness payloads, inventories and filters over a caller-owned
   transport.
 - The `receiver-wallet` feature: `receiver::{publication, lookup, witness, screen}`, the
   bounded network steps the wallet recovery queue consumes.
+
+### Changed
+
+- Use PIR protocol and server crates `0.0.1-rc3` and SQLite `0.1.0-rc9.4`.
 
 ### Removed
 
