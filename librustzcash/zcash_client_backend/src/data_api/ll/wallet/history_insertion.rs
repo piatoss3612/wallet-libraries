@@ -91,8 +91,7 @@ where
     Ok(newer >= tree.max_checkpoints())
 }
 
-/// How often [`put_blocks`] builds a shard it could leave out, to check the root stored for it:
-/// about one shard in this many.
+/// How often [`put_blocks`] audits a complete shard that was stored as a downloaded root.
 const STORED_ROOT_AUDIT_RATE: u64 = 16;
 
 /// See [`stored_root_mismatches`].
@@ -108,7 +107,7 @@ pub fn stored_root_mismatches() -> u64 {
     STORED_ROOT_MISMATCHES.load(Ordering::Relaxed)
 }
 
-/// Whether [`put_blocks`] builds and checks the shard at `index` although it could leave it out:
+/// Whether [`put_blocks`] independently checks the shard at `index`:
 /// about one shard in [`STORED_ROOT_AUDIT_RATE`], chosen with a key drawn once per process, so that
 /// a server cannot tell which shards will be checked.
 pub(super) fn audit_sample(index: u64) -> bool {
@@ -181,10 +180,10 @@ where
 /// the roots `put_*_subtree_roots` caches there either way, so leaving the shard out trusts the
 /// stored root no more than inserting it does.
 ///
-/// The others are built: shards holding a leaf to keep, the shards for which `audited` returns
-/// true, and every shard unless `leave_out_allowed`. Compare their stored roots with a fresh
-/// frontier of the incoming commitments. After insertion a collapsed leaf can reuse the
-/// downloaded root, so reading the tree back cannot independently verify it.
+/// Sampled shards are built and independently checked against the incoming commitments.
+/// After insertion a collapsed leaf can reuse the downloaded root. Shards containing retained
+/// leaves are always built. Once a mismatch disables skipping, every shard is built and the
+/// audit stops.
 #[allow(clippy::type_complexity)]
 fn shards_stored_as_root<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &ShardTree<S, DEPTH, SHARD_HEIGHT>,
@@ -197,6 +196,10 @@ where
     S: ShardStore<CheckpointId = BlockHeight>,
     S::H: Clone + PartialEq + Hashable,
 {
+    if !leave_out_allowed {
+        return Ok((vec![], vec![]));
+    }
+
     let shard_size = 1u64 << SHARD_HEIGHT;
     let start = u64::from(start);
     let end = start + commitments.len() as u64;
@@ -216,14 +219,11 @@ where
         };
         let first = usize::try_from(index * shard_size - start).expect("within commitments");
         let leaves = &commitments[first..first + shard_size as usize];
-        let note_free = leaves
-            .iter()
-            .all(|leaf| matches!(leaf, Some((_, Retention::Ephemeral))));
-        if note_free && leave_out_allowed && !audited(index) {
-            left_out.push(shard);
-        } else {
+        if audited(index) {
             let mut frontier = Frontier::<S::H, SHARD_HEIGHT>::empty();
             for entry in leaves {
+                // put_blocks_rows wraps every commitment in Some. Only subtree construction,
+                // which runs after the audit, takes them out of the buffer.
                 let (node, _) = entry.as_ref().expect("commitments have not been consumed");
                 let appended = frontier.append(node.clone());
                 debug_assert!(appended, "a complete shard fits in the frontier");
@@ -231,6 +231,11 @@ where
             if &frontier.root() != stored_root {
                 mismatched.push(index);
             }
+        } else if leaves
+            .iter()
+            .all(|leaf| matches!(leaf, Some((_, Retention::Ephemeral))))
+        {
+            left_out.push(shard);
         }
     }
     Ok((left_out, mismatched))

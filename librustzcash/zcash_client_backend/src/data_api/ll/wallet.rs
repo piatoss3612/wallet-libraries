@@ -688,8 +688,9 @@ where
         // Without checkpoints, a shard that lies wholly inside the range and holds no wallet note
         // collapses to its root once inserted. When the tree already stores the shard as that root
         // alone, as `put_*_subtree_roots` stores a completed shard, its commitments are left out
-        // of the subtrees below, which spares hashing them. A sample of such shards, and those
-        // holding a note, are built anyway and their stored roots checked after the update.
+        // of the subtrees below, which spares hashing them. Sampled shards are built and audited
+        // against the scanned commitments before insertion. Shards holding a note are always built.
+        // Once an audit detects a mismatch, subsequent batches build every shard and stop auditing.
         let leave_out_allowed = stored_root_mismatches() == 0;
         let sapling_start = Position::from(from_state.final_sapling_tree().tree_size());
         let sapling_stored = if checkpoints_dropped {
