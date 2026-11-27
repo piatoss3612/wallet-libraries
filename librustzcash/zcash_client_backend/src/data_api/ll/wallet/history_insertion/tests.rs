@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::super::{build_subtrees, update_tree};
 use super::{
-    build_subtrees_except, checkpoints_pruned_on_insert, count_stored_root_mismatches,
-    drop_checkpoint_retention, leave_out_shards_stored_as_root, shards_stored_as_root,
+    build_subtrees_except, checkpoints_pruned_on_insert, drop_checkpoint_retention,
+    leave_out_shards_stored_as_root, shards_stored_as_root,
 };
 
 const MAX_CHECKPOINTS: usize = 3;
@@ -189,22 +189,13 @@ fn note_free_shards_stored_as_roots_are_left_out() {
     )
     .unwrap();
     assert_eq!(stored.left_out, vec![2, 3]);
-    // Shard 1 holds the note, so it is built and its stored root checked.
-    assert_eq!(
-        stored
-            .audited
-            .iter()
-            .map(|(index, _)| *index)
-            .collect::<Vec<_>>(),
-        vec![1]
-    );
     for (subtree, checkpoints) in
         build_subtrees_except::<_, 3>(Position::from(2), &mut downgraded, 4, &stored.left_out)
     {
         skipping.insert_tree(subtree, checkpoints).unwrap();
     }
     let mismatches = AtomicU64::new(0);
-    count_stored_root_mismatches(&skipping, &stored.audited, &mismatches).unwrap();
+    stored.report_mismatches(&mismatches);
     assert_eq!(mismatches.load(Ordering::Relaxed), 0);
 
     assert_eq!(checkpoints(&skipping), checkpoints(&full));
@@ -304,7 +295,7 @@ fn insert_over_stored_roots(
         tree.insert_tree(subtree, checkpoints).unwrap();
     }
     let mismatches = AtomicU64::new(0);
-    count_stored_root_mismatches(&tree, &stored.audited, &mismatches).unwrap();
+    stored.report_mismatches(&mismatches);
     (tree, stored.left_out, mismatches.load(Ordering::Relaxed))
 }
 
@@ -338,6 +329,13 @@ fn a_wrong_stored_root_is_counted_without_failing() {
     // A shard left out goes unchecked.
     let (_, left_out, mismatches) = insert_over_stored_roots(Some(3), |_| false);
     assert_eq!((left_out, mismatches), (vec![2, 3], 0));
+}
+
+#[test]
+fn auditing_every_shard_detects_a_bad_cached_root_after_chunked_insertion() {
+    let (_, left_out, mismatches) = insert_over_stored_roots(Some(3), |_| true);
+    assert!(left_out.is_empty());
+    assert_eq!(mismatches, 1);
 }
 
 #[test]
