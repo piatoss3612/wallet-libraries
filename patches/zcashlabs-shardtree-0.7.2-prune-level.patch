@@ -1,0 +1,26 @@
+diff --git a/shardtree/src/prunable.rs b/shardtree/src/prunable.rs
+index 4d40c5e..1cae916 100644
+--- a/shardtree/src/prunable.rs
++++ b/shardtree/src/prunable.rs
+@@ -302,12 +302,15 @@ where
+     /// `level` must be the level of the root of the node being pruned.
+     pub fn prune(self, level: Level) -> Self {
+         match self {
+-            Tree(Node::Parent { ann, left, right }) => Tree::unite(
+-                level,
+-                ann,
+-                left.as_ref().clone().prune(level - 1),
+-                right.as_ref().clone().prune(level - 1),
+-            ),
++            Tree(Node::Parent { ann, left, right }) => {
++                let child_level = level - 1;
++                Tree::unite(
++                    child_level,
++                    ann,
++                    left.as_ref().clone().prune(child_level),
++                    right.as_ref().clone().prune(child_level),
++                )
++            }
+             other => other,
+         }
+     }
