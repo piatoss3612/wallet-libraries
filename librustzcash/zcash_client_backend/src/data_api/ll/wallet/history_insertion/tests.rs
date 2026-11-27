@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::super::{build_subtrees, update_tree};
 use super::{
-    build_subtrees_except, checkpoints_pruned_on_insert, count_stored_root_mismatches,
-    drop_checkpoint_retention, leave_out_shards_stored_as_root, shards_stored_as_root,
+    build_subtrees_except, checkpoints_pruned_on_insert, drop_checkpoint_retention,
+    leave_out_shards_stored_as_root, shards_stored_as_root,
 };
 
 const MAX_CHECKPOINTS: usize = 3;
@@ -75,6 +75,33 @@ fn checkpoints(tree: &Tree) -> Vec<(BlockHeight, Option<Position>)> {
     out
 }
 
+// Insertion order can change which parent roots are cached. Verify every cached root against
+// the uncached subtree before comparing the structure and retention flags.
+fn check_annotations(tree: &PrunableTree<String>, address: Address) -> PrunableTree<String> {
+    match &**tree {
+        shardtree::Node::Parent { ann, left, right } => {
+            let (left_address, right_address) = address.children().unwrap();
+            let recomputed = PrunableTree::parent(
+                None,
+                check_annotations(left, left_address),
+                check_annotations(right, right_address),
+            );
+            if let Some(cached) = ann {
+                assert_eq!(
+                    cached.as_ref(),
+                    &recomputed
+                        .root_hash(address, address.position_range_end())
+                        .unwrap(),
+                    "cached root at {address:?}",
+                );
+            }
+            recomputed
+        }
+        shardtree::Node::Leaf { value } => PrunableTree::leaf(value.clone()),
+        shardtree::Node::Nil => PrunableTree::empty(),
+    }
+}
+
 #[test]
 fn history_without_checkpoints_leaves_the_same_tree() {
     let history = || leaves(0, 32, 10, Some(5));
@@ -92,24 +119,37 @@ fn history_without_checkpoints_leaves_the_same_tree() {
     assert_eq!(checkpoints(&without), checkpoints(&with_checkpoints));
     for index in 0..6 {
         let addr = Address::from_parts(Level::from(3), index);
+        let a = without.store().get_shard(addr).unwrap().unwrap();
+        let b = with_checkpoints.store().get_shard(addr).unwrap().unwrap();
         assert_eq!(
-            without.store().get_shard(addr).unwrap(),
-            with_checkpoints.store().get_shard(addr).unwrap(),
-            "shard {index}",
+            check_annotations(a.root(), addr),
+            check_annotations(b.root(), addr),
+            "shard {index}"
         );
     }
-    assert_eq!(
-        without.root_at_checkpoint_depth(Some(0)).unwrap(),
-        with_checkpoints.root_at_checkpoint_depth(Some(0)).unwrap(),
-    );
-    assert_eq!(
-        without
-            .witness_at_checkpoint_depth(Position::from(5), 0)
-            .unwrap(),
-        with_checkpoints
-            .witness_at_checkpoint_depth(Position::from(5), 0)
-            .unwrap(),
-    );
+    for depth in 0..MAX_CHECKPOINTS {
+        let root = without
+            .root_at_checkpoint_depth(Some(depth))
+            .unwrap()
+            .unwrap();
+        let witness = without
+            .witness_at_checkpoint_depth(Position::from(5), depth)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Some(root.clone()),
+            with_checkpoints
+                .root_at_checkpoint_depth(Some(depth))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(witness.clone()),
+            with_checkpoints
+                .witness_at_checkpoint_depth(Position::from(5), depth)
+                .unwrap()
+        );
+        assert_eq!(witness.root("f".to_owned()), root);
+    }
 }
 
 /// Stores each of `shards` as its root alone, as downloaded subtree roots are stored,
@@ -165,22 +205,13 @@ fn note_free_shards_stored_as_roots_are_left_out() {
     )
     .unwrap();
     assert_eq!(stored.left_out, vec![2, 3]);
-    // Shard 1 holds the note, so it is built and its stored root checked.
-    assert_eq!(
-        stored
-            .audited
-            .iter()
-            .map(|(index, _)| *index)
-            .collect::<Vec<_>>(),
-        vec![1]
-    );
     for (subtree, checkpoints) in
         build_subtrees_except::<_, 3>(Position::from(2), &mut downgraded, 4, &stored.left_out)
     {
         skipping.insert_tree(subtree, checkpoints).unwrap();
     }
     let mismatches = AtomicU64::new(0);
-    count_stored_root_mismatches(&skipping, &stored.audited, &mismatches).unwrap();
+    stored.report_mismatches(&mismatches);
     assert_eq!(mismatches.load(Ordering::Relaxed), 0);
 
     assert_eq!(checkpoints(&skipping), checkpoints(&full));
@@ -254,6 +285,7 @@ fn shards_not_stored_as_roots_are_built() {
 /// left out, and returns the tree with the number of stored roots found wrong.
 fn insert_over_stored_roots(
     wrong_root_at: Option<u64>,
+    leave_out_allowed: bool,
     audited: impl Fn(u64) -> bool,
 ) -> (Tree, Vec<u64>, u64) {
     let mut tree = tip_first();
@@ -271,22 +303,27 @@ fn insert_over_stored_roots(
     }
     let mut commitments = leaves(2, 32, 10, Some(13));
     drop_checkpoint_retention(&mut commitments);
-    let stored =
-        leave_out_shards_stored_as_root(&mut tree, Position::from(2), &commitments, true, audited)
-            .unwrap();
+    let stored = leave_out_shards_stored_as_root(
+        &mut tree,
+        Position::from(2),
+        &commitments,
+        leave_out_allowed,
+        audited,
+    )
+    .unwrap();
     for (subtree, checkpoints) in
         build_subtrees_except::<_, 3>(Position::from(2), &mut commitments, 4, &stored.left_out)
     {
         tree.insert_tree(subtree, checkpoints).unwrap();
     }
     let mismatches = AtomicU64::new(0);
-    count_stored_root_mismatches(&tree, &stored.audited, &mismatches).unwrap();
+    stored.report_mismatches(&mismatches);
     (tree, stored.left_out, mismatches.load(Ordering::Relaxed))
 }
 
 #[test]
 fn sampled_shards_are_built_and_match_the_full_insertion() {
-    let (sampled, left_out, mismatches) = insert_over_stored_roots(None, |index| index == 2);
+    let (sampled, left_out, mismatches) = insert_over_stored_roots(None, true, |index| index == 2);
     assert_eq!(left_out, vec![3]);
     assert_eq!(mismatches, 0);
 
@@ -306,14 +343,78 @@ fn sampled_shards_are_built_and_match_the_full_insertion() {
 #[test]
 fn a_wrong_stored_root_is_counted_without_failing() {
     // A sampled note-free shard.
-    let (_, _, mismatches) = insert_over_stored_roots(Some(2), |index| index == 2);
+    let (_, _, mismatches) = insert_over_stored_roots(Some(2), true, |index| index == 2);
     assert_eq!(mismatches, 1);
-    // The shard holding the note is always checked.
-    let (_, _, mismatches) = insert_over_stored_roots(Some(1), |_| false);
+    // The shard holding the note is always built and audited only when sampled.
+    let (_, left_out, mismatches) = insert_over_stored_roots(Some(1), true, |_| false);
+    assert_eq!((left_out, mismatches), (vec![2, 3], 0));
+    let (_, _, mismatches) = insert_over_stored_roots(Some(1), true, |index| index == 1);
     assert_eq!(mismatches, 1);
     // A shard left out goes unchecked.
-    let (_, left_out, mismatches) = insert_over_stored_roots(Some(3), |_| false);
+    let (_, left_out, mismatches) = insert_over_stored_roots(Some(3), true, |_| false);
     assert_eq!((left_out, mismatches), (vec![2, 3], 0));
+}
+
+#[test]
+fn disabled_skipping_also_disables_the_audit() {
+    let (_, left_out, mismatches) =
+        insert_over_stored_roots(Some(2), false, |_| panic!("audit is disabled"));
+    assert!(left_out.is_empty());
+    assert_eq!(mismatches, 0);
+}
+
+#[cfg(feature = "orchard")]
+#[test]
+fn sampled_orchard_root_uses_the_correct_hash_levels() {
+    use incrementalmerkletree::Hashable;
+    use orchard::tree::MerkleHashOrchard;
+
+    let leaves: [MerkleHashOrchard; 8] = std::array::from_fn(|i| {
+        let mut bytes = [0; 32];
+        bytes[0] = i as u8;
+        MerkleHashOrchard::from_bytes(&bytes).unwrap()
+    });
+    let parents: [_; 4] = std::array::from_fn(|i| {
+        MerkleHashOrchard::combine(Level::from(0), &leaves[2 * i], &leaves[2 * i + 1])
+    });
+    let left = MerkleHashOrchard::combine(Level::from(1), &parents[0], &parents[1]);
+    let right = MerkleHashOrchard::combine(Level::from(1), &parents[2], &parents[3]);
+    let expected = MerkleHashOrchard::combine(Level::from(2), &left, &right);
+    let wrong_level = MerkleHashOrchard::combine(Level::from(1), &left, &right);
+    assert_ne!(expected, wrong_level);
+
+    let commitments = leaves.map(|leaf| Some((leaf, Retention::Ephemeral)));
+    for (root, expected_mismatches) in [(expected, 0), (wrong_level, 1)] {
+        let mut tree = ShardTree::<_, 6, 3>::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+        tree.store_mut()
+            .put_shard(
+                LocatedTree::from_parts(
+                    Address::from_parts(Level::from(3), 0),
+                    PrunableTree::leaf((root, RetentionFlags::EPHEMERAL)),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let stored = leave_out_shards_stored_as_root(
+            &mut tree,
+            Position::from(0),
+            &commitments,
+            true,
+            |_| true,
+        )
+        .unwrap();
+        assert!(stored.left_out.is_empty());
+        let mismatches = AtomicU64::new(0);
+        stored.report_mismatches(&mismatches);
+        assert_eq!(mismatches.load(Ordering::Relaxed), expected_mismatches);
+    }
+}
+
+#[test]
+fn auditing_every_shard_detects_a_bad_cached_root_after_chunked_insertion() {
+    let (_, left_out, mismatches) = insert_over_stored_roots(Some(3), true, |_| true);
+    assert!(left_out.is_empty());
+    assert_eq!(mismatches, 1);
 }
 
 #[test]
