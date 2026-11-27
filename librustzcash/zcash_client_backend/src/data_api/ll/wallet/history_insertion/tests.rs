@@ -75,6 +75,17 @@ fn checkpoints(tree: &Tree) -> Vec<(BlockHeight, Option<Position>)> {
     out
 }
 
+// Parent hash caches depend on insertion order. Keep every leaf, flag and branch in the comparison.
+fn without_annotations(tree: &PrunableTree<String>) -> PrunableTree<String> {
+    match &**tree {
+        shardtree::Node::Parent { left, right, .. } => {
+            PrunableTree::parent(None, without_annotations(left), without_annotations(right))
+        }
+        shardtree::Node::Leaf { value } => PrunableTree::leaf(value.clone()),
+        shardtree::Node::Nil => PrunableTree::empty(),
+    }
+}
+
 #[test]
 fn history_without_checkpoints_leaves_the_same_tree() {
     let history = || leaves(0, 32, 10, Some(5));
@@ -92,24 +103,37 @@ fn history_without_checkpoints_leaves_the_same_tree() {
     assert_eq!(checkpoints(&without), checkpoints(&with_checkpoints));
     for index in 0..6 {
         let addr = Address::from_parts(Level::from(3), index);
+        let a = without.store().get_shard(addr).unwrap().unwrap();
+        let b = with_checkpoints.store().get_shard(addr).unwrap().unwrap();
         assert_eq!(
-            without.store().get_shard(addr).unwrap(),
-            with_checkpoints.store().get_shard(addr).unwrap(),
-            "shard {index}",
+            without_annotations(a.root()),
+            without_annotations(b.root()),
+            "shard {index}"
         );
     }
-    assert_eq!(
-        without.root_at_checkpoint_depth(Some(0)).unwrap(),
-        with_checkpoints.root_at_checkpoint_depth(Some(0)).unwrap(),
-    );
-    assert_eq!(
-        without
-            .witness_at_checkpoint_depth(Position::from(5), 0)
-            .unwrap(),
-        with_checkpoints
-            .witness_at_checkpoint_depth(Position::from(5), 0)
-            .unwrap(),
-    );
+    for depth in 0..MAX_CHECKPOINTS {
+        let root = without
+            .root_at_checkpoint_depth(Some(depth))
+            .unwrap()
+            .unwrap();
+        let witness = without
+            .witness_at_checkpoint_depth(Position::from(5), depth)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Some(root.clone()),
+            with_checkpoints
+                .root_at_checkpoint_depth(Some(depth))
+                .unwrap()
+        );
+        assert_eq!(
+            Some(witness.clone()),
+            with_checkpoints
+                .witness_at_checkpoint_depth(Position::from(5), depth)
+                .unwrap()
+        );
+        assert_eq!(witness.root("f".to_owned()), root);
+    }
 }
 
 /// Stores each of `shards` as its root alone, as downloaded subtree roots are stored,
